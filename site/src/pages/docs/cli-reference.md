@@ -93,6 +93,7 @@ chunkhound search <query> [path] [options]
 | `--commit-range RANGE` | Search changes in a git revision range, such as `v2.4..HEAD` or `main..HEAD` |
 | `--commit-hash HASH` | Search changes introduced by one commit |
 | `--vector-source {diff,both,db}` | With git history options, choose changed code only (`diff`), diff plus indexed DB (`both`), or indexed DB only (`db`) |
+| `--duckdb-hnsw` / `--no-duckdb-hnsw` | Global database flag (via `DatabaseConfig`) — Enable/disable the DuckDB HNSW vector index for semantic searches (default: enabled). Available on all database-aware commands, not search-only |
 | `--config PATH` | Path to configuration file |
 | `--verbose` | Verbose output |
 | `--debug` | Debug output |
@@ -117,6 +118,23 @@ chunkhound search "database migration" --commit-range main..HEAD
 ```
 
 > **Note:** `--regex` ignores git diff flags (`--last-n`, `--commit-range`, `--commit-hash`). For diff-scoped search, use semantic search (default).
+>
+> **Semantic pagination:** With DuckDB HNSW enabled (default; disable via
+> `--no-duckdb-hnsw` / `duckdb_hnsw_enabled: false`), semantic search supports
+> the exclusive offset window `[0, 1000)`. An offset of 1000 or a page that
+> crosses the endpoint is rejected. Candidate-budget exhaustion can return a
+> short page; `has_more: false` means no next page was materialized, so narrow
+> the query or path filter. With HNSW disabled, exact linear scans apply and
+> the `[0, 1000)` window does not bound results. Threshold is an inclusive similarity floor (score >= threshold); convert legacy distance ceiling via 1 - distance.
+>
+> **Multi-hop pagination:** Multi-hop semantic search (auto-selected when the
+> embedding provider supports reranking, or forced via `--multi-hop`) enforces
+> `multi_hop_result_limit` results (default 500). With HNSW enabled, the 1,000
+> result window is also enforced, so the effective limit is the lower value.
+> Exact mode has no provider window cap; exhaustive exact mode has no
+> materialization cap. Pages whose `offset + page_size` exceeds the applicable
+> limit are rejected; reduce `--page-size` or `--offset`, or raise
+> `CHUNKHOUND_RESEARCH_MULTI_HOP_RESULT_LIMIT`.
 
 ## `chunkhound websearch`
 
@@ -403,7 +421,7 @@ chunkhound calibrate --output-format json --output-file calibration.json
 
 ## Common Flags
 
-These flags are available on all commands:
+These flags are available on all commands. Database flags like `--duckdb-hnsw` / `--no-duckdb-hnsw` are global (via `DatabaseConfig`) — see the search table above for details.
 
 | Flag | Description |
 |---|---|

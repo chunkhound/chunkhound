@@ -9,6 +9,7 @@ from loguru import logger
 from chunkhound.api.cli.utils import verify_database_exists
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.exceptions import MaterializationLimitError
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.mcp_server.tools import search_impl
@@ -80,11 +81,13 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         force_strategy = "multi_hop"
 
     # Guard: force_strategy flags are incompatible with commit-scoped diff search
-    if force_strategy and any([
-        getattr(args, "commit_range", None),
-        getattr(args, "commit_hash", None),
-        getattr(args, "last_n_commits", None),
-    ]):
+    if force_strategy and any(
+        [
+            getattr(args, "commit_range", None),
+            getattr(args, "commit_hash", None),
+            getattr(args, "last_n_commits", None),
+        ]
+    ):
         formatter.error(
             "--commit-range/--commit-hash/--last-n cannot be combined with --single-hop/--multi-hop."
         )
@@ -168,6 +171,16 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         # Format and display results
         _format_search_results(formatter, result_dict, args.query, args.regex)
 
+    except ValueError as e:
+        message = f"Search failed: {e}"
+        if isinstance(e, MaterializationLimitError) and not e.guidance_present:
+            message += (
+                "\nReduce --page-size or --offset; multi-hop search results must "
+                "fit within their configured result limit."
+            )
+        formatter.error(message)
+        logger.exception("Full error details:")
+        sys.exit(1)
     except Exception as e:
         formatter.error(f"Search failed: {e}")
         logger.exception("Full error details:")
@@ -189,13 +202,15 @@ def _format_search_results(
     pagination = result.get("pagination", {})
 
     search_type = "regex" if is_regex else "semantic"
+    if pagination.get("candidate_budget_exhausted"):
+        formatter.warning("Results may be incomplete; narrow the query or path filter.")
 
     if not results:
         formatter.info(f"No results found for {search_type} search: '{query}'")
         return
 
     # Display header
-    total = pagination.get("total", len(results))
+    total = pagination.get("total")
     offset = pagination.get("offset", 0)
     page_size = pagination.get("page_size", len(results))
 
@@ -203,9 +218,12 @@ def _format_search_results(
     formatter.info(f"Query: '{query}'")
     start_idx = offset + 1
     end_idx = offset + len(results)
-    formatter.info(
-        f"Results: {len(results)} of {total} (showing {start_idx}-{end_idx})"
-    )
+    if total is None:
+        formatter.info(f"Results: {len(results)} (showing {start_idx}-{end_idx})")
+    else:
+        formatter.info(
+            f"Results: {len(results)} of {total} (showing {start_idx}-{end_idx})"
+        )
 
     # Display each result
     for i, result_item in enumerate(results, 1):

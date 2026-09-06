@@ -9,6 +9,38 @@ from chunkhound.watchman_runtime.loader import is_packaged_watchman_runtime_avai
 logger.remove()
 
 _WATCHMAN_RUNTIME_VALIDATION_ENV = "CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION"
+_HNSW_REQUIRED_ENV = "CHUNKHOUND_REQUIRE_HNSW"
+_HNSW_SKIP_PROBE_ENV = "CHUNKHOUND_SKIP_HNSW_PROBE"
+
+
+def _probe_hnsw_capability() -> tuple[bool, str]:
+    """Verify that the locally installed DuckDB VSS extension supports HNSW.
+
+    Collection must remain offline. The required CI lane installs VSS before
+    pytest starts; ordinary environments skip HNSW tests when ``LOAD`` fails.
+    """
+    connection = None
+    try:
+        import duckdb
+
+        connection = duckdb.connect(":memory:")
+        connection.execute("SET autoinstall_known_extensions = false")
+        connection.execute("LOAD vss")
+        connection.execute("CREATE TABLE hnsw_probe (embedding FLOAT[3])")
+        connection.execute(
+            "CREATE INDEX hnsw_probe_index ON hnsw_probe USING HNSW "
+            "(embedding) WITH (metric = 'cosine')"
+        )
+        row = connection.execute(
+            "SELECT index_name FROM duckdb_indexes() "
+            "WHERE index_name = 'hnsw_probe_index'"
+        ).fetchone()
+        return row is not None, "HNSW index probe returned no catalog entry"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def pytest_configure(config):
@@ -28,6 +60,27 @@ def pytest_collection_modifyitems(config, items):
     native_watchman_ready = is_packaged_watchman_runtime_available() or (
         os.getenv(_WATCHMAN_RUNTIME_VALIDATION_ENV) == "1"
     )
+    hnsw_items = [item for item in items if "hnsw" in item.keywords]
+    hnsw_required = os.getenv(_HNSW_REQUIRED_ENV) == "1"
+    if hnsw_required and not hnsw_items:
+        pytest.fail("CHUNKHOUND_REQUIRE_HNSW=1 but no tests are marked hnsw")
+    if hnsw_items:
+        if os.getenv(_HNSW_SKIP_PROBE_ENV) == "1" and not hnsw_required:
+            hnsw_ready, hnsw_reason = False, f"{_HNSW_SKIP_PROBE_ENV}=1"
+        else:
+            hnsw_ready, hnsw_reason = _probe_hnsw_capability()
+        if not hnsw_ready:
+            if hnsw_required:
+                pytest.fail(
+                    "CHUNKHOUND_REQUIRE_HNSW=1 but DuckDB HNSW is unavailable: "
+                    f"{hnsw_reason}",
+                    pytrace=False,
+                )
+            skip_hnsw = pytest.mark.skip(
+                reason=f"DuckDB HNSW is unavailable: {hnsw_reason}"
+            )
+            for item in hnsw_items:
+                item.add_marker(skip_hnsw)
     if run_heavy:
         skip_heavy = None
     else:

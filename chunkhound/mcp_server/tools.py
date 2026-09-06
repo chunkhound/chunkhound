@@ -34,6 +34,7 @@ except (ImportError, AttributeError):
     from typing_extensions import NotRequired
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import MaterializationLimitError
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
@@ -91,9 +92,8 @@ def _format_fetch_warnings(warnings: list[str]) -> str:
     """
     if not warnings:
         return ""
-    return (
-        "\n\n> **Fetch warnings:**\n"
-        + "\n".join("> - " + w.replace("\n", "\n> ") for w in warnings)
+    return "\n\n> **Fetch warnings:**\n" + "\n".join(
+        "> - " + w.replace("\n", "\n> ") for w in warnings
     )
 
 
@@ -397,7 +397,13 @@ def format_search_results_markdown(
     search) similarity percentage. Appends a pagination footer.
     """
     if not results:
-        return "No results found."
+        message = "No results found."
+        if pagination.get("candidate_budget_exhausted"):
+            message += (
+                " HNSW candidate budget reached; results may be incomplete; "
+                "narrow the query or path filter."
+            )
+        return message
 
     blocks: list[str] = []
     for result in results:
@@ -428,7 +434,9 @@ def format_search_results_markdown(
 
         heading = " ".join(parts)
         # Use a fence longer than any backtick run in the content (CommonMark §6.1).
-        max_run = max((len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0)
+        max_run = max(
+            (len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0
+        )
         fence = "`" * max(3, max_run + 1)
         block = f"{heading}\n\n{fence}{lang_hint}\n{content}\n{fence}"
         blocks.append(block)
@@ -454,6 +462,8 @@ def format_search_results_markdown(
 
     if has_more and next_offset is not None:
         footer += f" | next_offset={next_offset}"
+    if pagination.get("candidate_budget_exhausted"):
+        footer += " | results may be incomplete; narrow the query or path filter"
 
     return f"{body}\n\n---\n{footer}"
 
@@ -481,6 +491,7 @@ GIT HISTORY SEARCH (type='semantic' only):
 - last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
 - vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+DuckDB semantic requests (when --duckdb-hnsw enabled; disable via --no-duckdb-hnsw) must stay within the exclusive [0,1000) window; semantic pagination total may be None, and candidate-budget exhaustion means a short result set may be incomplete.
 
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
@@ -557,7 +568,9 @@ def _resolve_commit_range(
 ) -> str | None:
     """Resolve mutually-exclusive commit inputs to a single git revision range."""
     if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
-        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+        raise ValueError(
+            "Provide at most one of: commit_range, commit_hash, last_n_commits."
+        )
     if commit_hash is not None:
         return f"{commit_hash}^..{commit_hash}"
     if last_n_commits is not None:
@@ -580,7 +593,11 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
         db_path = Path(services.provider.db_path)
         start = db_path if db_path.is_dir() else db_path.parent
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(start), "rev-parse", "--show-toplevel",
+            "git",
+            "-C",
+            str(start),
+            "rev-parse",
+            "--show-toplevel",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -589,6 +606,7 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
             return Path(stdout.decode("utf-8", errors="replace").strip())
     except Exception:
         from loguru import logger as _log
+
         _log.debug("git rev-parse failed from {}, falling back", start, exc_info=True)
 
     # Fallback: project markers, then bare cwd
@@ -613,7 +631,9 @@ async def _inject_diff_service(
     callers must surface this to the MCP client so the LLM knows results are partial.
     """
     if vector_source not in ("diff", "db", "both"):
-        raise ValueError(f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'.")
+        raise ValueError(
+            f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'."
+        )
 
     # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
     from loguru import logger as _log
@@ -682,8 +702,8 @@ async def search_impl(
         type: Search mode — "regex" for exact pattern matching, "semantic" for meaning-based similarity
         query: For regex: a regex pattern like "def authenticate" or "class.*Handler". For semantic: a natural language concept like "retry logic" or "database connection pooling"
         path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
-        page_size: Number of results per page (1-100)
-        offset: Starting offset for pagination
+        page_size: Number of results per page (1-100); DuckDB semantic requests (when --duckdb-hnsw enabled; disable via --no-duckdb-hnsw) must stay within the exclusive [0,1000) window
+        offset: Starting offset for pagination; semantic pagination total may be None, and candidate-budget exhaustion means a short result set may be incomplete
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
         commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
         last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
@@ -705,7 +725,9 @@ async def search_impl(
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
-    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+    effective_commit_range = _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits
+    )
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -717,11 +739,16 @@ async def search_impl(
             )
 
     truncation_warning: str | None = None
-    if effective_commit_range is not None and type == "semantic" and vector_source != "db":
-        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+    if (
+        effective_commit_range is not None
+        and type == "semantic"
+        and vector_source != "db"
+    ):
+        services, truncation_warning = await _inject_diff_service(
+            services, effective_commit_range, vector_source, embedding_manager
+        )
 
     if type == "semantic":
-
         # Get default provider/model
         try:
             provider_obj = embedding_manager.get_provider()
@@ -731,14 +758,21 @@ async def search_impl(
             raise ValueError("No default embedding provider configured.")
 
         # Perform semantic search
-        results, pagination = await services.search_service.search_semantic(
-            query=query,
-            page_size=page_size,
-            offset=offset,
-            provider=provider_name,
-            model=model_name,
-            path_filter=path,
-        )
+        try:
+            results, pagination = await services.search_service.search_semantic(
+                query=query,
+                page_size=page_size,
+                offset=offset,
+                provider=provider_name,
+                model=model_name,
+                path_filter=path,
+            )
+        except MaterializationLimitError as e:
+            raise MaterializationLimitError(
+                f"{e}. Reduce page_size or offset; multi-hop search must fit "
+                "within its configured result limit.",
+                guidance_present=True,
+            ) from e
     else:  # regex
         # Perform regex search; pass query so results are scored by cosine similarity
         results, pagination = await services.search_service.search_regex_async(
@@ -837,11 +871,15 @@ async def deep_research_impl(
             "Configure a rerank_model in your embedding configuration."
         )
 
-    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+    effective_commit_range = _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits
+    )
 
     truncation_warning: str | None = None
     if effective_commit_range is not None and vector_source != "db":
-        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+        services, truncation_warning = await _inject_diff_service(
+            services, effective_commit_range, vector_source, embedding_manager
+        )
 
     # Create default config from environment if not provided
     if config is None:
@@ -925,7 +963,9 @@ async def websearch_impl(
 
     limit = clamp_limit(limit)
 
-    queries = await expand_web_queries(query, llm_manager, previous_query=previous_query)
+    queries = await expand_web_queries(
+        query, llm_manager, previous_query=previous_query
+    )
     try:
         results = await search_multi(queries, limit, None)
     except urllib.error.HTTPError as e:
@@ -952,7 +992,9 @@ async def websearch_impl(
         # (e.g. queries[0]) to deep research would silently degrade the
         # answer with no signal.
         cmd = build_quickresearch_argv_core(
-            query, tmpdir, config,
+            query,
+            tmpdir,
+            config,
             parent_pid=os.getpid(),
             previous_query=previous_query,
         )
@@ -975,9 +1017,7 @@ async def websearch_impl(
                 proc.communicate(), timeout=timeout_s
             )
         except asyncio.TimeoutError:
-            raise MCPError(
-                f"websearch timed out after {timeout_s:.0f}s"
-            ) from None
+            raise MCPError(f"websearch timed out after {timeout_s:.0f}s") from None
         if proc.returncode != 0:
             tail = _summarize_subprocess_stderr(stderr)
             raise MCPError(
@@ -1151,7 +1191,9 @@ async def execute_tool(
                     "has_more": True,
                     "next_offset": pagination.get("offset", 0) + len(results_list),
                 }
-                md = format_search_results_markdown(results_list, pagination, search_type)
+                md = format_search_results_markdown(
+                    results_list, pagination, search_type
+                )
             # If the single remaining result still exceeds the limit, truncate its content.
             if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
                 result_copy = dict(results_list[0])
@@ -1160,13 +1202,23 @@ async def execute_tool(
                 # two fence lines of max_run+1 backticks each) means the 300-char reserve
                 # can be wildly insufficient; re-render and shrink until the actual output fits.
                 max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
-                result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
-                md = format_search_results_markdown([result_copy], pagination, search_type)
-                while estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0:
+                result_copy["content"] = (
+                    content[:max_content_chars] + "\n\n[... truncated ...]"
+                )
+                md = format_search_results_markdown(
+                    [result_copy], pagination, search_type
+                )
+                while (
+                    estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0
+                ):
                     excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
                     max_content_chars = max(0, max_content_chars - excess_chars - 1)
-                    result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
-                    md = format_search_results_markdown([result_copy], pagination, search_type)
+                    result_copy["content"] = (
+                        content[:max_content_chars] + "\n\n[... truncated ...]"
+                    )
+                    md = format_search_results_markdown(
+                        [result_copy], pagination, search_type
+                    )
             if diff_warnings:
                 warning_block = "\n".join(f"> **Warning:** {w}" for w in diff_warnings)
                 md = f"{warning_block}\n\n{md}"

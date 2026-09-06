@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 
+from chunkhound.core.exceptions import MaterializationLimitError
 from chunkhound.core.types.common import Language
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
@@ -15,6 +16,9 @@ from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.search_service import SearchService
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
 from tests.fixtures.multi_hop_synthetic import (
+    DeterministicEmbeddingProvider,
+    SyntheticChunk,
+    SyntheticGraphDatabase,
     build_graph_exhaustion_scenario,
     build_insufficient_candidates_scenario,
     build_min_score_termination_scenario,
@@ -55,6 +59,29 @@ def _build_search_service(
     )
 
 
+def _build_deep_pagination_service(
+    *, provider_cap: int = 1000, result_limit: int | None = 500
+) -> tuple[SearchService, SyntheticGraphDatabase]:
+    chunks = [
+        SyntheticChunk(index, f"chunk {index}", f"src/{index}.py", 1 - index / 1000)
+        for index in range(700)
+    ]
+    database = SyntheticGraphDatabase(
+        chunks=chunks,
+        query_results={(1.0,): list(range(700))},
+        neighbors={},
+        semantic_result_window_cap=provider_cap,
+    )
+    provider = DeterministicEmbeddingProvider(
+        query_vectors={"deep query": [1.0]},
+        rerank_scores={
+            "deep query": {chunk.content: chunk.similarity for chunk in chunks}
+        },
+    )
+    config = _StubResearchConfig(exhaustive_mode=False, result_limit=result_limit)
+    return _build_search_service(database, provider, config=config), database
+
+
 def _build_python_coordinator(
     db: DuckDBProvider,
     tmp_path: Path,
@@ -71,8 +98,9 @@ def _build_python_coordinator(
 
 @pytest.mark.fast
 @pytest.mark.asyncio
-async def test_search_service_selects_single_hop_when_provider_lacks_reranking(
-) -> None:
+async def test_search_service_selects_single_hop_when_provider_lacks_reranking() -> (
+    None
+):
     """Without reranking, search should not expand beyond initial results."""
     scenario = build_multi_hop_scenario(supports_reranking=False)
     search_service = _build_search_service(scenario.db, scenario.provider)
@@ -80,11 +108,15 @@ async def test_search_service_selects_single_hop_when_provider_lacks_reranking(
 
     results, pagination = await search_service.search_semantic(query, page_size=10)
 
-    # Single-hop: only initial results (chunks 1,5,6,7,8), no bridge expansion
-    assert pagination["total"] == 5, (
-        f"non-reranking provider should return only initial results (5), "
+    # Single-hop: only initial results (chunks 1,5,6,7,8), no bridge expansion.
+    # The provider reports no exact total (semantic pagination contract), so
+    # the size of the returned page is the only signal that expansion did not
+    # run.
+    assert pagination["total"] is None, (
+        f"non-reranking provider should report an unknown total, "
         f"got {pagination['total']}"
     )
+    assert len(results) == 5
 
     # force_strategy="multi_hop" should also fallback to single-hop
     results_forced, pagination_forced = await search_service.search_semantic(
@@ -92,10 +124,11 @@ async def test_search_service_selects_single_hop_when_provider_lacks_reranking(
         page_size=10,
         force_strategy="multi_hop",
     )
-    assert pagination_forced["total"] == 5, (
+    assert pagination_forced["total"] is None, (
         f"force_strategy multi_hop on non-reranking provider should fallback "
-        f"to single-hop (5), got {pagination_forced['total']}"
+        f"to single-hop (total=None), got {pagination_forced['total']}"
     )
+    assert len(results_forced) == 5
     assert {r["chunk_id"] for r in results_forced} == {r["chunk_id"] for r in results}
 
 
@@ -169,6 +202,7 @@ async def test_multi_hop_pagination_is_stable_for_ranked_results() -> None:
         "has_more": True,
         "next_offset": 2,
         "total": 8,
+        "candidate_budget_exhausted": False,
     }
     assert pagination_two == {
         "offset": 2,
@@ -176,7 +210,105 @@ async def test_multi_hop_pagination_is_stable_for_ranked_results() -> None:
         "has_more": True,
         "next_offset": 4,
         "total": 8,
+        "candidate_budget_exhausted": False,
     }
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_materializes_deep_page_beyond_initial_tuning_cap() -> None:
+    """A valid deep page expands the initial provider fetch instead of going empty."""
+    service, database = _build_deep_pagination_service()
+
+    results, _ = await service.search_semantic(
+        "deep query", page_size=5, offset=150, time_limit=0.0
+    )
+
+    assert [result["chunk_id"] for result in results] == list(range(150, 155))
+    assert database.semantic_calls[0] == {"page_size": 156, "offset": 0}
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_rejects_page_beyond_default_materialization_limit() -> None:
+    """The default 500-result accumulation limit is an explicit page boundary."""
+    service, database = _build_deep_pagination_service()
+
+    with pytest.raises(MaterializationLimitError, match="materialization limit of 500"):
+        await service.search_semantic("deep query", page_size=2, offset=499)
+
+    assert database.semantic_calls == []
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_unlimited_result_limit_uses_provider_cap() -> None:
+    """An absent result limit leaves the provider window as the only bound."""
+    service, database = _build_deep_pagination_service(
+        provider_cap=600, result_limit=None
+    )
+
+    results, _ = await service.search_semantic(
+        "deep query", page_size=5, offset=550, time_limit=0.0
+    )
+
+    assert [result["chunk_id"] for result in results] == list(range(550, 555))
+    assert database.semantic_calls[0] == {"page_size": 556, "offset": 0}
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_capped_boundary_hides_total_and_stops_pagination() -> None:
+    """Multi-hop honors the provider's exclusive approximate result window."""
+    scenario = build_multi_hop_scenario()
+    scenario.db.semantic_result_window_cap = 4
+    search_service = _build_search_service(scenario.db, scenario.provider)
+
+    results, pagination = await search_service.search_semantic(
+        "security validation mechanisms", page_size=2, offset=2
+    )
+
+    assert len(results) == 2
+    assert pagination == {
+        "offset": 2,
+        "page_size": 2,
+        "has_more": False,
+        "next_offset": None,
+        "total": None,
+        "candidate_budget_exhausted": False,
+    }
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_multi_hop_propagates_initial_candidate_budget_exhaustion() -> None:
+    """Multi-hop keeps incomplete-candidate warnings from its provider search."""
+    scenario = build_multi_hop_scenario()
+    scenario.db.candidate_budget_exhausted = True
+    search_service = _build_search_service(scenario.db, scenario.provider)
+
+    _, pagination = await search_service.search_semantic(
+        "security validation mechanisms", page_size=2
+    )
+
+    assert pagination["candidate_budget_exhausted"] is True
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("offset", "page_size"), [(-1, 1), (0, 0), (3, 2)])
+async def test_search_service_rejects_invalid_multi_hop_windows(
+    offset: int, page_size: int
+) -> None:
+    """Service validation runs before the selected multi-hop strategy."""
+    scenario = build_multi_hop_scenario()
+    scenario.db.semantic_result_window_cap = 4
+    search_service = _build_search_service(scenario.db, scenario.provider)
+
+    with pytest.raises(ValueError):
+        await search_service.search_semantic(
+            "security validation mechanisms", page_size=page_size, offset=offset
+        )
 
 
 @pytest.mark.fast
@@ -309,7 +441,7 @@ async def test_multi_hop_terminates_on_result_limit() -> None:
 
     results, pagination = await search_service.search_semantic(
         "security validation mechanisms",
-        page_size=10,
+        page_size=2,
         result_limit=2,
     )
 
@@ -355,7 +487,7 @@ async def test_multi_hop_truncates_expansion_to_remaining_result_budget() -> Non
 
     results, pagination = await search_service.search_semantic(
         "security validation mechanisms",
-        page_size=10,
+        page_size=6,
         result_limit=6,
     )
 
@@ -705,7 +837,9 @@ async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
     assert all(
         result.get("file_path", "").startswith("src/lib/")
         for result in lib_regex_results
-    ), f"src/lib filter matched wrong paths: {[r['file_path'] for r in lib_regex_results]}"
+    ), (
+        f"src/lib filter matched wrong paths: {[r['file_path'] for r in lib_regex_results]}"
+    )
     assert any(
         result.get("file_path", "") == "src/lib/util.py" for result in lib_regex_results
     ), "src/lib filter should match src/lib/util.py"
@@ -729,9 +863,7 @@ async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
     ), "path_filter='module.py' should match module.py"
 
     # ── Also verify via search_semantic (exercises a different executor) ──
-    query_embedding = await embedding_provider.embed_single(
-        "path-filter-like-target"
-    )
+    query_embedding = await embedding_provider.embed_single("path-filter-like-target")
 
     lib_sem_results, _ = db.search_semantic(
         query_embedding=query_embedding,
@@ -741,8 +873,7 @@ async def test_path_filter_like_patterns_against_duckdb(tmp_path: Path) -> None:
         path_filter="src/lib",
     )
     assert all(
-        result.get("file_path", "").startswith("src/lib/")
-        for result in lib_sem_results
+        result.get("file_path", "").startswith("src/lib/") for result in lib_sem_results
     ), f"semantic src/lib filter leaked: {[r['file_path'] for r in lib_sem_results]}"
 
     py_sem_results, _ = db.search_semantic(
@@ -846,8 +977,7 @@ async def test_search_by_embedding_enforces_path_filter_component_boundary(
     )
     assert scoped_results
     assert all(
-        result.get("file_path", "").startswith("repo_a/")
-        for result in scoped_results
+        result.get("file_path", "").startswith("repo_a/") for result in scoped_results
     )
 
 

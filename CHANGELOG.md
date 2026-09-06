@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- **DuckDB semantic pagination is approximate** — Semantic pages now report
+  `total=None` instead of an exact count and must stay within the exclusive
+  `[0, 1000)` result window. Pages that start at or cross the endpoint are
+  rejected.
+- **DuckDB direct vector thresholds are similarity floors** —
+  `find_similar_chunks` and `search_by_embedding` now interpret `threshold`
+  as inclusive cosine similarity (`score >= threshold`), matching
+  `search_semantic`; callers previously using distance ceilings must convert
+  them with `1 - distance`.
+- **Read-only databases require HNSW indexes (when HNSW is enabled)** —
+  Read-only DuckDB databases created from interrupted indexing runs (missing
+  HNSW indexes) now fail explicitly instead of falling back to a brute-force
+  scan, **but only when `duckdb_hnsw_enabled` is `true`** (the default).
+  When HNSW is disabled via `--no-duckdb-hnsw`, exact linear scans work on
+  read-only databases without any persisted index.
+
+### Migration Guide
+
+**Python API consumers — semantic search pagination:** Code that paginates
+`search_semantic` results through the Python API must adapt to the new
+approximate pagination contract:
+
+- `pagination["total"]` is now `None` for semantic search — an exact result
+  count is no longer computed.
+- Terminate pagination loops with `pagination["has_more"]` instead of
+  comparing the accumulated page size against `total`.
+- Semantic result windows are capped at the exclusive `[0, 1000)` range;
+  pages that start at or cross that endpoint are rejected.
+- `pagination["candidate_budget_exhausted"]` is a new boolean field indicating
+  the HNSW candidate budget was reached before the page filled. When `true`,
+  the page is short due to approximate search, not table exhaustion.
+- Candidate-budget exhaustion can return a short page. `has_more=False` means
+  no next page was materialized, not that every match was examined; narrow the
+  query or path filter when this occurs.
+- **Multi-hop materialization limit (500 results)** — Multi-hop semantic search
+  accumulates results across hops and rejects pages whose `offset + page_size`
+  exceeds `min(semantic_result_window_cap, result_limit)`. With HNSW enabled the
+  provider cap is 1000 and the default `result_limit` is 500, so the effective
+  boundary is 500. Reduce `--page-size` or `--offset`, or increase
+  `multi_hop_result_limit` when a page exceeds that boundary.
+
+Semantic search also requires a cosine-compatible HNSW index; all vector
+search operations use cosine similarity (`l2sq` and `ip` metrics are not
+supported by the search API).
+
 ### Added
 - **Fetchurl CLI command and MCP tool** — New `chunkhound fetchurl <url> [-q "…"]` CLI subcommand and matching `fetchurl` MCP tool fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer.
   - Short pages are token-truncated and summarized in one LLM call; long pages with a query go through a chunk + rerank + elbow-filter pipeline that passes only the most relevant sections to the LLM.
@@ -14,7 +60,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Configurable via `fetchurl.rerank_threshold_tokens` (default 15000), `fetchurl.truncate_tokens` (default 15000), and `fetchurl.max_retries` (default 3), or their `CHUNKHOUND_FETCHURL_*` env-var equivalents.
   - Uses the same zendriver + system Chrome transport as `websearch`, with `urllib` fallback.
 
+### Changed
+- **DuckDB HNSW is now configurable** — `database.duckdb_hnsw_enabled`
+  (`true` by default; CLI `--duckdb-hnsw` / `--no-duckdb-hnsw`; env
+  `CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED`) switches between approximate
+  HNSW search and exact linear scans. Disabled mode never creates or uses
+  HNSW indexes, drops the `[0, 1000)` result window, and lets read-only
+  search succeed without a persisted index.
+- **DuckDB vector search requires cosine HNSW** — `search_semantic`,
+  `find_similar_chunks`, and `search_by_embedding` require a cosine-compatible
+  HNSW index and emit a single-table candidate query eligible for HNSW scans.
+  DuckDB's optimizer may still choose a sequential scan for large candidate
+  windows. Post-filtered searches can return short pages when their candidate
+  budget is exhausted.
+- **HNSW search beam widened** — `hnsw_ef_search` increased from default 64
+  to 256 for better recall in the vector-candidate overfetch path.
+- **DuckDB vector metadata is consistent** — Results from every DuckDB vector
+  search entry point include parsed chunk metadata in the `metadata` mapping.
+- **Semantic search errors surface** — Database/provider errors during
+  semantic search now raise explicitly instead of returning empty result
+  pages.
+
 ### Fixed
+- **`path_filter` behaves identically for diff and DB search** — Git-diff
+  searches (`--last-n`, `--commit-range`, `--commit-hash`) previously treated
+  every filter as a directory prefix, so a file filter such as
+  `path_filter="src/module.py"` silently matched nothing. Both layers now share
+  one normalizer: file filters are right-anchored, directory filters match at
+  any depth.
 - **PyMuPDF `fitz` import deprecation warning on stdout** — PDF parsing now imports `pymupdf` instead of the legacy `fitz` alias, which since PyMuPDF 1.28.2 prints a deprecation warning to stdout and corrupts MCP stdio clients (e.g. CURe preflight). Adds a regression test asserting parser imports write nothing to stdout.
 
 ## [5.2.0] - 2026-07-12

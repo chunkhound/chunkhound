@@ -235,6 +235,11 @@ class SerialDatabaseProvider(ABC):
 
     # Common capability detection pattern using hasattr()
 
+    @property
+    def semantic_result_window_cap(self) -> int | None:
+        """Return no semantic result-window restriction by default."""
+        return None
+
     def search_semantic(
         self,
         query_embedding: list[float],

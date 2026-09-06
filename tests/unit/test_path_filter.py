@@ -1,23 +1,33 @@
-"""Unit tests for path filter normalization and LIKE pattern construction.
+"""Unit tests for path filter semantics shared by DB and diff search.
 
-Tests the pure string-transformation logic of:
-  - DuckDBProvider._validate_and_normalize_path_filter()
-  - DuckDBProvider._build_path_like_pattern()
+Covers the pure string logic of:
+  - validate_and_normalize_path_filter() — file vs directory classification
+  - path_matches_filter() — in-memory matching (diff search)
+  - DuckDBProvider._build_path_like_pattern() — SQL LIKE translation
+
+The last two must agree: a filter has to select the same paths regardless of
+whether results come from the DB or from in-memory diff chunks.
 
 No database required — these are pure string functions.
 """
 
+import duckdb
 import pytest
 
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.utils.path_filter import (
+    path_matches_filter,
+    validate_and_normalize_path_filter,
+)
 
 # ---------------------------------------------------------------------------
-# _validate_and_normalize_path_filter
+# validate_and_normalize_path_filter
 # ---------------------------------------------------------------------------
+
 
 def _normalize(path: str | None) -> str | None:
-    """Shorthand to call the static normalize method."""
-    return DuckDBProvider._validate_and_normalize_path_filter(path)
+    """Shorthand to call the shared normalizer."""
+    return validate_and_normalize_path_filter(path)
 
 
 class TestNormalizeNoneOrEmpty:
@@ -29,6 +39,10 @@ class TestNormalizeNoneOrEmpty:
 
     def test_whitespace_only_returns_none(self) -> None:
         assert _normalize("   ") is None
+
+    @pytest.mark.parametrize("path_filter", ["/", "///", "\\\\"])
+    def test_root_filter_returns_none(self, path_filter: str) -> None:
+        assert _normalize(path_filter) is None
 
 
 class TestNormalizeClassifiesDirectories:
@@ -116,17 +130,20 @@ class TestNormalizeBackslashes:
 
 
 class TestNormalizeRejectsDangerous:
-    @pytest.mark.parametrize("dangerous", [
-        "..",
-        "~",
-        "*",
-        "?",
-        "[",
-        "]",
-        "\0",
-        "\n",
-        "\r",
-    ])
+    @pytest.mark.parametrize(
+        "dangerous",
+        [
+            "..",
+            "~",
+            "*",
+            "?",
+            "[",
+            "]",
+            "\0",
+            "\n",
+            "\r",
+        ],
+    )
     def test_rejects_dangerous_pattern(self, dangerous: str) -> None:
         with pytest.raises(ValueError, match="contains forbidden pattern"):
             _normalize(f"src/{dangerous}/file.py")
@@ -135,6 +152,7 @@ class TestNormalizeRejectsDangerous:
 # ---------------------------------------------------------------------------
 # _build_path_like_pattern
 # ---------------------------------------------------------------------------
+
 
 def _like(path: str) -> str:
     """Shorthand to call the static LIKE builder."""
@@ -183,3 +201,93 @@ class TestBuildLikeSpecialChars:
 
     def test_percent_is_escaped(self) -> None:
         assert _like("test%dir/") == "%/test\\%dir/%"
+
+
+# ---------------------------------------------------------------------------
+# path_matches_filter (in-memory equivalent of the SQL LIKE filter)
+# ---------------------------------------------------------------------------
+
+
+def _matches(file_path: str, path_filter: str) -> bool:
+    """Normalize a user filter, then match it against a stored path."""
+    normalized = validate_and_normalize_path_filter(path_filter)
+    assert normalized is not None
+    return path_matches_filter(file_path, normalized)
+
+
+class TestMatchDirectoryFilters:
+    def test_matches_file_inside_directory(self) -> None:
+        assert _matches("src/main.py", "src")
+
+    def test_matches_nested_file(self) -> None:
+        assert _matches("src/lib/deep/util.py", "src/lib")
+
+    def test_matches_directory_anywhere_in_path(self) -> None:
+        assert _matches("repo_a/src/main.py", "src")
+
+    def test_rejects_partial_directory_name(self) -> None:
+        assert not _matches("src_utils/helper.py", "src")
+
+    def test_rejects_sibling_directory(self) -> None:
+        assert not _matches("src/lib2/util.py", "src/lib")
+
+    def test_absolute_stored_path(self) -> None:
+        assert _matches("/abs/src/main.py", "src")
+
+    def test_windows_stored_path(self) -> None:
+        assert _matches("src\\main.py", "src")
+
+
+class TestMatchFileFilters:
+    """File filters are right-anchored — the m8 regression: a diff-side prefix
+    match would treat 'module.py' as a directory and drop every real hit."""
+
+    def test_matches_exact_file(self) -> None:
+        assert _matches("src/module.py", "module.py")
+
+    def test_matches_file_at_repo_root(self) -> None:
+        assert _matches("module.py", "module.py")
+
+    def test_rejects_suffixed_file(self) -> None:
+        assert not _matches("src/module.py.bak", "module.py")
+
+    def test_matches_qualified_path(self) -> None:
+        assert _matches("a/src/main.ts", "src/main.ts")
+
+    def test_rejects_different_directory(self) -> None:
+        assert not _matches("other/main.ts", "src/main.ts")
+
+
+class TestMatchAgreesWithLikePattern:
+    """In-memory matching must select the same paths as the SQL LIKE pattern.
+
+    Evaluated against real DuckDB LIKE, mirroring the provider's
+    ``CONCAT('/', f.path) LIKE ? ESCAPE '\\'`` predicate."""
+
+    @pytest.mark.parametrize(
+        ("file_path", "path_filter"),
+        [
+            ("src/main.py", "src"),
+            ("src_utils/helper.py", "src"),
+            ("src/lib2/util.py", "src/lib"),
+            ("src/module.py", "module.py"),
+            ("src/module.py.bak", "module.py"),
+            (".github/workflows/ci.yml", ".github"),
+            ("config/.eslintrc.js", ".eslintrc.js"),
+        ],
+    )
+    def test_matches_like_semantics(self, file_path: str, path_filter: str) -> None:
+        normalized = validate_and_normalize_path_filter(path_filter)
+        assert normalized is not None
+        pattern = DuckDBProvider._build_path_like_pattern(normalized)
+        assert path_matches_filter(file_path, normalized) == _like_matches(
+            pattern, "/" + file_path
+        )
+
+
+def _like_matches(pattern: str, value: str) -> bool:
+    """Evaluate the provider's LIKE predicate with a real DuckDB engine."""
+    with duckdb.connect(":memory:") as conn:
+        row = conn.execute("SELECT ? LIKE ? ESCAPE '\\'", [value, pattern]).fetchone()
+        assert row is not None
+        return bool(row[0])

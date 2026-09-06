@@ -197,11 +197,14 @@ Fast analytical queries and efficient storage.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
+| `duckdb_hnsw_enabled` | `boolean` | `true` | Use the DuckDB HNSW vector index for semantic searches. `true` = approximate search via the persisted HNSW index (exclusive `[0, 1000)` result window, candidate-budget exhaustion possible). `false` = exact linear scan (uncapped, `total` is `None`, no HNSW index created or used; read-only search works without HNSW). In exact mode every page performs an O(N) sequential scan over all matching rows (computing cosine distance per row); there is no index on the distance expression, so deep pagination degrades linearly. Use path filters to bound the result set when using `--no-duckdb-hnsw`. CLI: `--duckdb-hnsw` / `--no-duckdb-hnsw`. Env: `CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED` (strict boolean). |
 | `max_disk_usage_mb` | `number` | `null` | Max DB size in MB before indexing stops (CLI flag uses GB) |
 | `fragmentation_threshold_pct` | `number` | `30` | Background/auto-compaction trigger: file-size overhead above the provider's estimated live DB size (%). 30 = compact when the DB is ~30% larger than live data. 0 = always, null = never. This does not disable the fixed `chunkhound index` compaction boundaries. CLI: `--fragmentation-threshold-pct`. |
 | `execute_timeout_seconds` | `number` | `null` | Timeout for **synchronous** serial DB executor waits (`execute_sync` / `_execute_in_db_thread_sync`) in seconds. `null` = built-in defaults (30s normal ops, 660s compaction). When set, replaces both defaults for every sync operation including compaction, HNSW rebuild, and queries. Does **not** apply to async dispatch (`execute_async`), which remains unbounded. CLI: `--db-execute-timeout`. Env: `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` (or legacy `CHUNKHOUND_DB_EXECUTE_TIMEOUT`). |
 | `lancedb_index_type` | `string` | `null` | LanceDB vector index type: `auto`, `ivf_hnsw_sq`, or `ivf_rq` |
 | `lancedb_optimize_fragment_threshold` | `number` | `100` | Fragment count to trigger LanceDB compaction |
+
+Threshold is an inclusive cosine-similarity floor (score >= threshold). Convert legacy distance ceiling: threshold_new = 1 - distance_old (e.g., old 0.2 → new 0.8).
 
 DuckDB also compacts during `chunkhound index` at two fixed batch boundaries: once after chunking and before embedding generation, then again at the end of the indexing pass. Those boundary calls are unconditional, including `--no-embeddings` and noop re-index runs. If a batch compaction fails with `status: "error"`, the index run is aborted. Providers that report compaction as unsupported/`skipped` keep indexing normally. Sampled/background auto-compaction (triggered by fragmentation threshold during normal operations) does NOT fail the original operation — failures are logged and skipped.
 
@@ -442,6 +445,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` | Max database size in GB |
 | `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` | Sync serial DB executor timeout in seconds (overrides 30s/660s defaults when set; async dispatch unbounded) |
 | `CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT` | Auto-compaction fragmentation threshold (%) |
+| `CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED` | Use DuckDB HNSW vector index for semantic searches (`true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`; default: `true`) |
 | `CHUNKHOUND_DATABASE__READ_ONLY` | Open DB read-only (`true`/`1`/`yes`) |
 | `CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE` | LanceDB vector index type |
 | `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` | LanceDB fragment count to trigger optimize |

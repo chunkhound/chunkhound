@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 from typing import Any, cast
 
-from .common_arguments import add_common_arguments, add_config_arguments, add_git_diff_arguments
+from .common_arguments import (
+    add_common_arguments,
+    add_config_arguments,
+    add_git_diff_arguments,
+)
 
 
 def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
@@ -65,13 +69,22 @@ def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
         "--page-size",
         type=int,
         default=10,
-        help="Number of results per page (default: 10)",
+        help=(
+            "Number of results per page (default: 10); DuckDB HNSW semantic "
+            "searches (when --duckdb-hnsw enabled; disable via "
+            "--no-duckdb-hnsw) require a positive size and offset + "
+            "page-size <= 1000"
+        ),
     )
     search_parser.add_argument(
         "--offset",
         type=int,
         default=0,
-        help="Starting offset for pagination (default: 0)",
+        help=(
+            "Starting offset for pagination (default: 0); DuckDB HNSW semantic "
+            "pages (when --duckdb-hnsw enabled; disable via --no-duckdb-hnsw) "
+            "must stay within the exclusive [0, 1000) result window"
+        ),
     )
     search_parser.add_argument(
         "--path-filter",

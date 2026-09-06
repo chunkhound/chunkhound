@@ -12,15 +12,29 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from loguru import logger
 
-# Upper bound on DB results fetched in "both" mode.  10_000 exceeds any realistic
-# HNSW top-K corpus so total/has_more in the merged result set are exact rather
-# than heuristic for all practical corpora.
-_MAX_BOTH_DB_FETCH = 10_000
+from chunkhound.core.constants import HNSW_CANDIDATE_BUDGET
+from chunkhound.services.search.hybrid_utils import finalize_hybrid_pagination
+from chunkhound.services.search.semantic_window import (
+    normalize_semantic_window_cap,
+    semantic_hybrid_fetch_size,
+    semantic_next_offset,
+    semantic_total,
+    validate_semantic_window,
+)
+from chunkhound.utils.path_filter import (
+    path_matches_filter,
+    validate_and_normalize_path_filter,
+)
 
 
 @runtime_checkable
 class SearchServiceProtocol(Protocol):
     """Protocol matching the public API of SearchService for duck-type checks."""
+
+    @property
+    def semantic_result_window_cap(self) -> int | None:
+        """Exclusive upper bound of the semantic result window (None = uncapped)."""
+        ...
 
     async def search_semantic(
         self,
@@ -105,14 +119,19 @@ class DiffAwareSearchService:
         if diff_embeddings:
             # Guard: embedding provider may return more/fewer embeddings than inputs
             # (batching boundary bug observed in Qwen3 provider). Clamp both to min.
-            M = min(len(diff_embeddings), len(diff_chunks))
-            self._diff_chunks = diff_chunks[:M]
-            mat = np.array(diff_embeddings[:M], dtype=np.float32)
+            aligned_count = min(len(diff_embeddings), len(diff_chunks))
+            self._diff_chunks = diff_chunks[:aligned_count]
+            mat = np.array(diff_embeddings[:aligned_count], dtype=np.float32)
             norms = np.linalg.norm(mat, axis=1, keepdims=True)
             norms = np.clip(norms, np.float32(1e-9), None)  # avoid upcast via float32
             self._norm_matrix: np.ndarray | None = mat / norms
         else:
             self._norm_matrix = None
+
+    @property
+    def semantic_result_window_cap(self) -> int | None:
+        """Forward the wrapped provider's optional semantic window capability."""
+        return self._original.semantic_result_window_cap
 
     # ------------------------------------------------------------------
     # Helpers
@@ -152,7 +171,14 @@ class DiffAwareSearchService:
                 "returning empty results.",
                 self._vector_source,
             )
-            return [], {"total": 0, "page_size": page_size, "offset": offset}
+            return [], {
+                "offset": offset,
+                "page_size": page_size,
+                "has_more": False,
+                "next_offset": None,
+                "total": 0,
+                "candidate_budget_exhausted": False,
+            }
 
         # 1. Embed the query
         embed_result = await self._embedding_manager.embed_texts([query])
@@ -169,20 +195,16 @@ class DiffAwareSearchService:
         # 3. Sort indices by score descending
         sorted_indices = np.argsort(scores)[::-1].tolist()
 
-        # G1 — path_filter (normalise to dir prefix to avoid partial name matches)
-        if path_filter:
-            for _danger in ("..", "~", "*", "?", "[", "]", "\0", "\n", "\r"):
-                if _danger in path_filter:
-                    raise ValueError(
-                        f"Path filter contains forbidden pattern: {_danger!r}"
-                    )
-            path_filter = path_filter.replace("\\", "/").lstrip("/")
-            _pf = path_filter.rstrip("/") + "/"
+        # G1 — path_filter: same normalization/matching semantics as DB search
+        normalized_filter = validate_and_normalize_path_filter(path_filter)
+        if normalized_filter:
             sorted_indices = [
                 i
                 for i in sorted_indices
                 if self._diff_chunks[i].file_path
-                and str(self._diff_chunks[i].file_path).startswith(_pf)
+                and path_matches_filter(
+                    str(self._diff_chunks[i].file_path), normalized_filter
+                )
             ]
 
         # 4. Apply threshold
@@ -197,17 +219,19 @@ class DiffAwareSearchService:
         paged = sorted_indices[offset : offset + page_size]
 
         results = [
-            self._chunk_to_dict(self._diff_chunks[i], float(scores[i]))
-            for i in paged
+            self._chunk_to_dict(self._diff_chunks[i], float(scores[i])) for i in paged
         ]
 
-        has_more = (offset + page_size) < total_after_filter
+        next_offset = semantic_next_offset(
+            offset, page_size, offset + page_size < total_after_filter, None
+        )
         pagination: dict[str, Any] = {
             "offset": offset,
             "page_size": page_size,
-            "has_more": has_more,
-            "next_offset": offset + page_size if has_more else None,
+            "has_more": next_offset is not None,
+            "next_offset": next_offset,
             "total": total_after_filter,
+            "candidate_budget_exhausted": False,
         }
         return results, pagination
 
@@ -230,8 +254,15 @@ class DiffAwareSearchService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Semantic search with configurable vector_source."""
 
+        semantic_window_cap = (
+            None if self._vector_source == "diff" else self.semantic_result_window_cap
+        )
+        validate_semantic_window(offset, page_size, semantic_window_cap)
+
         if self._vector_source == "db":
-            db_only: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_semantic(
+            db_only: tuple[
+                list[dict[str, Any]], dict[str, Any]
+            ] = await self._original.search_semantic(
                 query=query,
                 page_size=page_size,
                 offset=offset,
@@ -256,11 +287,17 @@ class DiffAwareSearchService:
 
         # vector_source == "both"
         # Diff chunks are in-memory — fetch all of them (no cost).
-        diff_fetch = len(self._diff_chunks) if self._diff_chunks else (offset + page_size)
-        # Fetch all DB results so merged total/has_more are exact, not heuristic.
-        # 10_000 exceeds any realistic HNSW top-K result set; for corpora larger
-        # than this, pagination metadata beyond offset 10_000 is a lower bound.
-        db_fetch = _MAX_BOTH_DB_FETCH
+        diff_fetch = (
+            len(self._diff_chunks) if self._diff_chunks else (offset + page_size)
+        )
+        # Respect explicit provider limits while preserving the existing
+        # 10,000-row fetch for providers without this capability.
+        window_cap = normalize_semantic_window_cap(self.semantic_result_window_cap)
+        db_fetch = (
+            min(HNSW_CANDIDATE_BUDGET, window_cap)
+            if window_cap is not None
+            else HNSW_CANDIDATE_BUDGET
+        )
         diff_task = asyncio.create_task(
             self._search_diff(
                 query=query,
@@ -270,6 +307,7 @@ class DiffAwareSearchService:
                 path_filter=path_filter,
             )
         )
+        db_result_limit = result_limit if result_limit is not None else db_fetch
         db_task = asyncio.create_task(
             self._original.search_semantic(
                 query=query,
@@ -281,11 +319,13 @@ class DiffAwareSearchService:
                 path_filter=path_filter,
                 force_strategy=force_strategy,
                 time_limit=time_limit,
-                result_limit=result_limit,
+                result_limit=db_result_limit,
             )
         )
 
-        (diff_results, _), (db_results, _) = await asyncio.gather(diff_task, db_task)
+        (diff_results, _), (db_results, db_pagination) = await asyncio.gather(
+            diff_task, db_task
+        )
 
         # B3 — normalise DB results that use distance-based scoring.
         # Effectively dead code today: DuckDB and LanceDB providers both emit
@@ -309,7 +349,9 @@ class DiffAwareSearchService:
         seen_diff_ids: set[str] = set()
         diff_locations: set[tuple[Any, Any]] = set()
         deduped: list[dict[str, Any]] = []
-        for r in sorted(diff_results, key=lambda x: float(x.get("score", 0.0)), reverse=True):
+        for r in sorted(
+            diff_results, key=lambda x: float(x.get("score", 0.0)), reverse=True
+        ):
             cid = str(r.get("chunk_id", ""))
             if cid not in seen_diff_ids:
                 seen_diff_ids.add(cid)
@@ -319,7 +361,9 @@ class DiffAwareSearchService:
         # Pass 2 — DB results: skip if a diff result already covers this location,
         # or if a duplicate DB result for the same location was already kept.
         seen_db_locs: set[tuple[Any, Any]] = set()
-        for r in sorted(normalised_db, key=lambda x: float(x.get("score", 0.0)), reverse=True):
+        for r in sorted(
+            normalised_db, key=lambda x: float(x.get("score", 0.0)), reverse=True
+        ):
             loc = (r.get("file_path"), r.get("start_line"))
             if loc not in diff_locations and loc not in seen_db_locs:
                 seen_db_locs.add(loc)
@@ -329,25 +373,33 @@ class DiffAwareSearchService:
 
         # Apply threshold
         if threshold is not None:
-            deduped = [
-                r for r in deduped if float(r.get("score", 0.0)) >= threshold
-            ]
+            deduped = [r for r in deduped if float(r.get("score", 0.0)) >= threshold]
 
-        total = len(deduped)
+        # A capped DB prefix cannot establish an exact merged total.
+        total = semantic_total(len(deduped), window_cap)
         paged = deduped[offset : offset + page_size]
-        has_more = (offset + page_size) < total
+        next_offset = semantic_next_offset(
+            offset, page_size, offset + page_size < len(deduped), window_cap
+        )
         pagination: dict[str, Any] = {
             "offset": offset,
             "page_size": page_size,
-            "has_more": has_more,
-            "next_offset": offset + page_size if has_more else None,
+            "has_more": next_offset is not None,
+            "next_offset": next_offset,
             "total": total,
+            "candidate_budget_exhausted": bool(
+                db_pagination.get("candidate_budget_exhausted", False)
+            ),
         }
         return paged, pagination
 
     # ------------------------------------------------------------------
     # Delegation methods — all other public SearchService methods
     # ------------------------------------------------------------------
+
+    def _validate_semantic_window(self, offset: int, page_size: int) -> None:
+        """Reject requested windows that cross the provider's semantic cap."""
+        validate_semantic_window(offset, page_size, self.semantic_result_window_cap)
 
     def search_regex(
         self,
@@ -368,8 +420,14 @@ class DiffAwareSearchService:
         path_filter: str | None = None,
         query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        regex_result: tuple[list[dict[str, Any]], dict[str, Any]] = await self._original.search_regex_async(
-            pattern, page_size=page_size, offset=offset, path_filter=path_filter, query=query
+        regex_result: tuple[
+            list[dict[str, Any]], dict[str, Any]
+        ] = await self._original.search_regex_async(
+            pattern,
+            page_size=page_size,
+            offset=offset,
+            path_filter=path_filter,
+            query=query,
         )
         return regex_result
 
@@ -395,35 +453,55 @@ class DiffAwareSearchService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
+        semantic_window_cap = (
+            None if self._vector_source == "diff" else self.semantic_result_window_cap
+        )
+        validate_semantic_window(offset, page_size, semantic_window_cap)
         _enhancer = ResultEnhancer()
         tasks: list[tuple[str, Any]] = []
-        tasks.append(("semantic", asyncio.create_task(
-            self.search_semantic(query, page_size=page_size * 2, offset=offset, threshold=threshold)
-        )))
+        tasks.append(
+            (
+                "semantic",
+                asyncio.create_task(
+                    self.search_semantic(
+                        query,
+                        page_size=semantic_hybrid_fetch_size(
+                            page_size, offset, semantic_window_cap
+                        ),
+                        offset=offset,
+                        threshold=threshold,
+                    )
+                ),
+            )
+        )
         if regex_pattern:
-            tasks.append(("regex", asyncio.create_task(
-                self.search_regex_async(regex_pattern, page_size=page_size * 2, offset=offset)
-            )))
+            tasks.append(
+                (
+                    "regex",
+                    asyncio.create_task(
+                        self.search_regex_async(
+                            regex_pattern, page_size=page_size * 2, offset=offset
+                        )
+                    ),
+                )
+            )
 
         results_by_type: dict[str, list[dict[str, Any]]] = {}
+        pagination_data: dict[str, dict[str, Any]] = {}
         for search_type, task in tasks:
-            results, _ = await task
+            results, pagination_data[search_type] = await task
             results_by_type[search_type] = results
 
         combined = _enhancer.combine_search_results(
             semantic_results=results_by_type.get("semantic", []),
             regex_results=results_by_type.get("regex", []),
             semantic_weight=semantic_weight,
-            limit=page_size,
+            limit=page_size + 1,
         )
-        pagination: dict[str, Any] = {
-            "offset": offset,
-            "page_size": page_size,
-            "has_more": len(combined) == page_size,
-            "next_offset": offset + page_size if len(combined) == page_size else None,
-            "total": None,
-        }
-        return combined, pagination
+        pagination = finalize_hybrid_pagination(
+            offset, page_size, combined, pagination_data, semantic_window_cap
+        )
+        return combined[:page_size], pagination
 
     def get_chunk_context(
         self, chunk_id: Any, context_lines: int = 5

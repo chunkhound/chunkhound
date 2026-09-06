@@ -533,6 +533,7 @@ class TestCompactDatabase:
         assert file_id > max_file_id_before
         assert chunk_ids[0] > max_chunk_id_before
 
+    @pytest.mark.hnsw
     def test_hnsw_indexes_survive_compaction(
         self, populated_db: DuckDBProvider
     ) -> None:
@@ -1223,6 +1224,7 @@ class TestHNSWCatalogAwareContracts:
         finally:
             db.disconnect()
 
+    @pytest.mark.hnsw
     def test_drop_all_hnsw_indexes_drops_custom_named_index(
         self, tmp_path: Path
     ) -> None:
@@ -1248,6 +1250,7 @@ class TestHNSWCatalogAwareContracts:
         finally:
             db.disconnect()
 
+    @pytest.mark.hnsw
     def test_ensure_all_hnsw_indexes_respects_existing_custom_hnsw_index(
         self, tmp_path: Path
     ) -> None:
@@ -1273,6 +1276,7 @@ class TestHNSWCatalogAwareContracts:
         finally:
             db.disconnect()
 
+    @pytest.mark.hnsw
     def test_compaction_rebuilds_hnsw_when_src_catalog_has_custom_named_index(
         self, tmp_path: Path
     ) -> None:
@@ -1297,6 +1301,7 @@ class TestHNSWCatalogAwareContracts:
         finally:
             db.disconnect()
 
+    @pytest.mark.hnsw
     def test_compaction_fails_when_src_catalog_hnsw_discovery_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2171,13 +2176,17 @@ class TestCompactionDataIntegrity:
         )
         assert inserted_id == next_id + 1
 
+    @pytest.mark.hnsw
     def test_regex_and_semantic_search_still_work_after_compaction(
         self, populated_db: DuckDBProvider
     ) -> None:
-        """Compaction preserves user-visible regex and semantic search behavior."""
+        """Compaction preserves user-visible regex and HNSW semantic search."""
         query_embedding = ConstantEmbeddingProvider(
             dims=16
         )._generate_deterministic_vector("test_1b")
+        candidate_query = DuckDBProvider._hnsw_eligible_candidate_query(
+            "embeddings_16", 16, 10
+        )
 
         regex_before, regex_pagination_before = populated_db.search_regex(
             "func_1b",
@@ -2189,8 +2198,19 @@ class TestCompactionDataIntegrity:
             model="fake-embeddings",
             page_size=10,
         )
+        catalog_before = populated_db.execute_query(
+            "SELECT index_name, sql FROM duckdb_indexes() "
+            "WHERE table_name = 'embeddings_16'",
+            [],
+        )
+        plan_before = populated_db.execute_query(
+            f"EXPLAIN {candidate_query}", [query_embedding, 10]
+        )
         assert regex_pagination_before["total"] >= 1
-        assert semantic_pagination_before["total"] >= 1
+        assert semantic_before
+        assert semantic_pagination_before["total"] is None
+        assert any("USING HNSW" in (row["sql"] or "").upper() for row in catalog_before)
+        assert "HNSW_INDEX_SCAN" in "\n".join(str(row) for row in plan_before)
 
         populated_db.compact_database()
 
@@ -2204,17 +2224,27 @@ class TestCompactionDataIntegrity:
             model="fake-embeddings",
             page_size=10,
         )
+        catalog_after = populated_db.execute_query(
+            "SELECT index_name, sql FROM duckdb_indexes() "
+            "WHERE table_name = 'embeddings_16'",
+            [],
+        )
+        plan_after = populated_db.execute_query(
+            f"EXPLAIN {candidate_query}", [query_embedding, 10]
+        )
 
         assert regex_pagination_after["total"] == regex_pagination_before["total"]
-        assert semantic_pagination_after["total"] == semantic_pagination_before["total"]
+        assert semantic_after
+        assert any("USING HNSW" in (row["sql"] or "").upper() for row in catalog_after)
+        assert "HNSW_INDEX_SCAN" in "\n".join(str(row) for row in plan_after)
+        assert semantic_pagination_after["total"] is None
         assert any(
             result.get("file_path") == "test_1.py"
             and "func_1b" in result.get("content", "")
             for result in regex_after
         )
         assert any(
-            result.get("file_path") == "test_1.py"
-            and result.get("symbol") == "func_1b"
+            result.get("file_path") == "test_1.py" and result.get("symbol") == "func_1b"
             for result in semantic_after
         )
 
@@ -3004,6 +3034,7 @@ def test_compaction_preserves_all_canonical_tables_behaviorally(
         db.disconnect()
 
 
+@pytest.mark.hnsw
 def test_non_cosine_hnsw_metric_survives_index_rebuild(
     tmp_path: Path,
 ) -> None:
