@@ -6,6 +6,7 @@ use crate::error::PipelineError;
 use rayon::current_thread_index;
 use reqwest::blocking::{Client, Response};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +28,11 @@ struct VoyageEmbedding {
 pub(crate) struct VoyageAiProvider {
     config: EmbedConfig,
     clients: ClientSlots,
+    // First-observed embedding dimension for this provider instance, shared
+    // across every concurrent `embed_batch` call (one per rayon sub-batch).
+    // 0 means "not yet established" -- real embedding dimensions are always
+    // > 0, so 0 is safe to use as an unset sentinel.
+    observed_dims: AtomicUsize,
 }
 
 impl VoyageAiProvider {
@@ -39,6 +45,7 @@ impl VoyageAiProvider {
         Ok(Self {
             config,
             clients: Arc::new(Mutex::new(Vec::new())),
+            observed_dims: AtomicUsize::new(0),
         })
     }
 
@@ -137,7 +144,6 @@ impl EmbedBatchFn for VoyageAiProvider {
         if let Some(batch) = builder.finish() {
             batches.push(batch);
         }
-        let mut expected_dims = None;
         for batch in batches {
             log::trace!("embedding batch token estimate: {}", batch.tokens);
             let mut request = |items: &[String]| self.request_with_retry(items);
@@ -153,13 +159,12 @@ impl EmbedBatchFn for VoyageAiProvider {
                         continue;
                     }
                 };
-                let Some(output) = self.validate_vector(vector, expected_dims) else {
+                let Some(output) = self.validate_vector(vector) else {
                     result
                         .errors
                         .push(format!("input {index}: invalid embedding vector"));
                     continue;
                 };
-                expected_dims = Some(output.len());
                 result.vectors[index] = Some(output);
             }
         }
@@ -168,7 +173,7 @@ impl EmbedBatchFn for VoyageAiProvider {
 }
 
 impl VoyageAiProvider {
-    fn validate_vector(&self, mut vector: Vec<f32>, expected: Option<usize>) -> Option<Vec<f32>> {
+    fn validate_vector(&self, mut vector: Vec<f32>) -> Option<Vec<f32>> {
         if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
             return None;
         }
@@ -183,10 +188,32 @@ impl VoyageAiProvider {
                 return None;
             }
         }
-        if expected.is_some_and(|value| value != vector.len()) {
+        if !self.check_observed_dims(vector.len()) {
             return None;
         }
         Some(vector)
+    }
+
+    /// Establishes (on first call) or enforces (on every later call) a single
+    /// embedding dimension across ALL concurrent `embed_batch` calls made on
+    /// this provider instance for the lifetime of one indexing run.
+    ///
+    /// `embed_batch` runs concurrently on a shared `Arc<dyn EmbedBatchFn>` --
+    /// one call per rayon sub-batch -- so this can't be a local variable
+    /// inside `embed_batch`, or dimension drift across two different calls
+    /// would never be caught. The compare-exchange makes "first observed
+    /// dimension wins" atomic: on a race between two threads seeing the
+    /// unset (0) sentinel, exactly one wins and sets the run's dimension,
+    /// the other's compare_exchange fails and falls through to the `Err`
+    /// arm, which then compares its own length against the winner's value.
+    fn check_observed_dims(&self, len: usize) -> bool {
+        match self
+            .observed_dims
+            .compare_exchange(0, len, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => true,
+            Err(existing) => existing == len,
+        }
     }
 }
 
@@ -276,5 +303,95 @@ fn sanitize(value: String, secret: Option<&str>) -> String {
         value
     } else {
         format!("{}...", value.chars().take(500).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::EmbedBatchFn;
+
+    fn config(base_url: String) -> EmbedConfig {
+        EmbedConfig {
+            provider: "voyageai".to_string(),
+            model: "voyage-3".to_string(),
+            api_key: Some("test-key".to_string()),
+            base_url: Some(base_url),
+            output_dims: None,
+            matryoshka: false,
+            client_side_truncation: false,
+            api_version: None,
+            ssl_verify: true,
+            is_azure: false,
+            azure_endpoint: None,
+            azure_deployment: None,
+            max_tokens_per_batch: 8191,
+            max_items_per_batch: 100,
+        }
+    }
+
+    #[test]
+    fn response_indices_are_reordered_to_input_order() {
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/embeddings");
+            then.status(200).json_body(serde_json::json!({
+                "data": [
+                    {"index": 1, "embedding": [2.0, 3.0]},
+                    {"index": 0, "embedding": [0.0, 1.0]}
+                ]
+            }));
+        });
+        let provider = VoyageAiProvider::new(config(server.url(""))).expect("provider");
+        let result = provider
+            .embed_batch(&["first".to_string(), "second".to_string()])
+            .expect("response");
+        assert_eq!(result.vectors[0], Some(vec![0.0, 1.0]));
+        assert_eq!(result.vectors[1], Some(vec![2.0, 3.0]));
+        mock.assert();
+    }
+
+    #[test]
+    fn embed_batch_rejects_dimension_drift_across_concurrent_calls() {
+        // Simulates two rayon sub-batches calling `embed_batch` on the same
+        // provider instance -- one per call, as `pipeline.rs`'s
+        // `embed_batch_parallel` does via a shared `Arc<dyn EmbedBatchFn>`.
+        // The provider must remember the dimension from the first call and
+        // reject a differently-sized vector on the second call, even though
+        // each call's own local batch is internally consistent.
+        let server = httpmock::MockServer::start();
+        let first_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/embeddings")
+                .body_contains("first-batch");
+            then.status(200).json_body(serde_json::json!({
+                "data": [{"index": 0, "embedding": [1.0, 2.0]}]
+            }));
+        });
+        let second_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/embeddings")
+                .body_contains("second-batch");
+            then.status(200).json_body(serde_json::json!({
+                "data": [{"index": 0, "embedding": [1.0, 2.0, 3.0]}]
+            }));
+        });
+        let provider = VoyageAiProvider::new(config(server.url(""))).expect("provider");
+
+        let first = provider
+            .embed_batch(&["first-batch".to_string()])
+            .expect("first response");
+        assert_eq!(first.vectors[0], Some(vec![1.0, 2.0]));
+        assert!(first.errors.is_empty());
+
+        let second = provider
+            .embed_batch(&["second-batch".to_string()])
+            .expect("second response");
+        assert_eq!(second.vectors[0], None);
+        assert_eq!(second.errors.len(), 1);
+        assert!(second.errors[0].contains("invalid embedding vector"));
+
+        first_mock.assert();
+        second_mock.assert();
     }
 }
