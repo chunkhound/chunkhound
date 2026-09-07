@@ -183,17 +183,20 @@ impl PipelineConfig {
 mod tests {
     use super::*;
 
+    /// The `extension-module` PyO3 feature means a standalone `cargo test`
+    /// binary cannot construct a real `Python<'_>` token (see lib.rs comment).
+    /// Test the `ApiKey` redaction invariant directly on the struct instead.
     #[test]
-    fn debug_output_redacts_embedding_api_key() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let dict = PyDict::new_bound(py);
-            dict.set_item("embedding_api_key", "secret-test-key")
-                .expect("set key");
-            let config = PipelineConfig::from_py_dict(&dict).expect("config");
-            let debug = format!("{config:?}");
-            assert!(!debug.contains("secret-test-key"));
-            assert!(debug.contains("REDACTED"));
-        });
+    fn api_key_debug_is_redacted() {
+        let key = ApiKey("secret-test-key".to_string());
+        let debug = format!("{key:?}");
+        assert!(
+            !debug.contains("secret-test-key"),
+            "ApiKey debug must not expose the raw key: {debug}"
+        );
+        assert!(
+            debug.contains("REDACTED"),
+            "ApiKey debug must say REDACTED: {debug}"
+        );
     }
 }
