@@ -17,7 +17,6 @@ pub(crate) fn classify_http_status(status: u16) -> PipelineError {
         429 => PipelineError::RateLimited {
             retry_after_secs: None,
         },
-        500..=599 => PipelineError::ProviderError(format!("HTTP {status}")),
         _ => PipelineError::ProviderError(format!("HTTP {status}")),
     }
 }
