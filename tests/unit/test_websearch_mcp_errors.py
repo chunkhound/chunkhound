@@ -135,3 +135,57 @@ async def test_limit_clamped_to_range(patched) -> None:
     await invoke(limit=1_000)
 
     assert search.await_args.args[1] == 100
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_previous_query_reaches_expansion_and_research(
+    monkeypatch, patched
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["previous_query"] = previous_query
+        return [query]
+
+    async def capturing_research(query, pages, *args, **kwargs):
+        captured["research_previous_query"] = kwargs.get("previous_query")
+        async for _ in pages:
+            pass
+        return {"answer": "ANSWER"}
+
+    monkeypatch.setattr(websearch_expansion, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(web_research_service, "research_web_pages", capturing_research)
+
+    await tools.websearch_impl(
+        embedding_manager=MagicMock(),
+        llm_manager=MagicMock(),
+        config=MagicMock(),
+        query="q",
+        previous_query="prior topic",
+    )
+
+    assert captured["previous_query"] == "prior topic"
+    assert captured["research_previous_query"] == "prior topic"
+
+
+@pytest.mark.asyncio
+async def test_websearch_mcp_empty_previous_query_treated_as_none(
+    monkeypatch, patched
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["previous_query"] = previous_query
+        return [query]
+
+    monkeypatch.setattr(websearch_expansion, "expand_web_queries", capturing_expand)
+
+    await tools.websearch_impl(
+        embedding_manager=MagicMock(),
+        llm_manager=MagicMock(),
+        config=MagicMock(),
+        query="q",
+        previous_query="",
+    )
+
+    assert captured["previous_query"] is None

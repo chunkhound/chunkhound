@@ -24,6 +24,9 @@ from ..utils.tree_progress import TreeProgressDisplay
 
 async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     """Fetch DuckDuckGo results for the given query."""
+    # Empty-string → None coercion at the surface boundary, so every
+    # downstream consumer sees the two-valued "real string or None" contract.
+    previous_query = args.previous_query or None
     formatter = RichOutputFormatter(verbose=getattr(args, "verbose", False))
     embedding_manager = setup_embedding_manager(formatter, config)
     llm_manager = setup_llm_manager(formatter, config)
@@ -36,7 +39,9 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     timeout_s = websearch_timeout()
 
     async def _run() -> tuple[dict, list[str]] | None:
-        queries = await expand_web_queries(args.query, llm_manager)
+        queries = await expand_web_queries(
+            args.query, llm_manager, previous_query=previous_query
+        )
         results = await search_multi(
             queries,
             args.limit,
@@ -74,6 +79,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
                 llm_manager,
                 progress=research_progress,
                 warning_callback=warnings.append,
+                previous_query=previous_query,
             )
         if not got_page:
             formatter.error(f"No pages could be fetched for {args.query!r}")

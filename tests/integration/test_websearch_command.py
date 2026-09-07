@@ -10,8 +10,12 @@ import pytest
 from chunkhound.api.cli.commands import websearch as ws_mod
 
 
-def make_args(query: str = "q") -> argparse.Namespace:
-    return argparse.Namespace(query=query, limit=30, verbose=False)
+def make_args(
+    query: str = "q", previous_query: str | None = None
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        query=query, limit=30, verbose=False, previous_query=previous_query
+    )
 
 
 def search_results() -> list[tuple[str, str, str]]:
@@ -102,3 +106,70 @@ async def test_websearch_command_empty_results_exits_10(monkeypatch, providers) 
         await ws_mod.websearch_command(make_args("zero"), MagicMock())
 
     assert exc.value.code == 10
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_previous_query_reaches_expansion(
+    monkeypatch, providers
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["query"] = query
+        captured["previous_query"] = previous_query
+        return [query]
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(
+        ws_mod, "search_multi", AsyncMock(return_value=search_results())
+    )
+
+    async def pages(*args, **kwargs):
+        yield "https://example.invalid/page", ".md", "# In memory"
+
+    async def research(query, page_stream, *args, **kwargs):
+        captured["research_previous_query"] = kwargs.get("previous_query")
+        async for _ in page_stream:
+            pass
+        return {"answer": "ANSWER"}
+
+    monkeypatch.setattr(ws_mod, "fetch_pages", pages)
+    monkeypatch.setattr(ws_mod, "research_web_pages", research)
+
+    await ws_mod.websearch_command(make_args(previous_query="prior"), MagicMock())
+
+    assert captured["previous_query"] == "prior"
+    assert captured["research_previous_query"] == "prior"
+
+
+@pytest.mark.asyncio
+async def test_websearch_cli_empty_previous_query_treated_as_none(
+    monkeypatch, providers
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def capturing_expand(query, llm_manager, previous_query=None):
+        captured["previous_query"] = previous_query
+        return [query]
+
+    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(
+        ws_mod, "search_multi", AsyncMock(return_value=search_results())
+    )
+
+    async def pages(*args, **kwargs):
+        yield "https://example.invalid/page", ".md", "# Page"
+
+    async def research(query, page_stream, *args, **kwargs):
+        captured["research_previous_query"] = kwargs.get("previous_query")
+        async for _ in page_stream:
+            pass
+        return {"answer": "ANSWER"}
+
+    monkeypatch.setattr(ws_mod, "fetch_pages", pages)
+    monkeypatch.setattr(ws_mod, "research_web_pages", research)
+
+    await ws_mod.websearch_command(make_args(previous_query=""), MagicMock())
+
+    assert captured["previous_query"] is None
+    assert captured["research_previous_query"] is None

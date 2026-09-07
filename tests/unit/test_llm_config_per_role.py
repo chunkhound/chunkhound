@@ -233,6 +233,17 @@ def test_registry_provider_missing_model_raises_configuration_error():
     )
 
 
+def test_openrouter_registry_provider_missing_model_raises_configuration_error():
+    cfg = LLMConfig(provider="openrouter", api_key=SecretStr("sk-test"))
+
+    with pytest.raises(
+        ConfigurationError, match="Model is required for 'openrouter'"
+    ) as exc_info:
+        cfg.get_provider_config_for_role("utility")
+
+    assert exc_info.value.config_key == "llm.model"
+
+
 def test_registry_provider_utility_override_with_model():
     """Per-role utility override to a registry provider with explicit model."""
     cfg = LLMConfig(
@@ -411,6 +422,9 @@ def test_llm_manager_forwards_anthropic_extended_config(monkeypatch):
         def __init__(self, **kwargs):  # noqa: ANN001
             captured.append(kwargs)
             self.model = kwargs["model"]
+
+        def configure_synthesis_output_limit_policy(self, **kwargs):  # noqa: ANN001
+            self.output_limit_policy = kwargs
 
     monkeypatch.setitem(LLMManager._providers, "anthropic", FakeAnthropicProvider)
 
@@ -1099,6 +1113,9 @@ def test_supports_structured_outputs_not_passed_to_other_providers() -> None:
 
         async def complete(self, prompt, **kwargs):  # noqa: ANN001, ANN201
             pass
+
+        def configure_synthesis_output_limit_policy(self, **kwargs):  # noqa: ANN001
+            self.output_limit_policy = kwargs
 
     from chunkhound.llm_manager import LLMManager
 

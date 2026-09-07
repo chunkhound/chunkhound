@@ -47,7 +47,7 @@ async def test_research_factory_receives_transient_search_service() -> None:
     research = MagicMock()
     captured: dict = {}
 
-    async def deep_research(query: str):
+    async def deep_research(query: str, previous_query: str | None = None):
         await captured["db_services"].search_service.search_semantic(query)
         return {"answer": "ANSWER"}
 
@@ -152,7 +152,7 @@ async def test_research_consumes_pages_incrementally_and_stores_full_text() -> N
     captured: dict = {}
     research = MagicMock()
 
-    async def deep_research(query: str):
+    async def deep_research(query: str, previous_query: str | None = None):
         search_service = captured["db_services"].search_service
         first, second = await asyncio.gather(
             search_service.search_semantic(query),
@@ -214,7 +214,7 @@ async def test_research_rejects_pages_without_usable_content() -> None:
     captured: dict = {}
     research = MagicMock()
 
-    async def deep_research(query: str):
+    async def deep_research(query: str, previous_query: str | None = None):
         await captured["db_services"].search_service.search_semantic(query)
         return {"answer": "must not escape"}
 
@@ -267,7 +267,7 @@ async def test_research_propagates_error_after_partial_page_stream() -> None:
     observed: list[BaseException] = []
     research = MagicMock()
 
-    async def deep_research(query: str):
+    async def deep_research(query: str, previous_query: str | None = None):
         search_service = captured["db_services"].search_service
         concurrent = await asyncio.gather(
             search_service.search_semantic(query),
@@ -336,7 +336,7 @@ async def test_research_cancellation_finalizes_page_producer() -> None:
     captured: dict = {}
     research = MagicMock()
 
-    async def deep_research(query: str):
+    async def deep_research(query: str, previous_query: str | None = None):
         await captured["db_services"].search_service.search_semantic(query)
         return {"answer": "must not escape"}
 

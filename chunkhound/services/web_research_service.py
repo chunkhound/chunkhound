@@ -279,6 +279,7 @@ async def research_web_pages(
     llm_manager: Any,
     progress: Any = None,
     warning_callback: Callable[[str], None] | None = None,
+    previous_query: str | None = None,
 ) -> dict[str, Any]:
     """Run the configured research strategy over fetched pages in process."""
     provider = _TransientProvider()
@@ -307,7 +308,9 @@ async def research_web_pages(
         path_filter=None,
     )
     try:
-        result = await research_service.deep_research(query)
+        result = await research_service.deep_research(
+            query, previous_query=previous_query
+        )
     finally:
         await chunk_stream.close()
     chunk_stream.raise_producer_error()

@@ -9,12 +9,21 @@ The registry pattern ensures consistent tool metadata and behavior.
 import asyncio
 import inspect
 import re
+import ssl
 import types
 import urllib.error
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypedDict, Union, cast, get_args, get_origin
+from typing import (
+    Any,
+    Literal,
+    TypedDict,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 try:
     from typing import NotRequired  # type: ignore[attr-defined]
@@ -39,6 +48,19 @@ MAX_ALLOWED_TOKENS = 25000
 MAX_DIFF_CHUNK_CHARS = 10_000
 _TRANSIENT_BATCH_SIZE = 100
 _TRANSIENT_VECTOR_CACHE = VectorCache()
+
+
+def _format_fetch_warnings(warnings: list[str]) -> str:
+    """Render fetch warnings as a trailing Markdown blockquote (empty if none).
+
+    Multi-line warnings are prefixed on every line so they stay in the block.
+    """
+    if not warnings:
+        return ""
+    return (
+        "\n\n> **Fetch warnings:**\n"
+        + "\n".join("> - " + w.replace("\n", "\n> ") for w in warnings)
+    )
 
 
 # =============================================================================
@@ -204,13 +226,12 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
         ):
             continue
 
-        # Get type hint
-        type_hint = (
+        annotation: Any = (
             param.annotation if param.annotation != inspect.Parameter.empty else Any
         )
 
         # Convert to JSON Schema type
-        schema = _python_type_to_json_schema_type(type_hint)
+        schema = _python_type_to_json_schema_type(annotation)
 
         # Add description if available from docstring
         if param_name in param_descriptions:
@@ -468,6 +489,9 @@ GIT HISTORY RESEARCH:
 - vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
 
+FOLLOW-UP CHAIN:
+- previous_query: Prior query for follow-up framing. When set, the synthesizer frames the answer in the prior topic's context. This changes only the answer's phrasing; it does not alter which code is searched or retrieved.
+
 One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
 DAEMON_STATUS_DESCRIPTION = """Report daemon startup, scan, and realtime
@@ -480,7 +504,12 @@ USE FOR:
 
 OUTPUT: {status, query_ready, scan_progress}"""
 
-WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
+WEBSEARCH_DESCRIPTION = """Search the web for `query`, fetch the top results, build a transient in-memory index over the fetched pages, and run deep research to produce a cited answer. \
+Use when the question requires external documentation, library references, or up-to-date web content — not for searching the local codebase (use `code_research` for that). \
+For follow-up questions, pass the prior query as previous_query — the expander then targets new dimensions instead of re-exploring the same ground, and the synthesizer interprets the current question in the prior topic's context. \
+High-latency; one call replaces a manual "search → read → synthesize" loop. Returns a cited markdown answer."""
+
+FETCHURL_DESCRIPTION = """Fetch a single URL (HTML or PDF) and return a Markdown answer. On large pages with a query, the tool reranks the page's sections against the query using a reranker and elbow cutoff, then passes only the most relevant sections to the LLM. On small pages or when no query is given, the page is truncated and summarized in one LLM call."""
 
 
 # =============================================================================
@@ -726,6 +755,7 @@ async def deep_research_impl(
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
     vector_source: str = "diff",
+    previous_query: str | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -741,6 +771,7 @@ async def deep_research_impl(
         commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
         last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
+        previous_query: Prior query for follow-up framing (optional). When set, the synthesis stage frames the answer in the prior topic's context. Does not affect which code is searched or retrieved.
 
     Returns:
         Dict with answer and metadata
@@ -784,6 +815,9 @@ async def deep_research_impl(
     # Create default config from environment if not provided
     if config is None:
         config = Config.from_environment()
+    # Empty-string → None coercion at the surface boundary, so every downstream
+    # consumer sees the two-valued "real string or None" contract.
+    previous_query = previous_query or None
 
     # Create code research service using factory (v1 or v2 based on config)
     # This ensures followup suggestions automatically update if tool is renamed
@@ -797,7 +831,7 @@ async def deep_research_impl(
         path_filter=path,
     )
 
-    result = await research_service.deep_research(query)
+    result = await research_service.deep_research(query, previous_query=previous_query)
     return result
 
 
@@ -814,6 +848,7 @@ async def websearch_impl(
     config: Config | None,
     query: str,
     limit: int = 30,
+    previous_query: str | None = None,
 ) -> str:
     """Search the web, fetch results, and run deep research over them.
 
@@ -827,6 +862,7 @@ async def websearch_impl(
             expander falls back to a single-query dispatch.
         config: Application configuration; falls back to environment.
         query: Natural-language or keyword query for DuckDuckGo.
+        previous_query: Previous query to build context and chain knowledge (optional).
         limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
 
     Returns:
@@ -844,14 +880,21 @@ async def websearch_impl(
 
     if config is None:
         config = Config.from_environment()
+    # Empty-string → None coercion at the surface boundary, so every
+    # downstream consumer sees the two-valued "real string or None" contract.
+    previous_query = previous_query or None
 
     limit = clamp_limit(limit)
     timeout_s = websearch_timeout()
 
     async def _run() -> tuple[dict, list[str]]:
-        queries = await expand_web_queries(query, llm_manager)
+        queries = await expand_web_queries(
+            query, llm_manager, previous_query=previous_query
+        )
         try:
             results = await search_multi(queries, limit, None)
+        except urllib.error.HTTPError as e:
+            raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
         except urllib.error.URLError as e:
             raise MCPError(f"Web search failed: {e.reason}") from e
         if not results:
@@ -877,6 +920,7 @@ async def websearch_impl(
             embedding_manager,
             llm_manager,
             warning_callback=warnings.append,
+            previous_query=previous_query,
         )
         if not got_page:
             raise MCPError(f"No pages could be fetched for {query!r}")
@@ -894,16 +938,69 @@ async def websearch_impl(
         raise MCPError(f"Web research failed: {exc}") from exc
 
     answer = str(research_result.get("answer", "")).rstrip()
-    # Warnings may be multi-line; prefix every line to keep the blockquote.
-    warn_block = (
-        (
-            "\n\n> **Fetch warnings:**\n"
-            + "\n".join("> - " + w.replace("\n", "\n> ") for w in warnings)
+    return f"{answer}{_format_fetch_warnings(warnings)}"
+
+
+@register_tool(
+    description=FETCHURL_DESCRIPTION,
+    requires_llm=True,
+    requires_reranker=True,
+    name="fetchurl",
+)
+async def fetchurl_impl(
+    embedding_manager: EmbeddingManager,
+    llm_manager: LLMManager,
+    config: Config | None,
+    url: str,
+    query: str = "",
+) -> str:
+    """Fetch a URL and return a focused Markdown answer.
+
+    Args:
+        embedding_manager: Injected; used to obtain the reranker-capable embedding provider.
+        llm_manager: Injected; used for the extraction call.
+        config: Injected; used for fetchurl thresholds and retry policy.
+        url: Absolute http:// or https:// URL. file://, ftp://, data:, and hosts
+            resolving to loopback / private / link-local addresses are rejected.
+        query: Optional question. When set, focuses extraction; enables rerank+elbow
+            path on pages exceeding fetchurl.rerank_threshold_tokens.
+    """
+    from chunkhound.mcp_server.common import MCPError
+    from chunkhound.utils.fetchurl import FetchUrlError, run_fetchurl
+
+    # Reranker availability is gated upstream: requires_reranker=True on the
+    # @register_tool decorator hides fetchurl from tools/list and makes the
+    # MCP dispatcher raise before we get here (see mcp_server/common.py and
+    # mcp_server/base.py).
+    if config is None:
+        config = Config.from_environment()
+
+    warnings: list[str] = []
+    try:
+        answer = await run_fetchurl(
+            url,
+            query,
+            config,
+            embedding_manager.get_provider(),
+            llm_manager,
+            warning_callback=warnings.append,
+            verbose_log=None,
         )
-        if warnings
-        else ""
-    )
-    return f"{answer}{warn_block}"
+    # asyncio.TimeoutError is a distinct class on Python 3.10 (aliased to
+    # builtin TimeoutError only from 3.11); keep both until requires-python
+    # >= 3.11.
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        raise MCPError("fetchurl timed out") from e
+    except FetchUrlError as e:
+        raise MCPError(f"fetchurl failed: {e}") from e
+    except urllib.error.HTTPError as e:
+        raise MCPError(f"fetchurl failed: HTTP {e.code} {e.reason}") from e
+    except urllib.error.URLError as e:
+        raise MCPError(f"fetchurl failed: {e.reason}") from e
+    # ValueError = fetch_url_to_content content-type / empty-body reject.
+    except (ssl.SSLError, ValueError) as e:
+        raise MCPError(f"fetchurl failed: {e}") from e
+    return f"{answer}{_format_fetch_warnings(warnings)}"
 
 
 # =============================================================================

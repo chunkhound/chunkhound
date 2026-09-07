@@ -9,27 +9,28 @@ sites depend on this neutral module instead of each other.
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import html.parser
 import itertools
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from http.client import HTTPMessage
-    from typing import Any
 
     import zendriver as zd
 
-MAX_FETCH_CONCURRENCY = 5
+_MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
 
@@ -38,6 +39,7 @@ __all__ = [
     "clamp_limit",
     "websearch_timeout",
     "fetch_pages",
+    "fetch_url_to_content",
     "search_multi",
 ]
 
@@ -131,7 +133,8 @@ def _check_chrome_version(chrome_path: str) -> None:
         ).strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         raise RuntimeError(
-            f"--version probe at {chrome_path!r} failed: {type(e).__name__}: {e}"
+            f"--version probe at {chrome_path!r} failed: "
+            f"{type(e).__name__}: {e}"
         ) from e
     major = next(
         (int(tok.split(".")[0]) for tok in out.split() if tok.split(".")[0].isdigit()),
@@ -171,7 +174,6 @@ def _resolve_chrome_path(
                 deferred[p] = e
     try:
         from zendriver.core.config import find_executable
-
         resolved = find_executable("auto")
     except Exception:
         # Broad catch: zendriver's launch-failure surface is documented as
@@ -204,6 +206,72 @@ def _resolve_chrome_path(
     return None
 
 
+@asynccontextmanager
+async def _managed_browser(
+    warning_callback: Callable[[str], None] | None = None,
+) -> AsyncIterator[zd.Browser | None]:
+    """Yield a running Chrome browser, or None if none can be launched.
+
+    Shared by every zendriver-consuming caller (websearch's ``fetch_pages``
+    and fetchurl's ``_fetch_with_retry``). Callers must
+    tolerate ``None`` — ``fetch_url_to_content`` and ``_fetch_page`` already
+    dispatch to the urllib fallback when ``browser is None``.
+    """
+    # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
+    # for CLI commands that never touch websearch (e.g. `chunkhound index`).
+    import zendriver as zd
+
+    # Must run before any tab.send() creates a Transaction.
+    _install_late_completion_guard()
+
+    # _resolve_chrome_path returns None for every "no usable Chrome >=124"
+    # case (not installed, too old, --version probe failed) and emits its
+    # own warning describing the cause. urllib is the unified fallback —
+    # we never hand a bad binary to zendriver, so the silent
+    # Response.charset parse-failure loop is never reached.
+    chrome_path = _resolve_chrome_path(warning_callback)
+    browser: zd.Browser | None = None
+    if chrome_path is not None:
+        # --headless=new is required for the PDF path: legacy --headless hands
+        # PDFs to Chrome's internal viewer and never exposes the response to
+        # _fetch_page. Pass both headless=True and the explicit flag — the
+        # relationship between zendriver's Config flag and the explicit arg is
+        # undocumented; belt-and-braces.
+        # --disable-dev-shm-usage: containers default /dev/shm to 64MB, which
+        # 5-way concurrent navigation of JS-heavy SPAs exhausts — Chrome dies
+        # and every in-flight tab raises ConnectionClosedError on its CDP
+        # WebSocket. --disable-gpu drops the unused GPU process to free RAM.
+        try:
+            browser = await zd.start(
+                headless=True,
+                browser_args=[
+                    "--headless=new",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+                browser_executable_path=chrome_path,
+            )
+        except Exception as e:
+            if warning_callback:
+                warning_callback(
+                    f"Browser launch failed: {e}. Falling back to urllib."
+                    " (If Google Chrome is not installed, install it to"
+                    " enable rich page fetches.)"
+                )
+            browser = None
+
+    try:
+        yield browser
+    finally:
+        if browser is not None:
+            # Bounded best-effort stop. browser.stop() can wedge on a stuck
+            # websocket close or a Chrome process ignoring SIGTERM.
+            try:
+                await asyncio.wait_for(browser.stop(), timeout=10)
+            except asyncio.TimeoutError:
+                pass
+
+
 def clamp_limit(limit: int) -> int:
     """Silently clamp result-count limit to [1, WEBSEARCH_LIMIT_MAX].
 
@@ -213,9 +281,8 @@ def clamp_limit(limit: int) -> int:
 
 
 def websearch_timeout() -> float:
-    """Overall wall-clock timeout (seconds) for the websearch operation.
+    """Overall wall-clock timeout (seconds) for the websearch subprocess.
 
-    Covers query expansion, DuckDuckGo search, page fetch, and research.
     Reads CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS; falls back to 600.0 on
     unset or malformed values.
     """
@@ -331,17 +398,27 @@ def _html_to_markdown(html_text: str) -> str:
     return _Converter(
         strip=[
             "head",
-            "nav",
-            "footer",
-            "header",
-            "aside",
-            "form",
-            "button",
-            "iframe",
-            "noscript",
+            "nav", "footer", "header", "aside",
+            "form", "button", "iframe", "noscript",
         ],
         heading_style="ATX",
     ).convert(html_text)
+
+
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_html_title(html_text: str) -> str | None:
+    """Return the first <title> element's inner text, or None.
+
+    Runs on the raw HTML *before* markdownify's strip=["head", ...] removes it
+    in `_html_to_markdown`. HTML entities (``&amp;``, ``&#x27;``, ...) are
+    decoded here — they are part of extracting the title text, not fetchurl
+    policy. Whitespace-normalization and length-capping happen downstream in
+    fetchurl-specific code.
+    """
+    m = _HTML_TITLE_RE.search(html_text)
+    return html.unescape(m.group(1)) if m else None
 
 
 def _normalize_ct(raw: str | None) -> str:
@@ -453,7 +530,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         # is known.
         nav_loader_id: cdp.network.LoaderId | None = None
         candidates: list[cdp.network.ResponseReceived] = []
-        main_response: asyncio.Future[cdp.network.Response] = (
+        main_response: asyncio.Future[cdp.network.ResponseReceived] = (
             asyncio.get_running_loop().create_future()
         )
 
@@ -470,7 +547,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                 candidates.append(event)
                 return
             if event.loader_id == nav_loader_id:
-                main_response.set_result(event.response)
+                main_response.set_result(event)
 
         # Register the handler BEFORE Network.enable. Events that fire
         # during the enable round-trip would otherwise land before the
@@ -497,12 +574,14 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         # loader_id; the ResponseReceived event does).
         for ev in candidates:
             if ev.loader_id == nav_loader_id and not main_response.done():
-                main_response.set_result(ev.response)
+                main_response.set_result(ev)
                 break
 
-        response = await asyncio.wait_for(main_response, timeout=30)
+        response_event = await asyncio.wait_for(main_response, timeout=30)
+        response = response_event.response
         ct = _normalize_ct(
-            response.headers.get("content-type") or response.headers.get("Content-Type")
+            response.headers.get("content-type")
+            or response.headers.get("Content-Type")
         )
 
         if ct == "application/pdf":
@@ -526,7 +605,9 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                     tab.send(cdp.network.get_cookies(urls=[pdf_url])),
                     timeout=10,
                 )
-                cookie_header = "; ".join(f"{c.name}={c.value}" for c in cookies)
+                cookie_header = "; ".join(
+                    f"{c.name}={c.value}" for c in cookies
+                )
             except asyncio.TimeoutError:
                 cookie_header = ""
             # Close the tab *before* urllib so Chrome stops holding the
@@ -547,12 +628,26 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             # the literal avoids a silent decode-behavior change there.
             extra = {"Cookie": cookie_header} if cookie_header else None
             _, body, _ = await asyncio.to_thread(
-                _fetch_url,
-                pdf_url,
-                extra,
-                False,  # follow_redirects=False
+                _fetch_url, pdf_url, extra, False  # follow_redirects=False
             )
             return "application/pdf", body, "utf-8"
+
+        if ct in {"text/plain", "text/markdown"}:
+            await asyncio.wait_for(tab.wait(), timeout=30)
+            body_text, base64_encoded = await asyncio.wait_for(
+                tab.send(
+                    cdp.network.get_response_body(
+                        request_id=response_event.request_id
+                    )
+                ),
+                timeout=30,
+            )
+            body_bytes = (
+                base64.b64decode(body_text)
+                if base64_encoded
+                else body_text.encode("utf-8")
+            )
+            return ct, body_bytes, "utf-8"
 
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
@@ -567,6 +662,66 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             await _close_tab_quietly(tab)
 
 
+async def fetch_url_to_content(
+    url: str, browser: zd.Browser | None
+) -> tuple[str, str | bytes, dict[str, str | None]]:
+    """Fetch one URL and return (kind, payload, source_metadata).
+
+    kind ∈ {".pdf", ".md"}. source_metadata carries out-of-band signals
+    lifted from the raw response before content-type normalization —
+    currently just the HTML <title> element, which markdownify's
+    strip=["head", ...] in `_html_to_markdown` would otherwise discard.
+    PDF and non-HTML paths return {"title": None}.
+
+    Shared between fetch_pages (websearch, which discards
+    source_metadata) and `_fetch_with_retry` in `chunkhound.utils.fetchurl`
+    (which threads it into `_derive_page_title`, §4.1a).
+
+    Raises ValueError on unsupported Content-Type or empty rendered body.
+    """
+    if browser is not None:
+        ct, body, charset = await _fetch_page(browser, url)
+    else:
+        ct, body, charset = await asyncio.to_thread(_fetch_url, url)
+    source_metadata: dict[str, str | None] = {"title": None}
+    if ct == "application/pdf":
+        kind, content = _decode_pdf_or_fallback_html(body, charset)
+        # On the HTML fallback path (paywall/auth wall served with an
+        # application/pdf Content-Type but no %PDF- magic), capture <title>
+        # from the same bytes the fallback markdown was derived from.
+        #
+        # Known limitation: on the Chrome branch, `_fetch_page` hardcodes
+        # charset="utf-8" regardless of the actual response encoding — see the
+        # inline comment there explaining why the literal is preserved. Any
+        # non-UTF-8 paywall HTML served under application/pdf via Chrome will
+        # therefore be decoded as UTF-8 here, potentially mojibaking the
+        # <title>. `errors="replace"` prevents a crash. This is accepted for v1;
+        # a v2 refinement could plumb Chrome's Response.charset through
+        # _fetch_page instead of hardcoding utf-8.
+        if kind == ".md":
+            source_metadata["title"] = _extract_html_title(
+                body.decode(charset, errors="replace")
+            )
+    elif ct in {"text/html", "text/plain", "text/markdown"}:
+        html_text = body.decode(charset, errors="replace")
+        if ct == "text/html":
+            source_metadata["title"] = _extract_html_title(html_text)
+            content = _html_to_markdown(html_text)
+        else:
+            content = html_text
+        kind = ".md"
+    else:
+        raise ValueError(f"Unsupported content-type: {ct!r}")
+    # Auth walls and error pages often render to whitespace-only markdown —
+    # surface as a fetch failure rather than passing empty content downstream.
+    # bytes.strip() and str.strip() are both valid; the unconditional .strip()
+    # covers PDFs and HTML alike (an all-whitespace-bytes PDF payload still
+    # raises).
+    if not content.strip():
+        raise ValueError(f"{ct!r} body rendered empty ({len(body)} bytes)")
+    return kind, content, source_metadata
+
+
 async def _fetch_content(
     url: str,
     browser: zd.Browser | None,
@@ -578,68 +733,12 @@ async def _fetch_content(
         if progress_callback:
             progress_callback(f"Fetching {url}...")
         try:
-            if browser is not None:
-                ct, body, charset = await _fetch_page(browser, url)
-            else:
-                ct, body, charset = await asyncio.to_thread(_fetch_url, url)
-            if ct == "application/pdf":
-                ext, content = _decode_pdf_or_fallback_html(body, charset)
-            elif ct == "text/html":
-                ext, content = (
-                    ".md",
-                    _html_to_markdown(body.decode(charset, errors="replace")),
-                )
-            else:
-                raise ValueError(f"Unsupported content-type: {ct!r}")
-            # Auth walls and error pages often render to whitespace-only
-            # markdown; surface that as a fetch failure rather than writing
-            # an empty file that consumes a result slot.
-            if not content.strip():
-                raise ValueError(f"{ct!r} body rendered empty ({len(body)} bytes)")
+            ext, content, _source_metadata = await fetch_url_to_content(url, browser)
             return url, ext, content
         except Exception as e:
             if warning_callback:
                 warning_callback(f"Failed to fetch {url}: {type(e).__name__}: {e}")
             return None
-
-
-@asynccontextmanager
-async def _browser_session(
-    warning_callback: Callable[[str], None] | None,
-) -> AsyncIterator[zd.Browser | None]:
-    import zendriver as zd
-
-    _install_late_completion_guard()
-    chrome_path = _resolve_chrome_path(warning_callback)
-    if chrome_path is None:
-        yield None
-        return
-    try:
-        browser = await zd.start(
-            headless=True,
-            browser_args=[
-                "--headless=new",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-            browser_executable_path=chrome_path,
-        )
-    except Exception as e:
-        if warning_callback:
-            warning_callback(
-                f"Browser launch failed: {e}. Falling back to urllib."
-                " (If Google Chrome is not installed, install it to"
-                " enable rich page fetches.)"
-            )
-        yield None
-        return
-    try:
-        yield browser
-    finally:
-        try:
-            await asyncio.wait_for(browser.stop(), timeout=10)
-        except asyncio.TimeoutError:
-            pass
 
 
 async def fetch_pages(
@@ -648,8 +747,8 @@ async def fetch_pages(
     warning_callback: Callable[[str], None] | None = None,
 ) -> AsyncIterator[tuple[str, str, str | bytes]]:
     """Yield fetched page bodies in memory as each request completes."""
-    semaphore = asyncio.Semaphore(MAX_FETCH_CONCURRENCY)
-    async with _browser_session(warning_callback) as browser:
+    semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
+    async with _managed_browser(warning_callback) as browser:
         tasks = [
             asyncio.create_task(
                 _fetch_content(
@@ -760,7 +859,9 @@ async def search_multi(
             else None
         )
         try:
-            batch = await asyncio.to_thread(search, q, limit, per_query_progress)
+            batch = await asyncio.to_thread(
+                search, q, limit, per_query_progress
+            )
         except urllib.error.URLError as e:
             if failure_callback is not None:
                 failure_callback(q, e)

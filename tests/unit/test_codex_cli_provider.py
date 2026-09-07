@@ -3,7 +3,6 @@ from unittest.mock import patch
 import pytest
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.providers.llm.codex_cli_provider import CODEX_DEFAULT_SYNTHESIS_MODEL
 
 
 @pytest.fixture(autouse=True)
