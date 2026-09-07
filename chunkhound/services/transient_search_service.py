@@ -20,6 +20,17 @@ _OVERFETCH_FACTOR = 5
 # instead of silently growing toward O(corpus size) as callers page deeper.
 _MAX_RESULT_WINDOW = 2000
 
+# Wall-clock ceiling on a single diff/web search call: streaming the source
+# plus embedding every uncached chunk it yields. This is a circuit breaker
+# against a truly pathological source (an enormous commit range, an embedding
+# backend that's stalled), not a tight SLA -- it's sized generously above the
+# time a legitimate multi-thousand-chunk diff takes to embed sequentially in
+# _TRANSIENT_BATCH_SIZE-sized batches. Without it, removing the old
+# MAX_DIFF_CHUNKS cap traded silent truncation for an unbounded hang: a large
+# enough source could block the calling MCP tool call indefinitely with no
+# actionable error.
+_TRANSIENT_SEARCH_TIMEOUT_SECONDS = 300
+
 ChunkBatchStream = Callable[[], AsyncIterator[list[Any]]]
 
 
@@ -100,6 +111,30 @@ class TransientSearchService:
         return await self._embedding_manager.embed_texts(texts, provider_name=provider)
 
     async def _search_transient(
+        self,
+        query: str,
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        try:
+            return await asyncio.wait_for(
+                self._search_transient_impl(
+                    query, page_size, offset, threshold, path_filter, provider
+                ),
+                timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Diff/web search timed out after "
+                f"{_TRANSIENT_SEARCH_TIMEOUT_SECONDS}s streaming and embedding "
+                "transient content. Narrow the commit range or query, or use "
+                "vector_source='db' to skip transient embedding."
+            ) from None
+
+    async def _search_transient_impl(
         self,
         query: str,
         page_size: int,

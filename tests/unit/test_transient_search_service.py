@@ -226,6 +226,34 @@ async def test_both_mode_deep_offset_rejected_beyond_max_result_window() -> None
 
 
 @pytest.mark.asyncio
+async def test_search_transient_times_out_on_stalled_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled/pathologically slow source must fail with a clear timeout
+    instead of hanging the caller indefinitely -- the old MAX_DIFF_CHUNKS cap
+    and its paired embedding timeout are gone, so this is the only remaining
+    circuit breaker against an unbounded diff/web search call."""
+    import chunkhound.services.transient_search_service as tss_module
+
+    monkeypatch.setattr(tss_module, "_TRANSIENT_SEARCH_TIMEOUT_SECONDS", 0.05)
+
+    async def stalled_stream() -> AsyncIterator[list]:
+        await asyncio.Event().wait()
+        yield []  # pragma: no cover
+
+    service = TransientSearchService(
+        make_original(),
+        stalled_stream,
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        await service.search_semantic("query", page_size=10)
+
+
+@pytest.mark.asyncio
 async def test_equal_scores_prefer_earlier_ordinal() -> None:
     chunks = [
         make_chunk("first", code="target-one"),
