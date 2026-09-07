@@ -34,6 +34,14 @@ _MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
 
+# Cap on a single fetched page's body size. A target URL can be anything --
+# a mis-served multi-GB file, an infinite stream -- and there's no way to
+# know its size in advance. Generous enough for any legitimate markdown/PDF
+# page; _fetch_content already catches and skips-with-a-warning any single
+# page that fails, so exceeding this cap degrades gracefully rather than
+# letting one oversized page balloon memory for the whole websearch call.
+_MAX_PAGE_BYTES = 20 * 1024 * 1024
+
 __all__ = [
     "WEBSEARCH_LIMIT_MAX",
     "clamp_limit",
@@ -368,6 +376,36 @@ class _ResultParser(html.parser.HTMLParser):
             self._desc += data
 
 
+def _read_bounded(resp: IO[bytes], max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
+    """Read *resp* up to `max_bytes`, raising `ValueError` if it's exceeded.
+
+    Reads in fixed-size chunks rather than one `resp.read()` call so an
+    oversized response is caught before it's fully buffered.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"Response exceeds maximum page size of {max_bytes} bytes")
+        chunks.append(chunk)
+
+
+def _check_page_size(body: bytes, max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
+    """Reject an already-materialized body that exceeds `max_bytes`.
+
+    CDP hands back a page's full body in one RPC response -- there's no
+    incremental read to bound like `_read_bounded` does for urllib, so this
+    is a post-hoc check on what Chrome already buffered.
+    """
+    if len(body) > max_bytes:
+        raise ValueError(f"Response exceeds maximum page size of {max_bytes} bytes")
+    return body
+
+
 def _fetch(params: dict[str, str]) -> str:
     data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(
@@ -376,7 +414,7 @@ def _fetch(params: dict[str, str]) -> str:
         headers={"User-Agent": "Mozilla/5.0"},
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode()
+        return _read_bounded(resp).decode()
 
 
 def _html_to_markdown(html_text: str) -> str:
@@ -491,7 +529,7 @@ def _fetch_url(
     )
     with opener.open(req, timeout=30) as resp:
         ct = _normalize_ct(resp.headers.get("Content-Type"))
-        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+        return ct, _read_bounded(resp), resp.headers.get_content_charset() or "utf-8"
 
 
 async def _close_tab_quietly(tab: zd.Tab) -> None:
@@ -647,7 +685,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                 if base64_encoded
                 else body_text.encode("utf-8")
             )
-            return ct, body_bytes, "utf-8"
+            return ct, _check_page_size(body_bytes), "utf-8"
 
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
@@ -656,7 +694,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         # implicit 30s timeout.
         await asyncio.wait_for(tab.wait(), timeout=30)
         html_str = await tab.get_content()
-        return ct, html_str.encode("utf-8"), "utf-8"
+        return ct, _check_page_size(html_str.encode("utf-8")), "utf-8"
     finally:
         if not tab_closed:
             await _close_tab_quietly(tab)
