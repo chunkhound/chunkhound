@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
-from chunkhound.core.git_diff.runner import stream_git_diff_file_blocks
+from chunkhound.core.git_diff.runner import (
+    _MAX_STDERR_BYTES,
+    stream_git_diff_file_blocks,
+)
 
 
 class _LineStdout:
@@ -26,16 +29,33 @@ class _LineStdout:
             await asyncio.Event().wait()
         return b""
 
+    async def readuntil(self, separator: bytes = b"\n") -> bytes:
+        # This test double always hands out complete, pre-terminated lines
+        # (or a clean EOF), so it never needs to exercise the
+        # LimitOverrunError recovery path -- that's covered separately by
+        # test_stream_reassembles_line_longer_than_reader_limit against a
+        # real asyncio.StreamReader.
+        line = await self.readline()
+        if not line:
+            raise asyncio.IncompleteReadError(b"", None)
+        return line
+
 
 class _Stderr:
     def __init__(self, payload: bytes = b"", hang: bool = False) -> None:
         self._payload = payload
         self._hang = hang
+        self.read_calls = 0
 
-    async def read(self) -> bytes:
+    async def read(self, n: int = -1) -> bytes:
+        self.read_calls += 1
         if self._hang:
             await asyncio.Event().wait()
-        return self._payload
+        if n is None or n < 0:
+            chunk, self._payload = self._payload, b""
+            return chunk
+        chunk, self._payload = self._payload[:n], self._payload[n:]
+        return chunk
 
 
 class StreamProcess:
@@ -99,6 +119,45 @@ async def test_streams_complete_file_blocks_from_real_git(
     assert all(block.startswith("diff --git ") for block in blocks)
     assert "one.py" in blocks[0]
     assert "two.py" in blocks[1]
+
+
+@pytest.mark.asyncio
+async def test_stream_reassembles_line_longer_than_reader_limit(
+    tmp_path: Path,
+) -> None:
+    """A single diff line longer than asyncio's default 64 KiB reader limit
+    must not truncate the stream or raise -- diffs can legitimately contain
+    very long single lines (minified bundles, generated lockfiles)."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "init", cwd=str(tmp_path), stdout=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    (tmp_path / "bundle.js").write_text("var x = 1;\n", encoding="utf-8")
+    proc = await asyncio.create_subprocess_exec("git", "add", ".", cwd=str(tmp_path))
+    await proc.communicate()
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "initial",
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+
+    long_line = "x" * 200_000  # comfortably over the 64 KiB default reader limit
+    (tmp_path / "bundle.js").write_text(f"var x = 1;\n{long_line}\n", encoding="utf-8")
+
+    blocks = [
+        block async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
+    ]
+
+    assert len(blocks) == 1
+    assert f"+{long_line}" in blocks[0]
 
 
 @pytest.mark.asyncio
@@ -208,6 +267,39 @@ async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
                 pass
 
     assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_caps_stderr_retained_in_memory(tmp_path: Path) -> None:
+    """A pathologically large stderr payload must not be fully buffered."""
+    huge_stderr = b"fatal: bad object HEAD~999 " + b"x" * (10 * _MAX_STDERR_BYTES)
+    proc = StreamProcess(lines=[], exit_code=128, stderr=huge_stderr)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(ValueError) as exc_info:
+            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+                pass
+
+    message = str(exc_info.value)
+    assert "fatal: bad object" in message
+    assert len(message) <= _MAX_STDERR_BYTES + len("git diff failed: ")
+
+
+@pytest.mark.asyncio
+async def test_stream_stderr_drain_reaches_eof_past_the_cap(
+    tmp_path: Path,
+) -> None:
+    """Draining must continue past the cap so git never blocks on a full pipe."""
+    huge_stderr = b"x" * (10 * _MAX_STDERR_BYTES)
+    proc = StreamProcess(lines=[], exit_code=128, stderr=huge_stderr)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(ValueError):
+            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+                pass
+
+    assert proc.stderr._payload == b""
+    assert proc.stderr.read_calls > 1
 
 
 @pytest.mark.asyncio
