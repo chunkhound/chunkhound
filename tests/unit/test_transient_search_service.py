@@ -69,18 +69,12 @@ async def test_streams_5000_chunks_into_bounded_top_page() -> None:
         "total": 5_000,
     }
 
-    final_results, final_page = await service.search_semantic(
-        "query", page_size=10, offset=4_990
-    )
-
-    assert len(final_results) == 10
-    assert final_page == {
-        "offset": 4_990,
-        "page_size": 10,
-        "has_more": False,
-        "next_offset": None,
-        "total": 5_000,
-    }
+    # The last page of this 5,000-chunk corpus sits beyond the pagination
+    # window (see test_deep_offset_rejected_beyond_max_result_window): exact
+    # deep-offset ranking would require holding the whole corpus in the heap,
+    # which defeats the O(K) memory bound this service exists to provide.
+    with pytest.raises(ValueError, match="offset\\+page_size"):
+        await service.search_semantic("query", page_size=10, offset=4_990)
 
 
 @pytest.mark.asyncio
@@ -172,6 +166,63 @@ async def test_peak_live_vectors_stays_within_heap_plus_batch() -> None:
     await service.search_semantic("query", page_size=10)
 
     assert service.peak_live_vectors <= 50 + 100
+
+
+@pytest.mark.asyncio
+async def test_deep_offset_rejected_beyond_max_result_window() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(5_000)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks, batch_size=100),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    with pytest.raises(ValueError, match="offset\\+page_size"):
+        await service.search_semantic("query", page_size=10, offset=1_995)
+
+
+@pytest.mark.asyncio
+async def test_deep_offset_within_window_keeps_heap_bounded() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(5_000)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks, batch_size=100),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    # Largest offset still inside the window: heap capacity is bounded by the
+    # window ceiling, not by the 5,000-chunk corpus size.
+    await service.search_semantic("query", page_size=10, offset=1_990)
+
+    assert service.peak_live_vectors <= 2_000 + 100
+
+
+@pytest.mark.asyncio
+async def test_both_mode_deep_offset_rejected_beyond_max_result_window() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(5_000)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks, batch_size=100),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    with pytest.raises(ValueError, match="offset\\+page_size"):
+        await service.search_semantic("query", page_size=10, offset=1_995)
 
 
 @pytest.mark.asyncio

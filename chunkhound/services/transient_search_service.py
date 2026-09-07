@@ -12,6 +12,14 @@ from chunkhound.services.vector_cache import VectorCache
 
 _OVERFETCH_FACTOR = 5
 
+# Hard ceiling on (offset + page_size) for a single transient (diff/web) search
+# call. The top-K heap must hold at least offset + page_size entries to return
+# an exact page, so heap size -- and therefore peak memory -- scales with this
+# window. Capping it keeps worst-case memory a known constant regardless of
+# corpus size (a 500-chunk diff and a 500,000-chunk diff have the same bound),
+# instead of silently growing toward O(corpus size) as callers page deeper.
+_MAX_RESULT_WINDOW = 2000
+
 ChunkBatchStream = Callable[[], AsyncIterator[list[Any]]]
 
 
@@ -203,6 +211,13 @@ class TransientSearchService:
                 force_strategy=force_strategy,
                 time_limit=time_limit,
                 result_limit=result_limit,
+            )
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search "
+                "pagination; narrow the query or commit range, or use "
+                "vector_source='db' for deep pagination over the indexed corpus."
             )
         if self._vector_source == "diff":
             return await self._search_transient(
