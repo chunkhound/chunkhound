@@ -30,6 +30,10 @@ class IndexingStats:
     skipped_unchanged: int = 0
     skipped_filtered: int = 0
     db_compactions: int = 0
+    compaction_ran: bool = False
+    compaction_size_before: int | None = None
+    compaction_size_after: int | None = None
+    compaction_reduction_pct: float | None = None
 
 
 class DirectoryIndexingService:
@@ -106,10 +110,33 @@ class DirectoryIndexingService:
                 await self._run_batch_compaction(stats)
 
             # Embedding generation (extracted from run.py:85-88, 287-312)
-            if not no_embeddings:
+            # Rust pipeline embeds before write — skip redundant embed pass.
+            # Gated on the coordinator's *actual* resolved decision
+            # (process_result["pipeline"]), not the raw feature flag: the
+            # coordinator falls back to Python for non-DuckDB providers
+            # (e.g. LanceDB) and non-standard DB filenames even when the
+            # flag requests Rust, and that fallback still needs this
+            # embed pass — using the raw flag here would silently skip
+            # embedding generation for those projects.
+            #
+            # Also still run the pass if the Rust pipeline reported errors:
+            # its per-file errors include embed failures (src/pipeline/
+            # pipeline.rs's embed_errors accumulator), and a file with a
+            # failed embed still gets its content_hash written as up to
+            # date — without this pass it would never be retried.
+            used_rust_pipeline = process_result.get("pipeline") == "rust"
+            rust_had_errors = used_rust_pipeline and process_result.get("errors", 0) > 0
+            if not no_embeddings and (not used_rust_pipeline or rust_had_errors):
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
-                stats.embeddings_generated = embed_result.get("generated", 0)
+                generated = embed_result.get("generated", 0)
+                stats.embeddings_generated += generated
+                if generated > 0:
+                    # This retry pass wrote new embeddings after the Rust
+                    # run's own internal compaction already ran — those
+                    # rows were never compacted, so force the next boundary
+                    # below to run for real instead of skipping.
+                    self.indexing_coordinator.clear_compaction_skip()
 
             # Second compaction boundary: needed when embeddings were
             # generated, or when files were processed (but the first
@@ -125,7 +152,7 @@ class DirectoryIndexingService:
             # Must be last: compaction produces a clean DB file, and HNSW
             # is built once on the clean DB instead of being rewritten on
             # every checkpoint.
-            await self._ensure_hnsw_indexes()
+            await self._ensure_hnsw_indexes(used_rust_pipeline)
 
             stats.processing_time = time.time() - start_time
 
@@ -141,15 +168,60 @@ class DirectoryIndexingService:
 
     async def _drop_hnsw_indexes(self) -> None:
         """Drop HNSW indexes before bulk indexing."""
+        # Rust pipeline handles HNSW internally when it actually ends up
+        # running for this provider/db_path — use the coordinator's resolved
+        # decision (same check process_directory() will make), not the raw
+        # feature flag, so a fallback run (e.g. LanceDB, non-chunks.db path)
+        # still gets its indexes pre-dropped instead of paying per-batch HNSW
+        # maintenance overhead during the bulk Python insert. log_reason=False
+        # since process_directory() logs the same resolution shortly after.
+        if self.indexing_coordinator.resolve_rust_pipeline_decision(log_reason=False):
+            return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "drop_all_hnsw_indexes"):
+            task = (
+                self.progress.add_task(
+                    "  └─ Dropping HNSW indexes", total=None, speed="", info=""
+                )
+                if self.progress
+                else None
+            )
+            t0 = time.time()
             db.drop_all_hnsw_indexes()
+            elapsed_ms = (time.time() - t0) * 1000
+            if task is not None:
+                self.progress.update(task, total=1, completed=1, info="done")
+            logger.info(f"Dropped HNSW indexes in {elapsed_ms:.0f}ms")
 
-    async def _ensure_hnsw_indexes(self) -> None:
-        """Rebuild HNSW indexes after bulk indexing completes."""
+    async def _ensure_hnsw_indexes(self, used_rust_pipeline: bool) -> None:
+        """Rebuild HNSW indexes after bulk indexing completes.
+
+        Args:
+            used_rust_pipeline: the coordinator's actual resolved decision
+                for this run (`process_result["pipeline"] == "rust"`), not
+                the raw feature flag. The Rust pipeline handles HNSW
+                internally when it actually ran — but on the fallback path
+                (non-DuckDB provider or non-standard db filename) this must
+                still run, otherwise a newly-created embedding table from
+                that fallback run never gets its HNSW index built.
+        """
+        if used_rust_pipeline:
+            return
         db = getattr(self.indexing_coordinator, "_db", None)
         if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
+            task = (
+                self.progress.add_task(
+                    "  └─ Rebuilding HNSW indexes", total=None, speed="", info=""
+                )
+                if self.progress
+                else None
+            )
+            t0 = time.time()
             db.ensure_all_hnsw_indexes()
+            elapsed_ms = (time.time() - t0) * 1000
+            if task is not None:
+                self.progress.update(task, total=1, completed=1, info="done")
+            logger.info(f"Rebuilt HNSW indexes in {elapsed_ms:.0f}ms")
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""
@@ -207,9 +279,20 @@ class DirectoryIndexingService:
         stats.files_skipped = result.get("skipped", 0)
         stats.files_errors = result.get("errors", 0)
         stats.chunks_created = result.get("total_chunks", 0)
+        stats.embeddings_generated = result.get("embeddings_generated", 0)
         stats.skipped_due_to_timeout = result.get("skipped_due_to_timeout", [])
         stats.skipped_unchanged = result.get("skipped_unchanged", 0)
         stats.skipped_filtered = result.get("skipped_filtered", 0)
+
+        # Rust-mode compaction (Python-mode compaction is reported directly
+        # onto `stats` by run_batch_compaction_boundary(), called later in
+        # process_directory() — only overwrite here when Rust's pipeline
+        # actually ran compaction internally).
+        if result.get("compaction_ran"):
+            stats.compaction_ran = True
+            stats.compaction_size_before = result.get("compaction_size_before")
+            stats.compaction_size_after = result.get("compaction_size_after")
+            stats.compaction_reduction_pct = result.get("compaction_reduction_pct")
 
         # Cleanup statistics
         cleanup = result.get("cleanup", {})

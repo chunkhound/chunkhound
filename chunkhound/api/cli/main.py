@@ -13,6 +13,7 @@ from loguru import logger
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
 from .utils.config_factory import create_validated_config
+from .utils.rich_output import install_default_log_sink
 
 # Required for PyInstaller multiprocessing support
 multiprocessing.freeze_support()
@@ -33,6 +34,75 @@ def _daemon_startup_breadcrumb(args: argparse.Namespace, message: str) -> None:
         pass
 
 
+def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
+    """Forward Python stdlib ``logging`` records into ``loguru``.
+
+    ``pyo3-log`` sends Rust ``log::info!`` / ``log::warn!`` into Python
+    ``logging`` at the corresponding level.  Since ChunkHound uses
+    ``loguru`` and not the stdlib logging module, those messages would
+    otherwise be silently discarded.
+
+    Installed once from ``setup_logging``, which runs after ``loguru``
+    but before any Rust pipeline work.
+    """
+    import logging as _logging
+    from types import FrameType
+
+    class _Bridge(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            # Preserve the record's real level — a Rust log::warn! must still
+            # display (and be greppable) as WARNING, distinct from routine
+            # log::info! progress lines. Visibility of Rust INFO lines
+            # without --verbose is handled by the sink filter in
+            # setup_logging(), not by relabeling the level here.
+            # loguru's logger.log() accepts either a registered level name
+            # (str) or a raw severity number (int) — the fallback below is
+            # for stdlib logging levels loguru has no registered name for.
+            level: str | int
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+
+            frame: FrameType | None = _logging.currentframe()
+            depth = 2
+            while (
+                frame is not None
+                and frame.f_code.co_filename == _logging.__file__
+            ):
+                frame = frame.f_back
+                depth += 1
+
+            is_rust = record.name.startswith("chunkhound_native")
+            logger.bind(rust_native=is_rust).opt(
+                depth=depth, exception=record.exc_info
+            ).log(level, record.getMessage())
+
+    _bridge = _Bridge()
+    _bridge.setLevel(_logging.DEBUG if verbose else _logging.INFO)
+    # Remove the default StreamHandler that basicConfig installed — we
+    # forward everything through loguru instead.
+    _root = _logging.getLogger()
+    for h in list(_root.handlers):
+        _root.removeHandler(h)
+    _root.addHandler(_bridge)
+    # Lower the root-logger threshold so our handler sees INFO messages.
+    # ``basicConfig(level=ERROR)`` was already called above; this is
+    # deliberately run AFTER for correct ordering.
+    if _root.level > _bridge.level:
+        _root.setLevel(_bridge.level)
+
+    # Third-party HTTP libraries emit per-request trace spam: httpx's
+    # "HTTP Request: POST ..." at INFO, and httpcore._trace /
+    # openai._base_client (full request bodies) at DEBUG. Under --verbose the
+    # DEBUG stream floods the log and drowns ChunkHound's own output — most
+    # notably the Rust pipeline's per-batch timing lines. Silence them
+    # unconditionally; our own loggers (chunkhound.* and the Rust
+    # chunkhound_native.* timers) still emit at DEBUG when --verbose is set.
+    for _noisy_logger in ("httpx", "httpcore", "openai"):
+        _logging.getLogger(_noisy_logger).setLevel(_logging.WARNING)
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging for the CLI.
 
@@ -40,29 +110,17 @@ def setup_logging(verbose: bool = False) -> None:
         verbose: Whether to enable verbose logging
     """
     logger.remove()
-
-    if verbose:
-        logger.add(
-            sys.stderr,
-            level="DEBUG",
-            format=(
-                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-                "<level>{level: <8}</level> | "
-                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-                "<level>{message}</level>"
-            ),
-        )
-    else:
-        logger.add(
-            sys.stderr,
-            level="WARNING",
-            format=(
-                "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
-                "<level>{message}</level>"
-            ),
-        )
+    # Shared with ProgressManager (rich_output.py) so progress-bar-scoped
+    # logging never diverges from this process's actual verbosity.
+    install_default_log_sink(verbose)
     # Also set stdlib logging level to avoid mixed loggers being noisy
     _pylogging.basicConfig(level=_pylogging.DEBUG if verbose else _pylogging.ERROR)
+
+    # ── Bridge Python stdlib logging → loguru ──────────────────────
+    # pyo3-log sends Rust log::info! / log::warn! into Python logging.
+    # Without this bridge those messages are silently discarded because
+    # ChunkHound uses loguru, not the stdlib logging module.
+    _install_logging_to_loguru_bridge(verbose=verbose)
 
 
 def create_parser() -> argparse.ArgumentParser:

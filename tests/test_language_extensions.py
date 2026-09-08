@@ -412,3 +412,31 @@ class TestIssue277UnknownExtensions:
         assert handler._should_index(Path(filename)), (
             f"Realtime service rejects {filename} ({description})"
         )
+
+
+class TestIsKnownPath:
+    """Tests for Language.is_known_path(), the shared discovery-time predicate."""
+
+    def test_known_extension(self):
+        assert Language.is_known_path(Path("module.py"))
+
+    def test_known_extension_case_insensitive(self):
+        assert Language.is_known_path(Path("Module.PY"))
+
+    def test_known_filename_pattern(self):
+        assert Language.is_known_path(Path("Makefile"))
+        assert Language.is_known_path(Path("Dockerfile"))
+
+    def test_unknown_extension(self):
+        assert not Language.is_known_path(Path("photo.png"))
+        assert not Language.is_known_path(Path("archive.tar.gz"))
+
+    def test_unknown_filename(self):
+        assert not Language.is_known_path(Path("README_ASSETS"))
+
+    def test_mixed_case_registry_extension(self):
+        """`.TcPOU` is registered mixed-case alongside `.tcpou` in the parser
+        factory; is_known_path must match regardless of the query's case."""
+        assert Language.is_known_path(Path("Program.TcPOU"))
+        assert Language.is_known_path(Path("Program.tcpou"))
+        assert Language.is_known_path(Path("Program.TCPOU"))

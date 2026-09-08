@@ -1,36 +1,53 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use duckdb::Connection;
 
 use crate::db::{DbBackend, DbConfig};
 use crate::error::DbError;
-use crate::types::{BatchResult, ChunkRecord, DbWriterBatch, FileRecord};
+use crate::types::{BatchResult, ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
 
 pub struct DuckDbHnswBackend {
     config: DbConfig,
     conn: Option<Connection>,
-    write_count: u32,
     has_vss: bool,
-    hnsw_cache: Option<Vec<HnswIndexInfo>>,
     hnsw_bulk_mode: bool,
     // Dims for which embeddings_N tables are known to exist in this session.
-    // Used to detect new dimensions mid-session so the HNSW cache can be
-    // invalidated and a fresh HNSW index created after the first commit.
     known_dims: HashSet<u32>,
+    // Metrics (e.g. "cosine", "l2sq") for each dims value, captured by
+    // drop_all_hnsw_indexes() before bulk-mode drop so that ensure_all_hnsw_indexes()
+    // can recreate indexes with the original metric instead of hardcoding cosine.
+    saved_hnsw_metrics: HashMap<u32, String>,
+    // Test seam: fail drop_all_hnsw_indexes after this many successful DROPs
+    // so we can assert close() still restores HNSW after a partial drop.
+    #[cfg(test)]
+    fail_drop_after: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 struct HnswIndexInfo {
     index_name: String,
     table_name: String,
-    create_sql: Option<String>,
+    metric: String,
 }
 
 struct BatchInner {
     file_ids: Vec<i64>,
     chunks_written: u64,
     embedding_pairs: Vec<(i64, usize, usize)>,
+}
+
+/// Which `.swap_intent` phase `recover_swap_intent` applied.
+/// `reopen_after_compaction_failure` uses this to decide whether a leftover
+/// `.compact` is an incomplete phase-1 copy (safe to drop) or the phase-2
+/// new DB (must not drop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveredSwap {
+    None,
+    PreSwap,
+    Phase1,
+    Phase2,
 }
 
 /// Two-signal compaction metrics (Phase 0).
@@ -50,15 +67,71 @@ impl DuckDbHnswBackend {
     /// parameter binding.
     const DELETE_BATCH: usize = 500;
 
+    /// Column DDL for the `files` table. Shared by `setup_schema` (initial DB
+    /// creation) and `run_attach_copy_compaction` (rebuilding the same table
+    /// from scratch during compaction) so the two can't silently drift apart —
+    /// previously each hardcoded its own copy of this list.
+    const FILES_COLUMNS_DDL: &str = "\
+        id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
+        path TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        extension TEXT,
+        size INTEGER,
+        modified_time TIMESTAMP,
+        content_hash TEXT,
+        language TEXT,
+        skip_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP";
+
+    /// Column DDL for the `chunks` table — see `FILES_COLUMNS_DDL`.
+    const CHUNKS_COLUMNS_DDL: &str = "\
+        id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
+        file_id INTEGER REFERENCES files(id),
+        chunk_type TEXT NOT NULL,
+        symbol TEXT,
+        code TEXT NOT NULL,
+        start_line INTEGER,
+        end_line INTEGER,
+        start_byte INTEGER,
+        end_byte INTEGER,
+        language TEXT,
+        metadata TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP";
+
+    /// Column DDL for the `schema_version` table — see `FILES_COLUMNS_DDL`.
+    const SCHEMA_VERSION_COLUMNS_DDL: &str = "\
+        version INTEGER PRIMARY KEY,
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        description TEXT";
+
+    /// Column DDL for an `embeddings_{dims}` table. Shared by
+    /// `ensure_embedding_table_dims` (initial creation) and
+    /// `run_attach_copy_compaction` (rebuilding during compaction) — see
+    /// `FILES_COLUMNS_DDL`.
+    fn embedding_columns_ddl(dims: u32) -> String {
+        format!(
+            "id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
+            chunk_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            embedding FLOAT[{dims}],
+            dims INTEGER NOT NULL DEFAULT {dims},
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        )
+    }
+
     pub fn new(config: DbConfig) -> Self {
         DuckDbHnswBackend {
             config,
             conn: None,
-            write_count: 0,
             has_vss: false,
-            hnsw_cache: None,
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
+            saved_hnsw_metrics: HashMap::new(),
+            #[cfg(test)]
+            fail_drop_after: None,
         }
     }
 
@@ -71,70 +144,63 @@ impl DuckDbHnswBackend {
     // SCHEMA PARITY: This DDL must stay in sync with the Python canonical source at
     // chunkhound/providers/database/duckdb/schema_constants.py (_FILES_TABLE_COLUMNS,
     // _CHUNKS_TABLE_COLUMNS, _SCHEMA_VERSION_TABLE_COLUMNS).  The cross-check test
-    // tests/test_rust_db_writer.py::TestSchemaParity catches column-level drift at CI time.
+    // tests/contracts/test_schema_parity.py::TestSchemaParity catches column-level drift at CI time.
     // When adding or renaming columns, update schema_constants.py FIRST, then mirror here.
     fn setup_schema(conn: &Connection) -> Result<(), DbError> {
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "
             CREATE SEQUENCE IF NOT EXISTS files_id_seq START 1;
-            CREATE TABLE IF NOT EXISTS files (
-                id INTEGER PRIMARY KEY DEFAULT nextval('files_id_seq'),
-                path TEXT UNIQUE NOT NULL,
-                name TEXT NOT NULL,
-                extension TEXT,
-                size INTEGER,
-                modified_time TIMESTAMP,
-                content_hash TEXT,
-                language TEXT,
-                skip_reason TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+            CREATE TABLE IF NOT EXISTS files ({files});
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS skip_reason TEXT;
             CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1;
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-                file_id INTEGER REFERENCES files(id),
-                chunk_type TEXT NOT NULL,
-                symbol TEXT,
-                code TEXT NOT NULL,
-                start_line INTEGER,
-                end_line INTEGER,
-                start_byte INTEGER,
-                end_byte INTEGER,
-                language TEXT,
-                metadata TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
+            CREATE TABLE IF NOT EXISTS chunks ({chunks});
             CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq START 1;
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
             CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
             CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
             CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type);
             CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol);
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER PRIMARY KEY,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                description TEXT
-            );
+            CREATE TABLE IF NOT EXISTS schema_version ({schema_version});
             INSERT INTO schema_version (version, description)
                 SELECT 1, 'Initial schema'
                 WHERE NOT EXISTS (SELECT 1 FROM schema_version WHERE version = 1);
         ",
-        )?;
+            files = Self::FILES_COLUMNS_DDL,
+            chunks = Self::CHUNKS_COLUMNS_DDL,
+            schema_version = Self::SCHEMA_VERSION_COLUMNS_DDL,
+        ))?;
         Ok(())
     }
 
     fn try_load_vss(conn: &Connection) -> bool {
-        match conn.execute_batch(
-            "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true;",
-        ) {
-            Ok(()) => true,
-            Err(e) => {
-                log::warn!("VSS extension unavailable (vector search disabled): {e}");
-                false
-            }
+        // INSTALL may fail in air-gapped environments or when the extension is already present
+        // at a different version — that is non-fatal.  Mirror Python's connection_manager.py
+        // which uses separate execute() calls so that LOAD is always attempted regardless of
+        // INSTALL's outcome.
+        let _ = conn.execute_batch("INSTALL vss");
+        if let Err(e) = conn.execute_batch("LOAD vss") {
+            log::warn!("VSS extension unavailable (vector search disabled): {e}");
+            return false;
         }
+        if let Err(e) = conn.execute_batch("SET hnsw_enable_experimental_persistence = true") {
+            log::warn!(
+                "HNSW persistence unavailable \
+                 (hnsw_enable_experimental_persistence not supported by this DuckDB build): {e}"
+            );
+            return false;
+        }
+        true
+    }
+
+    /// Ensure VSS is loaded, lazily — only on first write with embeddings.
+    fn ensure_vss(&mut self) -> Result<bool, DbError> {
+        if self.has_vss {
+            return Ok(true);
+        }
+        let conn = self.conn_or_err()?;
+        let ok = Self::try_load_vss(conn);
+        self.has_vss = ok;
+        Ok(ok)
     }
 
     fn ensure_embedding_table_dims(conn: &Connection, dims: u32) -> Result<(), DbError> {
@@ -147,25 +213,33 @@ impl DuckDbHnswBackend {
         } else {
             format!("idx_{dims}_chunk_id")
         };
+        let cols = Self::embedding_columns_ddl(dims);
         conn.execute_batch(&format!(
             "
-            CREATE TABLE IF NOT EXISTS \"{table}\" (
-                id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                chunk_id INTEGER NOT NULL,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                embedding FLOAT[{dims}],
-                dims INTEGER NOT NULL DEFAULT {dims},
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
-            ON \"{table}\" (chunk_id, provider, model);
+            CREATE TABLE IF NOT EXISTS \"{table}\" ({cols});
             CREATE INDEX IF NOT EXISTS {chunk_id_idx}
             ON \"{table}\" (chunk_id);
             CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model
             ON \"{table}\" (provider, model);
         "
         ))?;
+        // Created separately, best-effort: unlike the two plain indexes above,
+        // this can legitimately fail with a constraint violation if the table
+        // already has duplicate (chunk_id, provider, model) rows — e.g. a
+        // table rebuilt by compaction whose data predates this index ever
+        // being enforced. Python's post-reconnect
+        // _executor_ensure_embedding_upsert_contract dedupes and creates it
+        // as a fallback when this doesn't succeed.
+        if let Err(e) = conn.execute_batch(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
+             ON \"{table}\" (chunk_id, provider, model)"
+        )) {
+            log::warn!(
+                "Could not create unique upsert-contract index on {table} \
+                 (likely duplicate chunk_id/provider/model rows); Python's \
+                 reconnect will repair this: {e}"
+            );
+        }
         Ok(())
     }
 
@@ -195,62 +269,47 @@ impl DuckDbHnswBackend {
                     || name.starts_with("hnsw_")
                     || name.starts_with("idx_hnsw_")
             })
-            .map(|(name, table, sql)| HnswIndexInfo {
-                index_name: name,
-                table_name: table,
-                create_sql: sql,
+            .map(|(name, table, _sql)| {
+                let metric = Self::extract_hnsw_metric(conn, &name);
+                HnswIndexInfo {
+                    index_name: name,
+                    table_name: table,
+                    metric,
+                }
             })
             .collect();
         Ok(indexes)
     }
 
-    fn drop_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
-        for idx in indexes {
-            let safe_name = idx.index_name.replace('"', "\"\"");
-            conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
-        }
-        Ok(())
+    /// Return the live HNSW similarity metric from `pragma_hnsw_index_info()`.
+    ///
+    /// DuckDB strips the `WITH (metric = '...')` clause from `duckdb_indexes().sql`,
+    /// so the CREATE INDEX DDL alone cannot tell us the metric a dropped index used.
+    /// Mirrors `_extract_hnsw_metric` in `duckdb_provider.py` — must be called while
+    /// the index still exists (i.e. before it is dropped for a rebuild).
+    fn extract_hnsw_metric(conn: &Connection, index_name: &str) -> String {
+        conn.query_row(
+            "SELECT metric FROM pragma_hnsw_index_info() WHERE index_name = ? LIMIT 1",
+            [index_name],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "cosine".to_string())
     }
 
-    fn recreate_hnsw_indexes(conn: &Connection, indexes: &[HnswIndexInfo]) -> Result<(), DbError> {
-        for idx in indexes {
-            if let Some(create_sql) = &idx.create_sql {
-                // Ensure idempotent
-                let sql = if create_sql.contains("IF NOT EXISTS") {
-                    create_sql.clone()
-                } else {
-                    create_sql.replacen("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1)
-                };
-                conn.execute_batch(&sql)?;
-            } else {
-                let safe_idx = idx.index_name.replace('"', "\"\"");
-                let safe_tbl = idx.table_name.replace('"', "\"\"");
-                conn.execute_batch(&format!(
-                    "CREATE INDEX IF NOT EXISTS \"{safe_idx}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = 'cosine')"
-                ))?;
+    fn collect_dims_and_count(batch: &DbWriterBatch) -> (HashSet<u32>, usize) {
+        let mut dims = HashSet::new();
+        let mut count = 0usize;
+        for file in &batch.files {
+            for chunk in &file.chunks {
+                if let Some(e) = &chunk.embedding {
+                    if !e.is_empty() {
+                        dims.insert(e.len() as u32);
+                        count += 1;
+                    }
+                }
             }
         }
-        Ok(())
-    }
-
-    fn count_total_embeddings(batch: &DbWriterBatch) -> usize {
-        batch
-            .files
-            .iter()
-            .flat_map(|f| &f.chunks)
-            .filter(|c| c.embedding.as_ref().map(|e| !e.is_empty()).unwrap_or(false))
-            .count()
-    }
-
-    fn collect_unique_dims(batch: &DbWriterBatch) -> HashSet<u32> {
-        batch
-            .files
-            .iter()
-            .flat_map(|f| &f.chunks)
-            .filter_map(|c| c.embedding.as_ref())
-            .filter(|e| !e.is_empty())
-            .map(|e| e.len() as u32)
-            .collect()
+        (dims, count)
     }
 
     fn upsert_file(conn: &Connection, file: &FileRecord) -> Result<i64, DbError> {
@@ -265,10 +324,28 @@ impl DuckDbHnswBackend {
             .and_then(|e| e.to_str())
             .map(|s| s.to_string());
 
-        // DuckDB rejects ON CONFLICT DO UPDATE inside an explicit transaction when
-        // a FK child table (chunks) has rows referencing the conflicting parent row,
-        // even if those children were deleted earlier in the same transaction.
-        // Work around by doing an explicit SELECT then UPDATE-or-INSERT.
+        // Fast path: the diff phase already knows this file's DB id (incremental re-index).
+        // Skip the SELECT and go straight to UPDATE — but require the id to still match
+        // this exact path and to have actually matched a row before trusting it. A stale
+        // id (e.g. the diff snapshot outliving a concurrent delete/rename) must not be
+        // reported as success: insert_chunks_for_file would either violate the
+        // files->chunks FK on a nonexistent id, or — worse — silently attach this file's
+        // chunks to an unrelated file's row. On a mismatch, fall through to the
+        // path-keyed slow path below instead of trusting the stale id.
+        if let Some(id) = file.existing_file_id {
+            let rows_updated = conn.execute(
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, skip_reason = ?, updated_at = now() WHERE id = ? AND path = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, file.skip_reason, id, file.path],
+            )?;
+            if rows_updated == 1 {
+                return Ok(id);
+            }
+        }
+
+        // Slow path (new files or non-incremental runs): DuckDB rejects ON CONFLICT DO UPDATE
+        // inside an explicit transaction when a FK child table (chunks) has rows referencing
+        // the conflicting parent row, even if those children were deleted earlier in the same
+        // transaction. Work around by doing an explicit SELECT then UPDATE-or-INSERT.
         let existing_id: Option<i64> = conn
             .query_row("SELECT id FROM files WHERE path = ?", [&file.path], |r| {
                 r.get(0)
@@ -277,14 +354,14 @@ impl DuckDbHnswBackend {
 
         if let Some(id) = existing_id {
             conn.execute(
-                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, updated_at = now() WHERE id = ?",
-                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, id],
+                "UPDATE files SET size = ?, modified_time = CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, content_hash = ?, language = ?, skip_reason = ?, updated_at = now() WHERE id = ?",
+                duckdb::params![file.size_bytes, file.mtime, file.mtime, file.content_hash, file.language, file.skip_reason, id],
             )?;
             Ok(id)
         } else {
             let id: i64 = conn.query_row(
-                "INSERT INTO files (path, name, extension, size, modified_time, content_hash, language)
-                 VALUES (?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, ?, ?)
+                "INSERT INTO files (path, name, extension, size, modified_time, content_hash, language, skip_reason)
+                 VALUES (?, ?, ?, ?, CASE WHEN ? IS NOT NULL THEN to_timestamp(?) ELSE NULL END, ?, ?, ?)
                  RETURNING id",
                 duckdb::params![
                     file.path,
@@ -295,6 +372,7 @@ impl DuckDbHnswBackend {
                     file.mtime,
                     file.content_hash,
                     file.language,
+                    file.skip_reason,
                 ],
                 |row| row.get(0),
             )?;
@@ -306,38 +384,26 @@ impl DuckDbHnswBackend {
         conn: &Connection,
         file_id: i64,
         chunks: &[ChunkRecord],
+        insert_batch_size: usize,
     ) -> Result<Vec<i64>, DbError> {
         if chunks.is_empty() {
             return Ok(vec![]);
         }
 
-        conn.execute_batch(
-            "CREATE TEMPORARY TABLE IF NOT EXISTS rust_temp_chunks (
-                file_id INTEGER,
-                chunk_type TEXT,
-                symbol TEXT,
-                code TEXT,
-                start_line INTEGER,
-                end_line INTEGER,
-                start_byte INTEGER,
-                end_byte INTEGER,
-                language TEXT,
-                metadata TEXT
-            );
-            DELETE FROM rust_temp_chunks;",
-        )?;
+        // Insert directly into chunks with RETURNING id, batched to cut round-trips.
+        // Avoids CREATE/DROP TEMPORARY TABLE DDL so this function is safe to call
+        // inside an open transaction (DDL would cause implicit commits in some
+        // DuckDB versions).
+        let mut ids: Vec<i64> = Vec::with_capacity(chunks.len());
 
-        // Batch 100 rows per INSERT to cut SQL round-trips ~100× vs one-row-at-a-time.
-        // Mirrors the same pattern used in insert_embeddings_txn.
-        const CHUNK_INSERT_BATCH: usize = 100;
-        for chunk_slice in chunks.chunks(CHUNK_INSERT_BATCH) {
+        for chunk_slice in chunks.chunks(insert_batch_size.max(1)) {
             let row_ph = std::iter::repeat_n("(?,?,?,?,?,?,?,?,?,?)", chunk_slice.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "INSERT INTO rust_temp_chunks \
+                "INSERT INTO chunks \
                  (file_id, chunk_type, symbol, code, start_line, end_line, \
-                  start_byte, end_byte, language, metadata) VALUES {row_ph}"
+                  start_byte, end_byte, language, metadata) VALUES {row_ph} RETURNING id"
             );
             let mut params: Vec<duckdb::types::Value> = Vec::with_capacity(chunk_slice.len() * 10);
             for chunk in chunk_slice {
@@ -389,23 +455,14 @@ impl DuckDbHnswBackend {
                         }),
                 );
             }
-            conn.execute(&sql, duckdb::params_from_iter(params))?;
+            let mut stmt = conn.prepare(&sql)?;
+            let batch_ids: Vec<i64> = stmt
+                .query_map(duckdb::params_from_iter(params), |row| row.get(0))?
+                .collect::<Result<Vec<i64>, _>>()
+                .map_err(DbError::DuckDb)?;
+            ids.extend(batch_ids);
         }
 
-        let mut stmt = conn.prepare(
-            "INSERT INTO chunks
-             (file_id, chunk_type, symbol, code, start_line, end_line,
-              start_byte, end_byte, language, metadata)
-             SELECT file_id, chunk_type, symbol, code, start_line, end_line,
-                    start_byte, end_byte, language, metadata
-             FROM rust_temp_chunks
-             RETURNING id",
-        )?;
-
-        let ids: Vec<i64> = stmt
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<i64>, _>>()
-            .map_err(DbError::DuckDb)?;
         Ok(ids)
     }
 
@@ -413,6 +470,7 @@ impl DuckDbHnswBackend {
         conn: &Connection,
         batch: &DbWriterBatch,
         embedding_pairs: &[(i64, usize, usize)], // (chunk_id, file_idx, chunk_idx)
+        insert_batch_size: usize,
     ) -> Result<u64, DbError> {
         if embedding_pairs.is_empty() {
             return Ok(0);
@@ -432,30 +490,25 @@ impl DuckDbHnswBackend {
             }
         }
 
+        // Insert directly into embeddings_N, batched to cut round-trips.
+        // Avoids CREATE/DROP TEMPORARY TABLE DDL so this function is safe to call
+        // inside an open transaction (DDL would cause implicit commits in some
+        // DuckDB versions).
+        let insert_batch_size = insert_batch_size.max(1);
         let mut total = 0u64;
         for (dims, items) in &by_dims {
             let table = format!("embeddings_{dims}");
-            let temp = format!("rust_temp_emb_{dims}");
 
-            conn.execute_batch(&format!(
-                "CREATE TEMPORARY TABLE IF NOT EXISTS {temp} (
-                    chunk_id INTEGER,
-                    provider TEXT,
-                    model TEXT,
-                    embedding TEXT,
-                    dims INTEGER
-                );
-                DELETE FROM {temp};"
-            ))?;
-
-            // Batch 100 rows per INSERT to cut SQL round-trips ~100×.
-            const EMBED_INSERT_BATCH: usize = 100;
-            for chunk_slice in items.chunks(EMBED_INSERT_BATCH) {
-                let row_ph = std::iter::repeat_n("(?,?,?,?,?)", chunk_slice.len())
+            for chunk_slice in items.chunks(insert_batch_size) {
+                let row_ph = std::iter::repeat_n("(?,?,?,?::FLOAT[{dims}],?)", chunk_slice.len())
                     .collect::<Vec<_>>()
-                    .join(",");
+                    .join(",")
+                    .replace("{dims}", &dims.to_string());
                 let sql = format!(
-                    "INSERT INTO {temp} (chunk_id, provider, model, embedding, dims) VALUES {row_ph}"
+                    "INSERT INTO \"{table}\" (chunk_id, provider, model, embedding, dims) \
+                     VALUES {row_ph} \
+                     ON CONFLICT (chunk_id, provider, model) DO UPDATE \
+                     SET embedding = EXCLUDED.embedding, dims = EXCLUDED.dims"
                 );
                 let mut params: Vec<duckdb::types::Value> =
                     Vec::with_capacity(chunk_slice.len() * 5);
@@ -474,20 +527,9 @@ impl DuckDbHnswBackend {
                     params.push(duckdb::types::Value::Text(emb_json));
                     params.push(duckdb::types::Value::BigInt(*dims as i64));
                 }
-                conn.execute(&sql, duckdb::params_from_iter(params))?;
+                let rows = conn.execute(&sql, duckdb::params_from_iter(params))?;
+                total += rows as u64;
             }
-
-            let rows = conn.execute(
-                &format!(
-                    "INSERT INTO \"{table}\" (chunk_id, provider, model, embedding, dims)
-                     SELECT chunk_id, provider, model, embedding::FLOAT[{dims}], dims
-                     FROM {temp}
-                     ON CONFLICT (chunk_id, provider, model) DO UPDATE
-                     SET embedding = EXCLUDED.embedding, dims = EXCLUDED.dims"
-                ),
-                [],
-            )?;
-            total += rows as u64;
         }
         Ok(total)
     }
@@ -497,15 +539,18 @@ impl DuckDbHnswBackend {
     // is rejected inside an explicit transaction even after child rows are deleted.
     // The pre-deletes inside write_batch_inner work because upsert_file uses an explicit
     // SELECT + UPDATE/INSERT rather than ON CONFLICT DO UPDATE syntax.
-    fn delete_paths(conn: &Connection, paths: &[String]) -> Result<(), DbError> {
+    fn delete_paths(
+        conn: &Connection,
+        paths: &[String],
+        known_dims: &HashSet<u32>,
+    ) -> Result<(), DbError> {
         if paths.is_empty() {
             return Ok(());
         }
-        // TODO(Phase 1): cache emb_tables on DuckDbHnswBackend (alongside hnsw_cache) so
-        // this catalog scan is not repeated for every batch.  See pre_delete_for_upsert for the
-        // matching TODO and the invalidation note (cache must grow when a new embeddings_N table
-        // appears).  When caching is implemented, both TODOs should be resolved together.
-        let emb_tables = Self::discover_embedding_tables(conn)?;
+        let emb_tables: Vec<(String, u32)> = known_dims
+            .iter()
+            .map(|&dims| (format!("embeddings_{dims}"), dims))
+            .collect();
 
         // Phase 1: atomically delete embeddings + chunks together.
         // embeddings_N tables have no FK to chunks — delete embeddings first
@@ -599,27 +644,71 @@ impl DuckDbHnswBackend {
     //
     // Atomicity gap — two cases:
     //
-    // (a) Upsert files: only chunks/embeddings are deleted here; the file row survives.
-    //     If the process crashes after this COMMIT but before the write transaction below,
-    //     the file still exists in the files table with stale metadata.  Recovery is
-    //     self-healing: on the next index run the file is found in the DB and re-indexed
-    //     from disk — no data is permanently lost.
+    // (a) Upsert files: chunks/embeddings are deleted here and the file row is marked
+    //     dirty (`modified_time` and `content_hash` set to NULL) in the same COMMIT.
+    //     If the process crashes before the write transaction below, the next
+    //     incremental run sees NULL mtime and reprocesses the file (differ.rs treats
+    //     NULL modified_time as "changed" and does not hash-confirm skip). Leaving
+    //     mtime/hash intact would look "unchanged" after a force-reindex crash and
+    //     skip rewrite, leaving the file with zero chunks.
+    //     The dirty UPDATE runs *before* the chunk DELETEs in this transaction so we
+    //     do not trip DuckDB's FK check (UPDATE on files after deleting child chunks
+    //     in the same txn is rejected). Successful upsert_file overwrites the NULLs.
     //
     // (b) delete_paths (handled in Step 0a): files ARE removed from the DB.  If the process
     //     crashes after delete_paths commits but before the write transaction below commits,
     //     those files are absent from the DB and will not be re-populated unless the caller
     //     explicitly re-requests them.  This is an inherent limitation of the two-phase
     //     commit approach — the caller must be prepared to re-submit deletes after a crash.
-    fn pre_delete_for_upsert(conn: &Connection, batch: &DbWriterBatch) -> Result<(), DbError> {
-        let by_id: Vec<i64> = batch
+    fn pre_delete_for_upsert(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+        known_dims: &HashSet<u32>,
+    ) -> Result<(), DbError> {
+        // Verify each candidate id still points at the same path before trusting it — a
+        // stale id (e.g. the diff snapshot outliving a concurrent delete/rename) must fall
+        // back to the path-keyed path below instead of dirtying/deleting an unrelated
+        // file's row. Mirrors upsert_file's `id = ? AND path = ?` fast-path guard.
+        let candidate_ids: Vec<i64> = batch
             .files
             .iter()
             .filter_map(|f| f.existing_file_id)
             .collect();
+        let mut id_to_path: HashMap<i64, String> = HashMap::new();
+        if !candidate_ids.is_empty() {
+            let ph = std::iter::repeat_n("?", candidate_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let params: Vec<duckdb::types::Value> = candidate_ids
+                .iter()
+                .map(|&id| duckdb::types::Value::BigInt(id))
+                .collect();
+            let mut stmt =
+                conn.prepare(&format!("SELECT id, path FROM files WHERE id IN ({ph})"))?;
+            let rows = stmt
+                .query_map(duckdb::params_from_iter(params), |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::DuckDb)?;
+            id_to_path.extend(rows);
+        }
+
+        let by_id: Vec<i64> = batch
+            .files
+            .iter()
+            .filter_map(|f| {
+                f.existing_file_id
+                    .filter(|id| id_to_path.get(id) == Some(&f.path))
+            })
+            .collect();
         let by_path: Vec<String> = batch
             .files
             .iter()
-            .filter(|f| f.existing_file_id.is_none())
+            .filter(|f| match f.existing_file_id {
+                None => true,
+                Some(id) => id_to_path.get(&id) != Some(&f.path),
+            })
             .map(|f| f.path.clone())
             .collect();
 
@@ -627,11 +716,10 @@ impl DuckDbHnswBackend {
             return Ok(());
         }
 
-        // TODO(Phase 1): cache emb_tables on DuckDbHnswBackend (alongside hnsw_cache) instead
-        // of re-querying the catalog on every batch. Hoisting is non-trivial because the set can
-        // grow mid-session when a new embedding dimension appears for the first time — the cache
-        // must be invalidated whenever a new embeddings_N table is created.
-        let emb_tables = Self::discover_embedding_tables(conn)?;
+        let emb_tables: Vec<(String, u32)> = known_dims
+            .iter()
+            .map(|&dims| (format!("embeddings_{dims}"), dims))
+            .collect();
         conn.execute_batch("BEGIN")?;
         let result = (|| -> Result<(), DbError> {
             if !by_id.is_empty() {
@@ -642,6 +730,14 @@ impl DuckDbHnswBackend {
                     .iter()
                     .map(|&id| duckdb::types::Value::BigInt(id))
                     .collect();
+                // Dirty marker first — see comment (a) above.
+                conn.execute(
+                    &format!(
+                        "UPDATE files SET modified_time = NULL, content_hash = NULL \
+                         WHERE id IN ({ph})"
+                    ),
+                    duckdb::params_from_iter(params.clone()),
+                )?;
                 for (table_name, _dims) in &emb_tables {
                     conn.execute(
                         &format!(
@@ -664,6 +760,13 @@ impl DuckDbHnswBackend {
                     .iter()
                     .map(|p| duckdb::types::Value::Text(p.clone()))
                     .collect();
+                conn.execute(
+                    &format!(
+                        "UPDATE files SET modified_time = NULL, content_hash = NULL \
+                         WHERE path IN ({ph})"
+                    ),
+                    duckdb::params_from_iter(params.clone()),
+                )?;
                 let chunk_subquery = format!(
                     "SELECT id FROM chunks WHERE file_id IN \
                      (SELECT id FROM files WHERE path IN ({ph}))"
@@ -705,105 +808,339 @@ impl DuckDbHnswBackend {
         Ok(())
     }
 
-    /// Check available disk space on the filesystem containing `dir`.
-    /// Returns None when the platform does not support the query.
-    fn available_disk_space(_dir: &Path) -> Option<u64> {
-        // Best-effort: platform-specific implementations can be added.
-        None
+    fn wal_sidecar(db_file: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.wal", db_file.display()))
     }
 
-    /// 3-phase EXPORT/IMPORT atomic swap (Section 22.5).
+    /// True when `path` is absent or a zero-length file (Python's
+    /// `live_missing_or_empty`). A directory is treated as present so
+    /// dest-blocked recovery still fails closed instead of "restoring" over it.
+    fn is_missing_or_empty(path: &Path) -> bool {
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => meta.len() == 0,
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Rename a DuckDB main file and keep its `.wal` sidecar with it.
     ///
-    /// Phase 1: EXPORT current DB to Parquet while connection is open,
-    ///          then CHECKPOINT + close.
-    /// Phase 2: Write intent files, rename old DB, IMPORT into a fresh DB,
-    ///          rebuild HNSW indexes.
-    /// Phase 3: Atomic rename of compacted DB to active path, cleanup.
-    fn run_export_import_compaction(&mut self) -> Result<(), DbError> {
+    /// Dest WAL is deleted *before* the main rename so a crash after the
+    /// main file has moved cannot leave a stale occupant WAL next to the
+    /// new main file. If `from` has a WAL it is moved after the main file.
+    fn rename_db_with_wal(from: &Path, to: &Path) -> Result<(), DbError> {
+        let from_wal = Self::wal_sidecar(from);
+        let to_wal = Self::wal_sidecar(to);
+        if to_wal.exists() {
+            std::fs::remove_file(&to_wal)?;
+        }
+        std::fs::rename(from, to)?;
+        if from_wal.exists() {
+            std::fs::rename(&from_wal, &to_wal)?;
+        }
+        Ok(())
+    }
+
+    fn remove_db_file(path: &Path) -> Result<(), DbError> {
+        std::fs::remove_file(path)?;
+        let _ = std::fs::remove_file(Self::wal_sidecar(path));
+        Ok(())
+    }
+
+    fn remove_db_file_best_effort(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(Self::wal_sidecar(path));
+    }
+
+    /// Drop an incomplete `.compact` left by a crashed phase-1 copy.
+    /// Shared by `open()` and `reopen_after_compaction_failure()`.
+    fn discard_incomplete_compact_if_phase1(recovered: RecoveredSwap, db_path: &Path) {
+        if !matches!(recovered, RecoveredSwap::PreSwap | RecoveredSwap::Phase1) {
+            return;
+        }
+        if Self::is_missing_or_empty(db_path) {
+            return;
+        }
+        let compact_path = PathBuf::from(format!("{}.compact", db_path.display()));
+        if compact_path.exists() {
+            Self::remove_db_file_best_effort(&compact_path);
+        }
+    }
+
+    /// Finish or roll back an interrupted compaction swap (Invariant 17).
+    ///
+    /// Shared by `open()` (next-process crash recovery) and
+    /// `reopen_after_compaction_failure()` (in-process fallback) so the two
+    /// cannot drift. Errors are propagated so a failed rename cannot be
+    /// followed by deleting the last remaining copy.
+    fn recover_swap_intent(db_path: &Path) -> Result<RecoveredSwap, DbError> {
+        let intent_path = PathBuf::from(format!("{}.swap_intent", db_path.display()));
+        if !intent_path.exists() {
+            return Ok(RecoveredSwap::None);
+        }
+        let intent = match std::fs::read_to_string(&intent_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(DbError::Other(format!(
+                    "swap_intent present but unreadable: {e}"
+                )));
+            }
+        };
+        let old_path = PathBuf::from(format!("{}.old", db_path.display()));
+        let compact_path = PathBuf::from(format!("{}.compact", db_path.display()));
+        match intent.trim() {
+            "pre-swap" => {
+                Self::recover_pre_swap_or_phase1(db_path, &old_path, &intent_path, "pre-swap")?;
+                Ok(RecoveredSwap::PreSwap)
+            }
+            "phase1" => {
+                Self::recover_pre_swap_or_phase1(db_path, &old_path, &intent_path, "phase1")?;
+                Ok(RecoveredSwap::Phase1)
+            }
+            "phase2" => {
+                Self::recover_phase2(db_path, &old_path, &compact_path, &intent_path)?;
+                Ok(RecoveredSwap::Phase2)
+            }
+            other => Err(DbError::Other(format!(
+                "unrecognized swap_intent {other:?}"
+            ))),
+        }
+    }
+
+    fn recover_pre_swap_or_phase1(
+        db_path: &Path,
+        old_path: &Path,
+        intent_path: &Path,
+        phase: &str,
+    ) -> Result<(), DbError> {
+        // The db_path -> old_path rename may have completed before the
+        // "phase1" intent write landed. Restore .old if the live path is
+        // missing so Connection::open does not create an empty database
+        // and orphan the real data.
+        if old_path.exists() && Self::is_missing_or_empty(db_path) {
+            if db_path.exists() {
+                Self::remove_db_file(db_path)?;
+            }
+            Self::rename_db_with_wal(old_path, db_path)?;
+        } else if !old_path.exists() && Self::is_missing_or_empty(db_path) {
+            return Err(DbError::Other(format!(
+                "{phase} crash recovery: live db and .old backup both missing"
+            )));
+        }
+        let _ = std::fs::remove_file(intent_path);
+        Ok(())
+    }
+
+    /// Finish a phase-2 compact→live rename, or restore `.old` if the
+    /// compacted file is gone. Never deletes `.old` or the intent until
+    /// `db_path` exists and `.compact` is gone.
+    fn recover_phase2(
+        db_path: &Path,
+        old_path: &Path,
+        compact_path: &Path,
+        intent_path: &Path,
+    ) -> Result<(), DbError> {
+        if compact_path.exists() {
+            // Finish the swap. Keep .old until rename succeeds so a failed
+            // compact→db move cannot wipe every copy. Drop a leftover live
+            // file/WAL so they cannot attach onto .compact.
+            if db_path.exists() {
+                Self::remove_db_file(db_path)?;
+            }
+            Self::rename_db_with_wal(compact_path, db_path)?;
+        } else if Self::is_missing_or_empty(db_path) {
+            // Compact already applied or never written; live path is empty.
+            // Restore the pre-compaction backup instead of opening a new DB.
+            if old_path.exists() {
+                if db_path.exists() {
+                    Self::remove_db_file(db_path)?;
+                }
+                Self::rename_db_with_wal(old_path, db_path)?;
+            } else {
+                return Err(DbError::Other(
+                    "phase2 crash recovery: no compact, live db, or .old backup".into(),
+                ));
+            }
+        }
+
+        // Swap finished (or leftover sidecar after a successful rename):
+        // live path exists and compact is gone. Safe to drop the backup.
+        if !Self::is_missing_or_empty(db_path) && !compact_path.exists() {
+            Self::remove_db_file_best_effort(old_path);
+            let _ = std::fs::remove_file(intent_path);
+        }
+        Ok(())
+    }
+
+    /// Check available disk space on the filesystem containing `dir`.
+    /// Returns None when the platform does not support the query.
+    /// ATTACH + INSERT SELECT compaction — copies canonical tables into a
+    /// fresh DB file via DuckDB's in-process attach mechanism, avoiding the
+    /// filesystem I/O overhead of EXPORT/IMPORT via Parquet.
+    ///
+    /// Phase 1: CHECKPOINT + close live connection.
+    /// Phase 2: ATTACH old DB as 'src', CREATE tables + sequences, INSERT
+    ///          SELECT data, DETACH, CHECKPOINT.
+    /// Phase 3: Atomic rename of compacted DB to active path, cleanup,
+    ///          reopen (which also ensures HNSW indexes).
+    fn run_attach_copy_compaction(&mut self) -> Result<(), DbError> {
         let db_path = PathBuf::from(&self.config.db_path);
-        let export_dir = PathBuf::from(format!("{}.export_tmp", self.config.db_path));
         let compact_path = PathBuf::from(format!("{}.compact", self.config.db_path));
         let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
         let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
 
-        // --- Phase 1: Export while connection is open ----------------------
+        // --- Phase 1: CHECKPOINT + close live connection --------------------
         let conn = self.conn_or_err()?;
 
-        // Snapshot HNSW DDL before closing (needed for rebuild in Phase 2).
-        let hnsw_indexes = Self::discover_hnsw_indexes(conn)?;
-
-        // Preflight disk space: need ~3× DB size for export + compact files.
-        let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-        if let Some(avail) = Self::available_disk_space(&db_path) {
-            if avail < db_size * 3 {
-                return Err(DbError::Other(format!(
-                    "insufficient disk space for compaction: \
-                     need {} bytes, have {} bytes",
-                    db_size * 3,
-                    avail
-                )));
+        // Drop staging temp tables so they don't interfere with the copy.
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS rust_temp_chunks");
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'rust_temp_%'",
+        ) {
+            if let Ok(tables) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for name in tables.flatten() {
+                    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", name));
+                }
             }
         }
 
-        // Clean up stale artifacts from a prior failed compaction.
-        let _ = std::fs::remove_dir_all(&export_dir);
-        let _ = std::fs::remove_file(&compact_path);
-
-        // EXPORT current database schema + data to Parquet files.
-        let export_sql = format!(
-            "EXPORT DATABASE '{}' (FORMAT PARQUET)",
-            export_dir.display()
-        );
-        log::info!("compaction: {}", export_sql);
-        conn.execute_batch(&export_sql)?;
-
-        // CHECKPOINT and close the live connection.
         conn.execute_batch("CHECKPOINT")?;
         self.conn = None;
 
-        // --- Phase 2: Rename old DB, create compacted DB ------------------
-        Self::write_intent(&intent_path, "pre-swap")?;
-        std::fs::rename(&db_path, &old_path)?;
+        // A previous crashed compact can leave .old / .compact that would
+        // make Windows rename(live→.old) fail. Live is the good copy here.
+        if !Self::is_missing_or_empty(&db_path) {
+            Self::remove_db_file_best_effort(&old_path);
+            Self::remove_db_file_best_effort(&compact_path);
+        }
 
+        // --- Phase 2: Copy data via ATTACH + INSERT SELECT -----------------
+        Self::write_intent(&intent_path, "pre-swap")?;
+        Self::rename_db_with_wal(&db_path, &old_path)?;
         Self::write_intent(&intent_path, "phase1")?;
 
-        // Create a fresh DB file and IMPORT the Parquet export.
+        // Create fresh DB and attach the old DB as 'src'.
         let import_conn = Connection::open(&compact_path)?;
-        let import_sql = format!("IMPORT DATABASE '{}'", export_dir.display());
-        log::info!("compaction: {}", import_sql);
-        let import_result = import_conn.execute_batch(&import_sql);
+        let attach_sql = format!(
+            "ATTACH '{}' AS src",
+            old_path.to_string_lossy().replace('\'', "''")
+        );
+        log::info!("compaction: {}", attach_sql);
+        import_conn.execute_batch(&attach_sql)?;
 
-        // Rebuild HNSW indexes on the compacted DB.
-        if !hnsw_indexes.is_empty() {
-            if let Err(e) = Self::recreate_hnsw_indexes(&import_conn, &hnsw_indexes) {
-                log::warn!(
-                    "compaction: HNSW rebuild failed ({}), \
-                     continuing without indexes",
-                    e
-                );
-            }
+        // --- Compute MAX(id) from source for sequence seeding ---
+        let max_file_id: i64 =
+            import_conn.query_row("SELECT COALESCE(MAX(id), 0) FROM src.files", [], |row| {
+                row.get(0)
+            })?;
+        let max_chunk_id: i64 =
+            import_conn.query_row("SELECT COALESCE(MAX(id), 0) FROM src.chunks", [], |row| {
+                row.get(0)
+            })?;
+
+        // Discover embedding tables in the source catalog.
+        let emb_tables: Vec<String> = import_conn
+            .prepare(
+                "SELECT table_name FROM information_schema.tables \
+                 WHERE table_catalog = 'src' \
+                 AND table_name SIMILAR TO 'embeddings_[0-9]+'",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut max_embedding_id: i64 = 0;
+        for tname in &emb_tables {
+            let table_max: i64 = import_conn.query_row(
+                &format!("SELECT COALESCE(MAX(id), 0) FROM src.\"{}\"", tname),
+                [],
+                |row| row.get(0),
+            )?;
+            max_embedding_id = max_embedding_id.max(table_max);
         }
+
+        // --- Create sequences + tables in the fresh DB ---
+        import_conn.execute_batch(&format!(
+            "CREATE SEQUENCE files_id_seq START {}",
+            max_file_id + 1
+        ))?;
+        import_conn.execute_batch(&format!(
+            "CREATE SEQUENCE chunks_id_seq START {}",
+            max_chunk_id + 1
+        ))?;
+        import_conn.execute_batch(&format!(
+            "CREATE SEQUENCE embeddings_id_seq START {}",
+            max_embedding_id + 1
+        ))?;
+
+        // Shares column DDL with setup_schema() / ensure_embedding_table_dims()
+        // via the *_COLUMNS_DDL constants and embedding_columns_ddl(), so the
+        // two can't drift apart.
+        import_conn.execute_batch(&format!("CREATE TABLE files ({})", Self::FILES_COLUMNS_DDL))?;
+        import_conn.execute_batch(&format!(
+            "CREATE TABLE chunks ({})",
+            Self::CHUNKS_COLUMNS_DDL
+        ))?;
+        import_conn.execute_batch(&format!(
+            "CREATE TABLE schema_version ({})",
+            Self::SCHEMA_VERSION_COLUMNS_DDL
+        ))?;
+        import_conn.execute_batch("INSERT INTO schema_version SELECT * FROM src.schema_version")?;
+
+        // --- Copy data: files, chunks ---
+        let col = "id, path, name, extension, size, modified_time, \
+                    content_hash, language, skip_reason, created_at, updated_at";
+        import_conn.execute_batch(&format!(
+            "INSERT INTO files ({col}) SELECT {col} FROM src.files"
+        ))?;
+
+        let col = "id, file_id, chunk_type, symbol, code, start_line, \
+                    end_line, start_byte, end_byte, language, metadata, \
+                    created_at, updated_at";
+        import_conn.execute_batch(&format!(
+            "INSERT INTO chunks ({col}) SELECT {col} FROM src.chunks"
+        ))?;
+
+        // --- Copy embedding tables ---
+        for tname in &emb_tables {
+            let dims: u32 = tname
+                .strip_prefix("embeddings_")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            import_conn.execute_batch(&format!(
+                "CREATE TABLE \"{tname}\" ({})",
+                Self::embedding_columns_ddl(dims)
+            ))?;
+            import_conn.execute_batch(&format!(
+                "INSERT INTO \"{tname}\" SELECT * FROM src.\"{tname}\""
+            ))?;
+            // Restore the canonical index set (chunk_id / provider_model /
+            // unique upsert-contract) that the bare CREATE TABLE above
+            // doesn't include. Without this, Python's post-reconnect
+            // _executor_ensure_embedding_upsert_contract finds the unique
+            // index missing and repairs it itself — which drops and rebuilds
+            // the HNSW index a second time (this same reopen() already builds
+            // it via ensure_all_hnsw_indexes()), an expensive redundant full
+            // index rebuild on every compaction.
+            Self::ensure_embedding_table_dims(&import_conn, dims)?;
+        }
+
+        // DETACH and CHECKPOINT.
+        import_conn.execute_batch("DETACH src")?;
         import_conn.execute_batch("CHECKPOINT")?;
-        drop(import_conn); // Close before rename.
+        drop(import_conn);
 
-        // Check import result AFTER closing the connection.
-        import_result?;
-
-        // Clean up export temp directory.
-        let _ = std::fs::remove_dir_all(&export_dir);
-
-        // --- Phase 3: Atomic rename to active path ------------------------
+        // --- Phase 3: Atomic rename to active path --------------------------
         Self::write_intent(&intent_path, "phase2")?;
-        std::fs::rename(&compact_path, &db_path)?;
+        Self::rename_db_with_wal(&compact_path, &db_path)?;
 
-        // Clean up intent file and old DB.
+        // Clean up.
         let _ = std::fs::remove_file(&intent_path);
-        let _ = std::fs::remove_file(&old_path);
+        Self::remove_db_file_best_effort(&old_path);
 
-        // --- Reopen connection to compacted DB ----------------------------
+        // Reopen — also handles HNSW index creation via ensure_all_hnsw_indexes().
         self.reopen()?;
-        self.write_count = 0;
-        self.hnsw_cache = None;
         log::info!("compaction: complete");
         Ok(())
     }
@@ -812,12 +1149,17 @@ impl DuckDbHnswBackend {
     fn reopen(&mut self) -> Result<(), DbError> {
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
+        // VSS must be loaded unconditionally on reopen — compaction may have
+        // imported HNSW index definitions from EXPORT/IMPORT, and DuckDB won't
+        // serialize them during CHECKPOINT without VSS loaded.  The `has_vss`
+        // flag is stale after the connection was closed and reopened.
         self.has_vss = Self::try_load_vss(&conn);
         Self::setup_schema(&conn)?;
         let existing = Self::discover_embedding_tables(&conn)?;
         self.known_dims
             .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
+        // Recreate HNSW indexes on existing embedding tables.
         self.ensure_all_hnsw_indexes()?;
         Ok(())
     }
@@ -825,42 +1167,12 @@ impl DuckDbHnswBackend {
     /// Recover after a failed compaction attempt: reopen connection and
     /// restore state so the caller can continue or fall back to CHECKPOINT.
     fn reopen_after_compaction_failure(&mut self) -> Result<(), DbError> {
-        // If the old DB was renamed away, try to restore it from intent.
         let db_path = PathBuf::from(&self.config.db_path);
-        let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
-        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
-        if intent_path.exists() {
-            if let Ok(intent) = std::fs::read_to_string(&intent_path) {
-                match intent.trim() {
-                    "pre-swap" => {
-                        // Original DB was renamed to .old; restore it.
-                        if old_path.exists() && !db_path.exists() {
-                            let _ = std::fs::rename(&old_path, &db_path);
-                        }
-                        let _ = std::fs::remove_file(&intent_path);
-                    }
-                    "phase1" | "phase2" => {
-                        // Old DB already renamed; compact may or may not
-                        // exist. Try to restore the original.
-                        if old_path.exists() {
-                            if db_path.exists() {
-                                let _ = std::fs::remove_file(&db_path);
-                            }
-                            let _ = std::fs::rename(&old_path, &db_path);
-                        }
-                        let _ = std::fs::remove_file(&intent_path);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // Clean up any compaction artifacts.
-        let compact_path = PathBuf::from(format!("{}.compact", self.config.db_path));
+        let recovered = Self::recover_swap_intent(&db_path)?;
+        Self::discard_incomplete_compact_if_phase1(recovered, &db_path);
         let export_dir = PathBuf::from(format!("{}.export_tmp", self.config.db_path));
-        let _ = std::fs::remove_file(&compact_path);
         let _ = std::fs::remove_dir_all(&export_dir);
 
-        // Reopen.
         self.reopen()
     }
 
@@ -869,7 +1181,11 @@ impl DuckDbHnswBackend {
     // for the embedding insert step that follows in the same transaction.
     // Pre-deletes for upserted files are handled by pre_delete_for_upsert (called
     // before BEGIN to avoid DuckDB's intra-transaction FK check limitation).
-    fn write_batch_inner(conn: &Connection, batch: &DbWriterBatch) -> Result<BatchInner, DbError> {
+    fn write_batch_inner(
+        conn: &Connection,
+        batch: &DbWriterBatch,
+        insert_batch_size: usize,
+    ) -> Result<BatchInner, DbError> {
         // Upsert files → collect file_ids
         let mut file_ids = Vec::with_capacity(batch.files.len());
         for file in &batch.files {
@@ -882,7 +1198,8 @@ impl DuckDbHnswBackend {
         let mut embedding_pairs: Vec<(i64, usize, usize)> = Vec::new();
 
         for (file_idx, (file, &file_id)) in batch.files.iter().zip(file_ids.iter()).enumerate() {
-            let chunk_ids = Self::insert_chunks_for_file(conn, file_id, &file.chunks)?;
+            let chunk_ids =
+                Self::insert_chunks_for_file(conn, file_id, &file.chunks, insert_batch_size)?;
             total_chunks += chunk_ids.len() as u64;
 
             for (chunk_idx, chunk_id) in chunk_ids.into_iter().enumerate() {
@@ -935,9 +1252,9 @@ impl DuckDbHnswBackend {
             .unwrap_or(0);
 
         let live_embeddings: i64 = {
-            let tables = Self::discover_embedding_tables(conn).unwrap_or_default();
             let mut total = 0i64;
-            for (table_name, _) in &tables {
+            for &dims in &self.known_dims {
+                let table_name = format!("embeddings_{dims}");
                 if let Ok(cnt) =
                     conn.query_row(&format!("SELECT COUNT(*) FROM \"{table_name}\""), [], |r| {
                         r.get::<_, i64>(0)
@@ -963,9 +1280,9 @@ impl DuckDbHnswBackend {
             .unwrap_or(0);
 
         let stored_embeddings: i64 = {
-            let tables = Self::discover_embedding_tables(conn).unwrap_or_default();
             let mut total = 0i64;
-            for (table_name, _) in &tables {
+            for &dims in &self.known_dims {
+                let table_name = format!("embeddings_{dims}");
                 let safe = table_name.replace('"', "\"\"");
                 if let Ok(cnt) = conn.query_row(
                     &format!(
@@ -1007,34 +1324,36 @@ impl DuckDbHnswBackend {
 
 impl crate::db::DbBackend for DuckDbHnswBackend {
     fn open(&mut self) -> Result<(), DbError> {
+        // Idempotent: already open on Windows (exclusive file lock) would error on re-open.
+        if self.conn.is_some() {
+            return Ok(());
+        }
         // Crash recovery: check for swap_intent file (Invariant 17)
         let db_path = PathBuf::from(&self.config.db_path);
-        let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
-        if intent_path.exists() {
-            if let Ok(intent) = std::fs::read_to_string(&intent_path) {
-                match intent.trim() {
-                    "pre-swap" => {
-                        let _ = std::fs::remove_file(&intent_path);
-                    }
-                    "phase1" => {
-                        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
-                        if old_path.exists() {
-                            let _ = std::fs::rename(&old_path, &db_path);
-                        }
-                        let _ = std::fs::remove_file(&intent_path);
-                    }
-                    "phase2" => {
-                        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
-                        let _ = std::fs::remove_file(&old_path);
-                        let _ = std::fs::remove_file(&intent_path);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let recovered = Self::recover_swap_intent(&db_path)?;
+        Self::discard_incomplete_compact_if_phase1(recovered, &db_path);
 
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
+        // Defer WAL auto-checkpoints. DuckDB checkpoints synchronously on
+        // COMMIT once the WAL exceeds checkpoint_threshold, and each checkpoint
+        // does work proportional to the whole DB file (measured ~30ms/MiB) —
+        // NOT to the small WAL delta being flushed. At the default (~16MB) this
+        // fires every ~2 batches and grows unbounded as the DB grows, which is
+        // what dominates and monotonically degrades the store stage. Raising
+        // the threshold collapses hundreds of ever-growing checkpoints into a
+        // handful; close() issues the final CHECKPOINT to flush deferred WAL.
+        // Env-tunable so the ceiling can be adjusted per-run without rebuilding.
+        let checkpoint_threshold = std::env::var("CHUNKHOUND_DUCKDB_CHECKPOINT_THRESHOLD")
+            .unwrap_or_else(|_| "8GB".to_string());
+        if let Err(e) = conn.execute_batch(&format!(
+            "SET checkpoint_threshold='{checkpoint_threshold}'"
+        )) {
+            log::warn!("failed to set checkpoint_threshold='{checkpoint_threshold}': {e}");
+        }
+        // VSS must be loaded on open — the DB on disk may already have
+        // VSS catalog entries from a previous session, and DuckDB won't
+        // deserialize them without VSS loaded.
         self.has_vss = Self::try_load_vss(&conn);
         Self::setup_schema(&conn)?;
         // Prime known_dims from tables that already exist so the first batch
@@ -1043,8 +1362,8 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         self.known_dims
             .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
-        // Crash recovery: if the process was killed between Step 2 (DROP HNSW) and
-        // Step 5 (RECREATE HNSW) in write_batch, HNSW indexes are absent but the
+        // Crash recovery: if the process was killed between drop_all_hnsw_indexes()
+        // and ensure_all_hnsw_indexes(), HNSW indexes are absent but the
         // embeddings_N tables still hold data.  Recreate any missing indexes now so
         // the next session doesn't silently fall back to brute-force vector scan.
         self.ensure_all_hnsw_indexes()?;
@@ -1073,38 +1392,25 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn write_batch(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
-        // Step 0a: Handle delete_paths OUTSIDE transaction (Invariant: DuckDB rejects
-        // FK parent-row deletes inside an explicit transaction after child deletes).
-        //
-        // Atomicity gap: if the process crashes after delete_paths commits but before
-        // the write transaction below commits, the deleted files are permanently absent
-        // from the DB.  Unlike the upsert path (file rows survive → self-healing),
-        // delete_paths removes the file rows themselves.  The caller must be prepared
-        // to re-submit delete requests after a crash — the indexer has no way to know
-        // which files were intended for deletion.  Source files on disk are never
-        // touched by this code path.
+        self.prepare_write(batch)?;
+        self.write_batch_incremental(batch)
+    }
+
+    fn prepare_write(&mut self, batch: &DbWriterBatch) -> Result<(), DbError> {
+        // Step 0a: Handle delete_paths OUTSIDE transaction.
         if !batch.delete_paths.is_empty() {
             let conn = self.conn_or_err()?;
-            Self::delete_paths(conn, &batch.delete_paths)?;
+            Self::delete_paths(conn, &batch.delete_paths, &self.known_dims)?;
         }
 
         // Step 0b: Pre-delete chunks/embeddings for files being upserted, OUTSIDE transaction.
-        // DuckDB's FK check engine sees the committed DB state, not the current transaction's
-        // in-flight deletes.  Any UPDATE on files inside a txn where child chunks were deleted
-        // earlier in that same txn is rejected — even though no FK is violated at commit time.
-        // Running these deletes before BEGIN avoids the spurious constraint error.
         {
             let conn = self.conn_or_err()?;
-            Self::pre_delete_for_upsert(conn, batch)?;
+            Self::pre_delete_for_upsert(conn, batch, &self.known_dims)?;
         }
 
         // Step 0c: Ensure embedding tables outside txn (Invariant 13).
-        // Track which dims are genuinely new so we can (a) invalidate the stale
-        // HNSW cache and (b) create a fresh HNSW index for the new table after
-        // the commit (Step 5+).  The per-batch bookend only manages EXISTING
-        // indexes, so a brand-new embeddings_N table would never get one otherwise.
-        let unique_dims = Self::collect_unique_dims(batch);
-        let new_dims: Vec<u32> = unique_dims.difference(&self.known_dims).copied().collect();
+        let (unique_dims, total_emb) = Self::collect_dims_and_count(batch);
         {
             let conn = self.conn_or_err()?;
             for &dims in &unique_dims {
@@ -1112,55 +1418,25 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
         }
         self.known_dims.extend(unique_dims.iter().copied());
-        if !new_dims.is_empty() {
-            // The cached HNSW snapshot predates the new table(s) — force rediscovery.
-            self.hnsw_cache = None;
+
+        // Lazy VSS load — only when embeddings are actually present.
+        if total_emb > 0 {
+            self.ensure_vss()?;
         }
 
-        // Step 1: Count embeddings to decide HNSW lifecycle
-        let total_emb = Self::count_total_embeddings(batch);
+        Ok(())
+    }
 
-        // Step 2: Discover + DROP HNSW indexes BEFORE BEGIN (Invariant 14).
-        // Cache the index DDL after first successful discovery to skip the
-        // catalog query on every subsequent batch.
-        let hnsw_indexes = {
-            let conn = self
-                .conn
-                .as_ref()
-                .ok_or_else(|| DbError::Other("not open".into()))?;
-            if !self.hnsw_bulk_mode && self.has_vss && total_emb >= 50 {
-                let indexes = match &self.hnsw_cache {
-                    Some(cached) => cached.clone(),
-                    None => {
-                        let discovered = Self::discover_hnsw_indexes(conn)?;
-                        // Cache even an empty result so subsequent batches don't
-                        // re-query the catalog when no HNSW indexes exist yet.
-                        self.hnsw_cache = Some(discovered.clone());
-                        discovered
-                    }
-                };
-                if !indexes.is_empty() {
-                    Self::drop_hnsw_indexes(conn, &indexes)?;
-                }
-                indexes
-            } else {
-                vec![]
-            }
-        };
-
-        // Step 3: Transaction
+    fn write_batch_incremental(&mut self, batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
+        // BEGIN + write inner.
         let batch_inner = {
             let conn = self.conn_or_err()?;
             conn.execute_batch("BEGIN")?;
 
-            match Self::write_batch_inner(conn, batch) {
+            match Self::write_batch_inner(conn, batch, self.config.insert_batch_size) {
                 Ok(inner) => inner,
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
-                    // Try to restore HNSW even on error (Invariant 14)
-                    if !hnsw_indexes.is_empty() {
-                        let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
-                    }
                     return Err(e);
                 }
             }
@@ -1171,68 +1447,42 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             batch_inner.embedding_pairs,
         );
 
-        // Step 3e: Insert embeddings (still inside txn)
+        // Insert embeddings (still inside txn).
         let embeddings_written = {
+            let insert_batch_size = self.config.insert_batch_size;
             let conn = self
                 .conn
                 .as_ref()
                 .expect("conn is Some: open() succeeded and BEGIN passed");
-            match Self::insert_embeddings_txn(conn, batch, &embedding_pairs) {
+            match Self::insert_embeddings_txn(conn, batch, &embedding_pairs, insert_batch_size) {
                 Ok(n) => n,
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
-                    if !hnsw_indexes.is_empty() {
-                        let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
-                    }
                     return Err(e);
                 }
             }
         };
 
-        // Step 4: COMMIT
+        // COMMIT. DuckDB runs its automatic WAL checkpoint synchronously on
+        // COMMIT once the WAL exceeds checkpoint_threshold, so this timing
+        // isolates checkpoint cost from the inserts above — the key signal for
+        // diagnosing whether write-stage slowdown is checkpoint-driven.
         {
             let conn = self
                 .conn
                 .as_ref()
                 .expect("conn is Some: open() succeeded and BEGIN passed");
+            let t_commit = Instant::now();
             if let Err(e) = conn.execute_batch("COMMIT") {
                 let _ = conn.execute_batch("ROLLBACK");
-                if !hnsw_indexes.is_empty() {
-                    let _ = Self::recreate_hnsw_indexes(conn, &hnsw_indexes);
-                }
                 return Err(DbError::DuckDb(e));
             }
+            log::debug!(
+                "[store]   commit+checkpoint {:.1}ms",
+                t_commit.elapsed().as_secs_f64() * 1e3
+            );
         }
 
-        // Step 5: RECREATE HNSW AFTER COMMIT (Invariant 14)
-        if !hnsw_indexes.is_empty() {
-            let conn = self
-                .conn
-                .as_ref()
-                .expect("conn is Some: open() succeeded and COMMIT passed");
-            Self::recreate_hnsw_indexes(conn, &hnsw_indexes)?;
-        }
-
-        // Step 5+: Create HNSW indexes for newly-introduced embedding dimensions.
-        // The bookend above only recreates indexes that existed before Step 2's drop;
-        // a brand-new embeddings_N table has no HNSW yet.  Create it now so that
-        // subsequent batches can manage it through the normal drop/recreate cycle.
-        // hnsw_cache was already invalidated in Step 0c, so the next batch rediscovers.
-        if !new_dims.is_empty() && self.has_vss {
-            let conn = self
-                .conn
-                .as_ref()
-                .expect("conn is Some: open() succeeded and COMMIT passed");
-            for &dims in &new_dims {
-                let hnsw_name = format!("idx_hnsw_{dims}");
-                let table = format!("embeddings_{dims}");
-                conn.execute_batch(&format!(
-                    "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{table}\" USING HNSW (embedding) WITH (metric = 'cosine')"
-                ))?;
-            }
-        }
-
-        self.write_count += 1;
         Ok(BatchResult {
             file_ids,
             chunks_written,
@@ -1240,25 +1490,79 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         })
     }
 
-    fn needs_compaction(&self) -> Result<bool, DbError> {
-        // Two-signal metric-based detection (Phase 0).
-        // Falls back to simple write-count threshold when stats are unavailable.
-        if let Ok(stats) = self.compaction_stats() {
-            let effective = stats.free_ratio.max(stats.row_waste_ratio);
-            if effective >= self.config.compaction_threshold
-                && stats.reclaimable >= self.config.compaction_min_size_bytes
-            {
-                return Ok(true);
-            }
+    /// Write all `batches` inside a single BEGIN/COMMIT, reducing checkpoint
+    /// frequency versus one commit per batch. `prepare_write` must already
+    /// have been called for each batch (per the trait's documented contract),
+    /// so all embedding tables this loop needs already exist and `known_dims`
+    /// is already up to date — this method only touches `conn`, never
+    /// `self.known_dims` or other `&mut self` state.
+    fn write_batches_in_one_txn(
+        &mut self,
+        batches: &[DbWriterBatch],
+    ) -> Result<Vec<BatchResult>, DbError> {
+        if batches.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(self.write_count >= self.config.compaction_batch_threshold)
+
+        let insert_batch_size = self.config.insert_batch_size;
+        let conn = self.conn_or_err()?;
+        conn.execute_batch("BEGIN")?;
+
+        let mut results = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let batch_inner = match Self::write_batch_inner(conn, batch, insert_batch_size) {
+                Ok(inner) => inner,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            };
+            let embeddings_written = match Self::insert_embeddings_txn(
+                conn,
+                batch,
+                &batch_inner.embedding_pairs,
+                insert_batch_size,
+            ) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            };
+            results.push(BatchResult {
+                file_ids: batch_inner.file_ids,
+                chunks_written: batch_inner.chunks_written,
+                embeddings_written,
+            });
+        }
+
+        if let Err(e) = conn.execute_batch("COMMIT") {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(DbError::DuckDb(e));
+        }
+
+        Ok(results)
+    }
+
+    fn needs_compaction(&self) -> Result<bool, DbError> {
+        // None means auto-compaction is explicitly disabled.
+        let Some(threshold) = self.config.compaction_threshold else {
+            return Ok(false);
+        };
+        // Two-signal metric-based detection (Phase 0). If stats are unavailable
+        // (e.g. DB not open), there's nothing to compact yet.
+        let Ok(stats) = self.compaction_stats() else {
+            return Ok(false);
+        };
+        let effective = stats.free_ratio.max(stats.row_waste_ratio);
+        Ok(effective >= threshold && stats.reclaimable >= self.config.compaction_min_size_bytes)
     }
 
     fn run_compaction(&mut self) -> Result<(), DbError> {
         // 3-phase atomic EXPORT/IMPORT compaction (Phase 0).
         // Falls back to CHECKPOINT-only if EXPORT/IMPORT is unavailable
         // (e.g. DuckDB build without Parquet support).
-        if let Err(e) = self.run_export_import_compaction() {
+        if let Err(e) = self.run_attach_copy_compaction() {
             log::warn!(
                 "compaction: EXPORT/IMPORT failed ({}), falling back to CHECKPOINT",
                 e
@@ -1266,20 +1570,46 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             self.reopen_after_compaction_failure()?;
             let conn = self.conn_or_err()?;
             conn.execute_batch("CHECKPOINT")?;
-            self.write_count = 0;
         }
         Ok(())
     }
 
     fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
+        let indexes = {
+            let conn = self.conn_or_err()?;
+            Self::discover_hnsw_indexes(conn)?
+        };
+        // Snapshot metrics and enter bulk mode before any DROP so a mid-loop
+        // failure still causes close() to restore indexes (CREATE IF NOT EXISTS
+        // is a no-op for indexes that never dropped). Assignments happen with
+        // no live conn borrow.
+        self.saved_hnsw_metrics = indexes
+            .iter()
+            .filter_map(|idx| {
+                idx.table_name
+                    .strip_prefix("embeddings_")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .map(|dims| (dims, idx.metric.clone()))
+            })
+            .collect();
+        self.hnsw_bulk_mode = true;
+
         let conn = self.conn_or_err()?;
-        let indexes = Self::discover_hnsw_indexes(conn)?;
+        #[cfg(test)]
+        for (dropped, idx) in indexes.iter().enumerate() {
+            if self.fail_drop_after == Some(dropped) {
+                return Err(DbError::Other(
+                    "simulated mid-loop HNSW drop failure".into(),
+                ));
+            }
+            let safe_name = idx.index_name.replace('"', "\"\"");
+            conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
+        }
+        #[cfg(not(test))]
         for idx in &indexes {
             let safe_name = idx.index_name.replace('"', "\"\"");
             conn.execute(&format!("DROP INDEX IF EXISTS \"{safe_name}\""), [])?;
         }
-        self.hnsw_bulk_mode = true;
-        self.hnsw_cache = None;
         Ok(())
     }
 
@@ -1290,18 +1620,1622 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         if !self.has_vss {
             return Ok(());
         }
+        // Query the DB directly for embedding tables — mirrors Python's
+        // _executor_ensure_all_hnsw_indexes which does not rely on in-memory tracked state.
+        // This is more robust than known_dims when the connection is reopened after
+        // compaction or when edge cases cause the in-memory set to diverge from DB state.
+        // Scope the first conn borrow so it's dropped before we access self.saved_hnsw_metrics.
+        let existing = {
+            let conn = self.conn_or_err()?;
+            Self::discover_embedding_tables(conn)?
+        };
+        let dims_metrics: Vec<(u32, String)> = existing
+            .into_iter()
+            .map(|(_, dims)| {
+                let metric = self.saved_hnsw_metrics.get(&dims).cloned();
+                if metric.is_none() {
+                    // No captured metric for this dims — either this process never
+                    // saw a live index for it (e.g. drop_all_hnsw_indexes wasn't
+                    // called this session, such as after a mid-run crash), or the
+                    // index genuinely used cosine. Falling back to cosine is silent
+                    // data loss if a non-default metric was ever in use, so surface
+                    // it instead of guessing quietly.
+                    log::warn!(
+                        "No captured HNSW metric for {dims}-dim embeddings — \
+                         defaulting to cosine (this loses a non-default metric if \
+                         one was previously configured for this table)"
+                    );
+                }
+                (dims, metric.unwrap_or_else(|| "cosine".to_string()))
+            })
+            .collect();
         let conn = self.conn_or_err()?;
-        let tables = Self::discover_embedding_tables(conn)?;
-        for (table_name, dims) in &tables {
-            let hnsw_name = format!("idx_hnsw_{dims}");
-            let safe_tbl = table_name.replace('"', "\"\"");
-            conn.execute_batch(&format!(
-                "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"{safe_tbl}\" USING HNSW (embedding) WITH (metric = 'cosine')"
-            ))?;
+        // DuckDB VSS HNSW builds can be CPU-intensive.  Increase the thread
+        // count and disable any internal timeout so large tables don't fail.
+        let _ = conn.execute_batch("SET threads = 8");
+        // Build inside a closure so a failed CREATE INDEX/CHECKPOINT can't
+        // skip the thread-count restore below via an early `?` return —
+        // otherwise this connection would stay pinned at 8 threads and
+        // compete with a concurrently-running embed thread pool.
+        let build_result: Result<(), DbError> = (|| {
+            for (dims, metric) in &dims_metrics {
+                let hnsw_name = format!("idx_hnsw_{dims}");
+                conn.execute_batch(&format!(
+                    "CREATE INDEX IF NOT EXISTS \"{hnsw_name}\" ON \"embeddings_{dims}\" USING HNSW (embedding) WITH (metric = '{metric}')"
+                ))?;
+            }
+            if !dims_metrics.is_empty() {
+                conn.execute_batch("CHECKPOINT")?;
+            }
+            Ok(())
+        })();
+        // Restore a conservative thread count — this connection may still be
+        // used for a concurrent write loop (the streaming pipeline's store
+        // thread writes/checkpoints while the embed thread's rayon pool is
+        // active), which must not compete with DuckDB's own internal
+        // parallelism for this machine's cores. Unconditional: must run
+        // whether or not the index build above succeeded.
+        let _ = conn.execute_batch("SET threads = 1");
+        build_result
+    }
+
+    fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
+        let db_path = Path::new(&self.config.db_path);
+        if !db_path.exists() {
+            return Ok(Vec::new());
         }
-        if !tables.is_empty() {
-            conn.execute_batch("CHECKPOINT")?;
+        let conn = Connection::open(db_path)?;
+        let mut stmt = conn.prepare(FILE_STATE_SELECT)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(DbFileEntry {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    mtime: row.get(2)?,
+                    content_hash: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+}
+
+/// Mirrors `indexing_coordinator.py`'s `_check_disk_usage_limit` for a
+/// file-based (DuckDB) database: stats the exact `db_path` given (never a
+/// WAL/`.compact`/`.old`/`.swap_intent` sidecar), compares with `>=`, and
+/// fails OPEN (returns `None`) if the stat call itself errors or no limit is
+/// configured — matching Python's "never block indexing on a measurement
+/// error" behavior.
+///
+/// Returns `Some((size_mb, limit_mb))` when the limit is exceeded, `None`
+/// otherwise.
+pub(crate) fn check_disk_usage_limit(db_path: &Path, limit_mb: Option<f64>) -> Option<(f64, f64)> {
+    let limit_mb = limit_mb?;
+    let db_size = match std::fs::metadata(db_path) {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            log::warn!(
+                "Failed to check disk usage for {}: {}",
+                db_path.display(),
+                e
+            );
+            return None;
         }
-        Ok(())
+    };
+    // open() defers checkpoints until the WAL hits checkpoint_threshold (up to
+    // 8GB by default), so writes can sit in the `.wal` sidecar well past the
+    // main file's on-disk size — include it, or a deferred checkpoint lets
+    // true usage silently blow past the configured limit before this trips.
+    // A missing/unreadable WAL (e.g. already checkpointed) contributes 0
+    // rather than failing the whole check open.
+    let wal_path = PathBuf::from(format!("{}.wal", db_path.display()));
+    let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+    let size_mb = (db_size + wal_size) as f64 / (1024.0 * 1024.0);
+    (size_mb >= limit_mb).then_some((size_mb, limit_mb))
+}
+
+/// Columns read by the pipeline's diff phase (`pipeline::differ::compute_diff`).
+/// Keep in sync with `DuckDbHnswBackend::FILES_COLUMNS_DDL` above — if
+/// `modified_time` or `content_hash` are renamed there, update this too.
+///
+/// `modified_time` is written via `to_timestamp(?)` (an epoch -> TIMESTAMPTZ
+/// conversion), which DuckDB then implicitly casts down into this naive
+/// TIMESTAMP column using the session's local timezone — so the stored wall-
+/// clock digits already have a local-time shift baked in. Casting back to
+/// TIMESTAMPTZ before extracting the epoch reverses that same shift (assuming
+/// the session timezone hasn't changed between write and read), matching what
+/// Python's `datetime.timestamp()` does when it reads the same naive value
+/// back via the driver. Extracting the epoch directly from the naive column
+/// would skip that reversal and return a value off by the full UTC offset.
+const FILE_STATE_SELECT: &str =
+    "SELECT id, path, EXTRACT(EPOCH FROM modified_time::TIMESTAMPTZ), content_hash FROM files";
+
+#[cfg(test)]
+mod file_state_roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn mtime_roundtrip_is_timezone_symmetric() {
+        // Regression test: the diff phase's read of `modified_time`
+        // (FILE_STATE_SELECT) must reverse whatever local-timezone cast
+        // `to_timestamp(?)` applied at write time, or every stored mtime
+        // comes back shifted by the local UTC offset — pushing nearly every
+        // file outside mtime_epsilon and forcing a full content-hash
+        // re-verification (or reprocessing) of files that never changed.
+        //
+        // Rather than mutating the process's TZ (this crate forbids unsafe
+        // code, and `std::env::set_var` requires it), set DuckDB's session
+        // TimeZone explicitly and identically on both the write and read
+        // connections — exactly what two connections opened by the same
+        // process on the same non-UTC machine would see by default, and
+        // deterministic regardless of the host running this test.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db");
+
+        let original_mtime = 1_735_689_600.123_456_f64; // arbitrary UTC epoch
+        {
+            let conn = Connection::open(&db_path).expect("open for write");
+            conn.execute_batch("SET TimeZone = 'America/New_York';")
+                .expect("set tz");
+            conn.execute_batch(
+                "CREATE TABLE files (id BIGINT, path TEXT, modified_time TIMESTAMP, \
+                 content_hash TEXT)",
+            )
+            .expect("create table");
+            conn.execute(
+                "INSERT INTO files VALUES (1, 'a.py', to_timestamp(?), 'abc')",
+                [original_mtime],
+            )
+            .expect("insert");
+        }
+
+        let entries = {
+            let conn = Connection::open(&db_path).expect("open for read");
+            conn.execute_batch("SET TimeZone = 'America/New_York';")
+                .expect("set tz");
+            let mut stmt = conn.prepare(FILE_STATE_SELECT).expect("prepare");
+            stmt.query_map([], |row| {
+                Ok(DbFileEntry {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    mtime: row.get(2)?,
+                    content_hash: row.get(3)?,
+                })
+            })
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+        };
+
+        assert_eq!(entries.len(), 1);
+        let read_mtime = entries[0].mtime.expect("mtime must not be NULL");
+        assert!(
+            (read_mtime - original_mtime).abs() < 0.001,
+            "read-back mtime {read_mtime} must match the written mtime {original_mtime} \
+             (within float precision) even under a non-UTC session timezone"
+        );
+    }
+
+    #[test]
+    fn read_file_states_keeps_null_mtime_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db");
+        {
+            let conn = Connection::open(&db_path).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE files (id BIGINT, path TEXT, modified_time TIMESTAMP, \
+                 content_hash TEXT)",
+            )
+            .expect("create table");
+            conn.execute(
+                "INSERT INTO files (id, path, modified_time, content_hash) \
+                 VALUES (1, 'gone.py', NULL, NULL)",
+                [],
+            )
+            .expect("insert null mtime");
+        }
+
+        let backend = DuckDbHnswBackend::new(DbConfig {
+            db_path: db_path.to_string_lossy().into_owned(),
+            compaction_threshold: Some(0.3),
+            compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
+        });
+        let entries = backend.read_file_states().expect("read");
+        assert_eq!(
+            entries.len(),
+            1,
+            "NULL modified_time must not drop the row from the snapshot"
+        );
+        assert_eq!(entries[0].path, "gone.py");
+        assert_eq!(entries[0].mtime, None);
+        assert_eq!(entries[0].id, 1);
+    }
+}
+
+#[cfg(test)]
+mod disk_usage_limit_tests {
+    use super::*;
+
+    fn write_file_of_size(path: &Path, bytes: usize) {
+        std::fs::write(path, vec![0u8; bytes]).expect("write fixture file");
+    }
+
+    #[test]
+    fn no_limit_configured_never_exceeded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 10 * 1024 * 1024);
+        assert_eq!(check_disk_usage_limit(&db_path, None), None);
+    }
+
+    #[test]
+    fn size_below_limit_not_exceeded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 1024 * 1024); // 1 MB
+        assert_eq!(check_disk_usage_limit(&db_path, Some(10.0)), None);
+    }
+
+    #[test]
+    fn size_at_exact_limit_is_exceeded() {
+        // Encodes Python's strict `>=` — a DB exactly at the limit already trips.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 5 * 1024 * 1024); // exactly 5 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        assert_eq!(result, Some((5.0, 5.0)));
+    }
+
+    #[test]
+    fn size_above_limit_exceeded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 10 * 1024 * 1024); // 10 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        assert_eq!(result, Some((10.0, 5.0)));
+    }
+
+    #[test]
+    fn stat_failure_fails_open() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing_path = tmp.path().join("does_not_exist.duckdb");
+        assert_eq!(check_disk_usage_limit(&missing_path, Some(0.0)), None);
+    }
+
+    #[test]
+    fn sibling_wal_file_included_in_measurement() {
+        // Main file well under the limit alone, but the deferred-checkpoint
+        // `.wal` sidecar pushes combined usage over — must be counted, or a
+        // large deferred checkpoint could let true usage silently exceed the
+        // configured limit undetected.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let wal_path = tmp.path().join("t.duckdb.wal");
+        write_file_of_size(&db_path, 1024); // 1 KB
+        write_file_of_size(&wal_path, 20 * 1024 * 1024); // 20 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        let (size_mb, limit_mb) = result.expect("combined size should exceed the 5MB limit");
+        assert!((size_mb - (20.0 + 1.0 / 1024.0)).abs() < 0.01);
+        assert_eq!(limit_mb, 5.0);
+    }
+
+    #[test]
+    fn missing_wal_file_contributes_zero() {
+        // No `.wal` sidecar at all (e.g. already checkpointed) — must not be
+        // treated as a stat failure, and must not fail the check open.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        write_file_of_size(&db_path, 10 * 1024 * 1024); // 10 MB
+        let result = check_disk_usage_limit(&db_path, Some(5.0));
+        assert_eq!(result, Some((10.0, 5.0)));
+    }
+}
+
+#[cfg(test)]
+mod compaction_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn none_threshold_disables_compaction_without_opening_db() {
+        // Mirrors Python's fragmentation_threshold_pct=None ("never
+        // auto-compact") opt-out. Must short-circuit before touching the
+        // DB connection at all, so this works even on a never-`.open()`ed
+        // backend (needs_compaction() is polled opportunistically and must
+        // not itself force a connection).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let backend = DuckDbHnswBackend::new(test_support::config_with_compaction_threshold(
+            db_path, None,
+        ));
+        assert!(!backend.needs_compaction().expect("needs_compaction"));
+    }
+
+    #[test]
+    fn some_threshold_falls_through_to_metric_check() {
+        // With a real DB open and no fragmentation yet, a configured
+        // threshold must not itself force compaction — this pins the
+        // "Some(threshold) still requires exceeding it" half of the branch.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config_with_compaction_threshold(
+            db_path,
+            Some(0.30),
+        ));
+        backend.open().expect("open");
+        assert!(!backend.needs_compaction().expect("needs_compaction"));
+    }
+}
+
+#[cfg(test)]
+mod hnsw_metric_tests {
+    use super::*;
+
+    #[test]
+    fn test_upsert_file_with_known_id_skips_insert() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+        let config = DbConfig {
+            db_path,
+            compaction_threshold: Some(0.3),
+            compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
+        };
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+
+        let batch1 = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: None,
+                path: "a.py".into(),
+                mtime: Some(1.0),
+                size_bytes: Some(100),
+                content_hash: Some("abc".into()),
+                language: Some("python".into()),
+                skip_reason: None,
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        let result1 = backend.write_batch(&batch1).expect("first write");
+        let original_id = result1.file_ids[0];
+
+        // Second write: same path, different mtime, but now we know the file's DB id.
+        let batch2 = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: Some(original_id),
+                path: "a.py".into(),
+                mtime: Some(2.0),
+                size_bytes: Some(200),
+                content_hash: Some("def".into()),
+                language: Some("python".into()),
+                skip_reason: None,
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        let result2 = backend.write_batch(&batch2).expect("second write");
+
+        assert_eq!(
+            result2.file_ids[0], original_id,
+            "upsert with known id must return the same id (UPDATE path, not INSERT)"
+        );
+
+        // Verify no phantom row was inserted.
+        let conn = backend.conn_or_err().expect("conn");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "files table must have exactly one row after two writes to the same path"
+        );
+    }
+
+    #[test]
+    fn test_upsert_file_with_stale_id_falls_back_to_path_lookup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+        let config = DbConfig {
+            db_path,
+            compaction_threshold: Some(0.3),
+            compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
+        };
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+
+        // Write two distinct files so we have a real "someone else's id" to collide with.
+        let batch1 = crate::types::DbWriterBatch {
+            files: vec![
+                crate::types::FileRecord {
+                    existing_file_id: None,
+                    path: "a.py".into(),
+                    mtime: Some(1.0),
+                    size_bytes: Some(100),
+                    content_hash: Some("abc".into()),
+                    language: Some("python".into()),
+                    skip_reason: None,
+                    chunks: vec![],
+                },
+                crate::types::FileRecord {
+                    existing_file_id: None,
+                    path: "b.py".into(),
+                    mtime: Some(1.0),
+                    size_bytes: Some(50),
+                    content_hash: Some("xyz".into()),
+                    language: Some("python".into()),
+                    skip_reason: None,
+                    chunks: vec![],
+                },
+            ],
+            delete_paths: vec![],
+        };
+        let result1 = backend.write_batch(&batch1).expect("first write");
+        let a_id = result1.file_ids[0];
+        let b_id = result1.file_ids[1];
+
+        // Simulate a stale diff snapshot: "b.py" is written carrying a's id (e.g. a
+        // rename/delete race between the diff snapshot and this write). The fast path
+        // must not blindly trust this and must not corrupt a's row.
+        let batch2 = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: Some(a_id),
+                path: "b.py".into(),
+                mtime: Some(2.0),
+                size_bytes: Some(200),
+                content_hash: Some("def".into()),
+                language: Some("python".into()),
+                skip_reason: None,
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        let result2 = backend.write_batch(&batch2).expect("second write");
+
+        assert_eq!(
+            result2.file_ids[0], b_id,
+            "a mismatched (id, path) pair must fall back to the path-keyed row for b.py, \
+             not silently report success against a's row"
+        );
+
+        let conn = backend.conn_or_err().expect("conn");
+        let a_hash: String = conn
+            .query_row("SELECT content_hash FROM files WHERE id = ?", [a_id], |r| {
+                r.get(0)
+            })
+            .expect("a row must still exist untouched");
+        assert_eq!(
+            a_hash, "abc",
+            "a's row must not have been overwritten by b's stale-id update"
+        );
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 2, "no phantom row should be created for b.py");
+    }
+
+    #[test]
+    fn ensure_all_hnsw_indexes_preserves_non_cosine_metric() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+        let config = DbConfig {
+            db_path: db_path.clone(),
+            compaction_threshold: Some(0.3),
+            compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
+        };
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping ensure_all_hnsw_indexes metric test");
+            return;
+        }
+
+        // Create an embedding table and a non-cosine HNSW index.
+        {
+            let conn = backend.conn_or_err().expect("conn");
+            DuckDbHnswBackend::ensure_embedding_table_dims(conn, 3).expect("create embeddings_3");
+            conn.execute_batch(
+                "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) WITH (metric = 'l2sq')",
+            )
+            .expect("create l2sq HNSW index");
+        }
+        backend.known_dims.insert(3);
+
+        // Simulate what the pipeline does: drop_all_hnsw_indexes (saves metrics) then
+        // ensure_all_hnsw_indexes (rebuilds using saved metrics).
+        backend.drop_all_hnsw_indexes().expect("drop");
+        assert_eq!(
+            backend.saved_hnsw_metrics.get(&3).map(|s| s.as_str()),
+            Some("l2sq"),
+            "drop_all_hnsw_indexes must save the original metric"
+        );
+
+        backend.ensure_all_hnsw_indexes().expect("ensure");
+
+        let conn = backend.conn_or_err().expect("conn");
+        let after = DuckDbHnswBackend::discover_hnsw_indexes(conn).expect("discover after ensure");
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].metric, "l2sq",
+            "ensure_all_hnsw_indexes must preserve the original non-cosine metric"
+        );
+    }
+
+    #[test]
+    fn ensure_all_hnsw_indexes_restores_index_dropped_outside_lifecycle() {
+        // Crash between write_batch's HNSW drop (Step 2) and recreate (Step 5) leaves
+        // embeddings_N tables with data but no HNSW index. open() must detect this via
+        // an unconditional ensure_all_hnsw_indexes() call and restore it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let db_path_str = db_path.to_string_lossy().into_owned();
+
+        let mut backend1 = DuckDbHnswBackend::new(test_support::config(db_path_str.clone()));
+        backend1.open().expect("open");
+        if !backend1.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+        backend1
+            .write_batch(&test_support::embedding_batch("a", 128, 50))
+            .expect("write");
+        backend1.close().expect("close");
+
+        // Simulate a crash: drop the HNSW index behind the backend's back.
+        {
+            let conn = Connection::open(&db_path).expect("reopen raw");
+            let _ = conn.execute_batch("LOAD vss");
+            conn.execute_batch("DROP INDEX IF EXISTS idx_hnsw_128")
+                .expect("drop index");
+            conn.execute_batch("CHECKPOINT").expect("checkpoint");
+            let remaining = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+            assert!(
+                remaining.is_empty(),
+                "expected HNSW index to be absent after manual drop"
+            );
+        }
+
+        let mut backend2 = DuckDbHnswBackend::new(test_support::config(db_path_str));
+        backend2.open().expect("open");
+        backend2.close().expect("close");
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let _ = conn.execute_batch("LOAD vss");
+        let restored = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+        assert!(
+            !restored.is_empty(),
+            "HNSW index not restored after crash recovery"
+        );
+    }
+
+    #[test]
+    fn close_restores_hnsw_after_partial_drop_failure() {
+        // If the second DROP fails after the first succeeded, close() must
+        // still rebuild missing indexes because bulk mode was entered before
+        // the loop.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let db_path_str = db_path.to_string_lossy().into_owned();
+
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path_str));
+        backend.open().expect("open");
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+        backend
+            .write_batch(&test_support::embedding_batch("a", 8, 2))
+            .expect("write 8-dim");
+        backend
+            .write_batch(&test_support::embedding_batch("b", 16, 2))
+            .expect("write 16-dim");
+        backend.ensure_all_hnsw_indexes().expect("ensure");
+
+        let before = {
+            let conn = backend.conn_or_err().expect("conn");
+            DuckDbHnswBackend::discover_hnsw_indexes(conn).expect("discover")
+        };
+        assert_eq!(before.len(), 2, "need two HNSW indexes to fail mid-loop");
+
+        backend.fail_drop_after = Some(1);
+        let drop_err = backend
+            .drop_all_hnsw_indexes()
+            .expect_err("second DROP should fail");
+        assert!(
+            drop_err.to_string().contains("simulated mid-loop"),
+            "unexpected drop error: {drop_err}"
+        );
+        assert!(
+            backend.hnsw_bulk_mode,
+            "bulk mode must be set before the failing DROP"
+        );
+
+        backend.close().expect("close restores remaining indexes");
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let _ = conn.execute_batch("LOAD vss");
+        let restored = DuckDbHnswBackend::discover_hnsw_indexes(&conn).expect("discover");
+        assert_eq!(
+            restored.len(),
+            2,
+            "both HNSW indexes must exist after close() following a partial drop"
+        );
+    }
+
+    #[test]
+    fn compaction_restores_embedding_table_indexes() {
+        // Regression test: run_attach_copy_compaction() rebuilds each
+        // embedding table via a bare CREATE TABLE — it must also restore the
+        // chunk_id, provider_model, and unique upsert-contract indexes
+        // (normally created by ensure_embedding_table_dims() on first table
+        // creation). Without this, Python's post-reconnect
+        // _executor_ensure_embedding_upsert_contract finds the unique index
+        // missing and repairs it itself, which drops and rebuilds the HNSW
+        // index a second time — an expensive redundant full index rebuild on
+        // every compaction.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let db_path_str = db_path.to_string_lossy().into_owned();
+
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path_str));
+        backend.open().expect("open");
+        if !backend.has_vss {
+            eprintln!("VSS extension unavailable, skipping");
+            return;
+        }
+        backend
+            .write_batch(&test_support::embedding_batch("a", 8, 10))
+            .expect("write");
+
+        backend
+            .run_attach_copy_compaction()
+            .expect("compaction should succeed");
+
+        let conn = backend.conn_or_err().expect("conn");
+        for index_name in [
+            "idx_8_chunk_id",
+            "idx_8_provider_model",
+            "idx_8_chunk_provider_model_unique",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM duckdb_indexes() \
+                     WHERE table_name = 'embeddings_8' AND index_name = ?",
+                    [index_name],
+                    |r| r.get(0),
+                )
+                .expect("query duckdb_indexes");
+            assert!(
+                exists,
+                "{index_name} must exist on embeddings_8 after compaction"
+            );
+        }
+    }
+}
+
+/// Shared test fixtures for the modules below — kept separate from
+/// `hnsw_metric_tests` because it's used by three otherwise-unrelated modules.
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(super) fn config(db_path: String) -> DbConfig {
+        DbConfig {
+            db_path,
+            compaction_threshold: Some(0.30),
+            compaction_min_size_bytes: 52_428_800,
+            insert_batch_size: 100,
+        }
+    }
+
+    pub(super) fn config_with_insert_batch_size(
+        db_path: String,
+        insert_batch_size: usize,
+    ) -> DbConfig {
+        DbConfig {
+            insert_batch_size,
+            ..config(db_path)
+        }
+    }
+
+    pub(super) fn config_with_compaction_threshold(
+        db_path: String,
+        compaction_threshold: Option<f64>,
+    ) -> DbConfig {
+        DbConfig {
+            compaction_threshold,
+            ..config(db_path)
+        }
+    }
+
+    fn chunk_record(code: &str, embedding_dims: Option<u32>) -> ChunkRecord {
+        ChunkRecord {
+            chunk_type: "function".into(),
+            symbol: Some("foo".into()),
+            code: code.into(),
+            start_line: Some(1),
+            end_line: Some(2),
+            start_byte: None,
+            end_byte: None,
+            language: Some("python".into()),
+            metadata: None,
+            embedding: embedding_dims.map(|d| vec![0.1f32; d as usize]),
+            provider: embedding_dims.map(|_| "test".to_string()),
+            model: embedding_dims.map(|_| "test-model".to_string()),
+        }
+    }
+
+    pub(super) fn file_record(path: &str, embedding_dims: Option<u32>) -> FileRecord {
+        FileRecord {
+            existing_file_id: None,
+            path: path.into(),
+            mtime: Some(1.0),
+            size_bytes: Some(100),
+            content_hash: Some("abc123".into()),
+            language: Some("python".into()),
+            skip_reason: None,
+            chunks: vec![chunk_record("def foo(): pass", embedding_dims)],
+        }
+    }
+
+    pub(super) fn single_file_batch(path: &str) -> DbWriterBatch {
+        DbWriterBatch {
+            files: vec![file_record(path, None)],
+            delete_paths: vec![],
+        }
+    }
+
+    /// `count` files, each with one chunk holding a `dims`-wide embedding.
+    /// Paths are prefixed so multiple calls within one test don't collide.
+    pub(super) fn embedding_batch(prefix: &str, dims: u32, count: usize) -> DbWriterBatch {
+        DbWriterBatch {
+            files: (0..count)
+                .map(|i| file_record(&format!("{prefix}{i}.py"), Some(dims)))
+                .collect(),
+            delete_paths: vec![],
+        }
+    }
+
+    /// A single file with `chunk_count` chunks, each holding a `dims`-wide
+    /// embedding when `embedding_dims` is `Some`.
+    pub(super) fn file_with_n_chunks(
+        path: &str,
+        chunk_count: usize,
+        embedding_dims: Option<u32>,
+    ) -> FileRecord {
+        FileRecord {
+            existing_file_id: None,
+            path: path.into(),
+            mtime: Some(1.0),
+            size_bytes: Some(100),
+            content_hash: Some("abc123".into()),
+            language: Some("python".into()),
+            skip_reason: None,
+            chunks: (0..chunk_count)
+                .map(|i| chunk_record(&format!("def foo_{i}(): pass"), embedding_dims))
+                .collect(),
+        }
+    }
+}
+
+/// Crash recovery via `.swap_intent` files (Invariant 17) — ported from the
+/// deleted `RustDbWriter` PyO3 wrapper's test suite so these invariants stay
+/// covered without going through PyO3.
+#[cfg(test)]
+mod crash_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn pre_delete_for_upsert_nulls_mtime_and_hash() {
+        // Crash window after prepare_write / before insert: chunks are gone and
+        // the file row must look dirty so the next incremental differ reprocesses.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+
+        let result = backend
+            .write_batch(&test_support::single_file_batch("a.py"))
+            .expect("seed write");
+        let file_id = result.file_ids[0];
+        assert!(
+            result.chunks_written > 0,
+            "seed must insert at least one chunk"
+        );
+
+        let dirty = crate::types::DbWriterBatch {
+            files: vec![crate::types::FileRecord {
+                existing_file_id: Some(file_id),
+                path: "a.py".into(),
+                mtime: Some(1.0),
+                size_bytes: Some(100),
+                content_hash: Some("abc123".into()),
+                language: Some("python".into()),
+                skip_reason: None,
+                chunks: vec![],
+            }],
+            delete_paths: vec![],
+        };
+        {
+            let conn = backend.conn_or_err().expect("conn");
+            DuckDbHnswBackend::pre_delete_for_upsert(conn, &dirty, &backend.known_dims)
+                .expect("pre_delete");
+        }
+
+        let conn = backend.conn_or_err().expect("conn");
+        let chunk_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("chunk count");
+        assert_eq!(chunk_count, 0, "pre_delete must remove chunks");
+
+        let (mtime_is_null, hash_is_null): (bool, bool) = conn
+            .query_row(
+                "SELECT modified_time IS NULL, content_hash IS NULL FROM files WHERE id = ?",
+                [file_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("file dirty flags");
+        assert!(
+            mtime_is_null,
+            "modified_time must be NULL so differ reprocesses"
+        );
+        assert!(
+            hash_is_null,
+            "content_hash must be NULL so hash-confirm cannot skip"
+        );
+    }
+
+    #[test]
+    fn pre_swap_intent_cleared_on_open() {
+        // pre-swap with a live DB still present (rename had not happened).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut bootstrap =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        bootstrap.open().expect("open");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "pre-swap").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists(), "intent file must be removed");
+    }
+
+    #[test]
+    fn pre_swap_intent_after_rename_restores_old_file() {
+        // Simulates a crash between the db_path->old_path rename (Phase 2)
+        // and the "phase1" intent write landing on disk — the breadcrumb
+        // still reads "pre-swap" even though the rename already happened.
+        // Regression test for the data-loss bug where open() would silently
+        // create a fresh empty database at db_path and orphan the real data
+        // sitting at old_path.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        // Real data lives at old_path; db_path does not exist, matching the
+        // post-rename, pre-"phase1"-write crash state.
+        let mut bootstrap = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "pre-swap").expect("write intent");
+        assert!(!db_path.exists(), "db_path must not exist pre-recovery");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists());
+        assert!(!old_path.exists());
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "seed.py must have been recovered from the .old backup, not \
+             silently discarded by a fresh empty database"
+        );
+    }
+
+    #[test]
+    fn phase1_intent_restores_old_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        // Simulate a DB that was backed up but not yet swapped: a valid DB
+        // with one seed file lives at old_path.
+        let mut bootstrap = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "phase1").expect("write intent");
+
+        // open() should detect phase1 and rename old -> db_path.
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists());
+        assert!(!old_path.exists());
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "seed.py must have been recovered from the .old backup"
+        );
+    }
+
+    #[test]
+    fn phase2_intent_removes_old_file() {
+        // Already-swapped leftover: compact→db rename finished, .old and
+        // intent were not cleaned up. Recovery must keep the live DB and
+        // drop the sidecar files.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        // Live DB must exist first: this is the post-rename leftover-sidecar
+        // case. Writing .old + intent before bootstrap would make recovery
+        // treat the marker as the only copy and rename it onto db_path.
+        let mut bootstrap =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        bootstrap.open().expect("open");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&old_path, "stale backup marker").expect("write old");
+        std::fs::write(&intent_path, "phase2").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists());
+        assert!(!old_path.exists());
+    }
+
+    #[test]
+    fn phase2_intent_finishes_interrupted_compact_rename() {
+        // Crash after writing phase2 intent, before compact→db rename:
+        // live path is empty, real data is in .compact, pre-compaction
+        // backup is in .old. Recovery must finish the swap, not open an
+        // empty database and not prefer .old over .compact.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let compact_path = tmp.path().join("t.duckdb.compact");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut old_db = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        old_db.open().expect("open old");
+        old_db
+            .write_batch(&test_support::single_file_batch("old.py"))
+            .expect("write old");
+        old_db.close().expect("close old");
+
+        let mut compact_db = DuckDbHnswBackend::new(test_support::config(
+            compact_path.to_string_lossy().into_owned(),
+        ));
+        compact_db.open().expect("open compact");
+        compact_db
+            .write_batch(&test_support::single_file_batch("compact.py"))
+            .expect("write compact");
+        compact_db.close().expect("close compact");
+
+        std::fs::write(&intent_path, "phase2").expect("write intent");
+        assert!(!db_path.exists(), "db_path must not exist pre-recovery");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists(), "intent must be cleared after swap");
+        assert!(!old_path.exists(), "backup must be dropped after swap");
+        assert!(
+            !compact_path.exists(),
+            "compact must have been renamed onto the live path"
+        );
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let path: String = conn
+            .query_row("SELECT path FROM files", [], |r| r.get(0))
+            .expect("path");
+        assert_eq!(
+            path, "compact.py",
+            "live DB must be the compacted copy, not the .old backup \
+             and not a freshly created empty database"
+        );
+    }
+
+    #[test]
+    fn phase2_intent_restores_old_when_compact_and_live_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut bootstrap = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "phase2").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(!intent_path.exists());
+        assert!(!old_path.exists());
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "must restore .old when compact and live are gone");
+    }
+
+    #[test]
+    fn phase2_failed_swap_keeps_old_and_intent() {
+        // Live path is a directory so remove_file(db_path) fails before the
+        // compact rename. Recovery must leave .old and the intent in place
+        // so a later open can retry instead of wiping the last copies.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let compact_path = tmp.path().join("t.duckdb.compact");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        std::fs::create_dir(&db_path).expect("dir at live path");
+        std::fs::write(&old_path, "backup").expect("write old");
+        std::fs::write(&compact_path, "compact").expect("write compact");
+        std::fs::write(&intent_path, "phase2").expect("write intent");
+
+        DuckDbHnswBackend::recover_swap_intent(&db_path)
+            .expect_err("blocked dest must fail closed");
+
+        assert!(
+            old_path.exists(),
+            "must not delete .old after a failed compact→db swap"
+        );
+        assert!(
+            intent_path.exists(),
+            "must keep the intent so the next open retries"
+        );
+        assert!(
+            compact_path.exists(),
+            "compact must remain the new-db candidate"
+        );
+    }
+
+    #[test]
+    fn pre_swap_intent_cleared_on_open_db_extension() {
+        // Regression guard: PathBuf::set_extension() on "chunks.db" would produce
+        // "chunks.duckdb.swap_intent" instead of "chunks.db.swap_intent". The
+        // correct implementation builds the intent path via string concatenation.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("chunks.db");
+        let intent_path = tmp.path().join("chunks.db.swap_intent");
+
+        let mut bootstrap =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        bootstrap.open().expect("open");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&intent_path, "pre-swap").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(
+            !intent_path.exists(),
+            "intent file must be removed; wrong path construction would leave it untouched"
+        );
+    }
+
+    #[test]
+    fn phase2_all_copies_missing_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+        std::fs::write(&intent_path, "phase2").expect("write intent");
+
+        let err = DuckDbHnswBackend::recover_swap_intent(&db_path)
+            .expect_err("must not create an empty live db");
+        assert!(
+            err.to_string().contains("no compact, live db, or .old"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            intent_path.exists(),
+            "intent must remain so a later open retries"
+        );
+        assert!(!db_path.exists(), "must not create a live file");
+    }
+
+    #[test]
+    fn garbage_intent_live_missing_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+        std::fs::write(&old_path, "backup").expect("write old");
+        std::fs::write(&intent_path, "pha").expect("write garbage intent");
+
+        let err = DuckDbHnswBackend::recover_swap_intent(&db_path)
+            .expect_err("unknown intent + missing live must fail closed");
+        assert!(
+            err.to_string().contains("unrecognized swap_intent"),
+            "unexpected error: {err}"
+        );
+        assert!(old_path.exists(), "must not touch .old");
+        assert!(
+            intent_path.exists(),
+            "must keep the unreadable-phase intent"
+        );
+        assert!(!db_path.exists());
+    }
+
+    #[test]
+    fn unreadable_intent_live_missing_fails_closed() {
+        // A directory at the intent path makes read_to_string fail.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+        std::fs::write(&old_path, "backup").expect("write old");
+        std::fs::create_dir(&intent_path).expect("intent as directory");
+
+        DuckDbHnswBackend::recover_swap_intent(&db_path)
+            .expect_err("unreadable intent + missing live must fail closed");
+        assert!(old_path.exists(), "must not touch .old");
+        assert!(!db_path.exists());
+    }
+
+    #[test]
+    fn garbage_intent_live_present_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut bootstrap =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&test_support::single_file_batch("live.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&old_path, "backup").expect("write old");
+        std::fs::write(&intent_path, "pha").expect("write garbage intent");
+
+        DuckDbHnswBackend::recover_swap_intent(&db_path)
+            .expect_err("unknown intent must fail even when live exists");
+        assert!(db_path.exists(), "must not replace the live db");
+        assert!(old_path.exists(), "must not touch .old");
+        assert!(intent_path.exists(), "must keep the intent");
+    }
+
+    #[test]
+    fn unreadable_intent_live_present_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut bootstrap =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        bootstrap.open().expect("open");
+        bootstrap.close().expect("close");
+
+        std::fs::create_dir(&intent_path).expect("intent as directory");
+
+        DuckDbHnswBackend::recover_swap_intent(&db_path)
+            .expect_err("unreadable intent must fail even when live exists");
+        assert!(db_path.exists());
+    }
+
+    #[test]
+    fn empty_live_file_is_treated_as_missing_and_restored_from_old() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut bootstrap = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        bootstrap.open().expect("open");
+        bootstrap
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write");
+        bootstrap.close().expect("close");
+
+        std::fs::write(&db_path, b"").expect("empty live");
+        std::fs::write(&intent_path, "phase1").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "zero-length live must be replaced from .old");
+    }
+
+    #[test]
+    fn rename_db_with_wal_drops_dest_wal_before_main_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let from = tmp.path().join("from.duckdb");
+        let to = tmp.path().join("to.duckdb");
+        let dest_wal = tmp.path().join("to.duckdb.wal");
+        std::fs::write(&from, b"new-main").expect("write from");
+        std::fs::write(&dest_wal, b"STALE_WAL_MUST_NOT_REPLAY").expect("write dest wal");
+
+        DuckDbHnswBackend::rename_db_with_wal(&from, &to).expect("rename");
+
+        assert_eq!(std::fs::read(&to).expect("read dest"), b"new-main");
+        assert!(
+            !dest_wal.exists(),
+            "dest WAL must be gone before/without a source WAL to replace it"
+        );
+    }
+
+    #[test]
+    fn phase1_open_deletes_incomplete_compact_beside_restored_live() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let compact_path = tmp.path().join("t.duckdb.compact");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut old_db = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        old_db.open().expect("open old");
+        old_db
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write old");
+        old_db.close().expect("close old");
+
+        std::fs::write(&compact_path, "incomplete compact").expect("write compact");
+        std::fs::write(&intent_path, "phase1").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        assert!(
+            !compact_path.exists(),
+            "open() must drop leftover phase1 .compact, not only the in-process fallback"
+        );
+    }
+
+    #[test]
+    fn leftover_live_wal_is_dropped_when_finishing_phase2_swap() {
+        // After live→.old, a stale t.duckdb.wal can remain at the live
+        // name. Finishing compact→live must not let DuckDB replay that WAL
+        // against the compacted main file.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let compact_path = tmp.path().join("t.duckdb.compact");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+        let stale_wal = tmp.path().join("t.duckdb.wal");
+
+        let mut old_db = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        old_db.open().expect("open old");
+        old_db
+            .write_batch(&test_support::single_file_batch("old.py"))
+            .expect("write old");
+        old_db.close().expect("close old");
+
+        let mut compact_db = DuckDbHnswBackend::new(test_support::config(
+            compact_path.to_string_lossy().into_owned(),
+        ));
+        compact_db.open().expect("open compact");
+        compact_db
+            .write_batch(&test_support::single_file_batch("compact.py"))
+            .expect("write compact");
+        compact_db.close().expect("close compact");
+
+        std::fs::write(&stale_wal, b"STALE_WAL_MUST_NOT_REPLAY").expect("write stale wal");
+        std::fs::write(&intent_path, "phase2").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend.open().expect("open");
+        backend.close().expect("close");
+
+        if stale_wal.exists() {
+            let bytes = std::fs::read(&stale_wal).expect("read wal");
+            assert!(
+                !bytes
+                    .windows(b"STALE_WAL_MUST_NOT_REPLAY".len())
+                    .any(|w| w == b"STALE_WAL_MUST_NOT_REPLAY"),
+                "stale live WAL must not remain after compact→live"
+            );
+        }
+
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let path: String = conn
+            .query_row("SELECT path FROM files", [], |r| r.get(0))
+            .expect("path");
+        assert_eq!(path, "compact.py");
+    }
+
+    #[test]
+    fn phase1_failure_deletes_incomplete_compact_beside_restored_live() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb");
+        let old_path = tmp.path().join("t.duckdb.old");
+        let compact_path = tmp.path().join("t.duckdb.compact");
+        let intent_path = tmp.path().join("t.duckdb.swap_intent");
+
+        let mut old_db = DuckDbHnswBackend::new(test_support::config(
+            old_path.to_string_lossy().into_owned(),
+        ));
+        old_db.open().expect("open old");
+        old_db
+            .write_batch(&test_support::single_file_batch("seed.py"))
+            .expect("write old");
+        old_db.close().expect("close old");
+
+        std::fs::write(&compact_path, "incomplete compact").expect("write compact");
+        std::fs::write(&intent_path, "phase1").expect("write intent");
+
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config(db_path.to_string_lossy().into_owned()));
+        backend
+            .reopen_after_compaction_failure()
+            .expect("reopen after failure");
+        backend.close().expect("close");
+
+        assert!(
+            !compact_path.exists(),
+            "phase1 leftover compact must be dropped"
+        );
+        assert!(!intent_path.exists());
+        let conn = Connection::open(&db_path).expect("reopen for verification");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1);
+    }
+}
+
+/// `insert_batch_size` (from Python's `indexing.db_batch_size`) parameterizes
+/// the row-count-per-INSERT-statement chunking in `insert_chunks_for_file`/
+/// `insert_embeddings_txn`. These tests prove correctness at a non-default
+/// batch size that doesn't evenly divide the row count — the legitimate
+/// external contract here is "no rows dropped/duplicated at a batch
+/// boundary," not the internal INSERT-statement count itself.
+#[cfg(test)]
+mod insert_batch_size_tests {
+    use super::*;
+
+    #[test]
+    fn chunks_persist_correctly_at_non_default_batch_size() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config_with_insert_batch_size(db_path, 3));
+        backend.open().expect("open");
+
+        // 7 chunks, no embeddings — doesn't evenly divide the batch size of 3
+        // (batches of 3, 3, 1), exercising insert_chunks_for_file's chunking.
+        let batch = DbWriterBatch {
+            files: vec![test_support::file_with_n_chunks("a.py", 7, None)],
+            delete_paths: vec![],
+        };
+        let result = backend.write_batch(&batch).expect("write");
+        backend.close().expect("close");
+
+        assert_eq!(result.chunks_written, 7);
+        let conn = Connection::open(tmp.path().join("t.duckdb")).expect("reopen");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 7,
+            "all 7 chunks must persist despite the 3-row batch boundary"
+        );
+    }
+
+    #[test]
+    fn embeddings_persist_correctly_at_non_default_batch_size() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend =
+            DuckDbHnswBackend::new(test_support::config_with_insert_batch_size(db_path, 3));
+        backend.open().expect("open");
+
+        // 7 chunks each with a 4-dim embedding, in one file — doesn't evenly
+        // divide the batch size of 3, exercising insert_embeddings_txn's
+        // chunking (grouped by dims).
+        let batch = DbWriterBatch {
+            files: vec![test_support::file_with_n_chunks("a.py", 7, Some(4))],
+            delete_paths: vec![],
+        };
+        let result = backend.write_batch(&batch).expect("write");
+        backend.close().expect("close");
+
+        assert_eq!(result.embeddings_written, 7);
+        let conn = Connection::open(tmp.path().join("t.duckdb")).expect("reopen");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings_4", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            count, 7,
+            "all 7 embeddings must persist despite the 3-row batch boundary"
+        );
+    }
+}
+
+#[cfg(test)]
+mod write_batches_in_one_txn_tests {
+    use super::*;
+
+    #[test]
+    fn commits_all_batches_and_preserves_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+
+        let batch_a = test_support::embedding_batch("a", 4, 2);
+        let batch_b = test_support::embedding_batch("b", 4, 3);
+        backend.prepare_write(&batch_a).expect("prepare a");
+        backend.prepare_write(&batch_b).expect("prepare b");
+
+        let results = backend
+            .write_batches_in_one_txn(&[batch_a, batch_b])
+            .expect("write batches in one txn");
+        backend.close().expect("close");
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].file_ids.len(),
+            2,
+            "results[0] must correspond to batch_a (2 files), preserving input order"
+        );
+        assert_eq!(
+            results[1].file_ids.len(),
+            3,
+            "results[1] must correspond to batch_b (3 files), preserving input order"
+        );
+        assert_eq!(results[0].chunks_written, 2);
+        assert_eq!(results[1].chunks_written, 3);
+
+        let conn = Connection::open(tmp.path().join("t.duckdb")).expect("reopen");
+        let files_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count files");
+        let chunks_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count chunks");
+        let emb_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embeddings_4", [], |r| r.get(0))
+            .expect("count embeddings_4");
+        assert_eq!(files_count, 5, "both batches' files must persist");
+        assert_eq!(chunks_count, 5, "both batches' chunks must persist");
+        assert_eq!(emb_count, 5, "both batches' embeddings must persist");
+    }
+
+    #[test]
+    fn rolls_back_entire_window_on_mid_window_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+
+        let batch0 = test_support::single_file_batch("a.py");
+        // Deliberately built with an 8-dim embedding but prepare_write is
+        // never called for it below, so embeddings_8 is never created —
+        // insert_embeddings_txn's INSERT into it will fail with a real
+        // DuckDB catalog error, deterministically forcing a mid-window
+        // failure without any test-only hooks.
+        let batch1 = test_support::embedding_batch("b", 8, 1);
+        let batch2 = test_support::single_file_batch("c.py");
+
+        backend.prepare_write(&batch0).expect("prepare batch0");
+        backend.prepare_write(&batch2).expect("prepare batch2");
+
+        let result = backend.write_batches_in_one_txn(&[batch0, batch1, batch2]);
+        assert!(
+            result.is_err(),
+            "missing embeddings_8 table must surface as an error"
+        );
+
+        let conn = backend.conn_or_err().expect("conn");
+        let files_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count files");
+        let chunks_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count chunks");
+        assert_eq!(
+            files_count, 0,
+            "batch0's already-written file row must be rolled back with the rest of the window"
+        );
+        assert_eq!(
+            chunks_count, 0,
+            "batch0's already-written chunk must be rolled back with the rest of the window"
+        );
+
+        // Sanity check: the manual ROLLBACK must leave the connection usable,
+        // not stuck inside a broken transaction.
+        let post_rollback = test_support::single_file_batch("d.py");
+        backend
+            .write_batch(&post_rollback)
+            .expect("connection must remain usable after rollback");
+    }
+
+    #[test]
+    fn empty_slice_returns_empty_vec() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(test_support::config(db_path));
+        backend.open().expect("open");
+
+        let results = backend
+            .write_batches_in_one_txn(&[])
+            .expect("empty slice must not error");
+        assert!(results.is_empty());
+
+        let conn = backend.conn_or_err().expect("conn");
+        let files_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .expect("count files");
+        assert_eq!(files_count, 0, "empty slice must not touch the DB");
     }
 }

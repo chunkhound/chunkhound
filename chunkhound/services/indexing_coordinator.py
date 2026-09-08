@@ -21,20 +21,17 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Protocol, TYPE_CHECKING, cast
-
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from chunkhound.services.directory_indexing_service import IndexingStats
 
 from loguru import logger
-
-from chunkhound.utils.logging_guard import log_if_not_mcp
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
 from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
-from chunkhound.core.exceptions import DiskUsageLimitExceededError
+from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
 from chunkhound.core.utils import estimate_tokens_chunking
@@ -54,15 +51,19 @@ from chunkhound.providers.database.like_utils import escape_like_pattern
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
     load_gitignore_patterns,
+    passes_extension_filter,
+    prepare_extension_filter,
     scan_directory_files,
     walk_directory_tree,
     walk_subtree_worker,
 )
 from chunkhound.utils.hashing import compute_file_hash
+from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
+from .progress_utils import _update_speed_field
 from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
 
 # Lazy multiprocessing start-method guard — applied once before pool creation.
@@ -165,6 +166,20 @@ def _calculate_worker_count(file_count: int, cpu_count: int) -> int:
         return min(cpu_count, MAX_WORKERS_LARGE_BATCH, file_count)
 
 
+def _normalize_to_path_tuples(
+    files: list[Path] | list[tuple[Path, str | None]],
+) -> list[tuple[Path, str | None]]:
+    """Normalize a bare-path-or-tuple file list to the tuple form.
+
+    Callers accept either representation (see `_process_files_in_batches`),
+    but `run_rust_pipeline` and similar single-shape consumers need one
+    concrete type. An isinstance check here (rather than relying on static
+    narrowing of a union-typed variable across branches) is what actually
+    lets mypy verify the result type.
+    """
+    return [item if isinstance(item, tuple) else (item, None) for item in files]
+
+
 async def run_batch_compaction_boundary(
     coordinator: "IndexingCoordinator",
     stats: "IndexingStats | None" = None,
@@ -181,6 +196,20 @@ async def run_batch_compaction_boundary(
     if status == "success":
         if stats is not None:
             stats.db_compactions += 1
+            stats.compaction_ran = True
+            # This boundary can run twice per directory index (after
+            # chunking, after embeddings) — keep the first before-size and
+            # the latest after-size so the reported ratio spans the whole
+            # run, not just its final boundary.
+            if stats.compaction_size_before is None:
+                stats.compaction_size_before = compaction.get("size_before")
+            stats.compaction_size_after = compaction.get("size_after")
+            before = stats.compaction_size_before
+            after = stats.compaction_size_after
+            if before and after is not None:
+                stats.compaction_reduction_pct = (before - after) / before * 100.0
+            else:
+                stats.compaction_reduction_pct = 0.0
         return
     if status == "skipped":
         return
@@ -261,6 +290,7 @@ class IndexingCoordinator(BaseService):
         # Store raw path - will resolve at usage time for consistent symlink handling
         self._base_directory: Path = base_directory
         self._root_identity_validated = False
+        self._skip_compaction = False
 
     def _get_relative_path(self, file_path: Path) -> Path:
         """Get relative path, preserving symlink logical paths.
@@ -543,7 +573,8 @@ class IndexingCoordinator(BaseService):
                 self._root_identity_validated = True
 
             # Use batch processor with single file for consistency
-            parsed_results = await self._process_files_in_batches([(file_path, None)])
+            single_file: list[tuple[Path, str | None]] = [(file_path, None)]
+            parsed_results = await self._process_files_in_batches(single_file)
 
             if not parsed_results:
                 return {
@@ -783,12 +814,7 @@ class IndexingCoordinator(BaseService):
             per_file_cap = max(4, int(target_secs / max(0.001, timeout_s_probe)))
             batch_size = min(batch_size, per_file_cap)
         # Normalize input to list[tuple[Path, str|None]]
-        normalized_files: list[tuple[Path, str | None]] = []
-        for item in files:
-            if isinstance(item, tuple):
-                normalized_files.append(item)
-            else:
-                normalized_files.append((item, None))
+        normalized_files = _normalize_to_path_tuples(files)
         file_batches = [
             normalized_files[i : i + batch_size]
             for i in range(0, len(normalized_files), batch_size)
@@ -825,6 +851,7 @@ class IndexingCoordinator(BaseService):
                     inc = len(batch_result)
                     completed_files += inc
                     self.progress.advance(parse_task, inc)
+                    _update_speed_field(self.progress, parse_task, "files/min")
                     self.progress.update(parse_task, info=f"{completed_files} parsed")
                 # Stream results to storage if callback provided
                 if on_batch is not None:
@@ -996,15 +1023,7 @@ class IndexingCoordinator(BaseService):
         disk_limit_error = self._check_disk_usage_limit()
         if disk_limit_error:
             # Add disk limit error to stats for consistent error handling
-            stats["errors"].append(
-                {
-                    "file": None,  # Global error, not file-specific
-                    "error": str(disk_limit_error),
-                    "disk_limit_exceeded": True,
-                    "current_size_mb": disk_limit_error.current_size_mb,
-                    "limit_mb": disk_limit_error.limit_mb,
-                }
-            )
+            stats["errors"].append(disk_limit_error.to_error_dict())
             # Return early - don't process any files if disk limit exceeded
             return stats
 
@@ -1020,6 +1039,7 @@ class IndexingCoordinator(BaseService):
                 )
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["errors"] = (
                             cumulative_counters.get("errors", 0) + 1
@@ -1063,6 +1083,7 @@ class IndexingCoordinator(BaseService):
                     )
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["skipped"] = (
                             cumulative_counters.get("skipped", 0) + 1
@@ -1154,6 +1175,7 @@ class IndexingCoordinator(BaseService):
                 # Update progress
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["stored"] = (
                             cumulative_counters.get("stored", 0) + 1
@@ -1168,11 +1190,28 @@ class IndexingCoordinator(BaseService):
                             info=_progress_info(stored, skipped, errs, display_chunks),
                         )
 
+            except asyncio.CancelledError:
+                # CancelledError is a BaseException (not Exception) since Python
+                # 3.8, so it skips the `except Exception` branch below. Without
+                # this handler, a task cancellation (e.g. service shutdown)
+                # between begin_transaction_async() and commit_transaction_async()
+                # leaves the DB transaction open, and a later disconnect()'s
+                # mandatory CHECKPOINT fails with "transaction local changes".
+                try:
+                    await self._db.rollback_transaction_async()
+                except Exception:
+                    logger.warning(
+                        "Failed to roll back transaction while cancelling "
+                        f"processing of {result.file_path}",
+                        exc_info=True,
+                    )
+                raise
             except Exception as e:
                 await self._db.rollback_transaction_async()
                 stats["errors"].append({"file": str(result.file_path), "error": str(e)})
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    _update_speed_field(self.progress, file_task, "writes/min")
                     if cumulative_counters is not None:
                         cumulative_counters["errors"] = (
                             cumulative_counters.get("errors", 0) + 1
@@ -1200,6 +1239,57 @@ class IndexingCoordinator(BaseService):
         if len(results) == 1 and file_ids and file_ids[0] is not None:
             stats["file_id"] = file_ids[0]
         return stats
+
+    def resolve_rust_pipeline_decision(self, *, log_reason: bool = True) -> bool:
+        """Resolve whether the Rust write pipeline will actually run for this
+        DB provider, downgrading to Python for providers/paths it can't
+        handle.
+
+        Depends only on the CHUNKHOUND_USE_RUST env var and self._db (not on
+        any state process_directory computes), so it's safe to call before
+        process_directory actually runs — e.g. DirectoryIndexingService uses
+        this to decide whether to pre-drop HNSW indexes, since the Rust
+        pipeline handles HNSW internally only when it actually ends up
+        running.
+        """
+        from chunkhound.utils.rust_pipeline_flag import _get_use_rust
+
+        if not _get_use_rust():
+            return False
+        # The Rust pipeline (chunkhound_native.IndexingPipeline) only
+        # implements a DuckDB backend (DuckDbHnswBackend) — running it
+        # against a LanceDB-configured project would disconnect the live
+        # LanceDB provider and then hand Rust a db_path it can't use. Check
+        # the *actual* provider instance's declared capability (not
+        # self.config, which may be None or out of sync with self._db) so a
+        # non-DuckDB provider falls back to the Python path cleanly instead
+        # of breaking partway through. Uses getattr rather than isinstance
+        # against a concrete class so IndexingCoordinator stays coupled only
+        # to the DatabaseProvider interface, not one backend.
+        if not getattr(self._db, "supports_rust_pipeline", False):
+            if log_reason:
+                logger.info(
+                    "Rust pipeline requested but database provider is '{}' "
+                    "(Rust pipeline only supports DuckDB) — using Python path",
+                    type(self._db).__name__,
+                )
+            return False
+        if not hasattr(self._db, "db_path"):
+            # Test DB fakes may not expose db_path — fall through to Python
+            # before the cleanup gate fires so orphan cleanup isn't skipped.
+            return False
+        if Path(str(self._db.db_path)).name != "chunks.db":
+            # Rust pipeline hardcodes appending "chunks.db" to the directory
+            # it receives, so it can only write to a file named chunks.db.
+            # Fall back to Python for any other DB filename.
+            if log_reason:
+                logger.info(
+                    "Rust pipeline skipped — db_path '{}' is not named chunks.db; "
+                    "using Python path",
+                    self._db.db_path,
+                )
+            return False
+        return True
 
     async def process_directory(
         self,
@@ -1235,37 +1325,105 @@ class IndexingCoordinator(BaseService):
                 allow_claim_if_missing=True,
             )
             self._root_identity_validated = True
+
+        # Detect Rust pipeline early so we can skip DB-queried phases below.
+        from chunkhound.utils.rust_pipeline_flag import _get_use_rust
+
+        # Discovery (file scanning) has no DB-specific constraints, so it
+        # always follows the raw flag; the write pipeline (_use_rust below)
+        # can still be downgraded to Python for a non-DuckDB provider.
+        _rust_flag = _get_use_rust()
+        _use_rust = self.resolve_rust_pipeline_decision()
+        logger.info(
+            "Indexing backend: discovery={} pipeline={}",
+            "rust" if _rust_flag else "python",
+            "rust" if _use_rust else "python",
+        )
+
         try:
             import time as _t
 
-            _t0 = _t.perf_counter() if getattr(self, "profile_startup", False) else None
+            _t0 = _t.perf_counter()
             _t2 = _t3 = _t4 = _t5 = None
+
+            discovery_task: TaskID | None = None
+            if self.progress:
+                discovery_task = self.progress.add_task(
+                    "  └─ Discovering files", total=None, speed="", info=""
+                )
+
+            _diff_task: TaskID | None = None
+            if _use_rust and self.progress:
+                _diff_task = self.progress.add_task(
+                    "  └─ Checking for changes",
+                    total=1,
+                    speed="",
+                    info="",
+                    start=False,
+                )
+
             # Phase 1: Discovery - Discover files in directory (now parallelized)
-            files = await self._discover_files(directory, patterns, exclude_patterns)
-            _t1 = _t.perf_counter() if _t0 is not None else None
+            files = await self._discover_files(
+                directory,
+                patterns,
+                exclude_patterns,
+                discovery_task_id=discovery_task,
+            )
+            _t1 = _t.perf_counter()
+            if discovery_task is not None and self.progress:
+                self.progress.update(
+                    discovery_task,
+                    total=len(files),
+                    completed=len(files),
+                    info=f"{len(files)} files",
+                )
+            logger.info(
+                f"Discovery: {len(files)} files in {(_t1 - _t0) * 1000:.0f}ms "
+                f"(backend={getattr(self, '_resolved_discovery_backend', 'n/a')})"
+            )
 
-            if not files:
-                return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
+            # The Rust pipeline must see an empty discovered-file list when a
+            # previously indexed directory has been emptied. Its incremental
+            # diff uses that list to discover and delete all orphaned DB rows.
+            # Keep the legacy Python fast return; Rust has its own fresh-DB
+            # empty-input short circuit in IndexingPipeline.run().
+            if not files and not _use_rust:
+                if _diff_task is not None and self.progress:
+                    self.progress.remove_task(_diff_task)
+                return {
+                    "status": "no_files",
+                    "files_processed": 0,
+                    "total_chunks": 0,
+                    "pipeline": "rust" if _use_rust else "python",
+                }
 
-            # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files
+            # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files.
+            # Runs regardless of which pipeline (Python or Rust) processes this
+            # directory: it executes here, before either path touches the DB
+            # connection further (Rust's own connection + disconnect happen much
+            # later, right before run_rust_pipeline() is dispatched), so self._db
+            # is always a live, normal Python connection at this point.
             cleaned_files = 0
             do_cleanup = True
             if self.config and getattr(self.config, "indexing", None) is not None:
                 do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
-            if do_cleanup:
-                _t2 = _t.perf_counter() if _t0 is not None else None
+            if do_cleanup and not _use_rust:
+                _t2 = _t.perf_counter()
                 cleaned_files = self._cleanup_orphaned_files(
                     directory, files, patterns, exclude_patterns
                 )
-                _t3 = _t.perf_counter() if _t0 is not None else None
+                _t3 = _t.perf_counter()
             else:
-                logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
+                if not do_cleanup:
+                    logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
+                # else: Rust pipeline owns orphan cleanup via its own diff
 
             logger.debug(
                 f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"
             )
 
-            # Phase 2.5: Change detection (skip unchanged files unless force_reindex)
+            # Phase 2.5: Change detection (skip unchanged files unless force_reindex).
+            # Detect force_reindex early for both paths.
             force_reindex = False
             try:
                 if self.config and getattr(self.config, "indexing", None):
@@ -1277,8 +1435,20 @@ class IndexingCoordinator(BaseService):
 
             files_to_process: list[Path] | list[tuple[Path, str | None]] = list(files)
             skipped_unchanged = 0
-            if not force_reindex:
-                _t4 = _t.perf_counter() if _t0 is not None else None
+            if _use_rust:
+                # Rust pipeline: convert plain paths to (path, None) tuples
+                # matching run_rust_pipeline's expected signature. Built from
+                # `files` (known list[Path]) rather than `files_to_process`
+                # (the union-typed variable) so mypy can verify the element
+                # type without treating it as Path | tuple[Path, str | None].
+                # The explicit annotation matters too: list is invariant, so
+                # without it mypy infers list[tuple[Path, None]] (from the
+                # bare `None` literal) rather than list[tuple[Path, str |
+                # None]], and rejects the assignment below.
+                rust_files: list[tuple[Path, str | None]] = [(p, None) for p in files]
+                files_to_process = rust_files
+            elif not force_reindex:
+                _t4 = _t.perf_counter()
                 change_task: TaskID | None = None
                 if self.progress:
                     change_task = self.progress.add_task(
@@ -1438,7 +1608,11 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
-                _t5 = _t.perf_counter() if _t0 is not None else None
+                _t5 = _t.perf_counter()
+                logger.info(
+                    f"Change scan: {len(files_to_process)}/{len(files)} to process "
+                    f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
+                )
                 if debug_skip:
                     logger.warning(
                         f"Skip-check summary: ok={reasons['ok']} not_found={reasons['not_found']} "
@@ -1450,8 +1624,21 @@ class IndexingCoordinator(BaseService):
             parse_task: TaskID | None = None
             store_task: TaskID | None = None
             if self.progress:
+                # For the Rust pipeline, `files_to_process` is the full
+                # discovered-file list (line 1453) — Rust's own diff phase
+                # narrows it down internally, and the first "parse" callback
+                # below resets this bar's total to the real changed-file
+                # count. Seeding it with the full count here would show a
+                # misleadingly large total (e.g. "0/65000") until that reset
+                # fires. Start with a placeholder instead, matching the other
+                # Rust-phase bars (diff/embed/etc.) below, which all defer
+                # their real total to a reset() once Rust reports it.
                 parse_task = self.progress.add_task(
-                    "  └─ Parsing files", total=len(files_to_process), speed="", info=""
+                    "  └─ Parsing files",
+                    total=1 if _use_rust else len(files_to_process),
+                    speed="",
+                    info="",
+                    start=not _use_rust,
                 )
                 store_task = self.progress.add_task(
                     "  └─ Handling files",
@@ -1463,100 +1650,208 @@ class IndexingCoordinator(BaseService):
             # Aggregators for streamed storage
             agg_total_files = 0
             agg_total_chunks = 0
+            agg_embeddings = 0
             agg_errors: list[dict[str, Any]] = []
             agg_skipped = 0
             agg_skipped_timeout: list[str] = []
             agg_skipped_paths: list[tuple[str, str]] = []
+            _diff_elapsed = 0.0
 
-            store_progress_counters = {
-                "chunks": 0,
-                "files": 0,
-                "stored": 0,
-                "skipped": 0,
-                "errors": 0,
-            }
+            # Compaction outcome for this run (Rust path only — the Python
+            # path's compaction happens later, at the DirectoryIndexingService
+            # batch-compaction boundary via run_batch_compaction_boundary(),
+            # which writes directly onto IndexingStats instead of through
+            # this return dict). Only populated when a progress instance is
+            # attached, since only the progress-callback phases below
+            # observe which branch (write-compact vs write-index) Rust took.
+            _compact_ran = False
+            _compact_size_before: int | None = None
+            _compact_size_after: int | None = None
+            _compact_reduction_pct: float | None = None
 
-            async def _on_batch_store(batch: list[ParsedFileResult]) -> None:
-                nonlocal \
-                    agg_total_files, \
-                    agg_total_chunks, \
-                    agg_errors, \
-                    agg_skipped, \
-                    agg_skipped_timeout, \
-                    agg_skipped_paths
-                # Update skip counters from parse results
-                for r in batch:
-                    if r.status == "skipped":
-                        agg_skipped += 1
-                        if (r.error or "").lower() == "timeout":
-                            agg_skipped_timeout.append(str(r.file_path))
+            # Pre-check disk usage limit before either pipeline starts.
+            # _store_parsed_results checks this for the Python path, but the
+            # Rust pipeline bypasses that function — a pre-check here covers both.
+            _pre_disk_error = self._check_disk_usage_limit()
+            if _pre_disk_error:
+                return {
+                    "status": "disk_limit_exceeded",
+                    "current_size_mb": _pre_disk_error.current_size_mb,
+                    "limit_mb": _pre_disk_error.limit_mb,
+                    "error": str(_pre_disk_error),
+                    "pipeline": "rust" if _use_rust else "python",
+                }
 
-                # Store this batch immediately
-                stats_part = await self._store_parsed_results(
-                    batch, store_task, cumulative_counters=store_progress_counters
+            # Skip coordinator-side compaction only for this call's Rust run —
+            # the Rust pipeline runs its own compaction via
+            # DbBackend::run_compaction() internally. Set unconditionally
+            # (not just inside the `if _use_rust` branch below) since
+            # `self` is a cached/reused coordinator: without a reset here, a
+            # later Python-path call on the same instance would inherit a
+            # stale `True` from a prior Rust run and skip compaction forever.
+            self._skip_compaction = _use_rust
+
+            # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
+            # Detected at top of process_directory to gate cleanup + change detection.
+            if _use_rust:
+                # The Rust pipeline handles parse → embed → write in one call.
+                from chunkhound.services.rust_pipeline_runner import (
+                    run_rust_indexing_phase,
                 )
 
-                agg_total_files += stats_part.get("total_files", 0)
-                agg_total_chunks += stats_part.get("total_chunks", 0)
-                agg_errors.extend(stats_part.get("errors", []))
-                agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
+                # Hide the coordinator's store_task ("Handling files") —
+                # the Rust write sub-phase bars (built inside
+                # run_rust_indexing_phase) render fine-grained progress
+                # themselves. Keep parse_task for the parse phase.
+                if self.progress and store_task is not None:
+                    self.progress.remove_task(store_task)
+                    store_task = None
 
-            # Parse files (streaming progress as batches complete and store concurrently)
-            # Pass files_to_process directly - preserves hash for each file
-            # Results flow to storage via on_batch=_on_batch_store; return value unused.
-            await self._process_files_in_batches(
-                files_to_process,
-                config_file_size_threshold_kb,
-                parse_task,
-                on_batch=_on_batch_store,
-            )
+                rust_result = await run_rust_indexing_phase(
+                    db=self._db,
+                    config=self.config,
+                    embedding_provider=self._embedding_provider,
+                    progress=self.progress,
+                    files_to_process=_normalize_to_path_tuples(files_to_process),
+                    directory=directory,
+                    force_reindex=force_reindex,
+                    do_cleanup=do_cleanup,
+                    diff_task=_diff_task,
+                    parse_task=parse_task,
+                )
 
-            # Mark parse task complete
-            if parse_task is not None and self.progress:
-                task = self.progress.tasks[parse_task]
-                if task.total:
-                    self.progress.update(parse_task, completed=task.total)
+                _diff_elapsed = rust_result.diff_elapsed
+                _compact_ran = rust_result.compact_ran
+                _compact_size_before = rust_result.compact_size_before
+                _compact_size_after = rust_result.compact_size_after
+                _compact_reduction_pct = rust_result.compact_reduction_pct
+
+                agg_total_files = rust_result.total_files
+                agg_total_chunks = rust_result.total_chunks
+                agg_embeddings = rust_result.embeddings_generated
+                # Per-file parse timeouts arrive inside rust_result.errors as
+                # "parse timed out after {N}s" (chunkhound/pipeline_bridge.py's
+                # _parse_with_timeout, surfaced via _split_rust_error). Split
+                # those out into the skipped-due-to-timeout bucket — mirroring
+                # the Python path's equivalent split in _on_batch_store above —
+                # so run.py's timeout-exclusion prompt fires for the Rust path
+                # too. Match on the specific "parse timed out after" prefix,
+                # not a bare "timed out" substring: rust_result.errors also
+                # carries embed errors shaped like "embedding failed for N
+                # chunk(s): {message}", and {message} could itself mention a
+                # provider-side timeout — that must stay a real error, not get
+                # silently reclassified as a harmless parse skip.
+                #
+                # Non-timeout skip reasons (binary/unknown/large config) arrive
+                # on rust_result.skipped_paths, not in errors.
+                agg_errors = []
+                agg_skipped_timeout = []
+                for err in rust_result.errors:
+                    if "parse timed out after" in (err.get("error") or ""):
+                        agg_skipped_timeout.append(str(err.get("file")))
+                    else:
+                        agg_errors.append(err)
+                agg_skipped_paths = [
+                    (str(path), str(reason))
+                    for path, reason in rust_result.skipped_paths
+                ]
+                agg_skipped = len(agg_skipped_timeout) + len(agg_skipped_paths)
+
+                logger.info(
+                    f"Diff: {agg_total_files}/{len(files)} changed in "
+                    f"{_diff_elapsed * 1000:.0f}ms "
+                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash)"
+                )
+                # Total skipped = discovered files minus those actually processed.
+                # skipped_by_hash only covers mtime-changed-but-hash-matched files;
+                # the majority (mtime-matched) are not counted in any Rust stat.
+                skipped_unchanged = len(files) - agg_total_files
+
+            else:
+                # ── Python path (existing) ─────────────────────────
+
+                store_progress_counters = {
+                    "chunks": 0,
+                    "files": 0,
+                    "stored": 0,
+                    "skipped": 0,
+                    "errors": 0,
+                }
+
+                async def _on_batch_store(batch: list[ParsedFileResult]) -> None:
+                    nonlocal \
+                        agg_total_files, \
+                        agg_total_chunks, \
+                        agg_errors, \
+                        agg_skipped, \
+                        agg_skipped_timeout, \
+                        agg_skipped_paths
+                    # Update skip counters from parse results
+                    for r in batch:
+                        if r.status == "skipped":
+                            agg_skipped += 1
+                            if (r.error or "").lower() == "timeout":
+                                agg_skipped_timeout.append(str(r.file_path))
+
+                    # Store this batch immediately
+                    stats_part = await self._store_parsed_results(
+                        batch, store_task, cumulative_counters=store_progress_counters
+                    )
+
+                    agg_total_files += stats_part.get("total_files", 0)
+                    agg_total_chunks += stats_part.get("total_chunks", 0)
+                    agg_errors.extend(stats_part.get("errors", []))
+                    agg_skipped_paths.extend(stats_part.get("skipped_paths", []))
+
+                # Parse files (streaming progress as batches complete and store concurrently)
+                # Pass files_to_process directly - preserves hash for each file
+                # Results flow to storage via on_batch=_on_batch_store; return value unused.
+                await self._process_files_in_batches(
+                    files_to_process,
+                    config_file_size_threshold_kb,
+                    parse_task,
+                    on_batch=_on_batch_store,
+                )
+
+                # Mark parse task complete
+                if parse_task is not None and self.progress:
+                    task = self.progress.tasks[parse_task]
+                    if task.total:
+                        self.progress.update(parse_task, completed=task.total)
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
-            if _t0 is not None:
-                try:
-                    self._startup_profile = {
-                        "discovery_ms": round(
-                            ((_t1 - _t0) if (_t1 and _t0) else 0.0) * 1000.0, 3
-                        ),
-                        "cleanup_ms": round(
-                            (
-                                (_t3 - _t2)
-                                if (_t3 is not None and _t2 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "change_scan_ms": round(
-                            (
-                                (_t5 - _t4)
-                                if (_t5 is not None and _t4 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "files_discovered": len(files),
-                        "orphaned_cleaned": cleaned_files,
-                        "files_after_change_scan": len(files_to_process),
-                        "parallel_used": bool(
-                            getattr(self, "_profile_parallel_used", False)
-                        ),
-                    }
-                except Exception:
-                    pass
+            try:
+                # _t0/_t1 are set unconditionally above; _t2.._t5 stay None when
+                # the Rust pipeline runs or cleanup/change-scan is skipped, so
+                # those phases fall back to 0.0 rather than dropping the profile.
+                self._startup_profile = {
+                    "discovery_ms": round((_t1 - _t0) * 1000.0, 3),
+                    "cleanup_ms": round(
+                        ((_t3 - _t2) if (_t3 is not None and _t2 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "change_scan_ms": round(
+                        ((_t5 - _t4) if (_t5 is not None and _t4 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "files_discovered": len(files),
+                    "orphaned_cleaned": cleaned_files,
+                    "files_after_change_scan": len(files_to_process),
+                    "parallel_used": bool(
+                        getattr(self, "_profile_parallel_used", False)
+                    ),
+                }
+            except Exception:
+                pass
 
             # At this point, all parsed results have been stored via _on_batch_store
             stats: dict[str, Any] = {
                 "total_files": agg_total_files,
                 "total_chunks": agg_total_chunks,
                 "errors": agg_errors,
+                "embeddings_generated": agg_embeddings,
             }
 
             # Track skipped files (including timeouts)
@@ -1607,16 +1902,24 @@ class IndexingCoordinator(BaseService):
                         "current_size_mb": error["current_size_mb"],
                         "limit_mb": error["limit_mb"],
                         "error": error["error"],
+                        "pipeline": "rust" if _use_rust else "python",
                     }
 
             return {
                 "status": "success",
                 "files_processed": total_files,
                 "total_chunks": total_chunks,
+                "embeddings_generated": stats.get("embeddings_generated", 0),
+                "errors": len(agg_errors),
                 "skipped": skipped_total + skipped_unchanged,
                 "skipped_due_to_timeout": skipped_due_to_timeout,
                 "skipped_unchanged": skipped_unchanged,
                 "skipped_filtered": skipped_filtered,
+                "pipeline": "rust" if _use_rust else "python",
+                "compaction_ran": _compact_ran,
+                "compaction_size_before": _compact_size_before,
+                "compaction_size_after": _compact_size_after,
+                "compaction_reduction_pct": _compact_reduction_pct,
             }
 
         except Exception as e:
@@ -1631,9 +1934,21 @@ class IndexingCoordinator(BaseService):
                     "current_size_mb": e.current_size_mb,
                     "limit_mb": e.limit_mb,
                     "error": str(e),
+                    "pipeline": "rust" if _use_rust else "python",
+                }
+            elif isinstance(e, RustPipelineError):
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "pipeline": "rust",
+                    "rust_pipeline_error": True,
                 }
             else:
-                return {"status": "error", "error": str(e)}
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "pipeline": "rust" if _use_rust else "python",
+                }
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
@@ -1713,9 +2028,32 @@ class IndexingCoordinator(BaseService):
         """Get database statistics.
 
         Returns:
-            Dictionary with file, chunk, and embedding counts
+            Dictionary with file, chunk, embedding, and provider counts.
+            When the provider is not connected because the Rust pipeline
+            currently owns the database file, returns zeroed stats plus
+            `"status": "rust_pipeline_active"` so callers can distinguish
+            this transient state from a genuinely empty/disconnected database.
         """
+        if not self._db.is_connected:
+            zeros: dict[str, Any] = {
+                "files": 0,
+                "chunks": 0,
+                "embeddings": 0,
+                "providers": 0,
+            }
+            if self._db.is_rust_pipeline_in_progress():
+                zeros["status"] = "rust_pipeline_active"
+            return zeros
         return await self._db.get_stats_async()
+
+    def clear_compaction_skip(self) -> None:
+        """Force the next compact_database_with_metrics() call to run for real.
+
+        Called after a Python-side retry pass writes new data (e.g. missing
+        embeddings) following a Rust run that reported per-file errors —
+        Rust's own internal compaction never covered these newly-written rows.
+        """
+        self._skip_compaction = False
 
     async def compact_database_with_metrics(self) -> dict[str, Any]:
         """Compact the database file unconditionally and return metrics.
@@ -1727,6 +2065,9 @@ class IndexingCoordinator(BaseService):
         Returns:
             Dict with status, size_before, size_after, reduction_pct.
         """
+        if self._skip_compaction:
+            return {"status": "skipped", "reason": "Rust pipeline owns compaction"}
+
         db_path = str(self._db.db_path)
         if db_path == ":memory:":
             size_before = 0
@@ -2017,6 +2358,7 @@ class IndexingCoordinator(BaseService):
         patterns: list[str],
         exclude_patterns: list[str],
         use_inode_ordering: bool = False,
+        discovery_task_id: TaskID | None = None,
     ) -> list[Path] | None:
         """Parallel directory discovery using multi-core traversal.
 
@@ -2156,6 +2498,20 @@ class IndexingCoordinator(BaseService):
             f"{num_workers} workers (max: {max_workers})"
         )
 
+        # Now that parallel mode is confirmed, switch the discovery task from
+        # an indeterminate spinner to a determinate per-subtree count. The
+        # +1 accounts for the root-directory-itself scan below — folded into
+        # the same denominator as the bar's total so the info text's count
+        # never disagrees with the bar (see the root-scan tick further down).
+        _discovery_units = len(top_level_items) + 1
+        if discovery_task_id is not None and self.progress is not None:
+            self.progress.update(
+                discovery_task_id,
+                total=_discovery_units,
+                completed=0,
+                info=f"0/{_discovery_units} subtrees",
+            )
+
         # Process subtrees in parallel
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
@@ -2213,8 +2569,19 @@ class IndexingCoordinator(BaseService):
                 )
                 futures.append(fut)
 
-            # Wait for all subtrees to complete
-            subtree_results = await asyncio.gather(*futures)
+            # Wait for all subtrees to complete, ticking progress as each one
+            # finishes. Completion order doesn't matter here — the
+            # aggregation below re-sorts/merges results regardless of the
+            # order they arrive in.
+            subtree_results = []
+            for _fut in asyncio.as_completed(futures):
+                subtree_results.append(await _fut)
+                if discovery_task_id is not None and self.progress is not None:
+                    self.progress.update(
+                        discovery_task_id,
+                        advance=1,
+                        info=f"{len(subtree_results)}/{_discovery_units} subtrees",
+                    )
 
         # Aggregate and log worker errors
         all_errors = []
@@ -2262,6 +2629,12 @@ class IndexingCoordinator(BaseService):
             None,
             local_engine,
         )
+        if discovery_task_id is not None and self.progress is not None:
+            self.progress.update(
+                discovery_task_id,
+                advance=1,
+                info=f"{_discovery_units}/{_discovery_units} subtrees",
+            )
 
         # Merge sorted worker results efficiently using heap-based merge
         # Workers already sort their results, so we merge k sorted lists
@@ -2294,6 +2667,7 @@ class IndexingCoordinator(BaseService):
         exclude_patterns: list[str] | None,
         parallel_discovery: bool | None = None,
         use_inode_ordering: bool = False,
+        discovery_task_id: TaskID | None = None,
     ) -> list[Path]:
         """Discover files in directory matching patterns with efficient exclude filtering.
 
@@ -2563,13 +2937,19 @@ class IndexingCoordinator(BaseService):
                         setattr(self, "_profile_parallel_used", False)
                     except Exception:
                         pass
-                    return sorted(files_git)
+                    return self._filter_unsupported_extensions(
+                        sorted(files_git), patterns
+                    )
 
         # Try parallel discovery if enabled
         if parallel_discovery:
             try:
                 discovered_files = await self._discover_files_parallel(
-                    directory, patterns, exclude_patterns, use_inode_ordering
+                    directory,
+                    patterns,
+                    exclude_patterns,
+                    use_inode_ordering,
+                    discovery_task_id=discovery_task_id,
                 )
                 # Check if parallel succeeded (returns files) or signaled fallback (returns None)
                 if discovered_files is not None:
@@ -2579,7 +2959,9 @@ class IndexingCoordinator(BaseService):
                         setattr(self, "_profile_parallel_used", True)
                     except Exception:
                         pass
-                    return discovered_files
+                    return self._filter_unsupported_extensions(
+                        discovered_files, patterns
+                    )
                 # Otherwise fall through to sequential (None signal)
             except Exception as e:
                 # Preserve full error context for debugging large repo issues
@@ -2624,7 +3006,27 @@ class IndexingCoordinator(BaseService):
             setattr(self, "_profile_parallel_used", False)
         except Exception:
             pass
-        return sorted(discovered_files)
+        return self._filter_unsupported_extensions(sorted(discovered_files), patterns)
+
+    def _filter_unsupported_extensions(
+        self, files: list[Path], patterns: list[str]
+    ) -> list[Path]:
+        """Drop files with no language support that only matched via a
+        complex/wildcard include pattern. See passes_extension_filter() in
+        file_patterns.py for the shared predicate.
+        """
+        idx_cfg = self._indexing_config_or_none()
+        index_unknown = bool(
+            idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False)
+        )
+        # Summarize once for the whole batch; per-file re-summarization would be
+        # O(patterns) work on every discovered file.
+        prepared = prepare_extension_filter(patterns)
+        return [
+            f
+            for f in files
+            if passes_extension_filter(f, patterns, index_unknown, prepared=prepared)
+        ]
 
     def _discover_files_via_git(
         self,

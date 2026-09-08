@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import duckdb
 from loguru import logger
 
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -45,6 +46,8 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
+    DatabaseRustPipelineInProgressError,
+    DatabaseTemporarilyUnavailableError,
     _executor_local,
 )
 from chunkhound.utils.windows_constants import (
@@ -336,6 +339,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         return self._connection_manager.db_path
 
     @property
+    def supports_rust_pipeline(self) -> bool:
+        """The Rust pipeline (chunkhound_native.IndexingPipeline) implements
+        a DuckDB backend."""
+        return True
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active - delegate to connection manager."""
         return self._connection_manager.is_connected
@@ -360,6 +369,15 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "Database compaction in progress — connection refused until "
                     "compaction completes"
                 )
+            if self._executor.is_rust_pipeline_in_progress():
+                logger.info(
+                    "Rust indexing pipeline owns the database — refusing "
+                    "connection until it finishes"
+                )
+                raise DatabaseRustPipelineInProgressError(
+                    "Rust indexing pipeline owns the database — connection "
+                    "refused until it finishes"
+                )
 
             # Validate stored indexed-root identity before any file-backed DB
             # open, WAL replay, extension load, or schema touch happens.
@@ -374,7 +392,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Call parent connect which handles executor initialization
             super().connect()
 
-        except DatabaseCompactionInProgressError:
+        except DatabaseTemporarilyUnavailableError:
             raise
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
@@ -524,6 +542,47 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Recreate connection after WAL cleanup
             _executor_local.connection = self._create_connection()
 
+    def release_for_rust_pipeline(self) -> None:
+        """Close ALL DuckDB connections without shutting down the executor.
+
+        Overrides SerialDatabaseProvider to also close _connection_manager.connection.
+        If only the executor's thread-local connection is closed, Python's DuckDB
+        C-instance keeps the file open in its buffer pool.  When Rust then writes new
+        data and Python reconnects, duckdb.connect() returns a connection to the same
+        already-open in-memory database (stale cache) instead of reading Rust's
+        freshly-written data from disk.
+
+        Raises:
+            DatabaseError: if either connection could not be closed. The caller
+                must not proceed to hand write ownership to the Rust pipeline in
+                that case — Python's DuckDB connection(s) would still be open on
+                the same file Rust is about to write to.
+        """
+        failures: list[str] = []
+        try:
+            self._execute_in_db_thread_sync("disconnect", False)
+        except Exception as e:
+            failures.append(f"executor connection: {e}")
+        finally:
+            self._executor.clear_thread_local()
+            try:
+                # Close the connection manager's connection so Python's DuckDB
+                # fully releases the file before Rust takes ownership.
+                # skip_checkpoint=True: executor already checkpointed above.
+                self._connection_manager.disconnect(skip_checkpoint=True)
+            except Exception as e:
+                failures.append(f"connection manager: {e}")
+
+        if failures:
+            raise DatabaseError(
+                operation="release_for_rust_pipeline",
+                reason=(
+                    "failed to close the Python DuckDB connection(s) before "
+                    "handing write ownership to the Rust pipeline: "
+                    f"{'; '.join(failures)}"
+                ),
+            )
+
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing - delegate to connection manager."""
         try:
@@ -563,6 +622,10 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
         except Exception as e:
             log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
+            raise DatabaseError(
+                operation="disconnect",
+                reason=f"checkpoint failed before disconnect: {e}",
+            ) from e
         finally:
             # Close connection
             conn.close()
@@ -812,87 +875,40 @@ class DuckDBProvider(SerialDatabaseProvider):
         ).fetchall()
         return [int(row[0]) for row in rows]
 
-    def _executor_get_vector_indexes_for_table(
-        self, conn: Any, state: dict[str, Any], table_name: str
-    ) -> list[dict[str, Any]]:
-        """Return only the HNSW indexes for the target embedding table."""
-        return [
-            index_info
-            for index_info in self._executor_get_existing_vector_indexes(conn, state)
-            if index_info["table_name"] == table_name
-        ]
-
-    def _executor_run_embedding_table_hnsw_guarded_mutation(
+    def _executor_run_upsert_contract_step(
         self,
         conn: Any,
         state: dict[str, Any],
-        table_name: str,
-        mutation_label: str,
-        mutation_func: Callable[[], Any],
-        *,
-        optimize_for_bulk: bool = False,
-        transactional: bool = True,
-    ) -> Any:
-        """Run one embedding-table mutation behind a strict exact-index restore guard."""
-        if state.get("transaction_active", False) and transactional:
-            raise DuckDBTransactionConflictError(
-                f"{mutation_label} cannot run while another DuckDB transaction is active"
-            )
+        step_label: str,
+        step_func: Callable[[], Any],
+    ) -> None:
+        """Run one upsert-contract repair step in its own transaction, unless
+        the caller already has one open (then run directly, deferring to it).
 
-        existing_indexes = self._executor_get_vector_indexes_for_table(
-            conn, state, table_name
-        )
-
+        Deliberately does NOT touch any HNSW/vector index: a plain DELETE and
+        a plain (non-vector) CREATE UNIQUE INDEX are both safe to run against
+        a table with a live HNSW index left untouched — verified directly
+        against DuckDB's VSS extension. Dropping and rebuilding the HNSW
+        index around these steps, as a prior version of this code did, was a
+        redundant full O(table size) rebuild with no functional need, most
+        costly right after a compaction that just built the same index.
+        """
+        transactional = not state.get("transaction_active", False)
+        if transactional:
+            self._executor_begin_transaction(conn, state)
         try:
+            step_func()
+        except Exception:
             if transactional:
-                self._executor_begin_transaction(conn, state)
-            if optimize_for_bulk:
-                conn.execute("SET preserve_insertion_order = false")
-
-            for index_info in existing_indexes:
-                self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
-
-            result = mutation_func()
-
-            # Commit data changes before recreating HNSW indexes. DuckDB VSS HNSW indexes
-            # do not support CreateDeltaIndex, so committing a transaction that contains an
-            # HNSW CREATE triggers a BoundIndex::CreateDeltaIndex assertion failure.
-            if transactional:
-                self._executor_commit_transaction(conn, state, False)
-
-            for index_info in existing_indexes:
-                self._executor_recreate_vector_index_from_info(conn, state, index_info)
-
-            if not state.get("transaction_active", False):
-                conn.execute("CHECKPOINT")
-            return result
-        except Exception as e:
-            if transactional and state.get("transaction_active", False):
-                try:
-                    self._executor_rollback_transaction(conn, state)
-                except Exception as rollback_error:
-                    raise RuntimeError(
-                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
-                    ) from rollback_error
-            else:
-                restore_failures: list[str] = []
-                for index_info in existing_indexes:
-                    try:
-                        self._executor_recreate_vector_index_from_info(
-                            conn, state, index_info
-                        )
-                    except Exception as recreate_error:
-                        restore_failures.append(
-                            f"{index_info['index_name']}: {recreate_error}"
-                        )
-                if restore_failures:
-                    joined_failures = "; ".join(restore_failures)
-                    raise RuntimeError(
-                        f"{mutation_label} failed and HNSW restore was incomplete: "
-                        f"{joined_failures}"
-                    ) from e
-
+                self._executor_rollback_transaction(conn, state)
             raise
+        # Commit before the next step: DuckDB's index builder still counts a
+        # row deleted earlier in the same still-open transaction as a live
+        # duplicate, which trips "Data contains duplicates" even though the
+        # delete already ran -- the dedupe DELETE must commit before the
+        # CREATE UNIQUE INDEX step runs.
+        if transactional:
+            self._executor_commit_transaction(conn, state, False)
 
     def _executor_ensure_embedding_upsert_contract(
         self, conn: Any, state: dict[str, Any], table_name: str, dims: int
@@ -908,21 +924,23 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn, table_name
         )
 
-        def _apply_contract() -> None:
-            if duplicate_row_ids:
-                self._executor_delete_embeddings_by_row_ids(
+        if duplicate_row_ids:
+            self._executor_run_upsert_contract_step(
+                conn,
+                state,
+                f"dedupe_embedding_upsert_contract({table_name})",
+                lambda: self._executor_delete_embeddings_by_row_ids(
                     conn, table_name, duplicate_row_ids
-                )
-            self._executor_create_embedding_unique_index(conn, table_name, dims)
+                ),
+            )
 
-        manage_transaction = not state.get("transaction_active", False)
-        self._executor_run_embedding_table_hnsw_guarded_mutation(
+        self._executor_run_upsert_contract_step(
             conn,
             state,
-            table_name,
             f"ensure_embedding_upsert_contract({table_name})",
-            _apply_contract,
-            transactional=manage_transaction,
+            lambda: self._executor_create_embedding_unique_index(
+                conn, table_name, dims
+            ),
         )
 
     def _executor_create_embedding_table_indexes(
