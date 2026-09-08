@@ -10,46 +10,103 @@ Contract:
   header — sending a partially-interpolated string would leak the literal
   ``${VAR}`` placeholder to the wire and could authenticate as a different
   principal than the operator intended.
-- Any recoverable failure (timeout, transport error, non-2xx) logs a
-  WARNING and returns ``None``; the caller then aborts the pipeline for
-  this invocation.
-- Redirects are followed (``follow_redirects=True``) so operators can put
-  the endpoint behind a CDN or path rewriter without every fetch failing
-  envelope_parse_error on the 301's non-JSON body (3xx responses satisfy
-  status_code < 400 and would slip past the check). The 10-second
-  wall-clock budget still bounds the total including any redirect chain. Note: httpx strips the
-  ``Authorization`` header on cross-origin redirects but forwards it on
-  same-origin hops (same scheme + host + port, with an HTTP→HTTPS
-  upgrade exception on the same host); a URL that redirects within its
-  own origin will still receive the interpolated token, so the
-  configured endpoint's origin is the trust boundary. Failure logs drop
-  userinfo, query, and fragment from both the configured URL and any
-  redirected final URL so a credential or pre-signed object (as the
-  endpoint or as a CDN hop) does not copy secrets into the WARNING line.
+- URL scheme must be ``https`` OR the host must be loopback
+  (``localhost``, ``127.0.0.0/8``, ``::1``). Loopback is a narrow escape
+  hatch for local development and mock servers; loopback traffic does not
+  leave the machine, so cleartext HTTP there is not a MITM vector. The
+  rule never DNS-resolves hostnames — a resolvable name could point at
+  loopback at check time and elsewhere at fetch time.
+- Redirects are followed manually with per-hop scheme + loopback
+  validation (``_MAX_REDIRECTS`` caps the chain — tighter than httpx's
+  default of 20). The target of every 3xx is re-validated with the same
+  rule before the next request is issued, so an HTTPS→HTTP downgrade
+  never dispatches a cleartext request. ``Authorization`` is stripped
+  on cross-origin redirects (differing scheme, host, or port) so a
+  bearer token issued for the configured endpoint does not travel to
+  a redirect target.
+- Any recoverable failure (timeout, transport error, non-2xx, disallowed
+  scheme, redirect loop) logs a WARNING and returns ``None``; the caller
+  then aborts the pipeline for this invocation.
+- Failure logs drop userinfo, query, and fragment from every URL so a
+  credential or pre-signed object does not copy secrets into the WARNING
+  line.
 - The raw templated string is never mutated upstream. Persistence keeps it
   verbatim so subsequent runs re-interpolate against the *current*
   environment rather than freezing a stale secret to disk.
 """
 
 import asyncio
+import ipaddress
 import os
 import re
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 _TIMEOUT_SECONDS: float = 10.0
+_MAX_REDIRECTS: int = 5
+_REDIRECT_STATUSES: frozenset[int] = frozenset({301, 302, 303, 307, 308})
 _VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
+class _FetchAbortedError(Exception):
+    """Internal: fetch refused (disallowed scheme / redirect loop).
+
+    WARNING already logged at the point of raise.
+    """
+
+
 def _url_for_log(raw: str) -> str:
-    """Scheme + host + port + path; drop userinfo/query/fragment so secrets stay out of logs."""
+    """Scheme + host + port + path only.
+
+    Drops userinfo, query, and fragment so credentials and pre-signed
+    tokens don't copy into WARNING lines.
+    """
     parts = urlsplit(raw)
     _, _, netloc = parts.netloc.rpartition("@")
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _is_loopback_host(hostname: str | None) -> bool:
+    """True iff ``hostname`` is a loopback IP literal or the string ``localhost``.
+
+    Never DNS-resolves: a resolvable name could answer loopback at check
+    time and elsewhere at fetch time.
+    """
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _url_scheme_ok(url: str) -> bool:
+    """True iff URL is ``https`` or points at a loopback host over ``http``."""
+    parts = urlsplit(url)
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and _is_loopback_host(parts.hostname)
+
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    """(scheme, host, port) — the tuple used to decide same-origin for auth carry.
+
+    Missing ports are normalized to the scheme's default so
+    ``https://h/`` and ``https://h:443/`` compare equal — a CDN that
+    emits an explicit ``:443`` in ``Location`` must not look cross-origin.
+    """
+    parts = urlsplit(url)
+    port = parts.port if parts.port is not None else _DEFAULT_PORTS.get(parts.scheme)
+    return (parts.scheme, parts.hostname, port)
 
 
 def _interpolate_env(template: str) -> str | None:
@@ -79,14 +136,70 @@ def _interpolate_env(template: str) -> str | None:
     return result
 
 
+async def _fetch_with_redirects(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+) -> tuple[httpx.Response, str]:
+    """Drive a manual redirect loop with per-hop scheme validation.
+
+    Returns the terminal (non-redirect) response plus the URL that
+    produced it so the caller can log the final hop. Raises
+    ``_FetchAbortedError`` on disallowed scheme or exhausted hop budget
+    (WARNING already emitted).
+    """
+    origin_url = _url_for_log(url)
+    current_url = url
+    request_headers = dict(headers)
+    for _ in range(_MAX_REDIRECTS + 1):
+        response = await client.get(current_url, headers=request_headers)
+        if response.status_code not in _REDIRECT_STATUSES:
+            return response, current_url
+        location = response.headers.get("Location")
+        if not location:
+            return response, current_url
+        next_url = urljoin(current_url, location)
+        if not _url_scheme_ok(next_url):
+            log_if_not_mcp(
+                "WARNING",
+                "Remote-config redirect refused: URL scheme must be https "
+                "(or http to a loopback host): {} (via {})",
+                _url_for_log(next_url),
+                origin_url,
+            )
+            raise _FetchAbortedError
+        if _origin(next_url) != _origin(current_url):
+            request_headers.pop("Authorization", None)
+        current_url = next_url
+    log_if_not_mcp(
+        "WARNING",
+        "Remote-config fetch aborted after {} redirects: {} (via {})",
+        _MAX_REDIRECTS,
+        _url_for_log(current_url),
+        origin_url,
+    )
+    raise _FetchAbortedError
+
+
 async def fetch(url: str, auth_header: str | None) -> Any | None:
     """Fetch the remote-config envelope; return parsed JSON or ``None``.
 
     Returns:
         Parsed JSON payload (typically a dict) on success. ``None`` on any
         recoverable failure (timeout, transport error, non-2xx, JSON parse
-        failure of the response body).
+        failure of the response body, disallowed scheme, redirect loop).
     """
+    origin_url = _url_for_log(url)
+
+    if not _url_scheme_ok(url):
+        log_if_not_mcp(
+            "WARNING",
+            "Remote-config fetch refused: URL scheme must be https "
+            "(or http to a loopback host): {}",
+            origin_url,
+        )
+        return None
+
     headers: dict[str, str] = {}
     if auth_header is not None:
         interpolated = _interpolate_env(auth_header)
@@ -97,10 +210,10 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_TIMEOUT_SECONDS),
-            follow_redirects=True,
+            follow_redirects=False,
         ) as client:
-            response = await asyncio.wait_for(
-                client.get(url, headers=headers),
+            response, final_url = await asyncio.wait_for(
+                _fetch_with_redirects(client, url, headers),
                 timeout=_TIMEOUT_SECONDS,
             )
     except asyncio.TimeoutError:
@@ -108,30 +221,33 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
             "WARNING",
             "Remote-config fetch timed out after {}s: {}",
             _TIMEOUT_SECONDS,
-            _url_for_log(url),
+            origin_url,
         )
         return None
     except httpx.TimeoutException:
         log_if_not_mcp(
             "WARNING",
             "Remote-config fetch timeout: {}",
-            _url_for_log(url),
+            origin_url,
         )
+        return None
+    except _FetchAbortedError:
         return None
     except Exception as exc:  # httpx transport / connection / SSL / etc.
         log_if_not_mcp(
             "WARNING",
             "Remote-config fetch failed ({}): {}",
             type(exc).__name__,
-            _url_for_log(url),
+            origin_url,
         )
         return None
 
-    origin_url = _url_for_log(url)
-    if response.history:
-        logged_url = f"{_url_for_log(str(response.url))} (via {origin_url})"
-    else:
-        logged_url = origin_url
+    final_url_for_log = _url_for_log(final_url)
+    logged_url = (
+        f"{final_url_for_log} (via {origin_url})"
+        if final_url_for_log != origin_url
+        else origin_url
+    )
 
     if response.status_code >= 400:
         log_if_not_mcp(

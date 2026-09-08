@@ -12,6 +12,10 @@ Precedence rules:
   have that subtree scrubbed at load time with a WARNING (trust boundary in
   ``Config.__init__``) — a checked-in project file must not be able to
   redirect the operator's URL.
+- The URL scheme is enforced by the fetcher: HTTPS is required, with a
+  narrow loopback exception (``localhost``, ``127.0.0.0/8``, ``::1``) for
+  local development. The rule applies per hop across any redirect chain,
+  so an HTTPS endpoint can never be silently downgraded to cleartext.
 - On a successful fetch the pipeline self-registers the source-layer's
   raw values back into the global JSON so subsequent runs converge to the
   same discovery inputs. Intentional trade-off: a literal ``auth_header``

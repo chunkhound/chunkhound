@@ -1028,10 +1028,25 @@ class DaemonDiscovery:
         daemon_parser = add_daemon_subparser(_tmp.add_subparsers())
         # project_dir and socket_path are daemon-specific positionals already
         # placed explicitly in the command; skip them here.
+        #
+        # remote_config_* flags are dropped even though the daemon parser
+        # accepts them: `_daemon` is in `_SUBPROCESS_SKIP`
+        # (chunkhound/core/config/remote/__init__.py) and never runs the
+        # remote-config fetch, so forwarding is pointless — and forwarding
+        # the auth header would expose the credential via `ps` /
+        # `/proc/<pid>/cmdline`. Env vars
+        # (CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER) still reach the daemon
+        # via env inheritance below and are unaffected.
         return build_forwarded_argv(
             daemon_parser,
             args,
-            skip_dests={"project_dir", "socket_path", "help"},
+            skip_dests={
+                "project_dir",
+                "socket_path",
+                "help",
+                "remote_config_url",
+                "remote_config_auth_header",
+            },
         )
 
     def _start_daemon_subprocess(

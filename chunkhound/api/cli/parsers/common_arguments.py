@@ -32,7 +32,11 @@ def add_remote_config_arguments(parser: argparse.ArgumentParser) -> None:
         "--remote-config-url",
         type=str,
         default=None,
-        help="URL to fetch remote configuration on startup",
+        help=(
+            "URL to fetch remote configuration on startup. HTTPS required; "
+            "http:// is accepted only for loopback hosts (localhost, "
+            "127.0.0.0/8, ::1) as an escape hatch for local development."
+        ),
     )
     parser.add_argument(
         "--remote-config-auth-header",
