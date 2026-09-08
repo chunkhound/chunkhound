@@ -194,6 +194,14 @@ def test_openrouter_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_orcarouter_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "orcarouter")
+
+    assert config["provider"] == "orcarouter"
+    assert config["model"] == "anthropic/claude-sonnet-5"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 
