@@ -576,15 +576,33 @@ class Config(BaseModel):
 
         Applies env + provided global dict; skips local_config, config_file,
         and CLI layers. Used by the remote-config pipeline for the pre-rules
-        half-merged snapshot (feeds rule predicates like ``when.existing``)
-        and for both sides of the terminal delta gate, avoiding a speculative
-        disk write.
+        half-merged snapshot that feeds rule predicates like ``when.existing``
+        — must reflect disk state only, so CLI and local layers are excluded.
+        Delta-gate snapshots use ``snapshot_for_delta_gate`` instead.
         """
         return cls(
             args=None,
             skip_layers={"local_config", "config_file", "cli"},
             global_override=global_dict,
         )
+
+    @classmethod
+    def snapshot_for_delta_gate(
+        cls, global_dict: dict[str, Any], args: Any
+    ) -> "Config":
+        """Build a snapshot merging every layer, with ``global_dict`` as global-JSON.
+
+        Used for both sides of the terminal delta gate. Unlike
+        ``snapshot_from_global_dict`` (which is the substrate for rule
+        predicates and must reflect disk state only), the delta gate needs
+        to see the active invocation — including CLI flags like
+        ``--transport http`` and any project-local ``.chunkhound.json`` —
+        so that MCP guards keyed on ``self.mcp.transport == "http"`` cannot
+        be bypassed by a rule that persists ``mcp.host=0.0.0.0`` or
+        ``mcp.cors=true`` under a snapshot that silently falls back to the
+        ``stdio`` default.
+        """
+        return cls(args=args, global_override=global_dict)
 
     def validate_for_command_structured(
         self, command: str, args: Any | None = None

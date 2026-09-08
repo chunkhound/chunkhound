@@ -33,12 +33,15 @@ set ``extra="ignore"`` explicitly for local-config forward compatibility)
 and would otherwise silently absorb the typo. This applies to ``remove``
 as well: removing an unknown leaf now surfaces as ``schema_error`` rather
 than the previous ``no-op`` audit line — the leaf can't legitimately
-exist under the schema, so silence would still hide the typo. Currently
-limited to depth-2 — the config tree has no nested BaseModel fields
-beyond ``Config.<sub>``. Gap: unknown keys inside a depth-1 ``merge``
-value (e.g. ``id=embedding, op=merge, value={provder: ...}``) are still
-absorbed silently — the check only fires when the path itself carries
-a second segment.
+exist under the schema, so silence would still hide the typo. Parent-level
+``merge``/``set`` payloads (e.g. ``id=embedding, op=merge,
+value={provder: ...}``) are recursively checked against the target
+sub-model's fields — an unknown nested key surfaces as ``schema_error``
+before mutation, preventing typos from being persisted to the global JSON.
+
+The depth-2 assumption above (Config → sub-model → leaf) is enforced by
+a shape-invariant tripwire in ``test_rules.py`` — if a sub-config gains
+a nested ``BaseModel`` field the test fails, listing what to re-verify.
 """
 
 import copy
@@ -206,6 +209,52 @@ def _sub_model_for(top_segment: str) -> type[BaseModel] | None:
     return ENCLOSING_SUB_MODEL.get(top_segment)
 
 
+def _unwrap_optional_basemodel(annotation: Any) -> type[BaseModel] | None:
+    """Return the ``BaseModel`` inside ``X | None`` (or ``X`` directly), else None.
+
+    Mirrors the union handling in ``_build_enclosing_map`` so nested-field
+    recursion in ``_check_payload_keys`` follows the same shape rules as
+    the top-level enclosing map.
+    """
+    candidates = typing.get_args(annotation) or (annotation,)
+    for candidate in candidates:
+        if candidate is NoneType:
+            continue
+        if isinstance(candidate, type) and issubclass(candidate, BaseModel):
+            return candidate
+    return None
+
+
+def _check_payload_keys(
+    model: type[BaseModel],
+    payload: Any,
+    path_prefix: list[str],
+) -> str | None:
+    """Return the dotted path of the first unknown key in ``payload``, else None.
+
+    Walks ``payload`` recursively and validates every dict key against the
+    corresponding model's ``model_fields``. Sub-models set ``extra="ignore"``
+    for local-config forward compatibility, so pydantic would otherwise drop
+    typos silently — this pre-mutation check surfaces them as ``schema_error``.
+
+    Only descends into a field's payload when the field annotation resolves
+    to a ``BaseModel`` subclass. Non-model dict fields (``dict[str, str]``,
+    etc.) may legitimately carry arbitrary keys, so recursion stops there.
+    """
+    if not isinstance(payload, dict):
+        return None
+    fields = model.model_fields
+    for key, sub_payload in payload.items():
+        if key not in fields:
+            return ".".join([*path_prefix, key])
+        nested = _unwrap_optional_basemodel(fields[key].annotation)
+        if nested is not None:
+            err = _check_payload_keys(nested, sub_payload, [*path_prefix, key])
+            if err is not None:
+                return err
+    return None
+
+
 def _validate_sub_model(
     top_segment: str,
     working_copy: dict[str, Any],
@@ -351,6 +400,28 @@ def apply_rule(
             ".".join(segments),
         )
         return
+
+    # Reject unknown keys inside a parent-level merge/set payload for the
+    # same reason (extra="ignore" would drop them silently, then persist
+    # the raw payload dict to global JSON via deep_merge). Only runs when
+    # the rule addresses the sub-model itself (``id=<top>``) — deeper
+    # paths target a scalar/leaf whose value-shape is validated by
+    # ``_validate_sub_model``; running the payload check against
+    # ``sub_model`` there would misread a dict value for a scalar leaf
+    # as an unknown top-level field, and would reject legitimate rules
+    # targeting a future dict-typed leaf (e.g. ``dict[str, str]``).
+    if op in {"merge", "set"} and len(segments) == 1:
+        value = rule.get("value")
+        if isinstance(value, dict):
+            unknown = _check_payload_keys(sub_model, value, segments)
+            if unknown is not None:
+                log_if_not_mcp(
+                    "WARNING",
+                    "Remote-config {} schema_error: unknown path {!r}",
+                    ref,
+                    unknown,
+                )
+                return
 
     # Snapshot the top-level subtree so we can roll back a rule that fails
     # per-rule sub-model validation without contaminating later rules.

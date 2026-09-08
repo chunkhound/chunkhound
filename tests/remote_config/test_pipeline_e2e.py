@@ -186,6 +186,135 @@ async def test_terminal_gate_rejects_cross_command_hazard(
     assert target.read_text() == original_content
 
 
+async def test_terminal_gate_rejects_cli_http_transport_non_loopback(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for the delta-gate bypass: without the fully-merged gate
+    # snapshot, `mcp.transport` in the snapshot falls back to `"stdio"` and
+    # `MCP_NON_LOOPBACK_NO_AUTH` (guarded on `transport == "http"`) never
+    # fires. Operator invocation supplies `--transport http` via CLI; the
+    # rule tries to persist a non-loopback host. Gate must reject.
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.host", "op": "set", "value": "0.0.0.0"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(
+        _args(command="mcp", transport="http"), "mcp"
+    )
+
+    # No persistence — rule was rejected by the delta gate.
+    assert not target.exists()
+
+
+async def test_terminal_gate_rejects_cli_http_transport_cors(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same bypass shape as the non-loopback case, but exercising the
+    # `MCP_CORS_NO_AUTH` guard which shares the identical
+    # `transport == "http"` gate.
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.cors", "op": "set", "value": True}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(
+        _args(command="mcp", transport="http"), "mcp"
+    )
+
+    assert not target.exists()
+
+
+async def test_terminal_gate_rejects_local_http_transport_non_loopback(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Second vector: `mcp.transport=http` is supplied by the project-local
+    # `.chunkhound.json`, not the CLI. Same failure mode — the snapshot
+    # must merge the local layer, not fall back to the stdio default.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".chunkhound.json").write_text(
+        json.dumps({"mcp": {"transport": "http"}})
+    )
+
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.host", "op": "set", "value": "0.0.0.0"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(
+        _args(command="mcp", path=project), "mcp"
+    )
+
+    assert not target.exists()
+
+
+async def test_terminal_gate_rejects_local_http_transport_cors(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Local-config vector for the CORS guard, symmetric to the CLI case.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".chunkhound.json").write_text(
+        json.dumps({"mcp": {"transport": "http"}})
+    )
+
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.cors", "op": "set", "value": True}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(
+        _args(command="mcp", path=project), "mcp"
+    )
+
+    assert not target.exists()
+
+
+async def test_terminal_gate_accepts_preexisting_hazard_under_active_transport(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression guard against over-tight semantics: if the operator has
+    # already accepted the `MCP_NON_LOOPBACK_NO_AUTH` risk (host=0.0.0.0
+    # already on disk under HTTP transport), the delta gate must not
+    # block rules that leave that hazard unchanged. `_delta_ok` compares
+    # `E_post ⊆ E_pre`, so a pre-existing error must appear on both sides
+    # and be treated as accepted.
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({"mcp": {"host": "0.0.0.0"}}))
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "database.provider", "op": "set", "value": "duckdb"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(
+        _args(command="mcp", transport="http"), "mcp"
+    )
+
+    data = _read_target(target)
+    assert data["database"]["provider"] == "duckdb"
+    # Pre-existing hazard preserved verbatim.
+    assert data["mcp"]["host"] == "0.0.0.0"
+
+
 async def test_self_register_remote_config_when_missing(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -474,6 +603,140 @@ async def test_remove_on_leaf_segment_typo_is_schema_error_not_no_op(
     assert not any(
         "no-op" in m and "embedding.provder" in m for m in messages
     ), f"typo remove must not log 'no-op', got messages={messages}"
+
+
+async def test_parent_merge_with_unknown_nested_key_is_schema_error(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Symmetric with test_leaf_segment_typo_is_skipped_with_warning, but at
+    # the parent level: `{"id":"embedding","op":"merge","value":{"provder":...}}`
+    # slips past the path-segment check (path has depth 1). Without the
+    # payload-key pre-check, extra="ignore" drops `provder` from the
+    # sub-model but the raw payload dict is still deep-merged into
+    # working_copy and persisted verbatim, and the audit line says
+    # "applied" — a silent typo landing in durable config.
+    from loguru import logger
+
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "embedding", "op": "merge", "value": {"provder": "openai"}},
+            {"id": "database.provider", "op": "set", "value": "duckdb"},
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="INFO")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler_id)
+
+    data = _read_target(_target_path(_isolate))
+    # Good rule still applies.
+    assert data.get("database", {}).get("provider") == "duckdb"
+    # Typo never lands — neither under the misspelling nor the real key.
+    embedding = data.get("embedding", {})
+    assert "provder" not in embedding
+    assert embedding.get("provider") != "openai"
+    # Operator sees a WARNING naming the bad path.
+    assert any(
+        "schema_error" in m and "embedding.provder" in m for m in messages
+    ), f"expected WARNING naming the typo path, got messages={messages}"
+    # And crucially, no `applied` line for the embedding rule.
+    assert not any(
+        "applied" in m and "op=merge" in m and "'embedding'" in m
+        for m in messages
+    ), f"typo merge must not log 'applied', got messages={messages}"
+
+
+async def test_parent_set_with_unknown_nested_key_is_schema_error(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same shape as the parent-merge case but with `op: set`, where the
+    # raw payload dict wholesale replaces the sub-tree via _apply_set —
+    # extra="ignore" hides the typo, persistence writes it verbatim.
+    from loguru import logger
+
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "embedding", "op": "set", "value": {"provder": "openai"}},
+            {"id": "database.provider", "op": "set", "value": "duckdb"},
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="INFO")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler_id)
+
+    data = _read_target(_target_path(_isolate))
+    assert data.get("database", {}).get("provider") == "duckdb"
+    embedding = data.get("embedding", {})
+    assert "provder" not in embedding
+    assert embedding.get("provider") != "openai"
+    assert any(
+        "schema_error" in m and "embedding.provder" in m for m in messages
+    ), f"expected WARNING naming the typo path, got messages={messages}"
+    assert not any(
+        "applied" in m and "op=set" in m and "'embedding'" in m
+        for m in messages
+    ), f"typo set must not log 'applied', got messages={messages}"
+
+
+async def test_deep_path_with_dict_value_defers_to_sub_model_validation(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Locks in the ``len(segments) == 1`` guard on the payload-key pre-check
+    # in ``rules.py`` (see comment at the guard site for the full rationale).
+    from loguru import logger
+
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "embedding.api_key", "op": "set", "value": {"nested": "x"}},
+            {"id": "database.provider", "op": "set", "value": "duckdb"},
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler_id)
+
+    data = _read_target(_target_path(_isolate))
+    # Good rule still applies (bad rule rolled back cleanly).
+    assert data.get("database", {}).get("provider") == "duckdb"
+    # Bad rule never landed — either ``embedding`` is absent, or ``api_key``
+    # is not a dict.
+    assert "embedding" not in data or not isinstance(
+        data["embedding"].get("api_key"), dict
+    )
+    # Operator sees a WARNING from sub-model validation — proves the fix
+    # deferred to pydantic instead of the (wrong) parent-payload key check.
+    assert any(
+        "schema_error" in m and "sub-model validation failed" in m
+        for m in messages
+    ), (
+        "expected schema_error WARNING from sub-model validation, "
+        f"got messages={messages}"
+    )
+    # Regression guard: substring-match on ``unknown path`` + the target path,
+    # so cosmetic changes to the log wording can't silently disable the check.
+    assert not any(
+        "unknown path" in m and "embedding.api_key" in m for m in messages
+    ), (
+        "regression: parent-payload key check misfired on a depth-2 path — "
+        f"got messages={messages}"
+    )
 
 
 async def test_rule_version_gated_is_skipped_rest_applies(

@@ -13,7 +13,10 @@ contracts the pipeline (and reviewers) depend on directly are locked here.
 
 from __future__ import annotations
 
+import typing
+
 import pytest
+from pydantic import BaseModel
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
@@ -22,6 +25,7 @@ from chunkhound.core.config.mcp_config import MCPConfig
 from chunkhound.core.config.remote.rules import (
     ENCLOSING_SUB_MODEL,
     _predicate_matches,
+    _unwrap_optional_basemodel,
     parse_path,
 )
 from chunkhound.core.config.remote_config import RemoteConfig
@@ -81,3 +85,77 @@ class TestPredicateMatches:
             {"os": "definitely-not-a-real-platform"}, Config()
         )
         assert (matches, err) == (False, None)
+
+
+def test_config_tree_is_depth_2() -> None:
+    """Tripwire for the depth-2 assumption in ``apply_rule``'s payload check.
+
+    ``apply_rule`` validates ``segments[1]`` against the sub-model's fields
+    and ``_check_payload_keys`` walks payload dicts one level via
+    ``_unwrap_optional_basemodel``. Every sub-config in the real tree
+    stops at scalar leaves today, so the walk only ever reaches depth 2
+    through real config.
+
+    If a sub-config gains a nested ``BaseModel`` field this test fails.
+    Before relaxing the assertion:
+    1. Extend the walker in ``apply_rule`` / ``_check_payload_keys`` to
+       validate segments at the new depth — an unknown key beyond depth 2
+       would otherwise be silently absorbed by ``extra="ignore"``.
+    2. Add a pipeline_e2e test exercising a rule like
+       ``id=<sub>.<nested>.<leaf>`` end-to-end.
+    """
+    violations: list[str] = []
+    for top_name, top_info in Config.model_fields.items():
+        top_model = _unwrap_optional_basemodel(top_info.annotation)
+        if top_model is None:
+            continue  # scalar top-level field — no sub-tree
+        for nested_name, nested_info in top_model.model_fields.items():
+            nested_model = _unwrap_optional_basemodel(nested_info.annotation)
+            if nested_model is not None:
+                violations.append(
+                    f"{top_name}.{nested_name} → nested {nested_model.__name__}"
+                )
+
+    assert not violations, (
+        "Config tree gained BaseModel-typed fields under a sub-config — "
+        f"the depth-2 walker in remote/rules.py must be extended: "
+        f"{violations}. See test docstring for the checklist."
+    )
+
+
+def test_config_has_no_ambiguous_basemodel_unions() -> None:
+    """Tripwire for ambiguous ``BaseModel`` unions in the Config tree.
+
+    ``_unwrap_optional_basemodel`` and ``_build_enclosing_map`` both pick
+    the *first* ``BaseModel`` candidate in a union. That's safe only while
+    no field is typed as ``A | B`` where both are ``BaseModel`` subclasses
+    — if one appears, per-rule sub-model validation silently binds to one
+    schema and ignores the other. If this test fails, extend the walker
+    in ``remote/rules.py`` to refuse ambiguous unions rather than
+    silently picking a candidate.
+    """
+    violations: list[str] = []
+
+    def walk(model: type[BaseModel], prefix: str) -> None:
+        for name, info in model.model_fields.items():
+            candidates = typing.get_args(info.annotation) or (info.annotation,)
+            models = [
+                c
+                for c in candidates
+                if isinstance(c, type) and issubclass(c, BaseModel)
+            ]
+            if len(models) > 1:
+                violations.append(
+                    f"{prefix}{name}: {[m.__name__ for m in models]}"
+                )
+            elif len(models) == 1:
+                walk(models[0], f"{prefix}{name}.")
+
+    walk(Config, "")
+
+    assert not violations, (
+        "Config tree gained an ambiguous BaseModel union — the walker in "
+        "remote/rules.py silently picks the first candidate and would "
+        "validate rules against the wrong schema. Extend the walker to "
+        f"reject rather than pick: {violations}"
+    )

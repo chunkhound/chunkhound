@@ -210,11 +210,17 @@ async def _run(args: Any, command: str) -> None:
     # 4c — self-register remote_config discovery inputs
     _self_register_remote(working_copy, on_disk_dict, remote)
 
-    # 4d — terminal delta-only gate. The pre-rules snapshot is the same
-    # Config as `half_merged` (identical layer selector, same on_disk_dict,
-    # no env mutation between here and there) — reuse it.
+    # 4d — terminal delta-only gate. Unlike `half_merged` above (which feeds
+    # rule predicates and must reflect disk state only), the gate needs both
+    # sides evaluated under the *active invocation* — CLI flags and local
+    # `.chunkhound.json` included — so guards keyed on the fully-merged
+    # runtime state (e.g. `MCP_NON_LOOPBACK_NO_AUTH`, `MCP_CORS_NO_AUTH`,
+    # which fire only when `self.mcp.transport == "http"`) can't be bypassed
+    # by a rule that persists a dangerous field under a snapshot whose
+    # transport silently falls back to the `stdio` default.
     try:
-        post_snapshot = Config.snapshot_from_global_dict(working_copy)
+        pre_gate = Config.snapshot_for_delta_gate(on_disk_dict, args)
+        post_gate = Config.snapshot_for_delta_gate(working_copy, args)
     except (ValueError, ValidationError) as exc:
         log_if_not_mcp(
             "ERROR",
@@ -223,7 +229,7 @@ async def _run(args: Any, command: str) -> None:
         )
         return
 
-    if not _delta_ok(half_merged, post_snapshot, command):
+    if not _delta_ok(pre_gate, post_gate, command):
         return
 
     # 4e — write iff dict changed
