@@ -51,8 +51,9 @@ from chunkhound.providers.database.like_utils import escape_like_pattern
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
     load_gitignore_patterns,
+    passes_extension_filter,
+    prepare_extension_filter,
     scan_directory_files,
-    summarize_include_patterns,
     walk_directory_tree,
     walk_subtree_worker,
 )
@@ -3019,45 +3020,21 @@ class IndexingCoordinator(BaseService):
         self, files: list[Path], patterns: list[str]
     ) -> list[Path]:
         """Drop files with no language support that only matched via a
-        complex/wildcard include pattern (e.g. a blanket directory wildcard
-        like `Q/**/*`).
-
-        A file explicitly named by a clean, non-wildcard-directory pattern
-        (e.g. `**/*.xyzunk`) is always kept — that's a deliberate, specific
-        request (parity with the existing "Unknown file type" skip-recording
-        path in `batch_processor.py`), distinct from a directory wildcard
-        that sweeps up every extension incidentally. Skipped entirely when
-        `index_unknown_files=True`, or when the include list contains the
-        unrestricted `**/*` sentinel — the same literal pattern
-        `IndexingConfig` appends to `include` for `index_unknown_files=True`
-        (see indexing_config.py), so a caller passing it directly (e.g. to
-        mean "discover everything, let batch_processor decide") gets the same
-        opt-out without needing to also thread a config object through.
+        complex/wildcard include pattern. See passes_extension_filter() in
+        file_patterns.py for the shared predicate.
         """
         idx_cfg = self._indexing_config_or_none()
-        if idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False):
-            return files
-        if "**/*" in patterns:
-            return files
-
-        allowed_exts, allowed_names, _has_complex = summarize_include_patterns(
-            patterns
+        index_unknown = bool(
+            idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False)
         )
-        # Case-insensitive, matching both Language.is_known_path() and the
-        # Rust fast walker's scan_files() (src/lib.rs), which lowercases
-        # extensions before comparing — a pattern written as "*.JPG" must
-        # still recognize an on-disk "photo.jpg" (or vice versa).
-        allowed_exts_lower = {e.lower() for e in allowed_exts}
-        allowed_names_lower = {n.lower() for n in allowed_names}
-
-        def _keep(f: Path) -> bool:
-            if f.suffix.lower() in allowed_exts_lower or (
-                f.name.lower() in allowed_names_lower
-            ):
-                return True
-            return Language.is_known_path(f)
-
-        return [f for f in files if _keep(f)]
+        # Summarize once for the whole batch; per-file re-summarization would be
+        # O(patterns) work on every discovered file.
+        prepared = prepare_extension_filter(patterns)
+        return [
+            f
+            for f in files
+            if passes_extension_filter(f, patterns, index_unknown, prepared=prepared)
+        ]
 
     def _discover_files_via_git(
         self,
