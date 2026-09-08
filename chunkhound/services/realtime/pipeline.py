@@ -15,7 +15,7 @@ from chunkhound.core.utils.path_utils import normalize_realtime_path
 from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConflictError
 from chunkhound.providers.database.serial_executor import (
-    DatabaseCompactionInProgressError,
+    DatabaseTemporarilyUnavailableError,
 )
 
 from .events import RealtimeMutation, SimpleEventHandler, normalize_file_path
@@ -380,7 +380,11 @@ class RealtimePipelineMixin:
     def _handle_compaction_busy(
         self, mutation: RealtimeMutation, op_desc: str
     ) -> bool:
-        """Handle DatabaseCompactionInProgressError for a single mutation.
+        """Handle DatabaseTemporarilyUnavailableError for a single mutation.
+
+        Covers both database compaction and a Rust indexing pipeline run —
+        both temporarily close the DB connection and raise a subclass of
+        DatabaseTemporarilyUnavailableError.
 
         Returns True if a retry was scheduled (caller should return/continue).
         Returns False if the retry budget is exhausted — error is recorded,
@@ -390,17 +394,17 @@ class RealtimePipelineMixin:
             log_if_not_mcp(
                 "info",
                 f"Retrying realtime {op_desc} for {mutation.path} "
-                f"after database compaction "
+                f"— database temporarily unavailable "
                 f"(attempt {mutation.retry_count + 1}/"
                 f"{self._MAX_RETRY_BUDGET})",
             )
             self._debug(
-                f"retrying {op_desc} after database compaction "
+                f"retrying {op_desc} — database temporarily unavailable "
                 f"path={mutation.path} attempt={mutation.retry_count + 1}"
             )
             return True
-        error = DatabaseCompactionInProgressError(
-            "Database compaction in progress — retry budget exhausted"
+        error = DatabaseTemporarilyUnavailableError(
+            "Database temporarily unavailable — retry budget exhausted"
         )
         log_if_not_mcp(
             "error", f"Error during {op_desc} for {mutation.path}: {error}"
@@ -415,7 +419,11 @@ class RealtimePipelineMixin:
         mutations: list[RealtimeMutation],
         op_desc: str,
     ) -> tuple[list[RealtimeMutation], list[RealtimeMutation]]:
-        """Handle DatabaseCompactionInProgressError for a batch of mutations.
+        """Handle DatabaseTemporarilyUnavailableError for a batch of mutations.
+
+        Covers both database compaction and a Rust indexing pipeline run —
+        both temporarily close the DB connection and raise a subclass of
+        DatabaseTemporarilyUnavailableError.
 
         Returns (surviving, exhausted) — surviving mutations have retries
         scheduled, exhausted mutations have errors recorded.
@@ -433,16 +441,16 @@ class RealtimePipelineMixin:
             log_if_not_mcp(
                 "info",
                 f"Retrying realtime {op_desc} for "
-                f"{len(surviving)} files after database compaction",
+                f"{len(surviving)} files — database temporarily unavailable",
             )
             self._debug(
-                f"retrying {op_desc} after database compaction "
+                f"retrying {op_desc} — database temporarily unavailable "
                 f"count={len(surviving)}"
             )
 
         if exhausted:
-            error = DatabaseCompactionInProgressError(
-                "Database compaction in progress — retry budget exhausted"
+            error = DatabaseTemporarilyUnavailableError(
+                "Database temporarily unavailable — retry budget exhausted"
             )
             paths = ", ".join(str(m.path) for m in exhausted[:3])
             log_if_not_mcp(
@@ -1255,7 +1263,7 @@ class RealtimePipelineMixin:
             self.failed_files.add(str(mutation.path))
             self._record_processing_error()
             self._set_error(f"Error removing file {mutation.path}: {error}")
-        except DatabaseCompactionInProgressError:
+        except DatabaseTemporarilyUnavailableError:
             if self._handle_compaction_busy(mutation, "delete"):
                 return
         except Exception as error:
@@ -1362,7 +1370,7 @@ class RealtimePipelineMixin:
                     self.failed_files.add(str(mutation.path))
                 self._record_processing_error()
                 self._set_error(f"Error removing files {exhausted_paths}: {error}")
-        except DatabaseCompactionInProgressError:
+        except DatabaseTemporarilyUnavailableError:
             self._handle_compaction_busy_batch(executable_mutations, "delete batch")
         except Exception as error:
             logger.error(f"Error removing files {sample_paths}: {error}")
@@ -1386,7 +1394,7 @@ class RealtimePipelineMixin:
                 source_generation=mutation.source_generation,
             )
             completed = True
-        except DatabaseCompactionInProgressError:
+        except DatabaseTemporarilyUnavailableError:
             if self._handle_compaction_busy(mutation, "deleted-directory cleanup"):
                 return
         except Exception as error:
@@ -1459,7 +1467,7 @@ class RealtimePipelineMixin:
                         indexing_coordinator = self.services.indexing_coordinator
                         await indexing_coordinator.generate_missing_embeddings()
                         completed = True
-                    except DatabaseCompactionInProgressError:
+                    except DatabaseTemporarilyUnavailableError:
                         # Delegate to the shared compaction-busy handler:
                         # schedules retry with backoff, or records permanent
                         # error (including failed_files) when budget exhausted.
@@ -1587,18 +1595,18 @@ class RealtimePipelineMixin:
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
                 raise
-            except DatabaseCompactionInProgressError:
+            except DatabaseTemporarilyUnavailableError:
                 if mutation is not None and self._schedule_compaction_retry(mutation):
                     log_if_not_mcp(
                         "info",
                         "Retrying realtime "
                         f"{self._status_operation(mutation.operation)} for "
-                        f"{mutation.path} after database compaction "
+                        f"{mutation.path} — database temporarily unavailable "
                         f"(attempt {mutation.retry_count + 1}/"
                         f"{self._MAX_RETRY_BUDGET})",
                     )
                     self._debug(
-                        "retrying mutation after database compaction "
+                        "retrying mutation — database temporarily unavailable "
                         f"operation={mutation.operation} path={mutation.path} "
                         f"attempt={mutation.retry_count + 1}"
                     )
@@ -1606,8 +1614,8 @@ class RealtimePipelineMixin:
                 mutation_path = (
                     mutation.path if mutation is not None else Path("<unknown>")
                 )
-                error = DatabaseCompactionInProgressError(
-                    "Database compaction in progress — retry budget exhausted"
+                error = DatabaseTemporarilyUnavailableError(
+                    "Database temporarily unavailable — retry budget exhausted"
                 )
                 log_if_not_mcp("error", f"Error processing {mutation_path}: {error}")
                 self._record_processing_error()

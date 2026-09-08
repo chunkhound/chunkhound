@@ -235,6 +235,17 @@ class EmbeddingConfig(BaseSettings):
             raise ValueError("rerank_batch_size must be positive")
         return v
 
+    @field_validator("max_concurrent_batches")
+    def validate_max_concurrent_batches(cls, v: int | None) -> int | None:  # noqa: N805
+        """Validate max concurrent batches is positive.
+
+        A value of 0 would reach asyncio.Semaphore(0), which never releases
+        and deadlocks the embedding pipeline instead of failing fast.
+        """
+        if v is not None and v <= 0:
+            raise ValueError("max_concurrent_batches must be positive")
+        return v
+
     @field_validator("output_dims", mode="before")
     def validate_output_dims(cls, v: object) -> int | None:  # noqa: N805
         """Validate output_dims is an explicit positive integer.
@@ -363,6 +374,7 @@ class EmbeddingConfig(BaseSettings):
             "batch_size": self.batch_size,
             "timeout": self.timeout,
             "max_retries": self.max_retries,
+            "max_concurrent_batches": self.max_concurrent_batches,
         }
 
         # Add API key if available
@@ -391,8 +403,6 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_ssl_verify"] = self.rerank_ssl_verify
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
-        if self.max_concurrent_batches is not None:
-            base_config["max_concurrent_batches"] = self.max_concurrent_batches
 
         # Add matryoshka configuration if set
         if self.output_dims is not None:

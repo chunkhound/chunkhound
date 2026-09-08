@@ -38,11 +38,11 @@ def build_git_pathspecs(
     """
     # Import summarizer lazily to avoid cycles
     from chunkhound.utils.file_patterns import (
-        _summarize_include_patterns,  # type: ignore
+        summarize_include_patterns,
     )
 
     rel = (rel_prefix or "").strip("/")
-    exts, names, _complex = _summarize_include_patterns(list(include_patterns))
+    exts, names, _complex = summarize_include_patterns(list(include_patterns))
     specs: list[str] = []
 
     def add(p: str) -> None:
@@ -165,11 +165,11 @@ def list_repo_files_via_git(
     capped = False
     if pushdown:
         try:
-            from chunkhound.utils.file_patterns import (  # type: ignore
-                _summarize_include_patterns,
+            from chunkhound.utils.file_patterns import (
+                summarize_include_patterns,
             )
 
-            _exts, _names, has_complex = _summarize_include_patterns(
+            _exts, _names, has_complex = summarize_include_patterns(
                 list(include_patterns)
             )
             specs = (

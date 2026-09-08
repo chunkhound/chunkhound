@@ -135,6 +135,27 @@ QWEN_MODEL_CONFIG: dict[str, dict[str, int]] = {
 }
 
 
+_qwen_detection_logged: set[str] = set()
+"""Model names already announced via 'Detected Qwen ... model' — the Rust
+pipeline's embed thread pool creates one provider instance per worker
+thread (see pipeline_bridge.py:_embed_batch), so without this guard the
+same detection message repeats once per thread instead of once per run."""
+
+_native_dims_discovery_logged: set[str] = set()
+"""Model names already announced via 'Discovered native embedding
+dimension'. The dimension is a static fact about the model, not something
+that changes per batch — without this guard it re-logs on every batch
+(the discovery condition trivially holds again once cached) and, per the
+same one-provider-per-thread reasoning as `_qwen_detection_logged` above,
+once per thread on top of that."""
+
+_client_side_truncation_logged: set[str] = set()
+"""Model names already announced via 'Applying client-side truncation'.
+The truncation ratio is fixed for a given model/config, not a per-batch
+event — same repeat-every-batch-and-thread problem as
+`_native_dims_discovery_logged` above."""
+
+
 def _validate_qwen_model_config() -> None:
     """Validate QWEN_MODEL_CONFIG structure at module load time.
 
@@ -277,6 +298,7 @@ class OpenAIEmbeddingProvider:
         api_version: str | None = None,
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
+        max_concurrent_batches: int | None = None,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -306,6 +328,11 @@ class OpenAIEmbeddingProvider:
             api_version: Azure OpenAI API version (e.g., '2024-02-01')
             azure_endpoint: Azure OpenAI endpoint URL
             azure_deployment: Azure OpenAI deployment name
+            max_concurrent_batches: Expected number of concurrent requests this
+                instance will serve (e.g. EmbeddingService's semaphore width).
+                Sizes the HTTP connection pool so legitimate concurrency isn't
+                bottlenecked on socket availability. None/unset falls back to
+                RECOMMENDED_CONCURRENCY-sized defaults.
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -343,6 +370,7 @@ class OpenAIEmbeddingProvider:
         self._rerank_ssl_verify: bool = (
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
+        self._max_concurrent_batches = max_concurrent_batches
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -407,7 +435,8 @@ class OpenAIEmbeddingProvider:
         # Check if embedding model is a Qwen model
         if "qwen" in model_lower or model in QWEN_MODEL_CONFIG:
             qwen_config = QWEN_MODEL_CONFIG.get(model)
-            if qwen_config:
+            if qwen_config and model not in _qwen_detection_logged:
+                _qwen_detection_logged.add(model)
                 logger.info(f"Detected Qwen embedding model: {model}")
 
         # Check if rerank model is a Qwen model
@@ -416,7 +445,8 @@ class OpenAIEmbeddingProvider:
             "qwen" in rerank_model_lower or rerank_model in QWEN_MODEL_CONFIG
         ):
             qwen_rerank_config = QWEN_MODEL_CONFIG.get(rerank_model)
-            if qwen_rerank_config:
+            if qwen_rerank_config and rerank_model not in _qwen_detection_logged:
+                _qwen_detection_logged.add(rerank_model)
                 logger.info(f"Detected Qwen reranker model: {rerank_model}")
 
         # Apply Qwen batch size limits if detected
@@ -438,6 +468,33 @@ class OpenAIEmbeddingProvider:
 
         # Store rerank config separately for get_max_rerank_batch_size()
         self._qwen_rerank_config = qwen_rerank_config
+
+    @staticmethod
+    def _connection_limits(max_concurrent_batches: int | None) -> httpx.Limits:
+        """Bound the HTTP connection pool from configured concurrency.
+
+        Shared by the standard and Azure client paths — each Rust embed
+        thread gets its own provider instance (max_concurrent_batches=1
+        override, see pipeline_bridge.py), so an unbounded default pool per
+        instance risks FD exhaustion across N threads each holding onto idle
+        sockets with no explicit close() call.
+
+        A single shared instance can still serve genuinely concurrent
+        requests, though: EmbeddingService gates concurrent embed_batch()
+        calls on one provider instance with an
+        asyncio.Semaphore(max_concurrent_batches) (see
+        services/embedding_service.py), and max_concurrent_batches is
+        user-configurable with no upper bound. Size the pool to cover that
+        real concurrency instead of a flat cap, so a high explicit
+        concurrency setting doesn't get silently serialized down to 10.
+        """
+        requested_concurrency = max_concurrent_batches or 0
+        max_connections = max(10, requested_concurrency)
+        max_keepalive_connections = max(5, min(max_connections, requested_concurrency))
+        return httpx.Limits(
+            max_connections=max_connections,
+            max_keepalive_connections=max_keepalive_connections,
+        )
 
     async def _ensure_client(self) -> None:
         """Ensure the OpenAI client is initialized (must be called from async context)."""
@@ -470,16 +527,29 @@ class OpenAIEmbeddingProvider:
             "timeout": self._timeout,
         }
 
+        # ssl_verify only applies to custom/self-hosted endpoints — the
+        # official OpenAI endpoint always gets real TLS verification even if
+        # the caller set ssl_verify=False for some other (e.g. rerank) URL.
+        verify_tls: bool = True
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
+            verify_tls = self._ssl_verify
             if not self._ssl_verify:
-                client_kwargs["http_client"] = httpx.AsyncClient(
-                    timeout=httpx.Timeout(timeout=self._timeout),
-                    verify=False,
-                )
                 logger.debug(
                     f"SSL verification disabled for embedding endpoint: {self._base_url}"
                 )
+
+        # Bound the connection pool explicitly rather than relying on
+        # httpx's defaults (max_connections=100, max_keepalive_connections=20),
+        # which guards against FD exhaustion from *multiple* provider
+        # instances (e.g. one per Rust embed thread, see
+        # pipeline_bridge.py:_embed_batch) each holding onto idle sockets for
+        # their lifetime with no explicit close() call.
+        client_kwargs["http_client"] = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout=self._timeout),
+            verify=verify_tls,
+            limits=self._connection_limits(self._max_concurrent_batches),
+        )
 
         # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu
         # This ensures the event loop is running when the client initializes its httpx instance
@@ -507,12 +577,22 @@ class OpenAIEmbeddingProvider:
             f"api_version={self._api_version}, deployment={self._azure_deployment}"
         )
 
-        # AzureOpenAI client has different constructor parameters
+        # AzureOpenAI client has different constructor parameters. No
+        # verify= override here (unlike _ensure_client): ssl_verify only
+        # applies to custom/self-hosted base_urls, and validate_azure_config()
+        # already enforces azure_endpoint/base_url mutual exclusivity, so
+        # httpx's own default (verify=True) is correct for a real Azure
+        # endpoint. http_client bounds the connection pool for the same
+        # FD-exhaustion reason _ensure_client does — see _connection_limits.
         self._client = openai.AsyncAzureOpenAI(
             api_key=self._api_key,
             api_version=self._api_version,
             azure_endpoint=self._azure_endpoint,
             timeout=self._timeout,
+            http_client=httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout=self._timeout),
+                limits=self._connection_limits(self._max_concurrent_batches),
+            ),
         )
         self._client_initialized = True
 
@@ -1049,7 +1129,10 @@ class OpenAIEmbeddingProvider:
 
         for attempt in range(self._retry_attempts):
             try:
-                logger.debug(
+                # TRACE, not DEBUG: fires once per batch per embed thread —
+                # at --verbose (DEBUG) this drowns out everything else when
+                # the Rust pipeline runs many embed threads concurrently.
+                logger.trace(
                     f"Generating embeddings for {len(texts)} texts (attempt {attempt + 1})"
                 )
 
@@ -1083,9 +1166,11 @@ class OpenAIEmbeddingProvider:
                         cast(int, raw_dim),
                         self._required_output_dims_for_client_truncation(),
                     )
-                    logger.debug(
-                        f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
-                    )
+                    if self._model not in _client_side_truncation_logged:
+                        _client_side_truncation_logged.add(self._model)
+                        logger.debug(
+                            f"Applying client-side truncation: {cast(int, raw_dim)}→{output_dims}"
+                        )
                     truncated_embeddings = apply_client_side_truncation(
                         cast(list[list[float]], embeddings), output_dims
                     )
@@ -1097,7 +1182,7 @@ class OpenAIEmbeddingProvider:
                 if hasattr(response, "usage") and response.usage:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
-                logger.debug(f"Successfully generated {len(embeddings)} embeddings")
+                logger.trace(f"Successfully generated {len(embeddings)} embeddings")
 
                 # Discover native dims and validate output dims (INV-1).
                 # Custom endpoints may reuse official model names, so runtime
@@ -1111,7 +1196,12 @@ class OpenAIEmbeddingProvider:
                     cast(int, raw_dim),
                     server_side_truncation=server_side_truncation,
                 )
-                if self._discovered_native_dims == raw_dim and not server_side_truncation:
+                if (
+                    self._discovered_native_dims == raw_dim
+                    and not server_side_truncation
+                    and self._model not in _native_dims_discovery_logged
+                ):
+                    _native_dims_discovery_logged.add(self._model)
                     logger.debug(
                         f"Discovered native embedding dimension: {self._discovered_native_dims}"
                     )
@@ -1172,12 +1262,19 @@ class OpenAIEmbeddingProvider:
                     # Handle token limit exceeded errors
                     error_message = str(rate_error)
                     if (
-                        "maximum context length" in error_message
-                        and "tokens" in error_message
-                    ) or (
-                        "tokens" in error_message
-                        and "max" in error_message
-                        and "per request" in error_message
+                        (
+                            "maximum context length" in error_message
+                            and "tokens" in error_message
+                        )
+                        or (
+                            "tokens" in error_message
+                            and "max" in error_message
+                            and "per request" in error_message
+                        )
+                        or (
+                            "input length exceeds" in error_message
+                            and "context length" in error_message
+                        )
                     ):
                         total_tokens = self.estimate_batch_tokens(texts)
                         token_limit = (

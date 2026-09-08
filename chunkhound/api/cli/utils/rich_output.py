@@ -2,7 +2,7 @@
 
 import os
 import sys
-from typing import Any, Literal, TextIO
+from typing import TYPE_CHECKING, Any, Literal, TextIO
 
 import rich.box
 from loguru import logger
@@ -21,6 +21,62 @@ from rich.progress import (
 )
 from rich.table import Table
 from rich.text import Text
+
+if TYPE_CHECKING:
+    from loguru import Record
+
+from chunkhound.services.progress_utils import format_bytes
+
+
+def default_sink_filter(record: "Record") -> bool:
+    """Loguru filter for the CLI's default (non-verbose) log sink.
+
+    Rust pipeline progress (log::info!, tagged via the `rust_native` extra)
+    should be visible without --verbose, but everything else stays gated at
+    WARNING.
+    """
+    if record["extra"].get("rust_native"):
+        return True
+    return bool(record["level"].no >= logger.level("WARNING").no)
+
+
+def install_default_log_sink(verbose: bool = False) -> int:
+    """Install the CLI's single stderr log sink and return its handler id.
+
+    The one place that decides what "default" logging looks like for a
+    given verbosity — shared by `main.setup_logging()` (process startup)
+    and `ProgressManager` (progress-bar-scoped logging), so a progress bar
+    starting or ending never leaves logging in a state that diverges from
+    whatever verbosity the process was actually started with.
+    """
+    if verbose:
+        return logger.add(
+            sys.stderr,
+            level="DEBUG",
+            format=(
+                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+                "<level>{message}</level>"
+            ),
+        )
+    return logger.add(
+        sys.stderr,
+        level="INFO",
+        filter=default_sink_filter,
+        format=(
+            "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
+            "<level>{message}</level>"
+        ),
+    )
+
+
+def _format_duration(seconds: float) -> str:
+    """Format a duration in seconds as HH:MM:SS."""
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 class RichOutputFormatter:
@@ -282,6 +338,15 @@ class RichOutputFormatter:
         if not self._terminal_compatible or self.console is None:
             return _NoRichProgressManager()
 
+        # --verbose prints detailed log lines straight to stderr on every
+        # record, not through this Console — a live-updating progress bar
+        # sharing the same stream gets its redraws interleaved with (and
+        # visually broken by) that log output. Verbose users want the log
+        # lines, not the bar, so skip rendering it entirely rather than
+        # showing both.
+        if self.verbose:
+            return _NoRichProgressManager()
+
         # Create custom text columns that handle missing fields gracefully
         def render_field(
             task, field_name: str, default: str = "", style: str = ""
@@ -334,7 +399,9 @@ class RichOutputFormatter:
             transient=False,  # Don't make progress disappear when complete
         )
 
-        return ProgressManager(progress, self.console or Console())
+        return ProgressManager(
+            progress, self.console or Console(), verbose=self.verbose
+        )
 
     def completion_summary(self, stats: dict[str, Any], processing_time: float) -> None:
         """Display completion summary in a styled panel."""
@@ -346,6 +413,8 @@ class RichOutputFormatter:
         summary_table.add_row(
             "Processed:", f"[green]{stats.get('files_processed', 0)}[/green] files"
         )
+        skipped_timeouts = stats.get("skipped_due_to_timeout") or []
+        timeout_count = len(skipped_timeouts)
         summary_table.add_row(
             "Skipped:", f"[yellow]{stats.get('files_skipped', 0)}[/yellow] files"
         )
@@ -359,6 +428,11 @@ class RichOutputFormatter:
                 "  └─ Filtered:",
                 f"[yellow]{stats.get('skipped_filtered', 0)}[/yellow] files",
             )
+        if timeout_count > 0:
+            summary_table.add_row(
+                "  └─ Timeout:",
+                f"[yellow]{timeout_count}[/yellow] files",
+            )
         summary_table.add_row(
             "Errors:", f"[red]{stats.get('files_errors', 0)}[/red] files"
         )
@@ -371,7 +445,22 @@ class RichOutputFormatter:
                 "Embeddings:", f"[magenta]{stats['embeddings_generated']}[/magenta]"
             )
 
-        summary_table.add_row("Time:", f"[cyan]{processing_time:.2f}s[/cyan]")
+        summary_table.add_row(
+            "Time:", f"[cyan]{_format_duration(processing_time)}[/cyan]"
+        )
+
+        if stats.get("compaction_ran"):
+            size_before = stats.get("compaction_size_before")
+            size_after = stats.get("compaction_size_after")
+            reduction_pct = stats.get("compaction_reduction_pct")
+            if size_before is not None and size_after is not None:
+                direction = "smaller" if (reduction_pct or 0.0) >= 0 else "larger"
+                summary_table.add_row(
+                    "Compaction:",
+                    f"[cyan]{format_bytes(size_before)}[/cyan] → "
+                    f"[cyan]{format_bytes(size_after)}[/cyan] "
+                    f"({abs(reduction_pct or 0.0):.0f}% {direction})",
+                )
 
         # Add cleanup stats if any
         if stats.get("cleanup_deleted_files", 0) > 0:
@@ -397,14 +486,27 @@ class RichOutputFormatter:
             print("Processing Complete", file=stream)
             print(f"Processed: {stats.get('files_processed', 0)} files", file=stream)
             print(f"Skipped: {stats.get('files_skipped', 0)} files", file=stream)
+            if timeout_count > 0:
+                print(f"  Timeout: {timeout_count} files", file=stream)
             print(f"Errors: {stats.get('files_errors', 0)} files", file=stream)
             print(f"Total chunks: {stats.get('chunks_created', 0)}", file=stream)
             if "embeddings_generated" in stats:
                 print(f"Embeddings: {stats['embeddings_generated']}", file=stream)
-            print(f"Time: {processing_time:.2f}s", file=stream)
+            print(f"Time: {_format_duration(processing_time)}", file=stream)
+            if stats.get("compaction_ran"):
+                size_before = stats.get("compaction_size_before")
+                size_after = stats.get("compaction_size_after")
+                reduction_pct = stats.get("compaction_reduction_pct")
+                if size_before is not None and size_after is not None:
+                    direction = "smaller" if (reduction_pct or 0.0) >= 0 else "larger"
+                    print(
+                        f"Compaction: {format_bytes(size_before)} -> "
+                        f"{format_bytes(size_after)} "
+                        f"({abs(reduction_pct or 0.0):.0f}% {direction})",
+                        file=stream,
+                    )
 
-        # If we have a list of files skipped due to timeout, display them
-        skipped_timeouts = stats.get("skipped_due_to_timeout", [])
+        # List the timed-out paths after the summary (count is already in the table)
         if skipped_timeouts:
             if self.console is not None:
                 timeout_table = Table.grid(padding=(0, 1))
@@ -449,16 +551,17 @@ class RichOutputFormatter:
 class ProgressManager:
     """Manages multiple progress bars with Rich."""
 
-    def __init__(self, progress: Progress, console: Console):
+    def __init__(self, progress: Progress, console: Console, verbose: bool = False):
         self.progress = progress
         self.console = console
+        self._verbose = verbose
         self._tasks: dict[str, TaskID] = {}
         self._live: Live | None = None
         self._temp_handler_id: int | None = None
 
     def __enter__(self) -> "ProgressManager":
         logger.remove()
-        self._temp_handler_id = logger.add(sys.stderr, level="WARNING")
+        self._temp_handler_id = install_default_log_sink(self._verbose)
         self._live = Live(self.progress, console=self.console, refresh_per_second=10)
         self._live.start()
         return self
@@ -470,7 +573,13 @@ class ProgressManager:
         finally:
             if self._temp_handler_id is not None:
                 logger.remove(self._temp_handler_id)
-            logger.add(sys.stderr, level="WARNING")
+            # Restore the same default sink setup_logging() would install for
+            # this process's actual verbosity (not a hardcoded non-verbose
+            # one) so logging behavior — including Rust progress visibility
+            # in non-verbose mode, or DEBUG visibility in --verbose mode —
+            # doesn't change for the rest of the process after the progress
+            # bar closes.
+            install_default_log_sink(self._verbose)
 
     def add_task(
         self,
@@ -590,6 +699,9 @@ class _NoRichProgressManager:
 
                 self._Task = _Task
                 self.tasks: dict[int, _Task] = {}
+                # Alias so callers using Rich's private `_tasks` mapping (as
+                # opposed to the public `tasks` list) work against the shim too.
+                self._tasks = self.tasks
 
             def add_task(  # noqa: ANN001
                 self, description: str, total: int | None = None, **_: Any
@@ -620,6 +732,25 @@ class _NoRichProgressManager:
                     return
                 task.completed += int(step)
                 return None
+
+            def remove_task(self, task_id: int) -> None:  # noqa: ANN001
+                self.tasks.pop(task_id, None)
+
+            def reset(  # noqa: ANN001
+                self,
+                task_id: int,
+                *,
+                start: bool = True,
+                total: int | None = None,
+                **kwargs: Any,
+            ) -> None:
+                task = self.tasks.get(task_id)
+                if not task:
+                    return
+                task.completed = int(kwargs.get("completed", 0))
+                if total is not None:
+                    task.total = int(total)
+                # `start` has no effect — the shim has no clock/timer to start.
 
         return _Shim()
 
