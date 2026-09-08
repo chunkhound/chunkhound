@@ -739,6 +739,60 @@ def walk_directory_tree(
 # ---------------------------------------------------------------------------
 
 
+def prepare_extension_filter(
+    patterns: list[str],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Precompute the (lowercased) allowed extension/name sets consumed by
+    passes_extension_filter(), for callers that check many files against the
+    same pattern list (e.g. RealtimePathFilter's per-event hot path)."""
+    allowed_exts, allowed_names, _has_complex = summarize_include_patterns(patterns)
+    # Case-insensitive, matching Language.is_known_path() and the Rust
+    # fast walker's scan_files() (src/lib.rs), which lowercases extensions.
+    return (
+        frozenset(e.lower() for e in allowed_exts),
+        frozenset(n.lower() for n in allowed_names),
+    )
+
+
+def passes_extension_filter(
+    file_path: Path,
+    patterns: list[str],
+    index_unknown_files: bool,
+    prepared: tuple[frozenset[str], frozenset[str]] | None = None,
+) -> bool:
+    """Check whether a file passes the include-pattern extension filter.
+
+    Shared predicate used by both IndexingCoordinator (batch discovery) and
+    RealtimePathFilter (single-file realtime events) to avoid drifting copies
+    of the same algorithm. Unknown extensions pass when the caller opted out
+    of filtering: via index_unknown_files, or via the literal "**/*" — the
+    same sentinel IndexingConfig appends to `include` for
+    index_unknown_files=True (see indexing_config.py), so a caller passing it
+    directly gets the same opt-out without threading a config object through,
+    keeping batch discovery, realtime filtering, and cleanup in agreement.
+
+    `prepared`: output of prepare_extension_filter(patterns); pass it to skip
+    re-summarizing `patterns` on every call (realtime per-event hot path).
+    """
+    if index_unknown_files:
+        return True
+    if "**/*" in patterns:
+        return True
+
+    if prepared is None:
+        prepared = prepare_extension_filter(patterns)
+    allowed_exts_lower, allowed_names_lower = prepared
+
+    suffix = file_path.suffix.lower()
+    name = file_path.name.lower()
+    if suffix in allowed_exts_lower or name in allowed_names_lower:
+        return True
+
+    from chunkhound.core.types.common import Language
+
+    return Language.is_known_path(file_path)
+
+
 def normalize_include_pattern(pattern: str) -> str:
     """Ensure include pattern starts with "**/" prefix without double-prefixing.
 

@@ -3,12 +3,23 @@ description: >
   Build the chunkhound_native release wheel via `maturin build --release
   --auditwheel repair` and smoke-test that it actually imports. Shared by
   release.yml and release-rc.yml, which previously each carried their own
-  byte-identical copy of this step, plus ci.yml's native-wheel-smoke-arm64
-  job (with skip-tag-version-patch: true, since a CI branch/PR ref has no
-  release tag to derive a version from). Assumes the calling job has already
-  checked out the repo and installed `uv`.
+  byte-identical copy of this step, plus ci.yml's native-wheel-smoke-arm64,
+  native-dev-macos, watchman-runtime-validation (Linux/Windows), and
+  watchman-rollout-gate jobs (all with skip-tag-version-patch: true, since a
+  CI branch/PR ref has no release tag to derive a version from). Published
+  native-wheel support is
+  macOS arm64, Linux x86_64/aarch64 (manylinux_2_34), and Windows x86_64.
+  Intel macOS is deliberately excluded: free Intel macOS runners are retired,
+  and arm64 cross-compilation has unresolved PyO3 framework-linking failures.
+  musl and older glibc need a separate manylinux-container build; no native
+  sdist fallback exists. Assumes the calling job has already checked out the
+  repo and installed `uv`.
 
 inputs:
+  out-dir:
+    description: Directory where the repaired native wheel is written.
+    required: false
+    default: dist
   skip-tag-version-patch:
     description: >
       Set to "true" for non-release callers (e.g. a CI smoke build) where
@@ -82,6 +93,7 @@ runs:
         # Force a fresh link of just this crate every time; the expensive
         # dependency compilation (duckdb, arrow, ...) stays cached.
         cargo clean -p chunkhound_native --release
+        mkdir -p "${{ inputs.out-dir }}"
         # --auditwheel repair makes maturin bundle DuckDB's shared library
         # into the wheel and rewrite the extension's link path to resolve
         # it relative to itself (auditwheel-equivalent on Linux, its own
@@ -94,9 +106,9 @@ runs:
         # maturin extra (not a default dependency) -- request it explicitly
         # or the build fails with "Failed to execute 'patchelf'".
         if [[ "$RUNNER_OS" == "Linux" ]]; then
-          uvx --python 3.12 --from 'maturin[patchelf]' maturin build --release --auditwheel repair --out dist/
+          uvx --python 3.12 --from 'maturin[patchelf]' maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
         else
-          uvx --python 3.12 maturin build --release --auditwheel repair --out dist/
+          uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
         fi
         mv pyproject.toml.hidden pyproject.toml
 
@@ -104,15 +116,16 @@ runs:
       shell: bash
       run: |
         # Run outside the repo root: the repo's own chunkhound_native/__init__.py
-        # source-tree stub (kept so `maturin develop` re-exports survive editable
-        # reinstalls locally) would otherwise shadow the installed wheel package,
+        # source-tree stub (populated by scripts/install_native.py for the local
+        # maturin build + install_native.py dev workflow) would otherwise shadow
+        # the installed wheel package,
         # since it expects a compiled extension sitting next to it that only
         # exists after a local editable build, not in this CI job. Catches a
         # wheel that built successfully but doesn't actually import (e.g. a
         # macOS/Windows repair edge case) before it reaches PyPI -- alpha/beta/rc
         # tags publish with no other gate on the native wheel's importability.
         WORKSPACE_DIR="$(pwd)"
-        WHEEL_DIR="$WORKSPACE_DIR/dist"
+        WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"
         TMP_DIR="$(mktemp -d)"
         cd "$TMP_DIR"
         uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \

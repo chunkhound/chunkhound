@@ -1,12 +1,15 @@
 """Copy the downloaded DuckDB runtime library next to the compiled
-chunkhound_native extension, for local `maturin develop` builds.
+chunkhound_native extension, for local maturin build + install_native.py
+setups.
 
-Wheel-repair tools (auditwheel/delocate/delvewheel) do this automatically for
-built wheels, but they only operate on wheel files -- `maturin develop`
-produces an editable install with no wheel at all. This script closes that
-gap for the local dev loop, on every platform, so the self-relative
-$ORIGIN/@loader_path RPATH baked in at link time has something to find.
+Wheel-repair tools (auditwheel/delocate/delvewheel) bundle the runtime into
+release wheels, but local maturin-build wheels don't reliably carry it (see
+_select_files in scripts/install_native.py for what gets extracted). This
+script closes that gap for the local dev loop, on every platform, so the
+self-relative $ORIGIN/@loader_path RPATH baked in at link time has something
+to find.
 """
+
 import pathlib
 import shutil
 import sys

@@ -51,8 +51,9 @@ from chunkhound.providers.database.like_utils import escape_like_pattern
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
     load_gitignore_patterns,
+    passes_extension_filter,
+    prepare_extension_filter,
     scan_directory_files,
-    summarize_include_patterns,
     walk_directory_tree,
     walk_subtree_worker,
 )
@@ -1407,11 +1408,11 @@ class IndexingCoordinator(BaseService):
             if self.config and getattr(self.config, "indexing", None) is not None:
                 do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
             if do_cleanup and not _use_rust:
-                _t2 = _t.perf_counter() if _t0 is not None else None
+                _t2 = _t.perf_counter()
                 cleaned_files = self._cleanup_orphaned_files(
                     directory, files, patterns, exclude_patterns
                 )
-                _t3 = _t.perf_counter() if _t0 is not None else None
+                _t3 = _t.perf_counter()
             else:
                 if not do_cleanup:
                     logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
@@ -1447,7 +1448,7 @@ class IndexingCoordinator(BaseService):
                 rust_files: list[tuple[Path, str | None]] = [(p, None) for p in files]
                 files_to_process = rust_files
             elif not force_reindex:
-                _t4 = _t.perf_counter() if _t0 is not None else None
+                _t4 = _t.perf_counter()
                 change_task: TaskID | None = None
                 if self.progress:
                     change_task = self.progress.add_task(
@@ -1607,7 +1608,7 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
-                _t5 = _t.perf_counter() if _t0 is not None else None
+                _t5 = _t.perf_counter()
                 logger.info(
                     f"Change scan: {len(files_to_process)}/{len(files)} to process "
                     f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
@@ -1824,39 +1825,31 @@ class IndexingCoordinator(BaseService):
                         self.progress.update(parse_task, completed=task.total)
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
-            if _t0 is not None:
-                try:
-                    self._startup_profile = {
-                        "discovery_ms": round(
-                            ((_t1 - _t0) if (_t1 and _t0) else 0.0) * 1000.0, 3
-                        ),
-                        "cleanup_ms": round(
-                            (
-                                (_t3 - _t2)
-                                if (_t3 is not None and _t2 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "change_scan_ms": round(
-                            (
-                                (_t5 - _t4)
-                                if (_t5 is not None and _t4 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "files_discovered": len(files),
-                        "orphaned_cleaned": cleaned_files,
-                        "files_after_change_scan": len(files_to_process),
-                        "parallel_used": bool(
-                            getattr(self, "_profile_parallel_used", False)
-                        ),
-                    }
-                except Exception:
-                    pass
+            try:
+                # _t0/_t1 are set unconditionally above; _t2.._t5 stay None when
+                # the Rust pipeline runs or cleanup/change-scan is skipped, so
+                # those phases fall back to 0.0 rather than dropping the profile.
+                self._startup_profile = {
+                    "discovery_ms": round((_t1 - _t0) * 1000.0, 3),
+                    "cleanup_ms": round(
+                        ((_t3 - _t2) if (_t3 is not None and _t2 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "change_scan_ms": round(
+                        ((_t5 - _t4) if (_t5 is not None and _t4 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "files_discovered": len(files),
+                    "orphaned_cleaned": cleaned_files,
+                    "files_after_change_scan": len(files_to_process),
+                    "parallel_used": bool(
+                        getattr(self, "_profile_parallel_used", False)
+                    ),
+                }
+            except Exception:
+                pass
 
             # At this point, all parsed results have been stored via _on_batch_store
             stats: dict[str, Any] = {
@@ -3024,45 +3017,21 @@ class IndexingCoordinator(BaseService):
         self, files: list[Path], patterns: list[str]
     ) -> list[Path]:
         """Drop files with no language support that only matched via a
-        complex/wildcard include pattern (e.g. a blanket directory wildcard
-        like `Q/**/*`).
-
-        A file explicitly named by a clean, non-wildcard-directory pattern
-        (e.g. `**/*.xyzunk`) is always kept — that's a deliberate, specific
-        request (parity with the existing "Unknown file type" skip-recording
-        path in `batch_processor.py`), distinct from a directory wildcard
-        that sweeps up every extension incidentally. Skipped entirely when
-        `index_unknown_files=True`, or when the include list contains the
-        unrestricted `**/*` sentinel — the same literal pattern
-        `IndexingConfig` appends to `include` for `index_unknown_files=True`
-        (see indexing_config.py), so a caller passing it directly (e.g. to
-        mean "discover everything, let batch_processor decide") gets the same
-        opt-out without needing to also thread a config object through.
+        complex/wildcard include pattern. See passes_extension_filter() in
+        file_patterns.py for the shared predicate.
         """
         idx_cfg = self._indexing_config_or_none()
-        if idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False):
-            return files
-        if "**/*" in patterns:
-            return files
-
-        allowed_exts, allowed_names, _has_complex = summarize_include_patterns(
-            patterns
+        index_unknown = bool(
+            idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False)
         )
-        # Case-insensitive, matching both Language.is_known_path() and the
-        # Rust fast walker's scan_files() (src/lib.rs), which lowercases
-        # extensions before comparing — a pattern written as "*.JPG" must
-        # still recognize an on-disk "photo.jpg" (or vice versa).
-        allowed_exts_lower = {e.lower() for e in allowed_exts}
-        allowed_names_lower = {n.lower() for n in allowed_names}
-
-        def _keep(f: Path) -> bool:
-            if f.suffix.lower() in allowed_exts_lower or (
-                f.name.lower() in allowed_names_lower
-            ):
-                return True
-            return Language.is_known_path(f)
-
-        return [f for f in files if _keep(f)]
+        # Summarize once for the whole batch; per-file re-summarization would be
+        # O(patterns) work on every discovered file.
+        prepared = prepare_extension_filter(patterns)
+        return [
+            f
+            for f in files
+            if passes_extension_filter(f, patterns, index_unknown, prepared=prepared)
+        ]
 
     def _discover_files_via_git(
         self,

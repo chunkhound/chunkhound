@@ -69,8 +69,7 @@ class RealtimePathFilter:
         self._ignore_engine_degraded = False
         self._ignore_engine_degraded_warned = False
         self._include_patterns: list[str] | None = None
-        self._allowed_exts: frozenset[str] | None = None
-        self._allowed_names: frozenset[str] | None = None
+        self._extension_filter: tuple[frozenset[str], frozenset[str]] | None = None
         self._include_degraded = False
         self._include_degraded_warned = False
         self._pattern_cache: dict[str, Any] = {}
@@ -162,7 +161,7 @@ class RealtimePathFilter:
             if self._include_patterns is None:
                 from chunkhound.utils.file_patterns import (
                     normalize_include_patterns,
-                    summarize_include_patterns,
+                    prepare_extension_filter,
                 )
 
                 if settings.include_patterns is None:
@@ -170,14 +169,11 @@ class RealtimePathFilter:
 
                 includes = list(settings.include_patterns)
                 self._include_patterns = normalize_include_patterns(includes)
-                allowed_exts, allowed_names, _has_complex = summarize_include_patterns(
+                # Prepared once here because should_index() runs per filesystem
+                # event — re-summarizing patterns per call would be wasteful.
+                self._extension_filter = prepare_extension_filter(
                     self._include_patterns
                 )
-                # Case-insensitive, matching Language.is_known_path() and the
-                # Rust fast walker's scan_files() (src/lib.rs), which
-                # lowercases extensions before comparing.
-                self._allowed_exts = frozenset(e.lower() for e in allowed_exts)
-                self._allowed_names = frozenset(n.lower() for n in allowed_names)
 
             if not self._include_patterns:
                 return False
@@ -192,27 +188,14 @@ class RealtimePathFilter:
             ):
                 return False
 
-            if settings.index_unknown_files:
-                return True
+            from chunkhound.utils.file_patterns import passes_extension_filter
 
-            # Unrestricted "**/*" is the same literal sentinel IndexingConfig
-            # appends to `include` for index_unknown_files=True — a caller
-            # passing it directly (bypassing the config object) gets the same
-            # opt-out, so discovery and cleanup stay in agreement.
-            if "**/*" in self._include_patterns:
-                return True
-
-            cached_exts = self._allowed_exts or frozenset()
-            cached_names = self._allowed_names or frozenset()
-            if (
-                file_path.suffix.lower() in cached_exts
-                or file_path.name.lower() in cached_names
-            ):
-                return True
-
-            from chunkhound.core.types.common import Language
-
-            return Language.is_known_path(file_path)
+            return passes_extension_filter(
+                file_path,
+                self._include_patterns,
+                settings.index_unknown_files,
+                prepared=self._extension_filter,
+            )
         except Exception as error:
             self._include_degraded = True
             self._warn_include_degraded_once(error)

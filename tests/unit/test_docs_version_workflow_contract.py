@@ -559,6 +559,7 @@ class TestDocsVersionWorkflowContract:
             "site-build-validation",
             "watchman-rollout-gate",
             "native-wheel-smoke-arm64",
+            "native-dev-macos",
         ]
         assert job["if"] == "github.ref == 'refs/heads/main'"
         assert download_step["with"]["name"] == "site-dist"
