@@ -22,11 +22,13 @@ def test_prepare_release_runs_watchman_release_verifiers_in_order() -> None:
         '--require-supported-matrix "${WHEEL_PATHS[@]}"'
     )
     installed_live_call = (
-        'uv run python scripts/verify_watchman_live_indexing_e2e.py "${WHEEL_PATHS[@]}"'
+        "uv run python scripts/verify_watchman_live_indexing_e2e.py "
+        '--native-wheel "$NATIVE_WHEEL_PATH" "${WHEEL_PATHS[@]}"'
     )
     source_fallback_call = (
         "uv run python scripts/verify_watchman_live_indexing_e2e.py "
-        '--verify-source-fallback --source-root "$PROJECT_ROOT"'
+        '--native-wheel "$NATIVE_WHEEL_PATH" --verify-source-fallback '
+        '--source-root "$PROJECT_ROOT"'
     )
 
     assert runtime_call in script_text
@@ -48,10 +50,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
         pytest.skip("PyYAML not available")
 
     workflow_path = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "ci.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
     )
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
@@ -76,8 +75,7 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
     )
 
     step_runs = [
-        (step.get("name", ""), step.get("run", ""))
-        for step in rollout_gate["steps"]
+        (step.get("name", ""), step.get("run", "")) for step in rollout_gate["steps"]
     ]
     joined_runs = "\n".join(run for _, run in step_runs)
     assert "--require-supported-matrix" in joined_runs, (
@@ -96,6 +94,96 @@ def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
             assert "--source-root" in run, (
                 f"fallback proof step {name!r} must pin --source-root"
             )
+
+
+def test_ci_wires_repaired_native_wheel_into_watchman_verification() -> None:
+    """Watchman verification must run against the full repaired
+    chunkhound_native wheel (never a source-tree extension patch): each
+    consuming job must build it into a dedicated out-dir and pass it via
+    --native-wheel, and macOS PR coverage must smoke the repaired wheel."""
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        pytest.skip("PyYAML not available")
+
+    workflow_path = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    )
+    jobs = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))["jobs"]
+
+    def native_wheel_builds(job: dict) -> list[dict]:
+        return [
+            step
+            for step in job["steps"]
+            if step.get("uses", "").endswith("/build-native-wheel")
+        ]
+
+    runtime_validation = jobs["watchman-runtime-validation"]
+    runtime_builds = native_wheel_builds(runtime_validation)
+    assert len(runtime_builds) == 1
+    assert runtime_builds[0]["with"]["out-dir"] == "native-dist"
+    e2e_runs = [
+        step.get("run", "")
+        for step in runtime_validation["steps"]
+        if "--native-wheel" in step.get("run", "")
+    ]
+    assert len(e2e_runs) == 1
+    assert "native-dist/chunkhound_native-*.whl" in e2e_runs[0]
+    assert "Expected exactly one repaired native wheel" in e2e_runs[0], (
+        "installed-wheel e2e must guard against missing or ambiguous "
+        "repaired-wheel globs"
+    )
+
+    rollout_gate = jobs["watchman-rollout-gate"]
+    gate_builds = native_wheel_builds(rollout_gate)
+    assert len(gate_builds) == 1
+    assert gate_builds[0]["with"]["out-dir"] == "native-dist"
+    gate_fallback_runs = [
+        step.get("run", "")
+        for step in rollout_gate["steps"]
+        if "--verify-source-fallback" in step.get("run", "")
+    ]
+    assert len(gate_fallback_runs) == 1
+    assert "--native-wheel" in gate_fallback_runs[0]
+    assert "native-dist/chunkhound_native-*.whl" in gate_fallback_runs[0]
+    assert "Expected exactly one repaired native wheel" in gate_fallback_runs[0], (
+        "fallback proof must guard against missing or ambiguous repaired-wheel globs"
+    )
+
+    macos_builds = native_wheel_builds(jobs["native-dev-macos"])
+    assert len(macos_builds) == 1
+    assert macos_builds[0]["with"]["out-dir"] == "native-dist"
+
+
+def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
+    """release.yml/release-rc.yml call build-native-wheel without out-dir and
+    upload dist/*.whl afterwards -- the input default must stay "dist" and
+    every output location (maturin --out, smoke-test wheel dir) must follow
+    inputs.out-dir."""
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        pytest.skip("PyYAML not available")
+
+    action_path = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "actions"
+        / "build-native-wheel"
+        / "action.yml"
+    )
+    action = yaml.safe_load(action_path.read_text(encoding="utf-8"))
+    out_dir = action["inputs"]["out-dir"]
+    assert out_dir["required"] is False
+    assert out_dir["default"] == "dist"
+
+    runs = {step["name"]: step.get("run", "") for step in action["runs"]["steps"]}
+    build_run = runs["Build native wheel"]
+    smoke_run = runs["Smoke test native wheel API"]
+    assert build_run.count('--out "${{ inputs.out-dir }}/"') == 2, (
+        "both Linux and non-Linux maturin invocations must write into out-dir"
+    )
+    assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
 
 
 def test_prepare_release_enforces_supported_matrix_for_runtime_verifier() -> None:
@@ -120,6 +208,26 @@ def test_prepare_release_keeps_ci_owned_publish_contract() -> None:
     assert "--generate-notes" in script_text
     assert "gh release edit <tag> --draft=false" in script_text
     assert "Do not run uv publish manually" in script_text
+
+
+def test_prepare_release_requires_matching_native_wheel_env() -> None:
+    """The watchman verifiers now require a complete repaired
+    chunkhound-native wheel; prepare_release.sh must fail loudly unless
+    CHUNKHOUND_NATIVE_WHEEL points at an existing .whl file."""
+    prepare_release = (
+        Path(__file__).resolve().parents[1] / "scripts" / "prepare_release.sh"
+    )
+    script_text = prepare_release.read_text(encoding="utf-8")
+
+    assert 'NATIVE_WHEEL_PATH="${CHUNKHOUND_NATIVE_WHEEL:-}"' in script_text
+    assert '[[ ! -f "$NATIVE_WHEEL_PATH" || "$NATIVE_WHEEL_PATH" != *.whl ]]' in (
+        script_text
+    )
+    assert (
+        "❌ Set CHUNKHOUND_NATIVE_WHEEL to the matching repaired "
+        "chunkhound-native wheel." in script_text
+    )
+    assert '--native-wheel "$NATIVE_WHEEL_PATH"' in script_text
 
 
 @pytest.mark.asyncio
@@ -344,6 +452,8 @@ def test_main_runs_host_compatible_wheels_and_source_fallback(
     windows_wheel = tmp_path / "chunkhound-0.0.0-py3-none-win_amd64.whl"
     linux_wheel.write_text("wheel", encoding="utf-8")
     windows_wheel.write_text("wheel", encoding="utf-8")
+    native_wheel = tmp_path / "chunkhound_native-0.0.0.whl"
+    native_wheel.write_text("wheel", encoding="utf-8")
     calls: list[tuple[str, str]] = []
 
     monkeypatch.setattr(
@@ -367,11 +477,13 @@ def test_main_runs_host_compatible_wheels_and_source_fallback(
         lambda runtime_platform: runtime_platform == "linux-x86_64",
     )
 
-    async def fake_verify_wheel(wheel_path: Path) -> None:
-        calls.append(("wheel", wheel_path.name))
+    async def fake_verify_wheel(wheel_path: Path, native_wheel: Path) -> None:
+        calls.append(("wheel", f"{wheel_path.name}:{native_wheel.name}"))
 
-    async def fake_verify_source_fallback(source_root: Path) -> None:
-        calls.append(("source", str(source_root)))
+    async def fake_verify_source_fallback(
+        source_root: Path, native_wheel: Path
+    ) -> None:
+        calls.append(("source", f"{source_root}:{native_wheel.name}"))
 
     monkeypatch.setattr(live_verifier, "_verify_wheel", fake_verify_wheel)
     monkeypatch.setattr(
@@ -387,13 +499,18 @@ def test_main_runs_host_compatible_wheels_and_source_fallback(
                 "--verify-source-fallback",
                 "--source-root",
                 str(tmp_path),
+                "--native-wheel",
+                str(native_wheel),
                 str(linux_wheel),
                 str(windows_wheel),
             ]
         )
         == 0
     )
-    assert calls == [("wheel", linux_wheel.name), ("source", str(tmp_path))]
+    assert calls == [
+        ("wheel", f"{linux_wheel.name}:{native_wheel.name}"),
+        ("source", f"{tmp_path}:{native_wheel.name}"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -435,10 +552,13 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
     (source_root / ".ruff_cache").mkdir()
 
     work_root = tmp_path / "work"
+    native_wheel = tmp_path / "chunkhound_native-0.0.0.whl"
+    native_wheel.write_text("wheel", encoding="utf-8")
     editable_source_roots: list[Path] = []
     source_install_roots: list[Path] = []
     sdist_build_roots: list[Path] = []
     sdist_artifacts: list[Path] = []
+    native_install_wheels: list[Path] = []
     default_project_dirs: list[Path] = []
     watchman_project_dirs: list[Path] = []
     daemon_status_descriptions: list[str] = []
@@ -500,6 +620,11 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
             sdist_artifacts.append(sdist_path)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if command == ("uv", "pip", "install"):
+            if "--no-deps" in args:
+                assert "--force-reinstall" in args
+                assert Path(args[-1]) == native_wheel
+                native_install_wheels.append(native_wheel)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
             assert env is not None
             assert env["SETUPTOOLS_SCM_PRETEND_VERSION"] == "0.0.0"
             assert env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CHUNKHOUND"] == "0.0.0"
@@ -666,12 +791,13 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         lambda root: cleanup_roots.append(root),
     )
 
-    await live_verifier._verify_source_fallback(source_root)
+    await live_verifier._verify_source_fallback(source_root, native_wheel)
 
     assert len(sdist_build_roots) == 1
     assert len(sdist_artifacts) == 1
     assert len(source_install_roots) == 1
     assert len(editable_source_roots) == 1
+    assert native_install_wheels == [native_wheel, native_wheel, native_wheel]
     assert len(default_project_dirs) == 3
     assert len(watchman_project_dirs) == 3
     assert daemon_status_descriptions == [
@@ -681,6 +807,95 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
     ]
     assert default_client.closed is True
     assert cleanup_roots == [work_root, work_root]
+
+
+def test_install_native_wheel_uses_force_reinstall_no_deps_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The repaired native wheel must fully replace the PyPI-resolved
+    chunkhound-native inside the target venv: --force-reinstall (uv would
+    otherwise no-op on the same version), --no-deps (the branch wheel can be
+    ahead of pyproject's version constraint), targeting the venv's own
+    interpreter."""
+    captured: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
+    python_path = tmp_path / "venv" / "bin" / "python"
+    native_wheel = tmp_path / "chunkhound_native-0.0.0-cp312-abi3.whl"
+    native_wheel.write_text("wheel", encoding="utf-8")
+
+    live_verifier._install_native_wheel(
+        python_path=python_path, native_wheel=native_wheel
+    )
+
+    assert captured == [
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python_path),
+            "--force-reinstall",
+            "--no-deps",
+            str(native_wheel),
+        ]
+    ]
+
+
+def test_install_native_wheel_surfaces_uv_failure_on_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """uv runs with capture_output=True, so a failed install must re-raise
+    with uv's own diagnostics embedded -- otherwise the CI log would only
+    show a bare return code with no reason for the failure."""
+
+    def fake_run(args, **kwargs):
+        raise live_verifier.subprocess.CalledProcessError(
+            returncode=1,
+            cmd=list(args),
+            output="",
+            stderr="uv error: wheel is not compatible with the interpreter",
+        )
+
+    monkeypatch.setattr(live_verifier.subprocess, "run", fake_run)
+    python_path = tmp_path / "venv" / "bin" / "python"
+    native_wheel = tmp_path / "chunkhound_native-0.0.0-cp312-abi3.whl"
+    native_wheel.write_text("wheel", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="wheel is not compatible") as exc_info:
+        live_verifier._install_native_wheel(
+            python_path=python_path, native_wheel=native_wheel
+        )
+
+    assert isinstance(
+        exc_info.value.__cause__, live_verifier.subprocess.CalledProcessError
+    )
+    assert str(native_wheel) in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("native_wheel_name", "create_file"),
+    [("chunkhound_native-0.0.0.whl", False), ("not-a-wheel.txt", True)],
+)
+def test_main_rejects_missing_or_non_wheel_native_wheel(
+    tmp_path: Path, native_wheel_name: str, create_file: bool
+) -> None:
+    """``--native-wheel`` must point at an existing repaired .whl file; any
+    other value must fail loudly before any install runs."""
+    native_wheel = tmp_path / native_wheel_name
+    if create_file:
+        native_wheel.write_text("wheel", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        live_verifier.main(
+            ["--native-wheel", str(native_wheel), "--verify-source-fallback"]
+        )
+
+    assert str(native_wheel) in str(exc_info.value)
 
 
 def test_main_fails_when_no_host_compatible_wheels(
@@ -706,7 +921,11 @@ def test_main_fails_when_no_host_compatible_wheels(
 
     monkeypatch.setattr(live_verifier, "_verify_wheel", _should_not_run)
 
-    exit_code = live_verifier.main([str(macos_wheel)])
+    native_wheel = tmp_path / "chunkhound_native-0.0.0.whl"
+    native_wheel.write_text("wheel", encoding="utf-8")
+    exit_code = live_verifier.main(
+        ["--native-wheel", str(native_wheel), str(macos_wheel)]
+    )
     assert exit_code == 2
     captured = capsys.readouterr()
     assert "no host-compatible wheels" in captured.err
@@ -722,7 +941,9 @@ def test_main_source_fallback_only_returns_zero_with_no_compatible_wheels(
         lambda paths: [],
     )
 
-    async def fake_verify_source_fallback(source_root: Path) -> None:
+    async def fake_verify_source_fallback(
+        source_root: Path, native_wheel: Path
+    ) -> None:
         return None
 
     monkeypatch.setattr(
@@ -731,8 +952,16 @@ def test_main_source_fallback_only_returns_zero_with_no_compatible_wheels(
         fake_verify_source_fallback,
     )
 
+    native_wheel = tmp_path / "chunkhound_native-0.0.0.whl"
+    native_wheel.write_text("wheel", encoding="utf-8")
     exit_code = live_verifier.main(
-        ["--verify-source-fallback", "--source-root", str(tmp_path)]
+        [
+            "--native-wheel",
+            str(native_wheel),
+            "--verify-source-fallback",
+            "--source-root",
+            str(tmp_path),
+        ]
     )
     assert exit_code == 0
 
@@ -966,7 +1195,7 @@ async def test_verify_wheel_uses_clean_room_runtime_env(
         lambda root: cleanup_roots.append(root),
     )
 
-    await live_verifier._verify_wheel(wheel_path)
+    await live_verifier._verify_wheel(wheel_path, wheel_path)
 
     runtime_dir = work_root / "runtime"
     assert captured_env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] == str(runtime_dir)
@@ -1127,7 +1356,7 @@ async def test_verify_wheel_proves_live_searchability_in_polling_fallback(
 
     monkeypatch.setattr(Path, "write_text", recording_write_text)
 
-    await live_verifier._verify_wheel(wheel_path)
+    await live_verifier._verify_wheel(wheel_path, wheel_path)
 
     assert wrote_live_file
     assert search_queries == ["fallback_live_symbol"]

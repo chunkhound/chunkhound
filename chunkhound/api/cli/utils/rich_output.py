@@ -25,6 +25,8 @@ from rich.text import Text
 if TYPE_CHECKING:
     from loguru import Record
 
+from chunkhound.services.progress_utils import format_bytes
+
 
 def default_sink_filter(record: "Record") -> bool:
     """Loguru filter for the CLI's default (non-verbose) log sink.
@@ -68,15 +70,6 @@ def install_default_log_sink(verbose: bool = False) -> int:
         ),
     )
 
-
-def _format_bytes(n: int) -> str:
-    """Format a byte count as a human-readable string (e.g. '9.8GB')."""
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.1f}{unit}"
-        size /= 1024
-    return f"{size:.1f}TB"
 
 
 def _format_duration(seconds: float) -> str:
@@ -465,8 +458,8 @@ class RichOutputFormatter:
                 direction = "smaller" if (reduction_pct or 0.0) >= 0 else "larger"
                 summary_table.add_row(
                     "Compaction:",
-                    f"[cyan]{_format_bytes(size_before)}[/cyan] → "
-                    f"[cyan]{_format_bytes(size_after)}[/cyan] "
+                    f"[cyan]{format_bytes(size_before)}[/cyan] → "
+                    f"[cyan]{format_bytes(size_after)}[/cyan] "
                     f"({abs(reduction_pct or 0.0):.0f}% {direction})",
                 )
 
@@ -508,8 +501,8 @@ class RichOutputFormatter:
                 if size_before is not None and size_after is not None:
                     direction = "smaller" if (reduction_pct or 0.0) >= 0 else "larger"
                     print(
-                        f"Compaction: {_format_bytes(size_before)} -> "
-                        f"{_format_bytes(size_after)} "
+                        f"Compaction: {format_bytes(size_before)} -> "
+                        f"{format_bytes(size_after)} "
                         f"({abs(reduction_pct or 0.0):.0f}% {direction})",
                         file=stream,
                     )

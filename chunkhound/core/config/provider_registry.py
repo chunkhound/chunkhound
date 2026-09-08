@@ -85,4 +85,14 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://openrouter.ai/docs",
         auth_url="https://openrouter.ai",
     ),
+    "orcarouter": OpenAICompatibleSpec(
+        name="orcarouter",
+        default_base_url="https://api.orcarouter.ai/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
+        docs_url="https://docs.orcarouter.ai",
+        auth_url="https://www.orcarouter.ai",
+    ),
 }

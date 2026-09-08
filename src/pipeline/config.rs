@@ -20,6 +20,7 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 
+
 /// Extract an optional field from a PyDict — returns None if key is absent or value is Python None.
 fn extract_opt<'py, T: FromPyObject<'py>>(
     dict: &Bound<'py, PyDict>,

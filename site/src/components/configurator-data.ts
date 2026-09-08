@@ -248,6 +248,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_OPENROUTER_API_KEY>",
     },
     {
+        id: "orcarouter",
+        name: "OrcaRouter",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 6h9a3 3 0 0 1 3 3v6a3 3 0 0 0 3 3h1M4 12h15M4 18h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "orcarouter",
+            model: "anthropic/claude-sonnet-5",
+        },
+        apiKeyPlaceholder: "<YOUR_ORCAROUTER_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,

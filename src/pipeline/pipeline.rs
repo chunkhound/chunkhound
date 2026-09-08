@@ -352,15 +352,19 @@ impl IndexingPipeline {
             self.config.db_path.join("chunks.db")
         };
 
-        if !db_file.exists() {
-            emit_progress(py, progress_callback, "diff", total_files, total_files);
-            return Ok(DiffResult {
-                changed: files.to_vec(),
-                removed: Vec::new(),
-                ..Default::default()
-            });
-        }
-
+        // Deliberately NOT short-circuited on `!db_file.exists()` here: a
+        // crashed compaction swap (compaction.rs's 3-phase protocol) renames
+        // the live file aside to `.old` for its entire pre-swap/phase1/phase2
+        // window, so a missing `db_file` does not necessarily mean "no DB
+        // yet" — it can also mean "the real DB is one `recover_swap_intent()`
+        // call away, at `.old`". An early return here would run before
+        // `read_file_states()` ever gets a chance to recover it, silently
+        // downgrading recovery into "reprocess every file from scratch"
+        // instead of a correct incremental diff. `read_file_states()` runs
+        // that recovery first and only then falls back to `Ok(Vec::new())`
+        // if the DB is genuinely absent, so it's always safe to call
+        // unconditionally here — the fresh-project case just costs one cheap
+        // `.swap_intent` existence check more than before.
         let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
         let files_owned: Vec<PathBuf> = files.to_vec();
         let rel_keys_owned = rel_keys.clone();

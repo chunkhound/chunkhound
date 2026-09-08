@@ -1001,6 +1001,7 @@ version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4577ecaa3c4f96589d473f679a71b596316f6641bc350038b962a5daf0085d7a"
 
+
 [[package]]
 name = "futures-lite"
 version = "2.6.1"

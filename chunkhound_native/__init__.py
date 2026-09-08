@@ -22,6 +22,8 @@ def _find_bundled_duckdb_files() -> list[Path]:
     return sorted(candidates)
 
 
+# Windows has no RPATH equivalent, so register the extension directory before
+# importing it; local builds place duckdb.dll there.
 if sys.platform == "win32":
     import os
 
@@ -46,14 +48,14 @@ except ImportError as e:
         raise ImportError(
             "chunkhound_native failed to load because its bundled DuckDB "
             f"runtime library could not be found in {_PKG_DIR} or its "
-            "sibling wheel-repair directories. This usually means the "
-            "chunkhound-native install is incomplete or corrupted. "
-            "Try: pip install --force-reinstall chunkhound-native"
+            f"sibling wheel-repair directories. Loader error: {e}. This "
+            "usually means the chunkhound-native install is incomplete or "
+            "corrupted. Try: pip install --force-reinstall chunkhound-native"
         ) from e
     _bundled_list = ", ".join(str(p) for p in _bundled)
     raise ImportError(
         "chunkhound_native failed to load even though a bundled DuckDB "
-        f"runtime library was found ({_bundled_list}). This "
+        f"runtime library was found ({_bundled_list}). Loader error: {e}. This "
         "usually means an architecture mismatch, a corrupted file, or the "
         "file being blocked/quarantined by antivirus or security software."
     ) from e

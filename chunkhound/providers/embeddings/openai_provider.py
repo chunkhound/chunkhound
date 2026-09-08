@@ -1262,12 +1262,19 @@ class OpenAIEmbeddingProvider:
                     # Handle token limit exceeded errors
                     error_message = str(rate_error)
                     if (
-                        "maximum context length" in error_message
-                        and "tokens" in error_message
-                    ) or (
-                        "tokens" in error_message
-                        and "max" in error_message
-                        and "per request" in error_message
+                        (
+                            "maximum context length" in error_message
+                            and "tokens" in error_message
+                        )
+                        or (
+                            "tokens" in error_message
+                            and "max" in error_message
+                            and "per request" in error_message
+                        )
+                        or (
+                            "input length exceeds" in error_message
+                            and "context length" in error_message
+                        )
                     ):
                         total_tokens = self.estimate_batch_tokens(texts)
                         token_limit = (

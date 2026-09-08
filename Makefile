@@ -8,10 +8,16 @@
 .PHONY: bench-lang bench-cluster dev dev-release lint typecheck test rust-check rust-test
 
 # DuckDB is linked dynamically via DUCKDB_DOWNLOAD_LIB + a self-relative RPATH
-# baked in at link time ($ORIGIN on Linux, @loader_path on macOS) -- see
-# RUST_COMMANDS in AGENTS.md. scripts/copy_duckdb_runtime.py then places the
-# downloaded library next to the compiled extension so that RPATH has
-# something to find.
+# baked in at link time ($ORIGIN on Linux, @loader_path on macOS).
+# scripts/copy_duckdb_runtime.py then places the downloaded library next to
+# the compiled extension so that RPATH has something to find.
+#
+# Air-gapped builds (no GitHub access for the DuckDB download): link a static
+# libduckdb you already have instead -- DUCKDB_LIB_DIR=<dir> DUCKDB_STATIC=1
+# with RUSTFLAGS='-C link-arg=-lstdc++' (the static .a's C++ exception code
+# lives in libstdc++.so; without it the .so builds but fails at import with
+# "undefined symbol: __gxx_personality_v0"). Linux only, untested since the
+# switch to maturin build + install_native.py.
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 	RUST_RPATH_FLAG := -Wl,-rpath,@loader_path
@@ -36,10 +42,21 @@ bench-cluster:
 		$(if $(CONFIG),--config $(CONFIG),) \
 		--output .chunkhound/benches/cluster-stress-dev/cluster_eval.json
 
+# Both targets install the local native extension without letting uv's
+# auto-sync reinstall the locked PyPI wheel -- see _select_files in
+# scripts/install_native.py for the dist-info rationale. The FIRST uv run
+# must NOT use --no-sync (it syncs the locked PyPI chunkhound-native whose
+# dist-info install_native.py preserves); every later uv run needs --no-sync.
+# A stale 0.1.0 dist-info left by an older 'maturin develop' run is auto-
+# corrected: the first sync replaces it with the locked PyPI install.
 dev:
-	$(RUST_DUCKDB_ENV) uv run maturin develop
-	uv run python scripts/copy_duckdb_runtime.py
-	uv run pytest tests/test_smoke.py -v -n auto
+	rm -rf target/wheels/
+	# Clean ensures a fresh relink even when cargo's incremental cache is stale.
+	cargo clean -p chunkhound_native
+	$(RUST_DUCKDB_ENV) uv run maturin build --out target/wheels/
+	uv run --no-sync python scripts/install_native.py
+	uv run --no-sync python scripts/copy_duckdb_runtime.py
+	uv run --no-sync pytest tests/test_smoke.py -v -n auto
 
 dev-release:
 	rm -rf target/wheels/
@@ -49,9 +66,9 @@ dev-release:
 	# name from the previous wheel. Force a clean relink every time.
 	cargo clean -p chunkhound_native --release
 	$(RUST_DUCKDB_ENV) uv run maturin build --release --out target/wheels/
-	uv run python scripts/install_native.py
-	uv run python scripts/copy_duckdb_runtime.py
-	uv run pytest tests/test_smoke.py -v -n auto
+	uv run --no-sync python scripts/install_native.py
+	uv run --no-sync python scripts/copy_duckdb_runtime.py
+	uv run --no-sync pytest tests/test_smoke.py -v -n auto
 
 lint:
 	uv run ruff check chunkhound

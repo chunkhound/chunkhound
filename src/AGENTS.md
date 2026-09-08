@@ -90,6 +90,7 @@ non-retryable, not pipeline-aborting: by deliberate choice, a bad provider key
 or malformed provider response is recorded in `PipelineReport.errors` and the
 affected chunks are written with `embedding=NULL`.
 
+
 **Fail-closed philosophy**: a scan that hits walk errors and ends up with zero
 files must raise, not report an ordinary empty scan — an empty scan is
 indistinguishable from every file having been deleted, and downstream cleanup
@@ -133,6 +134,7 @@ layers are pre-run capability checks, not runtime-exception recovery:
    use the Python callback supplied for the run. Python always supplies both
    the native configuration and that fallback, so this is selected per-run in
    Rust rather than by a Python pre-run capability gate.
+
 
 Call chain for reference: `IndexingCoordinator.process_directory()` →
 `chunkhound/services/rust_pipeline_runner.py::run_rust_indexing_phase()` →

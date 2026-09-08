@@ -20,3 +20,14 @@ def _update_speed_field(progress: Progress, task_id: TaskID, unit: str) -> None:
     if task_obj.elapsed and task_obj.elapsed > 0 and task_obj.completed:
         rate = task_obj.completed / task_obj.elapsed * 60
         progress.update(task_id, speed=f"{rate:.1f} {unit}")
+
+
+def format_bytes(n: int) -> str:
+    """Format a byte count as a human-readable string (e.g. '9.8GB')."""
+    # GB is the terminal unit: everything above it keeps rendering as GB.
+    size = float(n)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}GB"

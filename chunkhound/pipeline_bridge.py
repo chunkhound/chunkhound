@@ -627,6 +627,7 @@ def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
     }.get(provider, "")
 
 
+
 _T = TypeVar("_T")
 _MISSING = object()
 

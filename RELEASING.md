@@ -2,7 +2,20 @@
 
 `scripts/prepare_release.sh` is a deprecated local verification helper only; it
 does not publish anything and must not replace the GitHub Release workflow
-documented below.
+documented below. Do not publish with `uv publish`; CI owns every PyPI upload.
+
+## Release workflow
+
+Run the smoke suite before creating a release tag:
+
+```bash
+uv run pytest tests/test_smoke.py -v -n auto
+```
+
+A stable release is published when its GitHub Release is published. An
+alpha/beta/RC tag triggers `release-rc.yml` and publishes the pre-release to
+PyPI. Create tags only with `uv run scripts/update_version.py`; never edit
+version strings manually.
 
 ## Prerequisites (one-time setup)
 

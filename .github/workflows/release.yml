@@ -1,5 +1,8 @@
 name: Release
 
+# Publishing a GitHub Release is the maintainer gate for stable releases.
+# This workflow owns PyPI publication through its two OIDC environments; do
+# not publish with uv manually.
 on:
   release:
     types: [published]
@@ -68,9 +71,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # No Intel macOS (x86_64-apple-darwin) leg -- see AGENTS.md's
-        # RUST_COMMANDS section for why that's a deliberate, documented gap
-        # rather than an oversight.
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
 
     steps:
@@ -99,6 +99,8 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      # macOS/arm64 excluded: runner cost. Coverage exists via native-dev-macos
+      # in ci.yml (source-level make dev) and build-native-wheel (wheel build).
       matrix:
         os: [ubuntu-latest, windows-latest]
 
@@ -149,6 +151,8 @@ jobs:
   publish:
     needs: [publish-native, build-sdist, build-runtime-wheels]
     runs-on: ubuntu-latest
+    # PyPI must trust this repository's release.yml workflow in the `pypi`
+    # environment for OIDC publishing to work.
     environment: pypi
     timeout-minutes: 15
     permissions:

@@ -51,6 +51,8 @@ from chunkhound.providers.database.like_utils import escape_like_pattern
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
     load_gitignore_patterns,
+    passes_extension_filter,
+    prepare_extension_filter,
     scan_directory_files,
     summarize_include_patterns,
     walk_directory_tree,
@@ -1407,11 +1409,15 @@ class IndexingCoordinator(BaseService):
             if self.config and getattr(self.config, "indexing", None) is not None:
                 do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
             if do_cleanup and not _use_rust:
+<<<<<<< HEAD
                 _t2 = _t.perf_counter() if _t0 is not None else None
+=======
+                _t2 = _t.perf_counter()
+>>>>>>> upstream/main
                 cleaned_files = self._cleanup_orphaned_files(
                     directory, files, patterns, exclude_patterns
                 )
-                _t3 = _t.perf_counter() if _t0 is not None else None
+                _t3 = _t.perf_counter()
             else:
                 if not do_cleanup:
                     logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
@@ -1447,7 +1453,11 @@ class IndexingCoordinator(BaseService):
                 rust_files: list[tuple[Path, str | None]] = [(p, None) for p in files]
                 files_to_process = rust_files
             elif not force_reindex:
+<<<<<<< HEAD
                 _t4 = _t.perf_counter() if _t0 is not None else None
+=======
+                _t4 = _t.perf_counter()
+>>>>>>> upstream/main
                 change_task: TaskID | None = None
                 if self.progress:
                     change_task = self.progress.add_task(
@@ -1607,7 +1617,11 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
+<<<<<<< HEAD
                 _t5 = _t.perf_counter() if _t0 is not None else None
+=======
+                _t5 = _t.perf_counter()
+>>>>>>> upstream/main
                 logger.info(
                     f"Change scan: {len(files_to_process)}/{len(files)} to process "
                     f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
@@ -1734,19 +1748,37 @@ class IndexingCoordinator(BaseService):
                 # those out into the skipped-due-to-timeout bucket — mirroring
                 # the Python path's equivalent split in _on_batch_store above —
                 # so run.py's timeout-exclusion prompt fires for the Rust path
+<<<<<<< HEAD
                 # too. Match on the specific "parse timed out after" prefix,
                 # not a bare "timed out" substring: rust_result.errors also
                 # carries embed errors shaped like "embedding failed for N
                 # chunk(s): {message}", and {message} could itself mention a
                 # provider-side timeout — that must stay a real error, not get
                 # silently reclassified as a harmless parse skip.
+=======
+                # too. _split_rust_error() has already stripped the "{path}: "
+                # prefix, so err["error"] is exactly _parse_with_timeout's
+                # returned message with nothing else concatenated onto it —
+                # anchor on startswith(), not a bare "in" substring search:
+                # rust_result.errors also carries embed errors shaped like
+                # "embedding failed for N chunk(s): {message}", and a bare
+                # substring search would silently reclassify a genuine parse
+                # or provider error as a harmless skip if {message} happened
+                # to *contain* this phrase anywhere in its free-text body.
+                # startswith() only matches when the message itself IS the
+                # timeout message, not merely mentions it.
+>>>>>>> upstream/main
                 #
                 # Non-timeout skip reasons (binary/unknown/large config) arrive
                 # on rust_result.skipped_paths, not in errors.
                 agg_errors = []
                 agg_skipped_timeout = []
                 for err in rust_result.errors:
+<<<<<<< HEAD
                     if "parse timed out after" in (err.get("error") or ""):
+=======
+                    if (err.get("error") or "").startswith("parse timed out after"):
+>>>>>>> upstream/main
                         agg_skipped_timeout.append(str(err.get("file")))
                     else:
                         agg_errors.append(err)
@@ -1819,39 +1851,31 @@ class IndexingCoordinator(BaseService):
                         self.progress.update(parse_task, completed=task.total)
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
-            if _t0 is not None:
-                try:
-                    self._startup_profile = {
-                        "discovery_ms": round(
-                            ((_t1 - _t0) if (_t1 and _t0) else 0.0) * 1000.0, 3
-                        ),
-                        "cleanup_ms": round(
-                            (
-                                (_t3 - _t2)
-                                if (_t3 is not None and _t2 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "change_scan_ms": round(
-                            (
-                                (_t5 - _t4)
-                                if (_t5 is not None and _t4 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "files_discovered": len(files),
-                        "orphaned_cleaned": cleaned_files,
-                        "files_after_change_scan": len(files_to_process),
-                        "parallel_used": bool(
-                            getattr(self, "_profile_parallel_used", False)
-                        ),
-                    }
-                except Exception:
-                    pass
+            try:
+                # _t0/_t1 are set unconditionally above; _t2.._t5 stay None when
+                # the Rust pipeline runs or cleanup/change-scan is skipped, so
+                # those phases fall back to 0.0 rather than dropping the profile.
+                self._startup_profile = {
+                    "discovery_ms": round((_t1 - _t0) * 1000.0, 3),
+                    "cleanup_ms": round(
+                        ((_t3 - _t2) if (_t3 is not None and _t2 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "change_scan_ms": round(
+                        ((_t5 - _t4) if (_t5 is not None and _t4 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "files_discovered": len(files),
+                    "orphaned_cleaned": cleaned_files,
+                    "files_after_change_scan": len(files_to_process),
+                    "parallel_used": bool(
+                        getattr(self, "_profile_parallel_used", False)
+                    ),
+                }
+            except Exception:
+                pass
 
             # At this point, all parsed results have been stored via _on_batch_store
             stats: dict[str, Any] = {
@@ -3019,6 +3043,7 @@ class IndexingCoordinator(BaseService):
         self, files: list[Path], patterns: list[str]
     ) -> list[Path]:
         """Drop files with no language support that only matched via a
+<<<<<<< HEAD
         complex/wildcard include pattern (e.g. a blanket directory wildcard
         like `Q/**/*`).
 
@@ -3058,6 +3083,23 @@ class IndexingCoordinator(BaseService):
             return Language.is_known_path(f)
 
         return [f for f in files if _keep(f)]
+=======
+        complex/wildcard include pattern. See passes_extension_filter() in
+        file_patterns.py for the shared predicate.
+        """
+        idx_cfg = self._indexing_config_or_none()
+        index_unknown = bool(
+            idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False)
+        )
+        # Summarize once for the whole batch; per-file re-summarization would be
+        # O(patterns) work on every discovered file.
+        prepared = prepare_extension_filter(patterns)
+        return [
+            f
+            for f in files
+            if passes_extension_filter(f, patterns, index_unknown, prepared=prepared)
+        ]
+>>>>>>> upstream/main
 
     def _discover_files_via_git(
         self,

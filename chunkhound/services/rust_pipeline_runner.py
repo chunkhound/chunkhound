@@ -26,17 +26,7 @@ from rich.progress import Progress, TaskID
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
 from chunkhound.pipeline_bridge import run_rust_pipeline
-from chunkhound.services.progress_utils import _update_speed_field
-
-
-def _format_bytes(n: int) -> str:
-    """Format a byte count as a human-readable string (e.g. '9.8GB')."""
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.1f}{unit}"
-        size /= 1024
-    return f"{size:.1f}TB"
+from chunkhound.services.progress_utils import _update_speed_field, format_bytes
 
 
 class RustProgressBridge:
@@ -259,8 +249,8 @@ class RustProgressBridge:
                         )
                         direction = "smaller" if pct >= 0 else "larger"
                         self._compact_info = (
-                            f"{_format_bytes(self.compact_size_before)} → "
-                            f"{_format_bytes(self.compact_size_after)} "
+                            f"{format_bytes(self.compact_size_before)} → "
+                            f"{format_bytes(self.compact_size_after)} "
                             f"({abs(pct):.0f}% {direction})"
                         )
                         self.compact_reduction_pct = pct
@@ -423,9 +413,19 @@ async def run_rust_indexing_phase(
     # only partially closing its two connections (see its docstring), and
     # the reconnect in `finally` below must still run in that case, or a
     # long-lived server process is left permanently disconnected.
+    #
+    # Deliberately NOT gated on `db.is_connected`: that property only
+    # reflects the connection manager's connection, not the executor's
+    # separate thread-local one, and a prior run that failed mid-release
+    # can leave the two out of sync. Gating on it meant a `db` left
+    # disconnected by an earlier failure skipped this whole block —
+    # publishing no ownership flag and never calling release — while Rust
+    # still ran below, producing a second native writer on the same file
+    # with no guard at all. release_for_rust_pipeline() is idempotent (it
+    # tolerates already-closed connections), so it's always safe to call.
     released_for_rust = False
     release_error: Exception | None = None
-    if db is not None and db.is_connected:
+    if db is not None:
         released_for_rust = True
         # Publish "Rust owns the file" *before* release starts, not after it
         # returns: release_for_rust_pipeline() runs a CHECKPOINT that can take

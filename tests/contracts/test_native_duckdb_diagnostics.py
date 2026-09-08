@@ -77,6 +77,11 @@ def test_missing_duckdb_library_raises_clear_error(monkeypatch):
     message = str(err)
     assert "bundled DuckDB" in message
     assert "could not be found" in message
+    assert "Loader error:" in message
+    # The actual chained loader error must be embedded verbatim, not just
+    # the "Loader error:" label -- otherwise a regression dropping the
+    # {e} interpolation would still pass.
+    assert str(err.__cause__) in message
     assert "force-reinstall" in message
     assert err.__cause__ is not None
 
@@ -94,6 +99,8 @@ def test_present_but_unloadable_duckdb_library_raises_clear_error(monkeypatch):
 
     message = str(err)
     assert "libduckdb.so.fake" in message
+    assert "Loader error:" in message
+    assert str(err.__cause__) in message
     assert "architecture mismatch" in message
     assert err.__cause__ is not None
 
