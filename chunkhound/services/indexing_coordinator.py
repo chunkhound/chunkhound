@@ -54,7 +54,6 @@ from chunkhound.utils.file_patterns import (
     passes_extension_filter,
     prepare_extension_filter,
     scan_directory_files,
-    summarize_include_patterns,
     walk_directory_tree,
     walk_subtree_worker,
 )
@@ -1409,11 +1408,7 @@ class IndexingCoordinator(BaseService):
             if self.config and getattr(self.config, "indexing", None) is not None:
                 do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
             if do_cleanup and not _use_rust:
-<<<<<<< HEAD
-                _t2 = _t.perf_counter() if _t0 is not None else None
-=======
                 _t2 = _t.perf_counter()
->>>>>>> upstream/main
                 cleaned_files = self._cleanup_orphaned_files(
                     directory, files, patterns, exclude_patterns
                 )
@@ -1453,11 +1448,7 @@ class IndexingCoordinator(BaseService):
                 rust_files: list[tuple[Path, str | None]] = [(p, None) for p in files]
                 files_to_process = rust_files
             elif not force_reindex:
-<<<<<<< HEAD
-                _t4 = _t.perf_counter() if _t0 is not None else None
-=======
                 _t4 = _t.perf_counter()
->>>>>>> upstream/main
                 change_task: TaskID | None = None
                 if self.progress:
                     change_task = self.progress.add_task(
@@ -1617,11 +1608,7 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
-<<<<<<< HEAD
-                _t5 = _t.perf_counter() if _t0 is not None else None
-=======
                 _t5 = _t.perf_counter()
->>>>>>> upstream/main
                 logger.info(
                     f"Change scan: {len(files_to_process)}/{len(files)} to process "
                     f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
@@ -1748,14 +1735,6 @@ class IndexingCoordinator(BaseService):
                 # those out into the skipped-due-to-timeout bucket — mirroring
                 # the Python path's equivalent split in _on_batch_store above —
                 # so run.py's timeout-exclusion prompt fires for the Rust path
-<<<<<<< HEAD
-                # too. Match on the specific "parse timed out after" prefix,
-                # not a bare "timed out" substring: rust_result.errors also
-                # carries embed errors shaped like "embedding failed for N
-                # chunk(s): {message}", and {message} could itself mention a
-                # provider-side timeout — that must stay a real error, not get
-                # silently reclassified as a harmless parse skip.
-=======
                 # too. _split_rust_error() has already stripped the "{path}: "
                 # prefix, so err["error"] is exactly _parse_with_timeout's
                 # returned message with nothing else concatenated onto it —
@@ -1767,18 +1746,13 @@ class IndexingCoordinator(BaseService):
                 # to *contain* this phrase anywhere in its free-text body.
                 # startswith() only matches when the message itself IS the
                 # timeout message, not merely mentions it.
->>>>>>> upstream/main
                 #
                 # Non-timeout skip reasons (binary/unknown/large config) arrive
                 # on rust_result.skipped_paths, not in errors.
                 agg_errors = []
                 agg_skipped_timeout = []
                 for err in rust_result.errors:
-<<<<<<< HEAD
-                    if "parse timed out after" in (err.get("error") or ""):
-=======
                     if (err.get("error") or "").startswith("parse timed out after"):
->>>>>>> upstream/main
                         agg_skipped_timeout.append(str(err.get("file")))
                     else:
                         agg_errors.append(err)
@@ -3043,47 +3017,6 @@ class IndexingCoordinator(BaseService):
         self, files: list[Path], patterns: list[str]
     ) -> list[Path]:
         """Drop files with no language support that only matched via a
-<<<<<<< HEAD
-        complex/wildcard include pattern (e.g. a blanket directory wildcard
-        like `Q/**/*`).
-
-        A file explicitly named by a clean, non-wildcard-directory pattern
-        (e.g. `**/*.xyzunk`) is always kept — that's a deliberate, specific
-        request (parity with the existing "Unknown file type" skip-recording
-        path in `batch_processor.py`), distinct from a directory wildcard
-        that sweeps up every extension incidentally. Skipped entirely when
-        `index_unknown_files=True`, or when the include list contains the
-        unrestricted `**/*` sentinel — the same literal pattern
-        `IndexingConfig` appends to `include` for `index_unknown_files=True`
-        (see indexing_config.py), so a caller passing it directly (e.g. to
-        mean "discover everything, let batch_processor decide") gets the same
-        opt-out without needing to also thread a config object through.
-        """
-        idx_cfg = self._indexing_config_or_none()
-        if idx_cfg is not None and getattr(idx_cfg, "index_unknown_files", False):
-            return files
-        if "**/*" in patterns:
-            return files
-
-        allowed_exts, allowed_names, _has_complex = summarize_include_patterns(
-            patterns
-        )
-        # Case-insensitive, matching both Language.is_known_path() and the
-        # Rust fast walker's scan_files() (src/lib.rs), which lowercases
-        # extensions before comparing — a pattern written as "*.JPG" must
-        # still recognize an on-disk "photo.jpg" (or vice versa).
-        allowed_exts_lower = {e.lower() for e in allowed_exts}
-        allowed_names_lower = {n.lower() for n in allowed_names}
-
-        def _keep(f: Path) -> bool:
-            if f.suffix.lower() in allowed_exts_lower or (
-                f.name.lower() in allowed_names_lower
-            ):
-                return True
-            return Language.is_known_path(f)
-
-        return [f for f in files if _keep(f)]
-=======
         complex/wildcard include pattern. See passes_extension_filter() in
         file_patterns.py for the shared predicate.
         """
@@ -3099,7 +3032,6 @@ class IndexingCoordinator(BaseService):
             for f in files
             if passes_extension_filter(f, patterns, index_unknown, prepared=prepared)
         ]
->>>>>>> upstream/main
 
     def _discover_files_via_git(
         self,
