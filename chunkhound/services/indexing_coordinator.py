@@ -1408,11 +1408,11 @@ class IndexingCoordinator(BaseService):
             if self.config and getattr(self.config, "indexing", None) is not None:
                 do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
             if do_cleanup and not _use_rust:
-                _t2 = _t.perf_counter() if _t0 is not None else None
+                _t2 = _t.perf_counter()
                 cleaned_files = self._cleanup_orphaned_files(
                     directory, files, patterns, exclude_patterns
                 )
-                _t3 = _t.perf_counter() if _t0 is not None else None
+                _t3 = _t.perf_counter()
             else:
                 if not do_cleanup:
                     logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
@@ -1448,7 +1448,7 @@ class IndexingCoordinator(BaseService):
                 rust_files: list[tuple[Path, str | None]] = [(p, None) for p in files]
                 files_to_process = rust_files
             elif not force_reindex:
-                _t4 = _t.perf_counter() if _t0 is not None else None
+                _t4 = _t.perf_counter()
                 change_task: TaskID | None = None
                 if self.progress:
                     change_task = self.progress.add_task(
@@ -1608,7 +1608,7 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
-                _t5 = _t.perf_counter() if _t0 is not None else None
+                _t5 = _t.perf_counter()
                 logger.info(
                     f"Change scan: {len(files_to_process)}/{len(files)} to process "
                     f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
@@ -1820,39 +1820,31 @@ class IndexingCoordinator(BaseService):
                         self.progress.update(parse_task, completed=task.total)
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
-            if _t0 is not None:
-                try:
-                    self._startup_profile = {
-                        "discovery_ms": round(
-                            ((_t1 - _t0) if (_t1 and _t0) else 0.0) * 1000.0, 3
-                        ),
-                        "cleanup_ms": round(
-                            (
-                                (_t3 - _t2)
-                                if (_t3 is not None and _t2 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "change_scan_ms": round(
-                            (
-                                (_t5 - _t4)
-                                if (_t5 is not None and _t4 is not None)
-                                else 0.0
-                            )
-                            * 1000.0,
-                            3,
-                        ),
-                        "files_discovered": len(files),
-                        "orphaned_cleaned": cleaned_files,
-                        "files_after_change_scan": len(files_to_process),
-                        "parallel_used": bool(
-                            getattr(self, "_profile_parallel_used", False)
-                        ),
-                    }
-                except Exception:
-                    pass
+            try:
+                # _t0/_t1 are set unconditionally above; _t2.._t5 stay None when
+                # the Rust pipeline runs or cleanup/change-scan is skipped, so
+                # those phases fall back to 0.0 rather than dropping the profile.
+                self._startup_profile = {
+                    "discovery_ms": round((_t1 - _t0) * 1000.0, 3),
+                    "cleanup_ms": round(
+                        ((_t3 - _t2) if (_t3 is not None and _t2 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "change_scan_ms": round(
+                        ((_t5 - _t4) if (_t5 is not None and _t4 is not None) else 0.0)
+                        * 1000.0,
+                        3,
+                    ),
+                    "files_discovered": len(files),
+                    "orphaned_cleaned": cleaned_files,
+                    "files_after_change_scan": len(files_to_process),
+                    "parallel_used": bool(
+                        getattr(self, "_profile_parallel_used", False)
+                    ),
+                }
+            except Exception:
+                pass
 
             # At this point, all parsed results have been stored via _on_batch_store
             stats: dict[str, Any] = {
