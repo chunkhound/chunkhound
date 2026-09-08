@@ -19,14 +19,10 @@ from pathlib import Path
 from re import Pattern
 
 from chunkhound.core.utils.path_utils import get_relative_path_safe
+from chunkhound.utils.rust_pipeline_flag import _get_use_rust
 
-try:
-    from chunkhound_native import scan_files as _rust_scan_files
-    _RUST_AVAILABLE = True
-except ImportError:
-    _RUST_AVAILABLE = False
+from chunkhound_native import scan_files as _rust_scan_files
 
-_USE_RUST = os.environ.get("CHUNKHOUND_USE_RUST", "1" if _RUST_AVAILABLE else "0") == "1"
 _log = logging.getLogger(__name__)
 
 HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
@@ -79,7 +75,7 @@ def compile_pattern(pattern: str, cache: dict[str, Pattern[str]]) -> Pattern[str
     return cache[pattern]
 
 
-def _summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str], bool]:
+def summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str], bool]:
     """Derive fast-path include sets from simple patterns.
 
     Returns:
@@ -88,6 +84,15 @@ def _summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str]
     - allowed_exts captures patterns like "**/*.py" or "*.py" -> {".py"}
     - allowed_names captures exact filename includes like "**/Makefile" or "Makefile"
     - has_complex true when any pattern isn't a pure extension or exact name
+
+    A directory-anchored pattern (e.g. "src/**/*.proto" or "docs/api/*.md")
+    is still treated as naming a specific extension/name, not as complex —
+    as long as every segment before the final one is either a plain literal
+    directory name or the recursive "**" wildcard. That anchor is incidental
+    to the request; only the final segment determines specificity. A bare
+    wildcard tail (e.g. "src/**/*") or a non-"**" wildcard directory segment
+    (e.g. "src/*/*.py") still falls through to has_complex=True — the former
+    is a genuine blanket sweep, the latter is ambiguous enough to leave gated.
     """
     exts: set[str] = set()
     names: set[str] = set()
@@ -117,19 +122,50 @@ def _summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str]
             return s
         return None
 
+    def _has_wildcard(segment: str) -> bool:
+        return any(ch in segment for ch in "*?[")
+
+    def classify(q: str) -> tuple[str, str] | None:
+        """Classify a pattern (after stripping a leading "**/") as
+        ("ext", value), ("name", value), or None (complex)."""
+        if "/" not in q:
+            ext = is_simple_ext(q)
+            if ext is not None:
+                return ("ext", ext)
+            nm = is_exact_name(q)
+            if nm is not None:
+                return ("name", nm)
+            return None
+
+        # Directory-anchored: only specific if every segment before the
+        # last is a plain literal name or "**" -- then classify the final
+        # segment the same way a non-anchored pattern would be.
+        segments = q.split("/")
+        anchor_segments, tail = segments[:-1], segments[-1]
+        for segment in anchor_segments:
+            if segment != "**" and _has_wildcard(segment):
+                return None
+        ext = is_simple_ext(tail)
+        if ext is not None:
+            return ("ext", ext)
+        nm = is_exact_name(tail)
+        if nm is not None:
+            return ("name", nm)
+        return None
+
     for p in patterns or []:
         q = p
         if q.startswith("**/"):
             q = q[3:]
-        ext = is_simple_ext(q)
-        if ext is not None:
-            exts.add(ext)
+        result = classify(q)
+        if result is None:
+            complex_pat = True
             continue
-        nm = is_exact_name(q)
-        if nm is not None:
-            names.add(nm)
-            continue
-        complex_pat = True
+        kind, value = result
+        if kind == "ext":
+            exts.add(value)
+        else:
+            names.add(value)
 
     return exts, names, complex_pat
 
@@ -422,7 +458,7 @@ def scan_directory_files(
                     continue
 
                 # Fast include prefilter: avoid regex matching when file can't possibly match
-                allow_exts, allow_names, has_complex = _summarize_include_patterns(
+                allow_exts, allow_names, has_complex = summarize_include_patterns(
                     patterns
                 )
                 if not has_complex:
@@ -470,12 +506,41 @@ def walk_directory_tree(
     """
     # Fast Rust path: ignore crate handles gitignore + exclude_patterns natively.
     # ignore_engine is applied as a post-filter so Rust handles the expensive I/O walk.
-    if _USE_RUST and _RUST_AVAILABLE:
-        _exts, _names, _has_complex = _summarize_include_patterns(patterns)
-        if (
-            not _has_complex
-            and (_exts or _names)
-            and max_files is None       # Rust path doesn't support max_files cap
+    if _get_use_rust():
+        _exts, _names, _has_complex = summarize_include_patterns(patterns)
+        # "**/*" is the unrestricted sentinel IndexingConfig injects for
+        # index_unknown_files=True (see indexing_coordinator.py's
+        # _filter_unsupported_extensions and realtime_path_filter.py's
+        # should_index, which already treat it the same way) — it makes every
+        # other include pattern's extension restriction redundant, since
+        # include patterns are unioned, not intersected. Bypass the
+        # extension/name allow-list entirely via Rust's include_all instead
+        # of falling back to the slow Python walk for these (usually the
+        # largest, most permissive) scans.
+        _include_all = "**/*" in patterns
+        if _include_all:
+            _include_prefixes = _extract_include_prefixes(patterns)
+            # An explicit anchor into a HEAVY_DIRS-named directory (e.g.
+            # "node_modules/**/*.ts") means the caller wants that subtree
+            # included — _should_prune_heavy_dir won't prune it, but Rust's
+            # scan_files always passes skip_dirs=HEAVY_DIRS with no
+            # anchor-awareness, which would wrongly drop that entire subtree.
+            # Decline the fast path in that case so behavior matches the
+            # slow path exactly (parity, not a correctness guarantee — the
+            # slow path itself has a known pre-existing gap here: mixing an
+            # anchored pattern with an unanchored one like "**/*" makes
+            # _extract_include_prefixes/_can_prune_dir_by_prefix wrongly
+            # prune unrelated sibling directories too, since it doesn't know
+            # the unanchored pattern should force an unpruned walk. Fixing
+            # that is a separate, broader bug in the anchor-pruning heuristic
+            # itself, not specific to index_unknown_files).
+            if any(
+                not _should_prune_heavy_dir(HEAVY_DIRS, _include_prefixes, name)
+                for name in HEAVY_DIRS
+            ):
+                _include_all = False
+        if max_files is None and (
+            _include_all or (not _has_complex and (_exts or _names))
         ):
             _gitignore_excludes = (
                 [_fnmatch_to_gitignore(p) for p in exclude_patterns]
@@ -484,14 +549,18 @@ def walk_directory_tree(
             )
             _raw = _rust_scan_files(
                 str(start_path),
-                [ext.lstrip(".") for ext in _exts],
+                [] if _include_all else [ext.lstrip(".") for ext in _exts],
                 skip_dirs=list(HEAVY_DIRS),
                 exclude_patterns=_gitignore_excludes,
-                exact_names=list(_names) if _names else None,
+                exact_names=(
+                    None if _include_all else (list(_names) if _names else None)
+                ),
+                include_all=_include_all,
             )
             _log.debug(
-                "[RUST_SCANNER] scan_files root=%s exts=%s names=%s files=%d",
-                start_path, sorted(_exts), sorted(_names), len(_raw),
+                "[RUST_SCANNER] scan_files root=%s include_all=%s "
+                "exts=%s names=%s files=%d",
+                start_path, _include_all, sorted(_exts), sorted(_names), len(_raw),
             )
             # Rust's native gitignore can exclude nested git repos that appear in the
             # parent .gitignore. Detect such repos via the ignore engine's repo_roots
@@ -509,10 +578,13 @@ def walk_directory_tree(
                     if not any(p.startswith(_nr_str + os.sep) for p in _raw):
                         _extra = _rust_scan_files(
                             _nr_str,
-                            [ext.lstrip(".") for ext in _exts],
+                            [] if _include_all else [ext.lstrip(".") for ext in _exts],
                             skip_dirs=list(HEAVY_DIRS),
                             exclude_patterns=_gitignore_excludes,
-                            exact_names=list(_names) if _names else None,
+                            exact_names=None
+                            if _include_all
+                            else (list(_names) if _names else None),
+                            include_all=_include_all,
                         )
                         _log.debug(
                             "[RUST_SCANNER] nested-repo boundary re-scan: root=%s files=%d",
@@ -545,7 +617,7 @@ def walk_directory_tree(
         return files, gitignore_patterns
 
     # Precompute include summary once for this walk
-    inc_allow_exts, inc_allow_names, inc_has_complex = _summarize_include_patterns(
+    inc_allow_exts, inc_allow_names, inc_has_complex = summarize_include_patterns(
         patterns
     )
     include_prefixes = _extract_include_prefixes(patterns)
@@ -667,6 +739,60 @@ def walk_directory_tree(
 # ---------------------------------------------------------------------------
 
 
+def prepare_extension_filter(
+    patterns: list[str],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Precompute the (lowercased) allowed extension/name sets consumed by
+    passes_extension_filter(), for callers that check many files against the
+    same pattern list (e.g. RealtimePathFilter's per-event hot path)."""
+    allowed_exts, allowed_names, _has_complex = summarize_include_patterns(patterns)
+    # Case-insensitive, matching Language.is_known_path() and the Rust
+    # fast walker's scan_files() (src/lib.rs), which lowercases extensions.
+    return (
+        frozenset(e.lower() for e in allowed_exts),
+        frozenset(n.lower() for n in allowed_names),
+    )
+
+
+def passes_extension_filter(
+    file_path: Path,
+    patterns: list[str],
+    index_unknown_files: bool,
+    prepared: tuple[frozenset[str], frozenset[str]] | None = None,
+) -> bool:
+    """Check whether a file passes the include-pattern extension filter.
+
+    Shared predicate used by both IndexingCoordinator (batch discovery) and
+    RealtimePathFilter (single-file realtime events) to avoid drifting copies
+    of the same algorithm. Unknown extensions pass when the caller opted out
+    of filtering: via index_unknown_files, or via the literal "**/*" — the
+    same sentinel IndexingConfig appends to `include` for
+    index_unknown_files=True (see indexing_config.py), so a caller passing it
+    directly gets the same opt-out without threading a config object through,
+    keeping batch discovery, realtime filtering, and cleanup in agreement.
+
+    `prepared`: output of prepare_extension_filter(patterns); pass it to skip
+    re-summarizing `patterns` on every call (realtime per-event hot path).
+    """
+    if index_unknown_files:
+        return True
+    if "**/*" in patterns:
+        return True
+
+    if prepared is None:
+        prepared = prepare_extension_filter(patterns)
+    allowed_exts_lower, allowed_names_lower = prepared
+
+    suffix = file_path.suffix.lower()
+    name = file_path.name.lower()
+    if suffix in allowed_exts_lower or name in allowed_names_lower:
+        return True
+
+    from chunkhound.core.types.common import Language
+
+    return Language.is_known_path(file_path)
+
+
 def normalize_include_pattern(pattern: str) -> str:
     """Ensure include pattern starts with "**/" prefix without double-prefixing.
 
@@ -709,6 +835,12 @@ def walk_subtree_worker(
 
     Returns:
         Tuple of (list of file paths found, list of error messages)
+
+    Raises:
+        RuntimeError: Propagated verbatim from the Rust scanner when it hit
+            walk errors and found zero files for this subtree -- callers must
+            not treat that as "this subtree has no files" (see inline comment
+            at the `except RuntimeError` clause below).
     """
     errors = []
 
@@ -781,6 +913,16 @@ def walk_subtree_worker(
         error_msg = f"Permission denied accessing {subtree_path}: {e}"
         errors.append(error_msg)
         return [], errors
+    except RuntimeError:
+        # The Rust scanner (_rust_scan_files) raises RuntimeError specifically
+        # when it hit walk errors and still ended up with nothing to report --
+        # that combination is indistinguishable from "this subtree is
+        # genuinely empty", which downstream cleanup treats as license to
+        # delete every DB row under it. Unlike the two cases above (which are
+        # legitimately "nothing was here to index"), this one must not be
+        # swallowed into an empty result: let it propagate so the caller
+        # aborts/falls back instead of silently merging a false-empty subtree.
+        raise
     except Exception as e:
         # Unexpected error - capture for debugging
         error_msg = (

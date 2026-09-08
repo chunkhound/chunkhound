@@ -78,6 +78,10 @@ chunkhound search <query> [path] [options]
 | `query` | Search query (required) |
 | `path` | Project directory (default: `.`) |
 
+> **Tip:** pass the project directory as the positional `path` so its
+> `.chunkhound.json` resolves. A wrong `--db` subpath silently returns 0
+> results — verify with a regex search first.
+
 **Options:**
 
 | Flag | Description |
@@ -273,6 +277,10 @@ chunkhound mcp --transport http --host 0.0.0.0 --port 5173 --auth-token "$TOKEN"
 > **Note:** binding to a non-loopback `--host` without `--auth-token` is refused at startup.
 > `--cors` also requires `--auth-token` — without a token, any website open in the same
 > browser could read from the HTTP transport, even on the default loopback host.
+>
+> **Tip:** for a project with its own `.chunkhound.json`, pass the project
+> directory as the positional `path`. If you must use `--db`, use the exact
+> `database.path` from that file — a wrong subpath silently returns 0 results.
 
 ## `chunkhound map`
 

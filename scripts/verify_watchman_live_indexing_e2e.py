@@ -209,10 +209,7 @@ class SubprocessJsonRpcClient:
                     timeout=_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                wait_note = (
-                    "wait_timeout="
-                    f"{_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS:.1f}s"
-                )
+                wait_note = f"wait_timeout={_JSON_RPC_EOF_WAIT_TIMEOUT_SECONDS:.1f}s"
             except Exception as error:
                 wait_note = f"wait_error={error!r}"
 
@@ -225,8 +222,7 @@ class SubprocessJsonRpcClient:
             details.append(f"stderr_tail={stderr_tail!r}")
 
         return RuntimeError(
-            "JSON-RPC subprocess terminated unexpectedly "
-            f"({', '.join(details)})"
+            f"JSON-RPC subprocess terminated unexpectedly ({', '.join(details)})"
         )
 
     async def _read_exited_stderr_tail(self) -> str | None:
@@ -423,10 +419,45 @@ def _editable_install_env() -> dict[str, str]:
     return env
 
 
+def _install_native_wheel(*, python_path: Path, native_wheel: Path) -> None:
+    """Install the complete repaired native wheel after the app artifact.
+
+    This deliberately replaces the PyPI-resolved native distribution without
+    re-resolving dependencies: the branch wheel can expose an API not yet
+    published on PyPI. Installing the whole repaired wheel preserves its
+    platform-specific loader layout (.libs/RPATH/DLL files).
+    """
+    try:
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(python_path),
+                "--force-reinstall",
+                "--no-deps",
+                str(native_wheel),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        # capture_output=True hides uv's own diagnostics; surface them so a
+        # failed wheel install is debuggable from the CI log alone.
+        detail = (error.stderr or error.stdout or "").strip()
+        raise RuntimeError(
+            "Failed to install repaired native wheel "
+            f"{native_wheel} into {python_path}: {detail}"
+        ) from error
+
+
 def _install_into_venv(
     *,
     venv_dir: Path,
     install_target: Path,
+    native_wheel: Path,
     editable: bool = False,
 ) -> Path:
     subprocess.run(
@@ -453,6 +484,7 @@ def _install_into_venv(
         text=True,
         env=_editable_install_env(),
     )
+    _install_native_wheel(python_path=python_path, native_wheel=native_wheel)
     chunkhound_exe = _chunkhound_path(venv_dir)
     if not chunkhound_exe.is_file():
         raise FileNotFoundError(
@@ -500,9 +532,7 @@ def _assert_sidecar_uses_installed_runtime(
         )
     path_entries = process_env.get("PATH", "").split(os.pathsep)
     normalized_entries = [
-        os.path.normcase(os.path.normpath(entry))
-        for entry in path_entries
-        if entry
+        os.path.normcase(os.path.normpath(entry)) for entry in path_entries if entry
     ]
     expected_venv_entry = os.path.normcase(os.path.normpath(str(expected_bin_dir)))
     expected_runtime_dir = realtime.get("watchman_binary_path")
@@ -913,7 +943,7 @@ async def _verify_fallback_install_contract(
         )
 
 
-async def _verify_source_fallback(source_root: Path) -> None:
+async def _verify_source_fallback(source_root: Path, native_wheel: Path) -> None:
     root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-source-verify-"))
     try:
         sdist_source_root = root / "sdist-source"
@@ -940,6 +970,7 @@ async def _verify_source_fallback(source_root: Path) -> None:
         sdist_chunkhound_exe = _install_into_venv(
             venv_dir=sdist_install_root / "venv",
             install_target=sdist_artifact,
+            native_wheel=native_wheel,
         )
         await _verify_fallback_install_contract(
             chunkhound_exe=sdist_chunkhound_exe,
@@ -951,6 +982,7 @@ async def _verify_source_fallback(source_root: Path) -> None:
         source_chunkhound_exe = _install_into_venv(
             venv_dir=source_install_root / "venv",
             install_target=source_tree_root,
+            native_wheel=native_wheel,
         )
         await _verify_fallback_install_contract(
             chunkhound_exe=source_chunkhound_exe,
@@ -962,6 +994,7 @@ async def _verify_source_fallback(source_root: Path) -> None:
         editable_chunkhound_exe = _install_into_venv(
             venv_dir=editable_install_root / "venv",
             install_target=editable_source_root,
+            native_wheel=native_wheel,
             editable=True,
         )
         await _verify_fallback_install_contract(
@@ -974,7 +1007,7 @@ async def _verify_source_fallback(source_root: Path) -> None:
         _remove_tree_with_retries(root)
 
 
-async def _verify_wheel(wheel_path: Path) -> None:
+async def _verify_wheel(wheel_path: Path, native_wheel: Path) -> None:
     root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-live-wheel-verify-"))
     try:
         venv_dir = root / "venv"
@@ -996,6 +1029,7 @@ async def _verify_wheel(wheel_path: Path) -> None:
             capture_output=True,
             text=True,
         )
+        _install_native_wheel(python_path=python_path, native_wheel=native_wheel)
         chunkhound_exe = _chunkhound_path(venv_dir)
         if not chunkhound_exe.is_file():
             raise FileNotFoundError(
@@ -1116,6 +1150,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Path(s) to .whl file(s) to verify for installed-wheel live indexing.",
     )
     parser.add_argument(
+        "--native-wheel",
+        type=Path,
+        required=True,
+        help=(
+            "Path to the complete repaired chunkhound-native wheel paired with "
+            "these verification installs."
+        ),
+    )
+    parser.add_argument(
         "--require-supported-matrix",
         action="store_true",
         help=(
@@ -1145,6 +1188,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.wheels and not args.verify_source_fallback:
         parser.error("Provide wheel paths and/or --verify-source-fallback.")
 
+    native_wheel = args.native_wheel
+    if not native_wheel.is_file() or native_wheel.suffix != ".whl":
+        raise FileNotFoundError(f"Native wheel not found: {native_wheel}")
+
     wheel_paths = list(args.wheels)
     for wheel_path in wheel_paths:
         if not wheel_path.is_file() or wheel_path.suffix != ".whl":
@@ -1167,10 +1214,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     for wheel_path in compatible_wheels:
-        asyncio.run(_verify_wheel(wheel_path))
+        asyncio.run(_verify_wheel(wheel_path, native_wheel))
 
     if args.verify_source_fallback:
-        asyncio.run(_verify_source_fallback(args.source_root))
+        asyncio.run(_verify_source_fallback(args.source_root, native_wheel))
 
     return 0
 

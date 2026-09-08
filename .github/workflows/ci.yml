@@ -65,7 +65,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.14"]
-        split: [1, 2]
+        split: [1, 2, 3]
         include:
           - os: ubuntu-latest
             job_timeout_minutes: 30
@@ -119,39 +119,8 @@ jobs:
           name: site-dist
           path: site/dist
 
-      - name: Install Rust stable toolchain
-        if: hashFiles('Cargo.toml') != ''
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        if: hashFiles('Cargo.toml') != ''
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      # Separate cache for the precompiled DuckDB zip so a Cargo.lock bump
-      # (for an unrelated crate) doesn't force a re-download.  Key on the
-      # DuckDB version embedded in Cargo.lock — changes only when duckdb-rs
-      # itself is upgraded.
-      - name: Cache DuckDB precompiled library
-        if: hashFiles('Cargo.toml') != ''
-        uses: actions/cache@v4
-        with:
-          path: target/duckdb-download/
-          key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-duckdb-
-
-      - name: Build Rust extension (maturin develop)
-        if: hashFiles('Cargo.toml') != ''
-        env:
-          DUCKDB_DOWNLOAD_LIB: "1"
-        run: |
-          uv pip install maturin
-          uv run maturin develop
+      - name: Build Rust extension
+        uses: ./.github/actions/build-rust-extension
 
       - name: Test collection check
         run: uv run pytest tests/ --collect-only -q --tb=no
@@ -174,7 +143,7 @@ jobs:
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
           max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 2 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()
@@ -191,50 +160,118 @@ jobs:
   rust-checks:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: windows-latest
+            job_timeout_minutes: 60
       fail-fast: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+      - name: Set up Rust toolchain
+        uses: ./.github/actions/setup-rust-toolchain
 
       - name: Cache DuckDB precompiled library
-        uses: actions/cache@v4
-        with:
-          path: target/duckdb-download/
-          key: ${{ runner.os }}-duckdb-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-duckdb-
+        uses: ./.github/actions/cache-duckdb-lib
 
-      - name: Check Rust formatting
-        run: cargo fmt --check
-
-      - name: Clippy (Rust lints)
-        env:
-          DUCKDB_DOWNLOAD_LIB: "1"
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Rust lint (fmt + clippy)
+        if: matrix.os != 'windows-latest'
+        run: make rust-check
 
       - name: Run Rust unit tests
+        if: matrix.os != 'windows-latest'
+        run: make rust-test
+
+      # windows-latest runners don't reliably have GNU Make on PATH (MSYS2 ships
+      # on the image but isn't added to PATH) -- run the equivalent cargo
+      # commands directly. Keep in sync with Makefile's rust-check/rust-test.
+      - name: Rust lint (fmt + clippy) [Windows]
+        if: matrix.os == 'windows-latest'
+        env:
+          DUCKDB_DOWNLOAD_LIB: "1"
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust unit tests [Windows]
+        if: matrix.os == 'windows-latest'
         env:
           DUCKDB_DOWNLOAD_LIB: "1"
         run: cargo test
 
+  # ubuntu-24.04-arm has no track record in this project yet (added for the
+  # chunkhound-native release wheel matrix) -- build+repair+smoke-import it on
+  # every PR via the same composite action release.yml/release-rc.yml use, so
+  # an aarch64-specific failure (auditwheel policy detection, patchelf, a
+  # dependency crate) surfaces here instead of on a live release tag.
+  native-wheel-smoke-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+
+  # Run the public Makefile contract once on macOS rather than only checking
+  # its printed commands. Other platforms exercise the equivalent native build
+  # through the test matrix without multiplying this expensive build.
+  native-dev-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # install_native.py verifies tracked source files
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Set up Rust toolchain
+        uses: ./.github/actions/setup-rust-toolchain
+
+      - name: Cache DuckDB precompiled library
+        uses: ./.github/actions/cache-duckdb-lib
+
+      - name: Run native development workflow
+        run: make dev
+
+      - name: Smoke-test repaired macOS native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+          out-dir: native-dist
+
   pages-artifact:
-    needs: [site-build, tests, rust-checks, site-build-validation, watchman-rollout-gate]
+    needs:
+      - site-build
+      - tests
+      - rust-checks
+      - site-build-validation
+      - watchman-rollout-gate
+      - native-wheel-smoke-arm64
+      - native-dev-macos
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -294,6 +331,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Build Rust extension
+        uses: ./.github/actions/build-rust-extension
+
       - name: Prepare Linux mount-aware Watchman fixture
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -324,6 +364,23 @@ jobs:
           CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
         run: uv build --wheel --clear
 
+      - name: Build repaired native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+          out-dir: native-dist
+
+      # Debug artifact only: keep the repaired wheel alive if a later
+      # verification step fails, so it does not die with the runner.
+      # Deliberately NOT named watchman-wheel-* -- the rollout gate's
+      # download pattern would merge it into its supported-matrix checks.
+      - name: Upload repaired native wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repaired-native-wheel-${{ matrix.os }}
+          path: native-dist/*.whl
+          if-no-files-found: error
+
       - name: Verify Watchman runtime wheel artifacts
         shell: bash
         run: |
@@ -344,7 +401,13 @@ jobs:
             echo "No wheel produced in dist/"
             exit 1
           fi
-          uv run python scripts/verify_watchman_live_indexing_e2e.py "${wheels[@]}"
+          native_wheels=(native-dist/chunkhound_native-*.whl)
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one repaired native wheel in native-dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_live_indexing_e2e.py \
+            --native-wheel "${native_wheels[0]}" "${wheels[@]}"
 
       - name: Upload Watchman wheel artifact
         uses: actions/upload-artifact@v4
@@ -378,6 +441,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Build repaired native wheel
+        uses: ./.github/actions/build-native-wheel
+        with:
+          skip-tag-version-patch: 'true'
+          out-dir: native-dist
+
       - name: Download staged Watchman wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -397,7 +466,14 @@ jobs:
           uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix "${wheels[@]}"
 
       - name: Verify source/editable Watchman fallback contract
-        run: >-
-          uv run python scripts/verify_watchman_live_indexing_e2e.py
-          --verify-source-fallback
-          --source-root .
+        shell: bash
+        run: |
+          shopt -s nullglob
+          native_wheels=(native-dist/chunkhound_native-*.whl)
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one repaired native wheel in native-dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_live_indexing_e2e.py \
+            --native-wheel "${native_wheels[0]}" \
+            --verify-source-fallback --source-root .

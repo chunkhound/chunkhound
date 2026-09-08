@@ -180,6 +180,25 @@ Fast analytical queries and efficient storage.
 }
 ```
 
+#### DuckDB storage paths
+
+`database.path` normally names a directory; ChunkHound stores the database as
+`chunks.db` inside it. A path ending in `.db` or `.duckdb` is an explicit
+DuckDB file instead. An existing regular file is also kept as a direct database
+path for older installations. If no path is configured, the default is
+`<project-root>/.chunkhound/db/chunks.db`.
+
+> **Gotchas:**
+> - Prefer passing the project directory as a positional argument
+>   (`chunkhound search "query" /path/to/project`) so its `.chunkhound.json`
+>   resolves correctly.
+> - A `--db` path pointing at the wrong subpath silently returns 0 results — no
+>   error, just empty. Verify with a regex search first.
+> - Pre-v4 flat `.chunkhound` files block directory creation — move them aside
+>   before re-indexing.
+> - `--config` does not override a project-local `.chunkhound.json` for the DB
+>   path — use an explicit `--db` when the target project has its own config.
+
 ### LanceDB
 
 > **Experimental** — not recommended for production use. The LanceDB integration is actively developed but may have rough edges around index rebuilding, migration, and edge-case query correctness. Use DuckDB unless you are evaluating LanceDB specifically.

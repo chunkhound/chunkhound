@@ -10,6 +10,7 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 - NEVER Use print() in MCP server (stdio.py, http_server.py, tools.py)
 - NEVER Make single-row DB inserts in loops
 - NEVER Use forward references (quotes) in type annotations unless needed
+- NEVER Modify `AGENTS.md` without an explicit user request and an explicit approval
 
 **ALWAYS:**
 - ALWAYS Run smoke tests before committing: `uv run pytest tests/test_smoke.py -v -n auto`
@@ -57,71 +58,6 @@ uv run scripts/update_version.py --bump minor b1   # v4.0.1 → v4.1.0b1
 
 NEVER manually edit version strings - ALWAYS create git tags instead.
 
-## PUBLISHING_PROCESS
-Releases are now fully automated via GitHub Actions (OIDC Trusted Publishing).
-See **RELEASING.md** for the authoritative step-by-step guide.
-
-Quick summary:
-1. Tag the version: `uv run scripts/update_version.py X.Y.Z`
-2. Run smoke tests: `uv run pytest tests/test_smoke.py -v -n auto` (MANDATORY)
-3. Create and publish a GitHub Release — `release.yml` handles the PyPI upload automatically.
-
-Pre-releases (alpha/beta/RC) publish to **PyPI** (not TestPyPI) via `release-rc.yml` on tag push.
-Do NOT use `uv publish` or `prepare_release.sh` manually — CI owns the publish step.
-
-## TEST RELEASE (alpha to PyPI)
-
-**If version not specified:** fetch latest version from PyPI, increment minor, append `a1`:
-```bash
-LATEST=$(pip index versions chunkhound 2>/dev/null | grep -oP '[\d.]+' | head -1)
-# e.g. 4.0.3 → next minor = 4.1.0 → alpha = 4.1.0a1
-```
-
-**If version specified by user** (e.g. `4.2.0`): append `a1` → `4.2.0a1`
-
-**Steps:**
-```bash
-# 1. Save current remote and switch to chunkhound org remote
-ORIGINAL_REMOTE=$(git remote get-url origin)
-git remote set-url origin https://github.com/chunkhound/chunkhound.git
-
-# 2. Create the alpha tag
-uv run scripts/update_version.py X.Y.Za1
-
-# 3. Push the tag — triggers release-rc.yml → publishes to PyPI as pre-release
-git push origin vX.Y.Za1
-
-# 4. Revert remote back to original
-git remote set-url origin "$ORIGINAL_REMOTE"
-
-# 5. Update uv.lock — pyproject.toml only pins a floor version, so this must be
-#    bumped every release to pick up the version that was just published
-uv lock --upgrade-package chunkhound-native
-git add uv.lock
-git commit -m "chore: bump chunkhound-native in lockfile to vX.Y.Za1"
-```
-
-PyPI trusted publisher required for `release-rc.yml` (on the `chunkhound` project):
-- Owner: `chunkhound`
-- Repository: `chunkhound`
-- Workflow: `release-rc.yml`
-- Environment: `pypi`
-
-This same tag push also publishes `chunkhound-native` via the `publish-rc-native` job, which needs
-its own trusted publisher registered on the **`chunkhound-native`** PyPI project (Workflow:
-`release-rc.yml`, Environment: `pypi-native`) — see `RELEASING.md` prerequisites for the full
-setup and the environment-scoping gotcha that causes a confusing `403` if it's misconfigured.
-
-## DB_PATH_GOTCHAS
-- **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly
-- **For MCP:** `chunkhound mcp --db /path/to/project/.chunkhound` (the path from `.chunkhound.json`'s `database.path`)
-- **`--db` with wrong subpath silently returns 0 results** — no error, just empty. Always verify with a regex search first.
-- `--db` accepts either a directory (uses `.../chunks.db` internally) or an explicit file path (`.db` / `.duckdb` extension returned as-is)
-- Default DB path: `.chunkhound/db/chunks.db` (directory structure, not flat file)
-- Old-style flat `.chunkhound` files (pre-v4) block directory creation — move aside before re-indexing
-- Project-local `.chunkhound.json` with relative `"path": ".chunkhound"` resolves to CWD, not the project dir — use `--db` with absolute paths when indexing remote projects
-- `--config` does NOT override a project-local `.chunkhound.json` for DB path — always use explicit `--db` when the target project has its own config
-
 ## RUST_RULES
 **NEVER:**
 - NEVER write `unsafe` code — `#![forbid(unsafe_code)]` is set at the crate root; the compiler will reject it
@@ -134,30 +70,6 @@ setup and the environment-scoping gotcha that causes a confusing `403` if it's m
 - ALWAYS run `cargo fmt` and `cargo clippy --all-targets -- -D warnings` before committing Rust changes (`make rust-check`)
 - ALWAYS run `cargo test` after Rust changes (`make rust-test`)
 - ALWAYS use owned types (`String`, `Vec<T>`) at the `allow_threads` boundary
-
-## RUST_COMMANDS
-```bash
-rust-check: make rust-check   # cargo fmt --check + clippy -D warnings
-rust-test:  make rust-test    # cargo test
-
-# Build the native extension (required before running tests that import chunkhound_native)
-#
-# CI (has internet): DUCKDB_DOWNLOAD_LIB=1 downloads the precompiled shared library from GitHub.
-#   DUCKDB_DOWNLOAD_LIB=1 uv run maturin develop
-#
-# Local (no internet / air-gapped): reuse the static library compiled by a prior release build.
-#   The .a lives under target/release/build/libduckdb-sys-*/out/libduckdb.a — find it with:
-#     find target/release/build -name "libduckdb.a" | head -1
-#   Then build against it (symlink gives libduckdb-sys the name it expects):
-#     OUT=$(find "$(pwd)/target/release/build" -name "libduckdb.a" -printf "%h\n" | head -1)
-#     ln -sf "$OUT/libduckdb.a" "$OUT/libduckdb_static.a"
-#     DUCKDB_LIB_DIR="$OUT" DUCKDB_STATIC=1 RUSTFLAGS="-C link-arg=-lstdc++" uv run maturin develop --release
-#
-#   RUSTFLAGS note: -lstdc++ is required when statically linking DuckDB. The static
-#   .a includes C++ exception-handling code (__gxx_personality_v0) that lives in
-#   libstdc++.so. Without this flag the .so builds cleanly but fails at Python import
-#   with "undefined symbol: __gxx_personality_v0".
-```
 
 ## PROJECT_MAINTENANCE
 - Smoke tests are mandatory guardrails
