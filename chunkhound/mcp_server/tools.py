@@ -8,14 +8,11 @@ The registry pattern ensures consistent tool metadata and behavior.
 
 import asyncio
 import inspect
-import os
 import re
-import shutil
 import ssl
-import tempfile
 import types
 import urllib.error
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -39,49 +36,18 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.status import derive_daemon_status
 from chunkhound.services.research.factory import ResearchServiceFactory
+from chunkhound.services.vector_cache import VectorCache
 
 # Response size limits (tokens)
 MAX_RESPONSE_TOKENS = 20000
 MIN_RESPONSE_TOKENS = 1000
 MAX_ALLOWED_TOKENS = 25000
 
-# Diff chunk cap: prevent OOM when commit_range spans thousands of changed files
-MAX_DIFF_CHUNKS = 500
 # Per-chunk char cap: JSON/HTML diffs are ~1:1 chars-to-tokens; 10k chars stays
 # safely under the 16384-token limit of the smallest supported embedding model.
 MAX_DIFF_CHUNK_CHARS = 10_000
-
-
-def _summarize_subprocess_stderr(stderr: bytes) -> str:
-    """Return the user-visible stderr summary for MCP subprocess failures."""
-    stderr_text = stderr.decode(errors="replace").strip()
-    lines = [line.rstrip() for line in stderr_text.split("\n")]
-    in_traceback = False
-    raise_summary: str | None = None
-    clean: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if line.startswith("Traceback") or line.startswith("  File"):
-            in_traceback = True
-            continue
-        if in_traceback and line.startswith("    "):
-            if stripped.startswith("raise ") and raise_summary is None:
-                raise_summary = stripped.removeprefix("raise ")
-            continue
-        # Reset traceback mode when encountering a non-traceback line
-        # (e.g. the error type after the traceback like "ValueError: ...").
-        # Without this reset, any indented diagnostics that follow the
-        # traceback would be silently consumed.
-        in_traceback = False
-        clean.append(line)
-
-    if clean:
-        return "\n".join(clean)[-500:]
-    if raise_summary:
-        return raise_summary[-500:]
-    return stderr_text[-200:]
+_TRANSIENT_BATCH_SIZE = 100
+_TRANSIENT_VECTOR_CACHE = VectorCache()
 
 
 def _format_fetch_warnings(warnings: list[str]) -> str:
@@ -373,7 +339,6 @@ class SearchResponse(TypedDict):
 
     results: list[dict[str, Any]]
     pagination: PaginationInfo
-    warnings: NotRequired[list[str]]
 
 
 def estimate_tokens(text: str) -> int:
@@ -428,7 +393,9 @@ def format_search_results_markdown(
 
         heading = " ".join(parts)
         # Use a fence longer than any backtick run in the content (CommonMark §6.1).
-        max_run = max((len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0)
+        max_run = max(
+            (len(m.group()) for m in _BACKTICK_RUN_RE.finditer(content)), default=0
+        )
         fence = "`" * max(3, max_run + 1)
         block = f"{heading}\n\n{fence}{lang_hint}\n{content}\n{fence}"
         blocks.append(block)
@@ -557,15 +524,14 @@ def _resolve_commit_range(
 ) -> str | None:
     """Resolve mutually-exclusive commit inputs to a single git revision range."""
     if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
-        raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
+        raise ValueError(
+            "Provide at most one of: commit_range, commit_hash, last_n_commits."
+        )
     if commit_hash is not None:
         return f"{commit_hash}^..{commit_hash}"
     if last_n_commits is not None:
         return f"HEAD~{last_n_commits}..HEAD"
     return commit_range
-
-
-_EMBED_TIMEOUT_SECONDS = 120  # same as provider-level default in .chunkhound.json
 
 
 async def _git_cwd_from_services(services: DatabaseServices) -> Path:
@@ -576,11 +542,17 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
     gives the correct repo root for the indexed project.  Falls back to
     project-marker detection then cwd only when the git lookup fails.
     """
+    proc: asyncio.subprocess.Process | None = None
+    start = Path.cwd()
     try:
         db_path = Path(services.provider.db_path)
         start = db_path if db_path.is_dir() else db_path.parent
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(start), "rev-parse", "--show-toplevel",
+            "git",
+            "-C",
+            str(start),
+            "rev-parse",
+            "--show-toplevel",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -589,7 +561,12 @@ async def _git_cwd_from_services(services: DatabaseServices) -> Path:
             return Path(stdout.decode("utf-8", errors="replace").strip())
     except Exception:
         from loguru import logger as _log
+
         _log.debug("git rev-parse failed from {}, falling back", start, exc_info=True)
+    finally:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
 
     # Fallback: project markers, then bare cwd
     from chunkhound.utils.project_detection import find_project_root
@@ -605,55 +582,40 @@ async def _inject_diff_service(
     effective_commit_range: str,
     vector_source: str,
     embedding_manager: Any,
-) -> tuple[DatabaseServices, str | None]:
-    """Build a DiffAwareSearchService and return it alongside a truncation warning.
-
-    Returns (updated_services, warning_str | None).  The warning is non-None when
-    the diff produced more than MAX_DIFF_CHUNKS chunks and results were capped —
-    callers must surface this to the MCP client so the LLM knows results are partial.
-    """
+) -> DatabaseServices:
+    """Build a streaming transient search service for a git revision range."""
     if vector_source not in ("diff", "db", "both"):
-        raise ValueError(f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'.")
+        raise ValueError(
+            f"Invalid vector_source: {vector_source!r}. Must be 'diff', 'db', or 'both'."
+        )
 
     # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
-    from loguru import logger as _log
-
-    from chunkhound.core.git_diff import parse_diff_to_chunks, run_git_diff
-    from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+    from chunkhound.core.git_diff import (
+        parse_diff_to_chunks,
+        stream_git_diff_file_blocks,
+    )
+    from chunkhound.services.transient_search_service import TransientSearchService
 
     _cwd = await _git_cwd_from_services(services)
-    raw_diff = await run_git_diff(effective_commit_range, cwd=_cwd)
-    diff_chunks = parse_diff_to_chunks(raw_diff, max_chunk_chars=MAX_DIFF_CHUNK_CHARS)
-    truncation_warning: str | None = None
-    if len(diff_chunks) > MAX_DIFF_CHUNKS:
-        truncation_warning = (
-            f"Diff range produced {len(diff_chunks)} chunks; results capped at "
-            f"{MAX_DIFF_CHUNKS} to avoid OOM. Use a narrower commit range for complete coverage."
-        )
-        _log.warning(truncation_warning)
-        diff_chunks = diff_chunks[:MAX_DIFF_CHUNKS]
-    diff_embeddings: list[list[float]] = []
-    if diff_chunks and embedding_manager is not None:
-        try:
-            emb_result = await asyncio.wait_for(
-                embedding_manager.embed_texts([c.code for c in diff_chunks]),
-                timeout=_EMBED_TIMEOUT_SECONDS,
+
+    async def chunk_stream() -> AsyncIterator[list[Any]]:
+        async for file_block in stream_git_diff_file_blocks(
+            effective_commit_range, cwd=_cwd
+        ):
+            chunks = parse_diff_to_chunks(
+                file_block, max_chunk_chars=MAX_DIFF_CHUNK_CHARS
             )
-        except asyncio.TimeoutError:
-            raise TimeoutError(
-                f"Embedding {len(diff_chunks)} diff chunks timed out after "
-                f"{_EMBED_TIMEOUT_SECONDS}s. Use a smaller commit range or "
-                "set vector_source='db' to skip diff embedding."
-            )
-        diff_embeddings = emb_result.embeddings
-    diff_service = DiffAwareSearchService(
+            for start in range(0, len(chunks), _TRANSIENT_BATCH_SIZE):
+                yield chunks[start : start + _TRANSIENT_BATCH_SIZE]
+
+    diff_service = TransientSearchService(
         original=services.search_service,
-        diff_chunks=diff_chunks,
-        diff_embeddings=diff_embeddings,
+        chunk_stream=chunk_stream,
         vector_source=vector_source,
         embedding_manager=embedding_manager,
+        vector_cache=_TRANSIENT_VECTOR_CACHE,
     )
-    return services._replace(search_service=diff_service), truncation_warning
+    return services._replace(search_service=diff_service)
 
 
 @register_tool(
@@ -705,7 +667,9 @@ async def search_impl(
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
-    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+    effective_commit_range = _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits
+    )
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -716,12 +680,16 @@ async def search_impl(
                 "Use type='regex' for pattern-based search without embeddings."
             )
 
-    truncation_warning: str | None = None
-    if effective_commit_range is not None and type == "semantic" and vector_source != "db":
-        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+    if (
+        effective_commit_range is not None
+        and type == "semantic"
+        and vector_source != "db"
+    ):
+        services = await _inject_diff_service(
+            services, effective_commit_range, vector_source, embedding_manager
+        )
 
     if type == "semantic":
-
         # Get default provider/model
         try:
             provider_obj = embedding_manager.get_provider()
@@ -753,8 +721,6 @@ async def search_impl(
     native_results = _convert_paths_to_native(results)
 
     response: dict[str, Any] = {"results": native_results, "pagination": pagination}
-    if truncation_warning:
-        response["warnings"] = [truncation_warning]
     return cast(SearchResponse, response)
 
 
@@ -837,11 +803,14 @@ async def deep_research_impl(
             "Configure a rerank_model in your embedding configuration."
         )
 
-    effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+    effective_commit_range = _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits
+    )
 
-    truncation_warning: str | None = None
     if effective_commit_range is not None and vector_source != "db":
-        services, truncation_warning = await _inject_diff_service(services, effective_commit_range, vector_source, embedding_manager)
+        services = await _inject_diff_service(
+            services, effective_commit_range, vector_source, embedding_manager
+        )
 
     # Create default config from environment if not provided
     if config is None:
@@ -863,9 +832,6 @@ async def deep_research_impl(
     )
 
     result = await research_service.deep_research(query, previous_query=previous_query)
-    if truncation_warning:
-        answer = result.get("answer", "")
-        result["answer"] = f"> **Note:** {truncation_warning}\n\n{answer}"
     return result
 
 
@@ -886,36 +852,31 @@ async def websearch_impl(
 ) -> str:
     """Search the web, fetch results, and run deep research over them.
 
-    No path_filter parameter: fetched pages live in a flat tmpdir, so a
-    subdirectory filter would silently match zero chunks.
+    Fetched pages remain in memory and are searched by the shared transient
+    search pipeline.
 
     Args:
-        embedding_manager: Present solely for capability gating
-            (requires_embeddings=True); signature-inspected by register_tool.
-            Unused in the body — the research stage runs in a subprocess.
+        embedding_manager: Embeds fetched page chunks in process.
         llm_manager: Used to expand the user query into 3 DuckDuckGo-optimized
             variants via the utility LLM. When None (no LLM configured), the
             expander falls back to a single-query dispatch.
-        config: Application configuration; falls back to environment. Its
-            source file (if any) is forwarded to the subprocess as --config.
+        config: Application configuration; falls back to environment.
         query: Natural-language or keyword query for DuckDuckGo.
         previous_query: Previous query to build context and chain knowledge (optional).
         limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
 
     Returns:
-        Markdown: research answer (with tmpdir paths rewritten to source URLs)
-        + optional fetch-warning block.
+        Markdown research answer plus an optional fetch-warning block.
     """
     from chunkhound.mcp_server.common import MCPError
+    from chunkhound.services.web_research_service import Page, research_web_pages
     from chunkhound.utils.websearch_core import (
-        build_quickresearch_argv_core,
         clamp_limit,
-        fetch_and_save,
+        fetch_pages,
         search_multi,
         websearch_timeout,
     )
     from chunkhound.utils.websearch_expansion import expand_web_queries
-    from chunkhound.utils.websearch_postprocess import replace_paths_with_urls
 
     if config is None:
         config = Config.from_environment()
@@ -924,73 +885,59 @@ async def websearch_impl(
     previous_query = previous_query or None
 
     limit = clamp_limit(limit)
+    timeout_s = websearch_timeout()
 
-    queries = await expand_web_queries(query, llm_manager, previous_query=previous_query)
-    try:
-        results = await search_multi(queries, limit, None)
-    except urllib.error.HTTPError as e:
-        raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
-    except urllib.error.URLError as e:
-        raise MCPError(f"Web search failed: {e.reason}") from e
-    if not results:
-        raise MCPError(f"No results found for {query!r}")
-
-    warnings: list[str] = []
-    mapping: dict[str, str] = {}
-    tmpdir = Path(tempfile.mkdtemp(prefix="chunkhound_websearch_mcp_"))
-    proc: asyncio.subprocess.Process | None = None
-    try:
-        await fetch_and_save(
-            [url for _, url, _ in results],
-            tmpdir,
-            progress_callback=None,
-            warning_callback=warnings.append,
-            mapping=mapping,
+    async def _run() -> tuple[dict, list[str]]:
+        queries = await expand_web_queries(
+            query, llm_manager, previous_query=previous_query
         )
+        try:
+            results = await search_multi(queries, limit, None)
+        except urllib.error.HTTPError as e:
+            raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
+        except urllib.error.URLError as e:
+            raise MCPError(f"Web search failed: {e.reason}") from e
+        if not results:
+            raise MCPError(f"No results found for {query!r}")
 
-        # Positional query is the RAW user input — feeding a lossy narrowing
-        # (e.g. queries[0]) to deep research would silently degrade the
-        # answer with no signal.
-        cmd = build_quickresearch_argv_core(
-            query, tmpdir, config,
-            parent_pid=os.getpid(),
+        warnings: list[str] = []
+        got_page = False
+
+        async def pages() -> AsyncIterator[Page]:
+            nonlocal got_page
+            async for page in fetch_pages(
+                [url for _, url, _ in results],
+                progress_callback=None,
+                warning_callback=warnings.append,
+            ):
+                got_page = True
+                yield page
+
+        research_result = await research_web_pages(
+            query,
+            pages(),
+            config,
+            embedding_manager,
+            llm_manager,
+            warning_callback=warnings.append,
             previous_query=previous_query,
         )
-        # Scrub CHUNKHOUND_MCP_MODE so the child's RichOutputFormatter.error()
-        # is not silenced — we rely on its stderr output to populate the
-        # MCPError tail on subprocess failure.
-        env = {k: v for k, v in os.environ.items() if k != "CHUNKHOUND_MCP_MODE"}
-        env["CHUNKHOUND_QUICKRESEARCH_QUIET"] = "1"
-        env["CHUNKHOUND_NO_PROMPTS"] = "1"
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        timeout_s = websearch_timeout()
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_s
-            )
-        except asyncio.TimeoutError:
-            raise MCPError(
-                f"websearch timed out after {timeout_s:.0f}s"
-            ) from None
-        if proc.returncode != 0:
-            tail = _summarize_subprocess_stderr(stderr)
-            raise MCPError(
-                f"Research subprocess failed (exit {proc.returncode}): {tail}"
-            )
-        answer = stdout.decode(errors="replace")
-    finally:
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if not got_page:
+            raise MCPError(f"No pages could be fetched for {query!r}")
+        return research_result, warnings
 
-    answer = replace_paths_with_urls(answer, mapping).rstrip()
+    try:
+        research_result, warnings = await asyncio.wait_for(_run(), timeout=timeout_s)
+    except MCPError:
+        raise
+    except asyncio.TimeoutError:
+        raise MCPError(f"websearch timed out after {timeout_s:.0f}s") from None
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise MCPError(f"Web research failed: {exc}") from exc
+
+    answer = str(research_result.get("answer", "")).rstrip()
     return f"{answer}{_format_fetch_warnings(warnings)}"
 
 
@@ -1139,7 +1086,6 @@ async def execute_tool(
             search_type = arguments.get("type", "regex")
             results_list = list(result.get("results", []))
             pagination = dict(result.get("pagination", {}))
-            diff_warnings: list[str] = result.get("warnings", [])
             md = format_search_results_markdown(results_list, pagination, search_type)
             # Keep at least 1 result; preserve original page_size so the footer's
             # total-page count stays calibrated to the requested page size.
@@ -1151,7 +1097,9 @@ async def execute_tool(
                     "has_more": True,
                     "next_offset": pagination.get("offset", 0) + len(results_list),
                 }
-                md = format_search_results_markdown(results_list, pagination, search_type)
+                md = format_search_results_markdown(
+                    results_list, pagination, search_type
+                )
             # If the single remaining result still exceeds the limit, truncate its content.
             if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
                 result_copy = dict(results_list[0])
@@ -1160,16 +1108,23 @@ async def execute_tool(
                 # two fence lines of max_run+1 backticks each) means the 300-char reserve
                 # can be wildly insufficient; re-render and shrink until the actual output fits.
                 max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
-                result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
-                md = format_search_results_markdown([result_copy], pagination, search_type)
-                while estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0:
+                result_copy["content"] = (
+                    content[:max_content_chars] + "\n\n[... truncated ...]"
+                )
+                md = format_search_results_markdown(
+                    [result_copy], pagination, search_type
+                )
+                while (
+                    estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0
+                ):
                     excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
                     max_content_chars = max(0, max_content_chars - excess_chars - 1)
-                    result_copy["content"] = content[:max_content_chars] + "\n\n[... truncated ...]"
-                    md = format_search_results_markdown([result_copy], pagination, search_type)
-            if diff_warnings:
-                warning_block = "\n".join(f"> **Warning:** {w}" for w in diff_warnings)
-                md = f"{warning_block}\n\n{md}"
+                    result_copy["content"] = (
+                        content[:max_content_chars] + "\n\n[... truncated ...]"
+                    )
+                    md = format_search_results_markdown(
+                        [result_copy], pagination, search_type
+                    )
             return md
 
     # String return types (e.g., websearch) pass through directly as markdown

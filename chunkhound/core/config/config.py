@@ -432,11 +432,9 @@ class Config(BaseModel):
                 f"Missing required configuration: {item}" for item in missing_config
             )
 
-        # websearch only spawns _quickresearch as a subprocess, but we validate
-        # LLM/embedding config in the parent so misconfiguration fails fast
-        # before fetching DDG results and writing tempfiles.
+        # Validate websearch dependencies before fetching remote pages.
         requires_llm = (
-            command in ("research", "websearch", "_quickresearch", "fetchurl")
+            command in ("research", "websearch", "fetchurl")
             or (command == "map" and not getattr(args, "overview_only", False))
             or (command == "autodoc" and not getattr(args, "assets_only", False))
         )
@@ -462,7 +460,7 @@ class Config(BaseModel):
                     )
 
         # Validate embedding provider requirements for commands that index code
-        if command in ("index", "websearch", "_quickresearch"):
+        if command in ("index", "websearch"):
             # Skip embedding validation if embeddings were explicitly disabled
             if not self.embeddings_disabled:
                 if self.embedding is None:
@@ -497,11 +495,7 @@ class Config(BaseModel):
                 )
 
         if self.database.read_only:
-            # _quickresearch always uses a :memory: DB (see quickresearch.py),
-            # so a project-level read_only setting inherited via --config is
-            # structurally inapplicable — accept it here and let the connection
-            # manager drop read_only for :memory: paths.
-            if command not in ("mcp", "_quickresearch"):
+            if command != "mcp":
                 errors.append(
                     "database.read_only=True is only valid for the 'mcp' subcommand"
                 )

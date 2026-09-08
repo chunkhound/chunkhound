@@ -137,7 +137,6 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.daemon_parser import add_daemon_subparser
     from .parsers.fetchurl_parser import add_fetchurl_subparser
     from .parsers.mcp_parser import add_mcp_subparser
-    from .parsers.quickresearch_parser import add_quickresearch_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
@@ -158,7 +157,6 @@ def create_parser() -> argparse.ArgumentParser:
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
     # Internal commands (hidden from help)
-    add_quickresearch_subparser(subparsers)
     add_daemon_subparser(subparsers)
 
     return parser
@@ -272,10 +270,6 @@ async def async_main() -> None:
             from .commands.research import research_command
 
             await research_command(args, config)
-        elif args.command == "_quickresearch":
-            from .commands.quickresearch import quickresearch_command
-
-            await quickresearch_command(args, config)
         elif args.command == "websearch":
             from .commands.websearch import websearch_command
 

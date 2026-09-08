@@ -10,20 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import html
 import html.parser
 import itertools
 import os
 import re
 import subprocess
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
 from loguru import logger
@@ -33,19 +30,25 @@ if TYPE_CHECKING:
 
     import zendriver as zd
 
-from chunkhound.core.config.config import Config
-
 _MAX_FETCH_CONCURRENCY = 5
 
 WEBSEARCH_LIMIT_MAX = 100
+
+# Cap on a single fetched page's body size. A target URL can be anything --
+# a mis-served multi-GB file, an infinite stream -- and there's no way to
+# know its size in advance. Generous enough for any legitimate markdown/PDF
+# page; _fetch_content already catches and skips-with-a-warning any single
+# page that fails, so exceeding this cap degrades gracefully rather than
+# letting one oversized page balloon memory for the whole websearch call.
+_MAX_PAGE_BYTES = 20 * 1024 * 1024
 
 __all__ = [
     "WEBSEARCH_LIMIT_MAX",
     "clamp_limit",
     "websearch_timeout",
-    "fetch_and_save",
+    "fetch_pages",
+    "fetch_url_to_content",
     "search_multi",
-    "build_quickresearch_argv_core",
 ]
 
 # Probe these paths before zendriver's auto-discovery. zendriver picks the
@@ -93,7 +96,7 @@ def _install_late_completion_guard() -> None:
     was the awaiter inside Connection.send, which already received
     CancelledError.
 
-    Idempotent via module-level flag — safe to call from every fetch_and_save.
+    Idempotent via module-level flag — safe to call from every fetch_pages.
     """
     global _late_completion_guard_installed
     if _late_completion_guard_installed:
@@ -217,8 +220,8 @@ async def _managed_browser(
 ) -> AsyncIterator[zd.Browser | None]:
     """Yield a running Chrome browser, or None if none can be launched.
 
-    Shared by every zendriver-consuming caller (websearch/quickresearch's
-    ``fetch_and_save`` and fetchurl's ``_fetch_with_retry``). Callers must
+    Shared by every zendriver-consuming caller (websearch's ``fetch_pages``
+    and fetchurl's ``_fetch_with_retry``). Callers must
     tolerate ``None`` — ``fetch_url_to_content`` and ``_fetch_page`` already
     dispatch to the urllib fallback when ``browser is None``.
     """
@@ -270,8 +273,7 @@ async def _managed_browser(
     finally:
         if browser is not None:
             # Bounded best-effort stop. browser.stop() can wedge on a stuck
-            # websocket close or a Chrome process ignoring SIGTERM; the subprocess
-            # process-group reaps any orphans when _quickresearch exits.
+            # websocket close or a Chrome process ignoring SIGTERM.
             try:
                 await asyncio.wait_for(browser.stop(), timeout=10)
             except asyncio.TimeoutError:
@@ -374,6 +376,36 @@ class _ResultParser(html.parser.HTMLParser):
             self._desc += data
 
 
+def _read_bounded(resp: IO[bytes], max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
+    """Read *resp* up to `max_bytes`, raising `ValueError` if it's exceeded.
+
+    Reads in fixed-size chunks rather than one `resp.read()` call so an
+    oversized response is caught before it's fully buffered.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"Response exceeds maximum page size of {max_bytes} bytes")
+        chunks.append(chunk)
+
+
+def _check_page_size(body: bytes, max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
+    """Reject an already-materialized body that exceeds `max_bytes`.
+
+    CDP hands back a page's full body in one RPC response -- there's no
+    incremental read to bound like `_read_bounded` does for urllib, so this
+    is a post-hoc check on what Chrome already buffered.
+    """
+    if len(body) > max_bytes:
+        raise ValueError(f"Response exceeds maximum page size of {max_bytes} bytes")
+    return body
+
+
 def _fetch(params: dict[str, str]) -> str:
     data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(
@@ -382,17 +414,7 @@ def _fetch(params: dict[str, str]) -> str:
         headers={"User-Agent": "Mozilla/5.0"},
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode()
-
-
-def _url_to_filename(url: str, max_length: int = 100) -> str:
-    # Append a short stable hash of the full URL so distinct URLs cannot
-    # collide via the lossy [^\w.-]→_ substitution or via truncation when
-    # two URLs share a long common prefix.
-    name = re.sub(r"^https?://", "", url)
-    name = re.sub(r"[^\w.-]", "_", name)
-    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
-    return f"{name[: max(0, max_length - 9)]}_{digest}"[:max_length]
+        return _read_bounded(resp).decode()
 
 
 def _html_to_markdown(html_text: str) -> str:
@@ -507,7 +529,7 @@ def _fetch_url(
     )
     with opener.open(req, timeout=30) as resp:
         ct = _normalize_ct(resp.headers.get("Content-Type"))
-        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+        return ct, _read_bounded(resp), resp.headers.get_content_charset() or "utf-8"
 
 
 async def _close_tab_quietly(tab: zd.Tab) -> None:
@@ -663,7 +685,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                 if base64_encoded
                 else body_text.encode("utf-8")
             )
-            return ct, body_bytes, "utf-8"
+            return ct, _check_page_size(body_bytes), "utf-8"
 
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
@@ -672,7 +694,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         # implicit 30s timeout.
         await asyncio.wait_for(tab.wait(), timeout=30)
         html_str = await tab.get_content()
-        return ct, html_str.encode("utf-8"), "utf-8"
+        return ct, _check_page_size(html_str.encode("utf-8")), "utf-8"
     finally:
         if not tab_closed:
             await _close_tab_quietly(tab)
@@ -689,7 +711,7 @@ async def fetch_url_to_content(
     strip=["head", ...] in `_html_to_markdown` would otherwise discard.
     PDF and non-HTML paths return {"title": None}.
 
-    Shared between _fetch_one (websearch/quickresearch, which discards
+    Shared between fetch_pages (websearch, which discards
     source_metadata) and `_fetch_with_retry` in `chunkhound.utils.fetchurl`
     (which threads it into `_derive_page_title`, §4.1a).
 
@@ -738,54 +760,56 @@ async def fetch_url_to_content(
     return kind, content, source_metadata
 
 
-async def _fetch_one(
+async def _fetch_content(
     url: str,
-    tmpdir: Path,
     browser: zd.Browser | None,
     progress_callback: Callable[[str], None] | None,
     warning_callback: Callable[[str], None] | None,
     semaphore: asyncio.Semaphore,
-    mapping: dict[str, str] | None,
-) -> None:
+) -> tuple[str, str, str | bytes] | None:
     async with semaphore:
         if progress_callback:
             progress_callback(f"Fetching {url}...")
         try:
             ext, content, _source_metadata = await fetch_url_to_content(url, browser)
-            path = tmpdir / (_url_to_filename(url) + ext)
-            if isinstance(content, bytes):
-                path.write_bytes(content)
-            else:
-                path.write_text(content, encoding="utf-8")
-            if mapping is not None:
-                mapping[path.name] = url
+            return url, ext, content
         except Exception as e:
             if warning_callback:
                 warning_callback(f"Failed to fetch {url}: {type(e).__name__}: {e}")
+            return None
 
 
-async def fetch_and_save(
+async def fetch_pages(
     urls: list[str],
-    tmpdir: Path,
     progress_callback: Callable[[str], None] | None = None,
     warning_callback: Callable[[str], None] | None = None,
-    mapping: dict[str, str] | None = None,
-) -> None:
-    """Fetch each URL concurrently (bounded) and save content to tmpdir."""
+) -> AsyncIterator[tuple[str, str, str | bytes]]:
+    """Yield fetched page bodies in memory as each request completes."""
     semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
-
-    async def _run(browser: zd.Browser | None) -> None:
+    async with _managed_browser(warning_callback) as browser:
         tasks = [
-            _fetch_one(
-                url, tmpdir, browser, progress_callback, warning_callback,
-                semaphore, mapping,
+            asyncio.create_task(
+                _fetch_content(
+                    url,
+                    browser,
+                    progress_callback,
+                    warning_callback,
+                    semaphore,
+                )
             )
             for url in urls
         ]
-        await asyncio.gather(*tasks)
-
-    async with _managed_browser(warning_callback) as browser:
-        await _run(browser)
+        try:
+            for completed in asyncio.as_completed(tasks):
+                fetched = await completed
+                if fetched is not None:
+                    yield fetched
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def search(
@@ -900,38 +924,3 @@ async def search_multi(
             if key not in seen:
                 seen[key] = row
     return list(seen.values())[:limit]
-
-
-def build_quickresearch_argv_core(
-    query: str,
-    tmpdir: Path,
-    config: Config,
-    parent_pid: int,
-    previous_query: str | None = None,
-) -> list[str]:
-    """Build argv to invoke _quickresearch as a subprocess.
-
-    Forwards the config source file as an absolute path so the child process
-    does not need to re-run config discovery (which would otherwise fall back
-    to env vars / defaults under the MCP server's working directory).
-
-    ``parent_pid`` is the caller's own PID (``os.getpid()``); the child uses
-    it as the reference for its orphan watchdog.
-
-    ``previous_query`` — single-hop chain payload, ``None``/empty omits the
-    flag entirely (truthy guard mirrors ``--config``).
-    """
-    cmd: list[str] = [
-        sys.executable,
-        "-m", "chunkhound.api.cli.main",
-        "_quickresearch",
-        query,
-        str(tmpdir),
-        "--parent-pid", str(parent_pid),
-    ]
-    source = config.config_file or config.local_config_file
-    if source is not None:
-        cmd.extend(["--config", str(Path(source).resolve())])
-    if previous_query:
-        cmd.extend(["--previous-query", previous_query])
-    return cmd

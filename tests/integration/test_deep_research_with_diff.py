@@ -1,16 +1,16 @@
-"""Integration tests proving deep_research_impl uses DiffAwareSearchService
+"""Integration tests proving deep_research_impl uses TransientSearchService
 when commit_range / commit_hash / last_n_commits parameters are supplied.
 
 The key claim:  after the injection block runs, the ResearchServiceFactory
 receives a *swapped* DatabaseServices whose search_service is a
-DiffAwareSearchService wrapping the original.  We verify this by:
+TransientSearchService wrapping the original.  We verify this by:
 
-  1. Mocking run_git_diff to return a known diff string.
+  1. Mocking stream_git_diff_file_blocks to yield a known diff block.
   2. Providing a controlled EmbeddingManager that returns unit-length vectors.
   3. Spying on the original search_service.search_semantic — in "diff" mode it
      must NOT be called; in "both" mode it WILL be called.
   4. Asserting that the services object received by ResearchServiceFactory has
-     a DiffAwareSearchService as its search_service.
+     a TransientSearchService as its search_service.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.embeddings import EmbeddingManager, LocalEmbeddingResult
-from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
+from chunkhound.services.transient_search_service import TransientSearchService
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,10 @@ index 0000000..1111111 100644
 +    session.clear()
 +    return True
 """
+
+
+async def _stream_fake_diff(commit_range: str, cwd=None):
+    yield FAKE_DIFF
 
 
 def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
@@ -131,7 +135,7 @@ def _make_services(search_service: Any) -> Any:
 
 @pytest.mark.asyncio
 async def test_deep_research_injects_diff_service_on_commit_range():
-    """DiffAwareSearchService is injected when commit_range is supplied."""
+    """TransientSearchService is injected when commit_range is supplied."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
     original_search = _make_original_search_service()
@@ -152,8 +156,8 @@ async def test_deep_research_injects_diff_service_on_commit_range():
 
     with (
         patch(
-            "chunkhound.core.git_diff.run_git_diff",
-            AsyncMock(return_value=FAKE_DIFF),
+            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            _stream_fake_diff,
         ),
         patch(
             "chunkhound.services.research.factory.ResearchServiceFactory.create",
@@ -170,13 +174,13 @@ async def test_deep_research_injects_diff_service_on_commit_range():
 
     assert result == {"answer": "stub-answer"}
 
-    # The factory must have received a DiffAwareSearchService as search_service
+    # The factory must receive the streaming search service.
     received_services = captured.get("db_services")
     assert received_services is not None, "ResearchServiceFactory.create was not called"
     assert isinstance(
-        received_services.search_service, DiffAwareSearchService
+        received_services.search_service, TransientSearchService
     ), (
-        f"Expected DiffAwareSearchService, got {type(received_services.search_service)}"
+        f"Expected TransientSearchService, got {type(received_services.search_service)}"
     )
 
 
@@ -202,8 +206,8 @@ async def test_deep_research_diff_mode_does_not_call_original_search_semantic():
 
     with (
         patch(
-            "chunkhound.core.git_diff.run_git_diff",
-            AsyncMock(return_value=FAKE_DIFF),
+            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            _stream_fake_diff,
         ),
         patch(
             "chunkhound.services.research.factory.ResearchServiceFactory.create",
@@ -222,8 +226,8 @@ async def test_deep_research_diff_mode_does_not_call_original_search_semantic():
     assert result == {"answer": "diff-only"}
     assert len(captured_search_service) == 1
     svc = captured_search_service[0]
-    assert isinstance(svc, DiffAwareSearchService), (
-        f"Expected DiffAwareSearchService in diff mode, got {type(svc)}"
+    assert isinstance(svc, TransientSearchService), (
+        f"Expected TransientSearchService in diff mode, got {type(svc)}"
     )
     assert svc._vector_source == "diff"
     # Original search_semantic was not called during injection (no research hop yet)
@@ -265,7 +269,7 @@ async def test_deep_research_no_commit_range_skips_injection():
     assert len(captured_search_service) == 1
     # Without commit params, the original (unwrapped) service is passed through
     assert captured_search_service[0] is original_search
-    assert not isinstance(captured_search_service[0], DiffAwareSearchService)
+    assert not isinstance(captured_search_service[0], TransientSearchService)
 
 
 @pytest.mark.asyncio
@@ -279,9 +283,9 @@ async def test_deep_research_commit_hash_expands_to_range():
 
     captured_range: list[str] = []
 
-    async def _fake_run_git_diff(commit_range: str, cwd=None) -> str:
+    async def _fake_stream_git_diff(commit_range: str, cwd=None):
         captured_range.append(commit_range)
-        return FAKE_DIFF
+        yield FAKE_DIFF
 
     captured_search_service: list[Any] = []
 
@@ -295,7 +299,10 @@ async def test_deep_research_commit_hash_expands_to_range():
     llm_manager = MagicMock()
 
     with (
-        patch("chunkhound.core.git_diff.run_git_diff", _fake_run_git_diff),
+        patch(
+            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            _fake_stream_git_diff,
+        ),
         patch(
             "chunkhound.services.research.factory.ResearchServiceFactory.create",
             side_effect=_fake_factory_create,
@@ -310,10 +317,11 @@ async def test_deep_research_commit_hash_expands_to_range():
         )
 
     assert result == {"answer": "hash-test"}
+    await captured_search_service[0].search_semantic("query")
     assert captured_range == ["abc123^..abc123"], (
         f"Expected 'abc123^..abc123', got {captured_range}"
     )
-    assert isinstance(captured_search_service[0], DiffAwareSearchService)
+    assert isinstance(captured_search_service[0], TransientSearchService)
 
 
 @pytest.mark.asyncio
@@ -327,9 +335,9 @@ async def test_deep_research_last_n_commits_expands_correctly():
 
     captured_range: list[str] = []
 
-    async def _fake_run_git_diff(commit_range: str, cwd=None) -> str:
+    async def _fake_stream_git_diff(commit_range: str, cwd=None):
         captured_range.append(commit_range)
-        return FAKE_DIFF
+        yield FAKE_DIFF
 
     captured_search_service: list[Any] = []
 
@@ -343,7 +351,10 @@ async def test_deep_research_last_n_commits_expands_correctly():
     llm_manager = MagicMock()
 
     with (
-        patch("chunkhound.core.git_diff.run_git_diff", _fake_run_git_diff),
+        patch(
+            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            _fake_stream_git_diff,
+        ),
         patch(
             "chunkhound.services.research.factory.ResearchServiceFactory.create",
             side_effect=_fake_factory_create,
@@ -358,10 +369,11 @@ async def test_deep_research_last_n_commits_expands_correctly():
         )
 
     assert result == {"answer": "n-commits"}
+    await captured_search_service[0].search_semantic("query")
     assert captured_range == ["HEAD~5..HEAD"], (
         f"Expected 'HEAD~5..HEAD', got {captured_range}"
     )
-    assert isinstance(captured_search_service[0], DiffAwareSearchService)
+    assert isinstance(captured_search_service[0], TransientSearchService)
 
 
 @pytest.mark.asyncio

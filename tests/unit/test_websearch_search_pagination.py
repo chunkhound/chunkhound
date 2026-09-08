@@ -177,8 +177,8 @@ class _FakeResponse:
     def __exit__(self, *exc) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self._body.read()
+    def read(self, amt: int | None = None) -> bytes:
+        return self._body.read(-1 if amt is None else amt)
 
 
 def test_fetch_posts_urlencoded_to_ddg_html_endpoint(monkeypatch) -> None:

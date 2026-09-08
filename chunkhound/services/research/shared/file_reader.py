@@ -27,6 +27,21 @@ from chunkhound.services.research.shared.models import (
 )
 
 
+def resolve_source_text(provider: Any, file_path: str) -> str | None:
+    """Return full source text from a transient store or the filesystem."""
+    getter = getattr(provider, "get_transient_file_content", None)
+    if callable(getter):
+        stored = getter(file_path)
+        if isinstance(stored, str) and stored:
+            return stored
+
+    base_dir = provider.get_base_directory()
+    path = Path(file_path) if Path(file_path).is_absolute() else base_dir / file_path
+    if path.exists():
+        return path.read_text(encoding="utf-8", errors="ignore")
+    return None
+
+
 class FileReader:
     """Handles token-budget-aware file reading for deep research."""
 
@@ -73,9 +88,6 @@ class FileReader:
         total_tokens = 0
         llm = llm_manager.get_utility_provider()
 
-        # Get base directory for path resolution
-        base_dir = self._db_services.provider.get_base_directory()
-
         for file_path, file_chunks in files_to_chunks.items():
             # Check if we've hit the overall token limit (skip if unlimited)
             if budget_limit is not None and total_tokens >= budget_limit:
@@ -85,23 +97,15 @@ class FileReader:
                 break
 
             try:
-                # Resolve path relative to base directory
-                if Path(file_path).is_absolute():
-                    path = Path(file_path)
-                else:
-                    path = base_dir / file_path
-
-                if not path.exists():
-                    logger.warning(f"File not found (expected at {path}): {file_path}")
+                content = resolve_source_text(self._db_services.provider, file_path)
+                if content is None:
+                    logger.warning(f"File not found: {file_path}")
                     continue
 
                 # Calculate token budget for this file (capped to prevent bloat)
                 num_chunks = len(file_chunks)
                 raw_budget = TOKEN_BUDGET_PER_FILE * num_chunks
                 budget = min(raw_budget, FILE_CONTENT_TOKENS_MAX)
-
-                # Read file
-                content = path.read_text(encoding="utf-8", errors="ignore")
 
                 # Estimate tokens
                 estimated_tokens = llm.estimate_tokens(content)
@@ -132,10 +136,8 @@ class FileReader:
                         end_line = chunk.get("end_line", 1)
 
                         # Use smart boundary detection to expand to complete functions/classes
-                        expanded_start, expanded_end = (
-                            expand_to_natural_boundaries(
-                                lines, start_line, end_line, chunk, file_path
-                            )
+                        expanded_start, expanded_end = expand_to_natural_boundaries(
+                            lines, start_line, end_line, chunk, file_path
                         )
 
                         if expanded_start == 0 and expanded_end == 0:
@@ -193,7 +195,7 @@ class FileReader:
                 f"but failed to read ANY file contents. "
                 f"Possible causes: "
                 f"(1) Token budget exhausted ({budget_desc}), "
-                f"(2) Files not found at base_directory: {base_dir}, "
+                f"(2) Files not found on disk or in the transient store, "
                 f"(3) All file read operations failed. "
                 f"Check logs above for file-specific errors."
             )
