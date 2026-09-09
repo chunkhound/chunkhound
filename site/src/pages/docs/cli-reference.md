@@ -17,7 +17,7 @@ These flags are accepted by every subcommand (`index`, `search`, `research`, `mc
 | Flag | Description |
 |---|---|
 | `--config PATH` | Path to an explicit configuration file (equivalent to `CHUNKHOUND_CONFIG_FILE`). |
-| `--remote-config-url URL` | URL to fetch remote configuration on startup. See [Remote Configuration](/docs/configuration/#remote-configuration). |
+| `--remote-config-url URL` | URL to fetch remote configuration on startup. HTTPS required; `http://` is accepted only for loopback hosts. See [Remote Configuration](/docs/configuration/#remote-configuration). |
 | `--remote-config-auth-header VALUE` | Authorization header for the remote-config fetch. Supports `${VAR}` interpolation against the environment at fetch time. See [Remote Configuration](/docs/configuration/#remote-configuration). |
 | `--verbose` / `-v` | Enable verbose logging. |
 | `--debug` | Enable debug mode. |

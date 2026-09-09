@@ -146,6 +146,46 @@ def test_skip_all_layers_still_applies_direct_kwargs(proj: Path) -> None:
     assert config.debug is True
 
 
+def test_snapshot_for_persisted_gate_skips_env_and_cli(
+    proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three gate substrates apply distinct layer selections.
+
+    Persisted = JSON alone (overlays must not leak in — otherwise
+    ``--auth-token`` / ``CHUNKHOUND_MCP__AUTH_TOKEN`` mask a newly
+    persisted ``mcp.host``).
+    Half-merged = env + JSON (CLI / local / --config skipped) — catches
+    env-activated hazards that CLI overlays mask on the active side.
+    Active = every layer (env + JSON + local + --config + CLI).
+    """
+    monkeypatch.setenv("CHUNKHOUND_MCP__AUTH_TOKEN", "from-env")
+    args = SimpleNamespace(
+        path=str(proj),
+        config=None,
+        debug=False,
+        verbose=False,
+        transport="http",
+        host="1.2.3.4",
+        auth_token="from-cli",
+    )
+    global_dict = {"mcp": {"host": "0.0.0.0"}}
+
+    persisted = Config.snapshot_for_persisted_gate(global_dict)
+    assert persisted.mcp.host == "0.0.0.0"
+    assert persisted.mcp.auth_token is None
+    assert persisted.mcp.transport == "stdio"
+
+    half_merged = Config.snapshot_from_global_dict(global_dict)
+    assert half_merged.mcp.host == "0.0.0.0"
+    assert half_merged.mcp.auth_token == "from-env"
+    assert half_merged.mcp.transport == "stdio"
+
+    active = Config.snapshot_for_delta_gate(global_dict, args)
+    assert active.mcp.host == "1.2.3.4"
+    assert active.mcp.auth_token == "from-cli"
+    assert active.mcp.transport == "http"
+
+
 def test_snapshot_from_global_dict_does_not_mutate_caller_dict(proj: Path) -> None:
     """Snapshot construction must leave the caller's dict untouched — otherwise
     the remote-config pipeline leaks ``indexing.exclude_user_supplied`` into

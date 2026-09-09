@@ -158,9 +158,10 @@ class Config(BaseModel):
                 config pipeline to construct restricted-merge snapshots.
             global_override: When non-None, the global-JSON layer uses this
                 pre-parsed dict instead of reading a candidate file from disk.
-                Used exclusively via ``snapshot_from_global_dict`` by the
-                remote-config pipeline to build snapshots without a speculative
-                disk write.
+                Used by the remote-config pipeline snapshot helpers
+                (``snapshot_from_global_dict``, ``snapshot_for_persisted_gate``,
+                ``snapshot_for_delta_gate``) to build snapshots without a
+                speculative disk write.
             **kwargs: Direct overrides for testing or special cases
         """
         # Start with defaults
@@ -577,12 +578,30 @@ class Config(BaseModel):
         Applies env + provided global dict; skips local_config, config_file,
         and CLI layers. Used by the remote-config pipeline for the pre-rules
         half-merged snapshot that feeds rule predicates like ``when.existing``
-        — must reflect disk state only, so CLI and local layers are excluded.
-        Delta-gate snapshots use ``snapshot_for_delta_gate`` instead.
+        — must reflect disk+env state, so CLI and local layers are excluded.
+        The delta gate uses ``snapshot_for_persisted_gate`` (the JSON that
+        would be written) and ``snapshot_for_delta_gate`` (the active
+        invocation) together; see those methods.
         """
         return cls(
             args=None,
             skip_layers={"local_config", "config_file", "cli"},
+            global_override=global_dict,
+        )
+
+    @classmethod
+    def snapshot_for_persisted_gate(cls, global_dict: dict[str, Any]) -> "Config":
+        """Build a snapshot of the on-disk global JSON alone.
+
+        Skips env, local, ``--config``, and CLI so a standing env var or a
+        one-off flag cannot mask a newly persisted hazard. This is one
+        substrate of the remote-config delta gate; the other is
+        ``snapshot_for_delta_gate`` (every layer of the current process).
+        Both must accept (``E_post ⊆ E_pre``) or the payload is discarded.
+        """
+        return cls(
+            args=None,
+            skip_layers={"env", "local_config", "config_file", "cli"},
             global_override=global_dict,
         )
 
@@ -592,17 +611,60 @@ class Config(BaseModel):
     ) -> "Config":
         """Build a snapshot merging every layer, with ``global_dict`` as global-JSON.
 
-        Used for both sides of the terminal delta gate. Unlike
-        ``snapshot_from_global_dict`` (which is the substrate for rule
-        predicates and must reflect disk state only), the delta gate needs
-        to see the active invocation — including CLI flags like
-        ``--transport http`` and any project-local ``.chunkhound.json`` —
-        so that MCP guards keyed on ``self.mcp.transport == "http"`` cannot
-        be bypassed by a rule that persists ``mcp.host=0.0.0.0`` or
-        ``mcp.cors=true`` under a snapshot that silently falls back to the
-        ``stdio`` default.
+        The *active-invocation* substrate of the remote-config delta gate.
+        Unlike ``snapshot_for_persisted_gate`` (the JSON that would be
+        written, overlays skipped), this view includes CLI flags,
+        ``--config``, and project-local ``.chunkhound.json`` so a rule
+        that is only unsafe in combination with the current process's
+        other sources still fails closed.
+
+        The pipeline ANDs this comparison with
+        ``snapshot_for_persisted_gate``: an overlay (e.g. ``--auth-token``)
+        must not mask a hazard that would appear in the file itself, and
+        a clean file must not mask a hazard that appears only when merged
+        with this invocation.
+
+        Each side also runs ``_hazard_snapshot_for_command`` so guards
+        keyed on runtime state (e.g. ``mcp.transport == "http"``) enumerate
+        even when no layer selects HTTP. The substitution is symmetric
+        across pre/post, so pre-existing accepted risk still passes
+        ``E_post ⊆ E_pre``.
         """
         return cls(args=args, global_override=global_dict)
+
+    def _hazard_snapshot_for_command(self, command: str) -> "Config":
+        """Return a snapshot forcing runtime-state-gated fields to their
+        worst case so all ``command`` guards enumerate under the delta gate.
+
+        Colocated with ``validate_for_command_structured`` in this class
+        so the substitution table stays in lockstep with the guards.
+        When adding a new guard gated on runtime state (e.g. ``if
+        command == "X" and self.foo.bar == Y``), extend this method with
+        the matching worst-case substitution — else the delta gate
+        short-circuits and a rule can persist the dangerous field.
+
+        Concrete scenario this defends against: a ``search`` invocation
+        with no HTTP transport anywhere (no CLI flag, no env, no on-disk
+        ``mcp.transport``) sees the ``mcp`` guard short-circuit — a rule
+        pushing ``mcp.host=0.0.0.0`` or ``mcp.cors=true`` lands on both
+        sides of the gate without ever emitting the hazard code, and the
+        next ``mcp --transport http`` startup then fails at final
+        validation. Forcing ``transport='http'`` here surfaces the
+        hazard at delta-gate time so the rule is rejected before persist.
+
+        Current substitutions:
+        - ``mcp``: force ``mcp.transport='http'`` so
+          ``MCP_NON_LOOPBACK_NO_AUTH`` / ``MCP_CORS_NO_AUTH`` fire even
+          when the active invocation resolves transport to ``stdio``.
+
+        Not for use outside the delta gate — production callers of
+        ``validate_for_command_structured`` need the real runtime state.
+        """
+        if command == "mcp" and self.mcp.transport != "http":
+            forced = self.model_copy(deep=True)
+            forced.mcp.transport = "http"
+            return forced
+        return self
 
     def validate_for_command_structured(
         self, command: str, args: Any | None = None
@@ -707,6 +769,9 @@ class Config(BaseModel):
                     )
                 )
 
+        # New runtime-state-gated `mcp` hazards must also be enumerated in
+        # `_hazard_snapshot_for_command` above — else the remote-config delta
+        # gate short-circuits and a rule can persist the dangerous field.
         if command == "mcp" and self.mcp.transport == "http":
             if not is_loopback_host(self.mcp.host) and not self.mcp.auth_token:
                 errors.append(

@@ -269,6 +269,35 @@ async def test_fetch_carries_auth_when_redirect_adds_default_port(
     assert seen[1].headers.get("Authorization") == "Bearer sekret"
 
 
+async def test_fetch_client_constructed_with_trust_env_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Flag pin — asserts the kwarg is passed. httpx owns the behavioral
+    # contract that ``trust_env=False`` suppresses ``HTTPS_PROXY`` /
+    # ``SSL_CERT_FILE`` / netrc; re-verifying that here would test the
+    # library, not our code. What we own is: the flag stays set. Any edit
+    # that drops or flips ``trust_env=False`` in fetcher.py must break
+    # this test.
+    captured_kwargs: dict[str, Any] = {}
+    real_client_cls = httpx.AsyncClient
+
+    def capturing_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        captured_kwargs.update(kwargs)
+        kwargs["transport"] = httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"ok": True})
+        )
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "chunkhound.core.config.remote.fetcher.httpx.AsyncClient",
+        capturing_client,
+    )
+
+    result = await fetch("https://example.com/config", auth_header=None)
+    assert result == {"ok": True}
+    assert captured_kwargs.get("trust_env") is False
+
+
 async def test_fetch_aborts_on_redirect_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -301,11 +301,14 @@ def _respond_with_startup_error(error: Exception, config: Any = None) -> None:
         pass
 
 
-async def main(args: Any = None) -> None:
+async def main(args: Any = None, config: Config | None = None) -> None:
     """Main entry point for the MCP stdio server.
 
     Args:
         args: Pre-parsed arguments. If None, will parse from sys.argv.
+        config: Pre-validated configuration. If provided (e.g. by
+            ``mcp_command``, which already validated it once), validation is
+            not repeated; otherwise a fresh one is built and validated here.
     """
     # Silence loguru before any import that could emit a log record.
     _silence_loguru()
@@ -329,13 +332,16 @@ async def main(args: Any = None) -> None:
     # Mark process as MCP mode so downstream code avoids interactive prompts
     os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    # Create and validate configuration
-    config, validation_errors = await create_validated_config(args, "mcp")
+    if config is None:
+        # Create and validate configuration
+        config, validation_errors = await create_validated_config(args, "mcp")
 
-    if validation_errors:
-        msg = "; ".join(str(e) for e in validation_errors)
-        _respond_with_startup_error(Exception(f"Configuration errors: {msg}"), config)
-        sys.exit(1)
+        if validation_errors:
+            msg = "; ".join(str(e) for e in validation_errors)
+            _respond_with_startup_error(
+                Exception(f"Configuration errors: {msg}"), config
+            )
+            sys.exit(1)
 
     # Create and run the stdio server
     try:

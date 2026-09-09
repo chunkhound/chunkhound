@@ -6,7 +6,11 @@ silently break:
  1. Successful fetch + rule application writes expected post-rules dict.
  2. `.bak` file created iff prior content existed on disk.
  3. Payload rejected when it would introduce a new validation error under
-    any persistence-hazard command (cross-command safety).
+    any persistence-hazard command (cross-command safety). The delta gate
+    scores *both* the persisted global JSON (overlays skipped) and the
+    fully merged invocation; either new code discards the write. Overlay
+    masking (CLI ``--auth-token``, local ``mcp.host``, env token) is
+    rejected by the persisted substrate.
  4. `remote_config.url` / `auth_header` gap-filled from the discovery layer
     on the first successful fetch; an on-disk value is durable and is
     never overwritten by a differing transient CLI/env value on a later
@@ -43,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from chunkhound.core.config.remote import run_remote_config_fetch
 
@@ -57,7 +62,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
         "command": "search",
         "path": None,
         "config": None,
-        "remote_config_url": "http://remote.test/config.json",
+        "remote_config_url": "https://remote.test/config.json",
         "remote_config_auth_header": None,
         "no_embeddings": False,
         "verbose": False,
@@ -189,11 +194,13 @@ async def test_terminal_gate_rejects_cross_command_hazard(
 async def test_terminal_gate_rejects_cli_http_transport_non_loopback(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Regression for the delta-gate bypass: without the fully-merged gate
-    # snapshot, `mcp.transport` in the snapshot falls back to `"stdio"` and
-    # `MCP_NON_LOOPBACK_NO_AUTH` (guarded on `transport == "http"`) never
-    # fires. Operator invocation supplies `--transport http` via CLI; the
-    # rule tries to persist a non-loopback host. Gate must reject.
+    # All-sources substrate: `--transport http` is only on the CLI. The
+    # persisted JSON has no transport, so without merging the active
+    # invocation the `MCP_NON_LOOPBACK_NO_AUTH` guard (keyed on
+    # `transport == "http"`) would never see HTTP from this layer. The
+    # gate must still reject — today the persisted side also rejects via
+    # `_hazard_snapshot_for_command`, so we assert the `active` log tag
+    # to keep the all-sources comparison load-bearing.
     target = _target_path(_isolate)
     assert not target.exists()
 
@@ -203,20 +210,27 @@ async def test_terminal_gate_rejects_cli_http_transport_non_loopback(
     }
     _install_fetch(monkeypatch, envelope)
 
-    await run_remote_config_fetch(
-        _args(command="mcp", transport="http"), "mcp"
-    )
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(
+            _args(command="mcp", transport="http"), "mcp"
+        )
+    finally:
+        logger.remove(handler_id)
 
-    # No persistence — rule was rejected by the delta gate.
     assert not target.exists()
+    assert any("rejected (active)" in m for m in messages), (
+        f"expected all-sources substrate to reject, got messages={messages}"
+    )
 
 
 async def test_terminal_gate_rejects_cli_http_transport_cors(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Same bypass shape as the non-loopback case, but exercising the
-    # `MCP_CORS_NO_AUTH` guard which shares the identical
-    # `transport == "http"` gate.
+    # All-sources substrate for `MCP_CORS_NO_AUTH` — same shape as the
+    # non-loopback case. Assert `active` so dropping that comparison
+    # cannot hide behind the persisted + force-http reject.
     target = _target_path(_isolate)
     assert not target.exists()
 
@@ -226,19 +240,26 @@ async def test_terminal_gate_rejects_cli_http_transport_cors(
     }
     _install_fetch(monkeypatch, envelope)
 
-    await run_remote_config_fetch(
-        _args(command="mcp", transport="http"), "mcp"
-    )
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(
+            _args(command="mcp", transport="http"), "mcp"
+        )
+    finally:
+        logger.remove(handler_id)
 
     assert not target.exists()
+    assert any("rejected (active)" in m for m in messages), (
+        f"expected all-sources substrate to reject, got messages={messages}"
+    )
 
 
 async def test_terminal_gate_rejects_local_http_transport_non_loopback(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Second vector: `mcp.transport=http` is supplied by the project-local
-    # `.chunkhound.json`, not the CLI. Same failure mode — the snapshot
-    # must merge the local layer, not fall back to the stdio default.
+    # All-sources substrate: `mcp.transport=http` comes from the
+    # project-local `.chunkhound.json`, not the CLI. Assert `active`.
     project = tmp_path / "project"
     project.mkdir()
     (project / ".chunkhound.json").write_text(
@@ -254,17 +275,25 @@ async def test_terminal_gate_rejects_local_http_transport_non_loopback(
     }
     _install_fetch(monkeypatch, envelope)
 
-    await run_remote_config_fetch(
-        _args(command="mcp", path=project), "mcp"
-    )
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(
+            _args(command="mcp", path=project), "mcp"
+        )
+    finally:
+        logger.remove(handler_id)
 
     assert not target.exists()
+    assert any("rejected (active)" in m for m in messages), (
+        f"expected all-sources substrate to reject, got messages={messages}"
+    )
 
 
 async def test_terminal_gate_rejects_local_http_transport_cors(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Local-config vector for the CORS guard, symmetric to the CLI case.
+    # All-sources CORS vector via local JSON. Assert `active`.
     project = tmp_path / "project"
     project.mkdir()
     (project / ".chunkhound.json").write_text(
@@ -280,11 +309,19 @@ async def test_terminal_gate_rejects_local_http_transport_cors(
     }
     _install_fetch(monkeypatch, envelope)
 
-    await run_remote_config_fetch(
-        _args(command="mcp", path=project), "mcp"
-    )
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(
+            _args(command="mcp", path=project), "mcp"
+        )
+    finally:
+        logger.remove(handler_id)
 
     assert not target.exists()
+    assert any("rejected (active)" in m for m in messages), (
+        f"expected all-sources substrate to reject, got messages={messages}"
+    )
 
 
 async def test_terminal_gate_accepts_preexisting_hazard_under_active_transport(
@@ -315,6 +352,250 @@ async def test_terminal_gate_accepts_preexisting_hazard_under_active_transport(
     assert data["mcp"]["host"] == "0.0.0.0"
 
 
+async def test_terminal_gate_rejects_mcp_host_stdio_default(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Residual delta-gate gap: with no HTTP transport ANYWHERE (no CLI
+    # flag, no env, no on-disk `mcp.transport`, no local JSON), the
+    # snapshot's `mcp.transport` falls back to `"stdio"` and the
+    # `MCP_NON_LOOPBACK_NO_AUTH` guard (gated on `transport == "http"`)
+    # never fires on either side of `_delta_ok`. A `search` invocation
+    # would then silently persist `mcp.host=0.0.0.0`, breaking the next
+    # `mcp --transport http` startup. `_codes_for` must evaluate the
+    # `mcp` hazard under a worst-case `transport='http'` snapshot so
+    # the guard fires and the rule is rejected regardless of the active
+    # invocation's transport.
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.host", "op": "set", "value": "0.0.0.0"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(_args(command="search"), "search")
+
+    assert not target.exists()
+
+
+async def test_terminal_gate_rejects_mcp_cors_stdio_default(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Symmetric to the host case above but for the `MCP_CORS_NO_AUTH`
+    # guard which shares the identical `transport == "http"` gate.
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.cors", "op": "set", "value": True}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(_args(command="search"), "search")
+
+    assert not target.exists()
+
+
+async def test_terminal_gate_accepts_preexisting_hazard_under_stdio_default(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Locks in that worst-case transport substitution applies to BOTH
+    # sides of the delta gate. A naive fix that only forced transport
+    # on the `post` side would emit `MCP_NON_LOOPBACK_NO_AUTH` only in
+    # `E_post`, spuriously blocking unrelated rules whenever the
+    # operator has already accepted the non-loopback host on disk. The
+    # substitution must be symmetric — the hazard shows in `E_pre` too,
+    # so `E_post ⊆ E_pre` accepts unrelated changes.
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({"mcp": {"host": "0.0.0.0"}}))
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "database.provider", "op": "set", "value": "duckdb"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(_args(command="search"), "search")
+
+    data = _read_target(target)
+    assert data["database"]["provider"] == "duckdb"
+    assert data["mcp"]["host"] == "0.0.0.0"
+
+
+async def test_terminal_gate_rejects_cli_auth_token_masking_non_loopback(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Persisted-dict substrate: a one-off `--auth-token` makes the
+    # all-sources snapshot valid on both sides, so a rule writing
+    # `mcp.host=0.0.0.0` (no token) to global JSON would be approved if
+    # we only scored the invocation. The persisted snapshot skips CLI
+    # and must reject. Assert `persisted` and that `active` did *not*
+    # fire — otherwise this wouldn't prove the overlay-mask path.
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.host", "op": "set", "value": "0.0.0.0"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(
+            _args(
+                command="mcp",
+                transport="http",
+                host="0.0.0.0",
+                auth_token="secret",
+            ),
+            "mcp",
+        )
+    finally:
+        logger.remove(handler_id)
+
+    assert not target.exists()
+    assert any("rejected (persisted)" in m for m in messages), (
+        f"expected persisted substrate to reject overlay mask, "
+        f"got messages={messages}"
+    )
+    assert not any("rejected (active)" in m for m in messages), (
+        f"active substrate must be masked by --auth-token; if it also "
+        f"rejects, this test no longer isolates the persisted check: "
+        f"{messages}"
+    )
+
+
+async def test_terminal_gate_rejects_local_host_masking_non_loopback(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Persisted-dict substrate: project-local `.chunkhound.json` already
+    # has `mcp.host=0.0.0.0`, so the all-sources snapshot shows the
+    # hazard on both sides and would approve copying it into the global
+    # file. Persisted skips local and must reject.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".chunkhound.json").write_text(
+        json.dumps({"mcp": {"host": "0.0.0.0"}})
+    )
+
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.host", "op": "set", "value": "0.0.0.0"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(
+            _args(command="search", path=project), "search"
+        )
+    finally:
+        logger.remove(handler_id)
+
+    assert not target.exists()
+    assert any("rejected (persisted)" in m for m in messages), (
+        f"expected persisted substrate to reject local-file mask, "
+        f"got messages={messages}"
+    )
+    assert not any("rejected (active)" in m for m in messages), (
+        f"active substrate must be masked by local mcp.host; if it also "
+        f"rejects, this test no longer isolates the persisted check: "
+        f"{messages}"
+    )
+
+
+async def test_terminal_gate_rejects_env_auth_token_masking_non_loopback(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Persisted-dict substrate: `CHUNKHOUND_MCP__AUTH_TOKEN` is a standing
+    # overlay, not part of the file. Scoring env+disk would hide a write
+    # of `mcp.host=0.0.0.0` without a token. Persisted skips env.
+    monkeypatch.setenv("CHUNKHOUND_MCP__AUTH_TOKEN", "from-env")
+
+    target = _target_path(_isolate)
+    assert not target.exists()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.host", "op": "set", "value": "0.0.0.0"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(_args(command="search"), "search")
+    finally:
+        logger.remove(handler_id)
+
+    assert not target.exists()
+    assert any("rejected (persisted)" in m for m in messages), (
+        f"expected persisted substrate to reject env-token mask, "
+        f"got messages={messages}"
+    )
+    assert not any("rejected (active)" in m for m in messages), (
+        f"active substrate must be masked by CHUNKHOUND_MCP__AUTH_TOKEN; "
+        f"if it also rejects, this test no longer isolates the persisted "
+        f"check: {messages}"
+    )
+
+
+async def test_terminal_gate_rejects_env_host_hazard_only_visible_to_half_merged(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Half-merged substrate: env supplies a non-loopback `mcp.host` that the
+    # persisted view (no env) cannot see, and a CLI `--auth-token` masks it
+    # on the active view. A rule removing `mcp.auth_token` from the JSON
+    # would leave a future invocation (without --auth-token) exposed to
+    # MCP_NON_LOOPBACK_NO_AUTH — env host + no auth in JSON. Persisted PASSes
+    # (host defaults to loopback with env skipped) and active PASSes (CLI
+    # auth still masks). Only half_merged catches it. Assert half_merged
+    # alone rejects, so dropping that substrate cannot hide behind either
+    # sibling.
+    monkeypatch.setenv("CHUNKHOUND_MCP__HOST", "0.0.0.0")
+
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({"mcp": {"auth_token": "existing"}}))
+    original_bytes = target.read_bytes()
+
+    envelope = {
+        "version": 1,
+        "rules": [{"id": "mcp.auth_token", "op": "remove"}],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="ERROR")
+    try:
+        await run_remote_config_fetch(
+            _args(command="search", auth_token="cli-secret"), "search"
+        )
+    finally:
+        logger.remove(handler_id)
+
+    assert target.read_bytes() == original_bytes
+    assert any("rejected (half_merged)" in m for m in messages), (
+        f"expected half_merged substrate to reject env-host hazard, "
+        f"got messages={messages}"
+    )
+    assert not any("rejected (persisted)" in m for m in messages), (
+        f"persisted must not see env-supplied host; if it also rejects, "
+        f"this test no longer isolates half_merged: {messages}"
+    )
+    assert not any("rejected (active)" in m for m in messages), (
+        f"active must be masked by CLI --auth-token; if it also rejects, "
+        f"this test no longer isolates half_merged: {messages}"
+    )
+
+
 async def test_self_register_remote_config_when_missing(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -325,13 +606,13 @@ async def test_self_register_remote_config_when_missing(
     _install_fetch(monkeypatch, envelope)
 
     args = _args(
-        remote_config_url="http://remote.test/config.json",
+        remote_config_url="https://remote.test/config.json",
         remote_config_auth_header="Bearer abc",
     )
     await run_remote_config_fetch(args, "search")
 
     data = _read_target(_target_path(_isolate))
-    assert data["remote_config"]["url"] == "http://remote.test/config.json"
+    assert data["remote_config"]["url"] == "https://remote.test/config.json"
     assert data["remote_config"]["auth_header"] == "Bearer abc"
 
 
@@ -345,7 +626,7 @@ async def test_self_register_preserves_on_disk_url(
     # silently replace the operator's fleet-wide URL and become permanent.
     target = _target_path(_isolate)
     target.write_text(
-        json.dumps({"remote_config": {"url": "http://original.test/x.json"}})
+        json.dumps({"remote_config": {"url": "https://original.test/x.json"}})
     )
     envelope = {
         "version": 1,
@@ -354,12 +635,12 @@ async def test_self_register_preserves_on_disk_url(
     _install_fetch(monkeypatch, envelope)
 
     await run_remote_config_fetch(
-        _args(remote_config_url="http://remote.test/config.json"), "search"
+        _args(remote_config_url="https://remote.test/config.json"), "search"
     )
 
     data = _read_target(target)
     # On-disk URL preserved despite a differing CLI URL used for the fetch.
-    assert data["remote_config"]["url"] == "http://original.test/x.json"
+    assert data["remote_config"]["url"] == "https://original.test/x.json"
     # Unrelated rule still landed.
     assert data["database"]["provider"] == "duckdb"
 
@@ -372,7 +653,7 @@ async def test_self_register_preserves_rule_set_url(
     # server-driven migrations.
     target = _target_path(_isolate)
     target.write_text(
-        json.dumps({"remote_config": {"url": "http://old.test/x.json"}})
+        json.dumps({"remote_config": {"url": "https://old.test/x.json"}})
     )
     envelope = {
         "version": 1,
@@ -380,18 +661,18 @@ async def test_self_register_preserves_rule_set_url(
             {
                 "id": "remote_config.url",
                 "op": "set",
-                "value": "http://rule.test/x.json",
+                "value": "https://rule.test/x.json",
             }
         ],
     }
     _install_fetch(monkeypatch, envelope)
 
     await run_remote_config_fetch(
-        _args(remote_config_url="http://cli.test/config.json"), "search"
+        _args(remote_config_url="https://cli.test/config.json"), "search"
     )
 
     data = _read_target(target)
-    assert data["remote_config"]["url"] == "http://rule.test/x.json"
+    assert data["remote_config"]["url"] == "https://rule.test/x.json"
 
 
 async def test_self_register_noop_when_discovery_matches_disk(
@@ -401,7 +682,7 @@ async def test_self_register_noop_when_discovery_matches_disk(
     # remote_config → no write, no .bak. Guards against needless mtime and
     # backup churn on every invocation once a URL is registered.
     target = _target_path(_isolate)
-    url = "http://remote.test/config.json"
+    url = "https://remote.test/config.json"
     target.write_text(json.dumps({"remote_config": {"url": url}}))
     bak = target.with_suffix(target.suffix + ".bak")
     original_bytes = target.read_bytes()
@@ -413,6 +694,111 @@ async def test_self_register_noop_when_discovery_matches_disk(
 
     assert not bak.exists()
     assert target.read_bytes() == original_bytes
+
+
+async def test_rule_set_url_reverted_when_scheme_invalid(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A rule persisting `http://attacker/x.json` (non-loopback http) would
+    # brick the pipeline on the next fetch and — if the attacker chose https —
+    # silently retarget the fleet. Same policy the fetcher enforces on the
+    # initial URL and every redirect hop; the persist path must match.
+    target = _target_path(_isolate)
+    original = "https://original.test/x.json"
+    target.write_text(json.dumps({"remote_config": {"url": original}}))
+
+    envelope = {
+        "version": 1,
+        "rules": [
+            {
+                "id": "remote_config.url",
+                "op": "set",
+                "value": "http://evil.test/x.json",
+            }
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(remote_config_url=original), "search")
+    finally:
+        logger.remove(handler_id)
+
+    data = _read_target(target)
+    assert data["remote_config"]["url"] == original
+    assert any("remote_config.url" in m for m in messages), (
+        f"expected refused-scheme WARNING, got messages={messages}"
+    )
+
+
+async def test_rule_set_url_accepted_when_loopback_http(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Loopback http is inside the fetcher's allowed set — local dev
+    # against a control plane on 127.0.0.1 must remain a supported rotation.
+    target = _target_path(_isolate)
+    target.write_text(
+        json.dumps({"remote_config": {"url": "https://original.test/x.json"}})
+    )
+    loopback = "http://127.0.0.1:8080/config.json"
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "remote_config.url", "op": "set", "value": loopback}
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    await run_remote_config_fetch(
+        _args(remote_config_url="https://original.test/x.json"), "search"
+    )
+
+    data = _read_target(target)
+    assert data["remote_config"]["url"] == loopback
+
+
+async def test_rule_set_unsafe_url_reverted_and_cli_url_seeded_when_no_on_disk_value(
+    _isolate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # First-run contract: one successful `--remote-config-url` should make
+    # later runs self-sufficient. An unsafe URL rule that arrives in the
+    # same envelope must not defeat that — the scheme guard reverts the
+    # unsafe rule value, then self-registration still seeds the
+    # fetcher-approved discovery URL into the empty slot. Without this
+    # ordering (validate → self-register), a hostile or typo'd
+    # `remote_config.url` rule in the very first envelope would leave the
+    # global file with no URL and the fleet would self-disable.
+    envelope = {
+        "version": 1,
+        "rules": [
+            {
+                "id": "remote_config.url",
+                "op": "set",
+                "value": "http://evil.test/x.json",
+            }
+        ],
+    }
+    _install_fetch(monkeypatch, envelope)
+
+    cli_url = "https://cli.test/config.json"
+    messages: list[str] = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(remote_config_url=cli_url), "search")
+    finally:
+        logger.remove(handler_id)
+
+    target = _target_path(_isolate)
+    assert target.exists(), "self-register should have written the seeded URL"
+    data = _read_target(target)
+    assert data["remote_config"]["url"] == cli_url, (
+        f"discovery URL should seed after unsafe rule revert; got {data!r}"
+    )
+    assert any("remote_config.url" in m for m in messages), (
+        f"expected refused-scheme WARNING, got messages={messages}"
+    )
 
 
 async def test_local_json_remote_config_stripped_and_ignored_by_url_discovery(
@@ -433,7 +819,7 @@ async def test_local_json_remote_config_stripped_and_ignored_by_url_discovery(
         json.dumps({"remote_config": {"url": malicious_url}})
     )
 
-    benign_url = "http://remote.test/config.json"
+    benign_url = "https://remote.test/config.json"
     args = _args(command="search", path=project, remote_config_url=benign_url)
 
     # (a) Pipeline URL discovery must fetch the CLI URL, not the file URL.
@@ -481,7 +867,7 @@ async def test_explicit_config_remote_config_stripped_and_ignored_by_url_discove
         json.dumps({"remote_config": {"url": malicious_url}})
     )
 
-    benign_url = "http://remote.test/config.json"
+    benign_url = "https://remote.test/config.json"
     args = _args(
         command="search",
         path=project,
@@ -898,7 +1284,7 @@ async def test_no_write_when_dict_unchanged(
     # written (so self-registration is a no-op); craft a `set` that lands on
     # the same value → deep-equality passes → no write, no .bak.
     target = _target_path(_isolate)
-    url = "http://remote.test/config.json"
+    url = "https://remote.test/config.json"
     target.write_text(
         json.dumps(
             {"mcp": {"host": "127.0.0.1"}, "remote_config": {"url": url}}

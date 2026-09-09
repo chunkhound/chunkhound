@@ -30,6 +30,14 @@ Contract:
 - Failure logs drop userinfo, query, and fragment from every URL so a
   credential or pre-signed object does not copy secrets into the WARNING
   line.
+- ``httpx.AsyncClient`` is constructed with ``trust_env=False`` so
+  proxy and TLS-trust env vars cannot silently reroute the credentialed
+  fetch. Real threats: an attacker-injected ``HTTPS_PROXY`` redirecting
+  the request to an endpoint they control, and a MITM proxy holding a
+  system-trusted CA terminating the tunnel and reading the
+  ``Authorization`` header. Side effect: ``SSL_CERT_FILE`` /
+  ``SSL_CERT_DIR`` env-based CA bundles are also ignored — operators
+  needing a private CA must extend the system trust store.
 - The raw templated string is never mutated upstream. Persistence keeps it
   verbatim so subsequent runs re-interpolate against the *current*
   environment rather than freezing a stale secret to disk.
@@ -86,7 +94,7 @@ def _is_loopback_host(hostname: str | None) -> bool:
         return False
 
 
-def _url_scheme_ok(url: str) -> bool:
+def url_scheme_ok(url: str) -> bool:
     """True iff URL is ``https`` or points at a loopback host over ``http``."""
     parts = urlsplit(url)
     if parts.scheme == "https":
@@ -159,7 +167,7 @@ async def _fetch_with_redirects(
         if not location:
             return response, current_url
         next_url = urljoin(current_url, location)
-        if not _url_scheme_ok(next_url):
+        if not url_scheme_ok(next_url):
             log_if_not_mcp(
                 "WARNING",
                 "Remote-config redirect refused: URL scheme must be https "
@@ -191,7 +199,7 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
     """
     origin_url = _url_for_log(url)
 
-    if not _url_scheme_ok(url):
+    if not url_scheme_ok(url):
         log_if_not_mcp(
             "WARNING",
             "Remote-config fetch refused: URL scheme must be https "
@@ -211,6 +219,7 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(_TIMEOUT_SECONDS),
             follow_redirects=False,
+            trust_env=False,
         ) as client:
             response, final_url = await asyncio.wait_for(
                 _fetch_with_redirects(client, url, headers),

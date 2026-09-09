@@ -14,8 +14,11 @@ Step order:
       converge on the same discovery inputs without CLI/env repetition
    4d terminal delta-only gate: the post-rules config must not introduce
       any new command-validation errors that weren't already present.
-      Checked across the current command plus every persistence-hazard
-      command, so a `search` invocation can't silently make `mcp` unsafe.
+      Scored twice — persisted global JSON (overlays skipped) AND the
+      fully merged invocation — across the current command plus every
+      persistence-hazard command, so a `search` invocation can't
+      silently make `mcp` unsafe and a one-off CLI flag can't mask a
+      newly written global hazard.
    4e write iff dict changed (avoid touching mtime on a no-op run).
 5. Re-load happens naturally when ``create_validated_config`` constructs
    the final ``Config(args=args)`` after this function returns.
@@ -35,6 +38,7 @@ from chunkhound.core.config.config import (
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from . import fetcher, persistence, rules
+from .fetcher import url_scheme_ok
 
 # Operator-owned fields that remote config must never touch. DB path and
 # target dir describe the local install; embeddings_disabled is a kill-switch
@@ -207,20 +211,28 @@ async def _run(args: Any, command: str) -> None:
     for path in REFUSED_PATHS:
         _restore_refused(working_copy, on_disk_dict, path)
 
-    # 4c — self-register remote_config discovery inputs
+    # 4c — enforce URL-scheme policy on rule-set values, then self-register.
+    #      Validate first so an unsafe rule URL is reverted (to the on-disk
+    #      value, or removed if there is none) *before* self-registration
+    #      decides whether the URL slot is empty. If the guard removed the
+    #      unsafe rule URL and no prior value is on disk, self-register can
+    #      still seed the discovery-layer URL — the fetcher scheme-checked
+    #      it before the fetch, so it does not need a second guard here.
+    _validate_remote_url(working_copy, on_disk_dict)
     _self_register_remote(working_copy, on_disk_dict, remote)
 
-    # 4d — terminal delta-only gate. Unlike `half_merged` above (which feeds
-    # rule predicates and must reflect disk state only), the gate needs both
-    # sides evaluated under the *active invocation* — CLI flags and local
-    # `.chunkhound.json` included — so guards keyed on the fully-merged
-    # runtime state (e.g. `MCP_NON_LOOPBACK_NO_AUTH`, `MCP_CORS_NO_AUTH`,
-    # which fire only when `self.mcp.transport == "http"`) can't be bypassed
-    # by a rule that persists a dangerous field under a snapshot whose
-    # transport silently falls back to the `stdio` default.
+    # 4d — terminal delta-only gate. Three substrates (persisted /
+    # half_merged / active); see `snapshot_for_persisted_gate` /
+    # `snapshot_from_global_dict` / `snapshot_for_delta_gate` docstrings.
+    # `half_merged` from step 4a is reused as the pre side — identical
+    # layer selector and `on_disk_dict` is not mutated between there and
+    # here. Persisted must skip env too, so it is built fresh here.
     try:
-        pre_gate = Config.snapshot_for_delta_gate(on_disk_dict, args)
-        post_gate = Config.snapshot_for_delta_gate(working_copy, args)
+        pre_persisted = Config.snapshot_for_persisted_gate(on_disk_dict)
+        post_persisted = Config.snapshot_for_persisted_gate(working_copy)
+        post_half_merged = Config.snapshot_from_global_dict(working_copy)
+        pre_active = Config.snapshot_for_delta_gate(on_disk_dict, args)
+        post_active = Config.snapshot_for_delta_gate(working_copy, args)
     except (ValueError, ValidationError) as exc:
         log_if_not_mcp(
             "ERROR",
@@ -229,7 +241,15 @@ async def _run(args: Any, command: str) -> None:
         )
         return
 
-    if not _delta_ok(pre_gate, post_gate, command):
+    if not _delta_ok(
+        pre_persisted=pre_persisted,
+        post_persisted=post_persisted,
+        pre_half_merged=half_merged,
+        post_half_merged=post_half_merged,
+        pre_active=pre_active,
+        post_active=post_active,
+        current_command=command,
+    ):
         return
 
     # 4e — write iff dict changed
@@ -332,7 +352,12 @@ def _self_register_remote(
         if on_disk_block.get(key) is not None:
             continue  # already persisted — never clobber
         if working_block.get(key) is not None:
-            continue  # a rule set it this run — rule wins
+            # A rule set it this run — rule wins. (Unsafe URL rules were
+            # already reverted or removed by `_validate_remote_url`, so
+            # any surviving working value came from a safe rule; a
+            # pre-rules on-disk value would have been caught by the
+            # `on_disk_block.get(key) is not None` check above.)
+            continue
         to_write[key] = value
     if to_write:
         merged = dict(working_block)
@@ -340,32 +365,121 @@ def _self_register_remote(
         working_copy["remote_config"] = merged
 
 
+def _validate_remote_url(
+    working_copy: dict[str, Any],
+    on_disk_dict: dict[str, Any],
+) -> None:
+    """Revert an unsafe rule-set ``remote_config.url`` before self-register.
+
+    Same policy the fetcher enforces on the initial URL and every redirect
+    hop: ``https``, or ``http`` to a loopback host. Any ``https://`` URL
+    passes — server-driven rotation to a new origin is the supported design,
+    and this function does not second-guess it. The only case blocked is
+    ``http://non-loopback/x``, which the fetcher will refuse on the next
+    run: persisting it would brick the pipeline until an operator hand-edits
+    the global config.
+
+    Runs before ``_self_register_remote`` so that when the guard deletes an
+    unsafe rule URL that has no on-disk fallback, self-register can still
+    seed the discovery-layer (CLI / env / global) URL — one successful
+    ``--remote-config-url`` remains sufficient to make later runs
+    self-sufficient, even when the envelope also pushed a bad URL rule.
+    The discovery URL itself does not need a second scheme check here
+    because the fetcher already applied the same rule before the fetch.
+
+    A pre-existing unsafe value that this run did not modify is left alone
+    and silent: the fetcher will refuse it on the next attempt, and warning
+    every run about the same operator hand-edit would be noise.
+    """
+    segments = ["remote_config", "url"]
+    working_present, working_value = _lookup(working_copy, segments)
+    if not working_present or working_value is None:
+        return
+    if isinstance(working_value, str) and url_scheme_ok(working_value):
+        return
+
+    on_disk_present, on_disk_value = _lookup(on_disk_dict, segments)
+    if on_disk_present and on_disk_value == working_value:
+        return  # unchanged this run — not a rule/discovery violation
+
+    log_if_not_mcp(
+        "WARNING",
+        "Remote-config refused remote_config.url: scheme must be https "
+        "(or http to a loopback host) — reverting to on-disk value",
+    )
+
+    if on_disk_present:
+        _set(working_copy, segments, on_disk_value)
+    else:
+        _delete(working_copy, segments)
+
+
 def _codes_for(
     snapshot: Config, commands: set[str]
 ) -> set[tuple[str, ConfigErrorCode]]:
-    """Collect (command, code) pairs across all commands under evaluation."""
+    """Collect (command, code) pairs across all commands under evaluation.
+
+    Each command is evaluated against its worst-case runtime-state
+    snapshot (see ``Config._hazard_snapshot_for_command``) so guards
+    gated on fields like ``mcp.transport`` fire regardless of the
+    snapshot's resolved transport. The substitution applies
+    symmetrically to both pre and post sides via ``_delta_ok``, so
+    pre-existing hazards still appear in ``E_pre`` and remain accepted
+    under ``E_post ⊆ E_pre``.
+    """
     result: set[tuple[str, ConfigErrorCode]] = set()
     for cmd in commands:
-        for code, _msg in snapshot.validate_for_command_structured(cmd, None):
+        target = snapshot._hazard_snapshot_for_command(cmd)
+        for code, _msg in target.validate_for_command_structured(cmd, None):
             result.add((cmd, code))
     return result
 
 
-def _delta_ok(pre: Config, post: Config, current_command: str) -> bool:
-    """Accept iff ``E_post ⊆ E_pre``. Log new codes on rejection with
-    the command each came from.
+def _new_codes(
+    pre: Config, post: Config, commands: set[str]
+) -> set[tuple[str, ConfigErrorCode]]:
+    """Return ``E_post - E_pre`` for ``commands``."""
+    return _codes_for(post, commands) - _codes_for(pre, commands)
+
+
+def _delta_ok(
+    *,
+    pre_persisted: Config,
+    post_persisted: Config,
+    pre_half_merged: Config,
+    post_half_merged: Config,
+    pre_active: Config,
+    post_active: Config,
+    current_command: str,
+) -> bool:
+    """Accept iff ``E_post ⊆ E_pre`` on *all three* gate substrates.
+
+    ``persisted`` is the on-disk global JSON (overlays skipped).
+    ``half_merged`` is env + on-disk JSON (CLI / local / --config
+    skipped) — catches hazards that env activates and that a future
+    invocation without the current CLI/local overlays would surface.
+    ``active`` is the fully merged invocation. New codes from any side
+    fail the gate. Logged with the substrate name so an overlay-only
+    mask vs an env-activated hazard vs an invocation-only hazard are
+    distinguishable.
     """
     commands = {current_command} | set(PERSISTENCE_HAZARD_COMMANDS)
-    e_pre = _codes_for(pre, commands)
-    e_post = _codes_for(post, commands)
-    new_codes = e_post - e_pre
-    if not new_codes:
+    persisted_new = _new_codes(pre_persisted, post_persisted, commands)
+    half_merged_new = _new_codes(pre_half_merged, post_half_merged, commands)
+    active_new = _new_codes(pre_active, post_active, commands)
+    if not persisted_new and not half_merged_new and not active_new:
         return True
-    for cmd, code in sorted(new_codes, key=lambda x: (x[0], x[1].value)):
-        log_if_not_mcp(
-            "ERROR",
-            "Remote-config rejected: {}: {}",
-            cmd,
-            code.value,
-        )
+    for source, new_codes in (
+        ("persisted", persisted_new),
+        ("half_merged", half_merged_new),
+        ("active", active_new),
+    ):
+        for cmd, code in sorted(new_codes, key=lambda x: (x[0], x[1].value)):
+            log_if_not_mcp(
+                "ERROR",
+                "Remote-config rejected ({}): {}: {}",
+                source,
+                cmd,
+                code.value,
+            )
     return False

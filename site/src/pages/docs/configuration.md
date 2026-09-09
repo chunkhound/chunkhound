@@ -136,7 +136,7 @@ Global defaults let you maintain shared settings (e.g. embedding provider + API 
 
 ## Remote Configuration
 
-For fleet-wide deployments, ChunkHound can fetch a configuration envelope from an operator-controlled HTTP endpoint at the start of every invocation, apply a list of rules to the on-disk global config, and seed the discovery-layer `remote_config.url` / `auth_header` into the global config file on the first successful fetch so subsequent runs continue fetching without needing the CLI flag or environment variable that triggered the initial run.
+For fleet-wide deployments, ChunkHound can fetch a configuration envelope from an operator-controlled HTTPS endpoint (or `http://` to a loopback host for local development) at the start of every invocation, apply a list of rules to the on-disk global config, and seed the discovery-layer `remote_config.url` / `auth_header` into the global config file on the first successful fetch so subsequent runs continue fetching without needing the CLI flag or environment variable that triggered the initial run.
 
 Skip this feature for single-user setups — enabling it adds a synchronous fetch with a hard 10-second wall-clock budget to every command (`index`, `search`, `mcp`, etc.), and there is no client-side cache. The intended use case is centralized management across many machines, not local convenience.
 
@@ -220,7 +220,6 @@ Rules apply in list order; later rules overwrite earlier ones at the same leaf. 
 
 - Unknown top-level paths (e.g. `embeding.provider`) log `schema_error` and skip the rule.
 - Unknown depth-2 paths (e.g. `embedding.provder`) are also detected and skipped, because sub-model `extra="ignore"` semantics would otherwise silently swallow the typo.
-- **Known gap.** Unknown keys nested *inside* a depth-1 `merge` value (e.g. `{ "id": "embedding", "op": "merge", "value": { "provder": "..." } }`) are still silently absorbed. Put the specific path in `id` when writing individual leaves so typos surface as `schema_error`.
 
 #### Predicates
 
@@ -266,13 +265,13 @@ Some settings describe the local install and are protected against server overri
 - `embeddings_disabled` — operator kill-switch.
 - `local_config_file`, `global_config_file`, `config_file` — discovery inputs to the loader (allowing remote to override them would recurse).
 
-`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable.
+`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused wholesale — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable. One narrow guard applies: a rule-set `remote_config.url` that fails the fetcher's scheme rule (cleartext `http://` to a non-loopback host) is reverted to the pre-rules on-disk value — or removed if there is none — with a WARNING. Persisting such a URL would brick the next fetch, since the fetcher refuses to send credentials over cleartext to a non-loopback host. Every `https://` URL passes, so rotation to a new HTTPS origin is unrestricted; `remote_config.auth_header` has no scheme concept and is accepted verbatim.
 
 ### Self-registration
 
 The first successful fetch seeds the effective `remote_config.url` and `remote_config.auth_header` (from the winning discovery layer — CLI > global > env, matching ChunkHound's overall config-layer precedence) into the global config file, so subsequent runs continue to fetch without needing the CLI flag or environment variable that triggered the initial run. Precedence:
 
-- If a rule in the envelope set `remote_config.url` or `remote_config.auth_header`, the rule's value wins and is persisted (server-driven URL/header rotation).
+- If a rule in the envelope set `remote_config.url` or `remote_config.auth_header`, the rule's value wins and is persisted (server-driven URL/header rotation). For `remote_config.url` this requires the value to pass the fetcher's scheme rule; an unsafe URL rule (cleartext `http://` to a non-loopback host) is reverted to the on-disk value or removed with a WARNING before this step runs. When the revert leaves the slot empty, discovery-layer seeding still fires — a first-run CLI/env URL survives even when the same envelope also pushed a bad URL rule.
 - Otherwise, if the on-disk file has no value at that path (and no rule set one this run), the discovery-layer value is seeded.
 - If the on-disk file already carries a value at that path, it is left alone — self-registration is gap-fill only, never a rewrite.
 
@@ -296,12 +295,14 @@ Writes are atomic (sibling `.tmp` + `replace()`), and any pre-existing target fi
 
 ### Delta-only validation gate
 
-After rules apply, the resulting config is snapshot-validated against the current command **and** every persistence-hazard command (currently `index`, `mcp`, and `research`). Each snapshot returns a set of structured `ConfigErrorCode` values (see [Startup validation](#startup-validation)). The pipeline compares pre-rules and post-rules error sets:
+After rules apply, the resulting config is snapshot-validated against the current command **and** every persistence-hazard command (currently `index`, `mcp`, and `research`). Each snapshot returns a set of structured `ConfigErrorCode` values (see [Startup validation](#startup-validation)). The pipeline compares pre-rules and post-rules error sets on **two substrates**; both must accept (`E_post ⊆ E_pre`) or the fetch is discarded:
 
-- If the post-rules set is a subset of the pre-rules set (no new codes), the fetch is written to disk.
-- If any new code appears, the fetch is discarded — nothing is written and an ERROR is logged naming each new code and the command it came from.
+1. **Persisted global dict** — the JSON that would be written, with env / local / `--config` / CLI skipped, plus worst-case command substitutions (for example forcing `mcp.transport=http` so host/CORS guards enumerate). This stops a one-off `--auth-token`, a project-local `.chunkhound.json`, or a standing `CHUNKHOUND_MCP__*` env var from masking a newly written global hazard.
+2. **Active invocation** — every config layer of the current process (CLI, `--config`, local, global, env), plus the same worst-case substitutions. This stops a rule that is only unsafe in combination with this process's other sources.
 
-This prevents a well-intentioned rule change during a `search` invocation from silently breaking the next `mcp` startup or scheduled `research` run on the same machine.
+If either comparison introduces a new code, nothing is written and an ERROR is logged naming the substrate (`persisted` or `active`), the command, and the code.
+
+This prevents a well-intentioned rule change during a `search` invocation from silently breaking the next `mcp` startup or scheduled `research` run on the same machine, and prevents an overlay on the current process from laundering an unsafe value into the global file.
 
 ### Fetch behavior and failure model
 
@@ -310,6 +311,7 @@ This prevents a well-intentioned rule change during a `search` invocation from s
 - **Single attempt.** No retries. No client-side cache.
 - **Recoverable failures** (timeout, transport error, non-2xx response, JSON parse error, envelope validation, `min_chunkhound_version` gate) log a WARNING and the invocation proceeds against whatever is currently on disk. This is intentional — remote-config outages must not brick indexing or search.
 - **Disk-write failures during backup or persist escalate to `sys.exit(1)`** with the target path and errno on stderr. A silent write failure would leave the process running against a stale on-disk copy while advertising success.
+- **`httpx` runs with `trust_env=False`**, so `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `netrc` are ignored on the remote-config fetch. This is deliberate: a hostile `HTTPS_PROXY` could reroute the credentialed request, and a MITM proxy holding a system-trusted CA could terminate the tunnel and read the `Authorization` header. **Operational consequence** — an operator needing a private / internal CA must extend the **system** trust store (e.g. install the CA into `/etc/ssl/certs`, the OS keychain, or the process's baked-in bundle); pointing `SSL_CERT_FILE` at an internal bundle has no effect and the TLS handshake will fail. The failure looks like any other recoverable fetch WARNING ("Remote-config fetch failed"), which can be mistaken for a flaky server rather than an ignored CA bundle.
 
 ### Startup validation
 
