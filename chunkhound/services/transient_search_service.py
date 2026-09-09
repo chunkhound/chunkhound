@@ -18,6 +18,11 @@ _OVERFETCH_FACTOR = 5
 # window. Capping it keeps worst-case memory a known constant regardless of
 # corpus size (a 500-chunk diff and a 500,000-chunk diff have the same bound),
 # instead of silently growing toward O(corpus size) as callers page deeper.
+#
+# Also used, unrelated to the ceiling above, as the fixed candidate-pool size
+# for vector_source="both" (see search_semantic): every "both" call fetches
+# this many candidates from both sources regardless of the caller's own
+# offset/page_size, so repeated calls for the same query see a stable pool.
 _MAX_RESULT_WINDOW = 2000
 
 # Wall-clock ceiling on a single diff/web search call: streaming the source
@@ -118,11 +123,19 @@ class TransientSearchService:
         threshold: float | None,
         path_filter: str | None,
         provider: str | None = None,
+        *,
+        limit: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
             return await asyncio.wait_for(
                 self._search_transient_impl(
-                    query, page_size, offset, threshold, path_filter, provider
+                    query,
+                    page_size,
+                    offset,
+                    threshold,
+                    path_filter,
+                    provider,
+                    limit=limit,
                 ),
                 timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
             )
@@ -142,6 +155,8 @@ class TransientSearchService:
         threshold: float | None,
         path_filter: str | None,
         provider: str | None = None,
+        *,
+        limit: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         self.peak_live_vectors = 0
         query_result = await self._embed_texts([query], provider)
@@ -154,7 +169,14 @@ class TransientSearchService:
             "dims": query_result.dims,
         }
         path_prefix = self._validate_path_filter(path_filter)
-        limit = max(offset + page_size, page_size * _OVERFETCH_FACTOR)
+        effective_limit = (
+            limit
+            if limit is not None
+            else max(offset + page_size, page_size * _OVERFETCH_FACTOR)
+        )
+        assert effective_limit >= offset + page_size, (
+            "candidate pool must cover the requested offset+page_size slice"
+        )
         heap: list[tuple[float, int, dict[str, Any]]] = []
         ordinal = 0
         qualifying_count = 0
@@ -198,7 +220,7 @@ class TransientSearchService:
                 result = self._chunk_to_dict(chunk, score)
                 entry = (score, ordinal, result)
                 ordinal += 1
-                if len(heap) < limit:
+                if len(heap) < effective_limit:
                     heapq.heappush(heap, entry)
                 elif score > heap[0][0]:
                     heapq.heapreplace(heap, entry)
@@ -259,14 +281,33 @@ class TransientSearchService:
                 query, page_size, offset, threshold, path_filter, provider
             )
 
-        fetch_size = max(offset + page_size, page_size * _OVERFETCH_FACTOR)
+        # Fixed (not offset-dependent) so every "both"-mode call for the same
+        # query fetches an identically-sized candidate pool from both sources,
+        # regardless of which page is requested. An offset-growing fetch size
+        # here previously let the DB side's approximate top-K search explore a
+        # different candidate depth per page, which can change which items
+        # rank in the same slot across pages for SingleHopStrategy. This fix
+        # guarantees a stable candidate pool for SingleHopStrategy; under
+        # MultiHopStrategy (reranking-capable providers) the DB side's own
+        # time-boxed/score-heuristic termination is independent of page_size
+        # and can still vary run-to-run -- this removes the window-growth
+        # mechanism this codebase controls, not all possible DB-side variance.
+        snapshot_size = _MAX_RESULT_WINDOW
         transient_task = asyncio.create_task(
-            self._search_transient(query, fetch_size, 0, None, path_filter, provider)
+            self._search_transient(
+                query,
+                snapshot_size,
+                0,
+                None,
+                path_filter,
+                provider,
+                limit=snapshot_size,
+            )
         )
         db_task = asyncio.create_task(
             self._original.search_semantic(
                 query=query,
-                page_size=fetch_size,
+                page_size=snapshot_size,
                 offset=0,
                 threshold=None,
                 provider=provider,

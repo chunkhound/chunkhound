@@ -417,3 +417,114 @@ async def test_hybrid_freezes_initial_source_total() -> None:
     assert calls == 2
     assert len(results) == 1
     assert pagination["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_both_mode_heap_limit_not_compounded() -> None:
+    """Regression guard: the diff-side heap in "both" mode must stay bounded
+    by the fixed snapshot size, not compound the overfetch formula twice
+    (previously up to page_size * _OVERFETCH_FACTOR**2 == 50,000 for this
+    page_size, contradicting the documented O(K) memory bound)."""
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(5_000)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks, batch_size=100),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    await service.search_semantic("query", page_size=2_000)
+
+    assert service.peak_live_vectors <= 2_000 + 100
+
+
+@pytest.mark.asyncio
+async def test_both_mode_returns_requested_page_size_not_fetch_size() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(200)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks, batch_size=50),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, pagination = await service.search_semantic("query", page_size=2)
+
+    assert len(results) == 2
+    assert pagination["page_size"] == 2
+
+
+@pytest.mark.asyncio
+async def test_both_mode_db_fetch_size_stable_across_offsets() -> None:
+    """The candidate pool requested from the DB side must not grow with the
+    caller's offset. TransientSearchService is constructed fresh on every
+    MCP/CLI call (verified: no instance persists across pages), so pagination
+    consistency across pages depends entirely on every call for the same
+    query fetching an identically-sized candidate pool from the DB."""
+    recorded_page_sizes: list[int] = []
+
+    async def recording_search(**kwargs: object) -> tuple[list, dict]:
+        recorded_page_sizes.append(kwargs["page_size"])  # type: ignore[arg-type]
+        return [], {
+            "offset": 0,
+            "page_size": kwargs["page_size"],
+            "has_more": False,
+            "next_offset": None,
+            "total": 0,
+        }
+
+    def make_service() -> TransientSearchService:
+        original = make_original()
+        original.search_semantic = AsyncMock(side_effect=recording_search)
+        return TransientSearchService(
+            original,
+            stream_chunks([]),
+            "both",
+            embedding_manager(),
+            VectorCache(max_entries=0),
+        )
+
+    await make_service().search_semantic("query", page_size=10, offset=0)
+    await make_service().search_semantic("query", page_size=10, offset=190)
+
+    assert len(recorded_page_sizes) == 2
+    assert recorded_page_sizes[0] == recorded_page_sizes[1]
+
+
+@pytest.mark.asyncio
+async def test_both_mode_pagination_fields_unaffected_by_fixed_fetch_size() -> None:
+    chunks = [make_chunk("fn", code="diff-body")]
+    original = make_original(
+        [
+            {
+                "file_path": "src/bar.py",
+                "start_line": 1,
+                "content": "db-body",
+                "score": 0.5,
+                "similarity": 0.5,
+            }
+        ]
+    )
+    service = TransientSearchService(
+        original,
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, pagination = await service.search_semantic("query", page_size=10, offset=0)
+
+    # Total must reflect the real merged count (one diff result, one db
+    # result), not the fixed internal snapshot/candidate-pool size.
+    assert pagination["total"] == 2
+    assert pagination["has_more"] is False
+    assert pagination["next_offset"] is None
