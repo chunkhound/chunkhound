@@ -17,6 +17,8 @@ to every project directory. Project-local files override the global layer.
 import copy
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -69,6 +71,47 @@ class ConfigErrorCode(str, Enum):
 # mcp host/auth gate at `validate_for_command_structured` to also fire for
 # `_daemon`), add it here at the same time.
 PERSISTENCE_HAZARD_COMMANDS: frozenset[str] = frozenset({"index", "mcp", "research"})
+
+
+# Env prefixes for every nested BaseSettings model. The persisted-gate
+# snapshot suppresses these so the outer skip_layers={"env"} is honest —
+# without it, EmbeddingConfig/LLMConfig/ResearchConfig/FetchUrlConfig
+# re-read env inside their own constructors and mask hazards that a
+# remote-config rule would persist. MCPConfig is a plain BaseModel and
+# needs no suppression.
+# When adding a new BaseSettings subconfig, add its env_prefix here.
+_NESTED_BASESETTINGS_ENV_PREFIXES: tuple[str, ...] = (
+    "CHUNKHOUND_EMBEDDING_",
+    "CHUNKHOUND_LLM_",
+    "CHUNKHOUND_RESEARCH_",
+    "CHUNKHOUND_FETCHURL_",
+)
+
+
+@contextmanager
+def _hide_nested_basesettings_env() -> Iterator[None]:
+    """Temporarily pop nested-BaseSettings env vars from ``os.environ``.
+
+    Matching is case-insensitive because the nested BaseSettings models
+    are configured with ``case_sensitive=False``; a lowercase env like
+    ``chunkhound_llm_api_key`` is still honored by pydantic and would
+    otherwise bypass this guard.
+
+    NOT thread-safe: mutates process-global ``os.environ``; do not call
+    concurrently with other code that reads ``CHUNKHOUND_*`` env vars.
+
+    See ``Config.snapshot_for_persisted_gate`` for the contract this
+    protects.
+    """
+    saved = {
+        k: os.environ.pop(k)
+        for k in list(os.environ)
+        if k.upper().startswith(_NESTED_BASESETTINGS_ENV_PREFIXES)
+    }
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 class Config(BaseModel):
@@ -598,12 +641,20 @@ class Config(BaseModel):
         substrate of the remote-config delta gate; the other is
         ``snapshot_for_delta_gate`` (every layer of the current process).
         Both must accept (``E_post ⊆ E_pre``) or the payload is discarded.
+
+        ``_hide_nested_basesettings_env`` is required because
+        ``EmbeddingConfig`` / ``LLMConfig`` / ``ResearchConfig`` /
+        ``FetchUrlConfig`` are ``pydantic_settings.BaseSettings`` and re-read
+        env vars inside their own constructors (both the special-handling
+        block and the ``default_factory`` path in ``super().__init__``),
+        defeating the outer ``skip_layers={"env"}`` alone.
         """
-        return cls(
-            args=None,
-            skip_layers={"env", "local_config", "config_file", "cli"},
-            global_override=global_dict,
-        )
+        with _hide_nested_basesettings_env():
+            return cls(
+                args=None,
+                skip_layers={"env", "local_config", "config_file", "cli"},
+                global_override=global_dict,
+            )
 
     @classmethod
     def snapshot_for_delta_gate(

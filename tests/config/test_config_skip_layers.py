@@ -186,6 +186,60 @@ def test_snapshot_for_persisted_gate_skips_env_and_cli(
     assert active.mcp.transport == "http"
 
 
+def test_snapshot_for_persisted_gate_hides_nested_basesettings_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested BaseSettings must not re-read CHUNKHOUND_* env inside
+    ``snapshot_for_persisted_gate`` — otherwise a standing env var masks
+    the persist-side delta of a hazard rule and the write commits an
+    unusable file that breaks downstream machines without the env.
+
+    Two leak paths, both covered:
+    - the ``EmbeddingConfig(**dict)`` / ``LLMConfig(**dict)`` block in
+      ``Config.__init__`` for dicts that omit ``api_key``;
+    - the ``default_factory=ResearchConfig`` / ``FetchUrlConfig`` path
+      when the field is absent from ``config_data`` entirely.
+    """
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING_API_KEY", "env-key")
+    monkeypatch.setenv("CHUNKHOUND_LLM_API_KEY", "env-key")
+    monkeypatch.setenv("CHUNKHOUND_RESEARCH_TARGET_TOKENS", "50000")
+    monkeypatch.setenv("CHUNKHOUND_FETCHURL_MAX_RETRIES", "9")
+
+    # Partial JSON: api_key omitted. Env must not fill it in.
+    snap = Config.snapshot_for_persisted_gate(
+        {"embedding": {"provider": "openai"}, "llm": {"provider": "openai"}}
+    )
+    assert snap.embedding is not None and snap.embedding.api_key is None
+    assert snap.llm is not None and snap.llm.api_key is None
+
+    # default_factory path: research absent from dict must yield the
+    # model default, not the env override.
+    snap = Config.snapshot_for_persisted_gate({})
+    assert snap.research.target_tokens == 20000
+    assert snap.fetchurl.max_retries == 3
+    assert snap.embedding is None
+    assert snap.llm is None
+
+    # os.environ restored after the snapshot completes.
+    assert os.environ["CHUNKHOUND_EMBEDDING_API_KEY"] == "env-key"
+    assert os.environ["CHUNKHOUND_LLM_API_KEY"] == "env-key"
+    assert os.environ["CHUNKHOUND_RESEARCH_TARGET_TOKENS"] == "50000"
+
+
+def test_snapshot_for_persisted_gate_hides_lowercase_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested BaseSettings use ``case_sensitive=False``, so a lowercase
+    env name is still honored by pydantic and must also be hidden.
+    """
+    monkeypatch.setenv("chunkhound_llm_api_key", "env-key")
+
+    snap = Config.snapshot_for_persisted_gate({"llm": {"provider": "openai"}})
+    assert snap.llm is not None and snap.llm.api_key is None
+
+    assert os.environ["chunkhound_llm_api_key"] == "env-key"
+
+
 def test_snapshot_from_global_dict_does_not_mutate_caller_dict(proj: Path) -> None:
     """Snapshot construction must leave the caller's dict untouched — otherwise
     the remote-config pipeline leaks ``indexing.exclude_user_supplied`` into
