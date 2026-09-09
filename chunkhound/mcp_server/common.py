@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, TypeVar
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
 
+from chunkhound.api.cli.parsers.common_arguments import add_remote_config_arguments
+
 from .tools import TOOL_REGISTRY, execute_tool
 
 if TYPE_CHECKING:
@@ -351,6 +353,10 @@ def add_common_mcp_arguments(parser: Any) -> None:
 
     # Config file argument
     parser.add_argument("--config", type=str, help="Path to configuration file")
+
+    # Remote-configuration discovery flags — shared with the top-level CLI so
+    # the two surfaces cannot drift on flag name / help text / default.
+    add_remote_config_arguments(parser)
 
     # Database arguments
     parser.add_argument("--db", type=str, help="Database path")

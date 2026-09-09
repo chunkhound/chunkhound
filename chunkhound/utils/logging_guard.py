@@ -16,7 +16,13 @@ from typing import Any
 from loguru import logger
 
 
-def log_if_not_mcp(level: str, message: str, *args: Any, **kwargs: Any) -> None:
+def log_if_not_mcp(
+    level: str,
+    message: str,
+    *args: Any,
+    exception: bool = False,
+    **kwargs: Any,
+) -> None:
     """Emit a log message unless running in MCP mode.
 
     MCP uses stdout for JSON-RPC message framing — any stray log output
@@ -26,7 +32,12 @@ def log_if_not_mcp(level: str, message: str, *args: Any, **kwargs: Any) -> None:
     Uses ``logger.opt(depth=1)`` so the log source reflects the *caller*,
     not this function.  Do NOT wrap ``log_if_not_mcp`` in another helper
     — the depth offset would break caller attribution.
+
+    Pass ``exception=True`` from within an ``except`` block to attach the
+    active exception's traceback (forwarded to ``logger.opt(exception=...)``).
     """
     if os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
         return
-    logger.opt(depth=1).log(level.upper(), message, *args, **kwargs)
+    logger.opt(depth=1, exception=exception).log(
+        level.upper(), message, *args, **kwargs
+    )

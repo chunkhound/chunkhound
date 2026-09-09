@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -131,7 +132,7 @@ def _validated_config_errors(
         overview_only=False,
         assets_only=False,
     )
-    _config, errors = create_validated_config(args, command)
+    _config, errors = asyncio.run(create_validated_config(args, command))
     return errors
 
 

@@ -134,6 +134,200 @@ Settings are resolved in this order (highest priority first):
 
 Global defaults let you maintain shared settings (e.g. embedding provider + API key, common exclude patterns, LLM roles) in a single file so you do not need to copy `.chunkhound.json` into every project. Any project-local `.chunkhound.json` (or explicit config/CLI) overrides values from the global layer. Nested objects (embedding, llm, research, database, ...) are deep-merged: specify only the keys you want to change and siblings from global survive. Lists such as `indexing.exclude` / `include` from a higher layer fully replace lower ones (built-in defaults are still applied on top; see Global Defaults above for details and examples).
 
+## Remote Configuration
+
+For fleet-wide deployments, ChunkHound can fetch a configuration envelope from an operator-controlled HTTPS endpoint (or `http://` to a loopback host for local development) at the start of every invocation, apply a list of rules to the on-disk global config, and seed the discovery-layer `remote_config.url` / `auth_header` into the global config file on the first successful fetch so subsequent runs continue fetching without needing the CLI flag or environment variable that triggered the initial run.
+
+Skip this feature for single-user setups — enabling it adds a synchronous fetch with a hard 10-second wall-clock budget to every command (`index`, `search`, `mcp`, etc.), and there is no client-side cache. The intended use case is centralized management across many machines, not local convenience.
+
+### Enabling remote fetch
+
+Two knobs, both operator-owned. They may be set via CLI, environment, or the global config file.
+
+> **Trust boundary.** A `remote_config` key inside a project-local `.chunkhound.json` or any file passed via `--config` is scrubbed at load time and a WARNING is logged — project-level files can never redirect the operator's URL, because a checked-in file could otherwise point first-run fetches at an attacker-controlled endpoint. To persist activation on a machine, place the values in the *global* config file (`~/.chunkhound.json` or `CHUNKHOUND_GLOBAL_CONFIG_FILE`), or leave it to self-registration (below) after a first run with CLI/env.
+
+| Setting | CLI flag | Environment variable |
+|---|---|---|
+| Remote-config URL | `--remote-config-url` | `CHUNKHOUND_REMOTE_CONFIG__URL` |
+| Authorization header | `--remote-config-auth-header` | `CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER` |
+
+```bash
+# Env-var activation (persists for the shell session)
+export CHUNKHOUND_REMOTE_CONFIG__URL="https://config.example.internal/chunkhound"
+export CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER='Bearer ${MY_TOKEN}'
+chunkhound index
+```
+
+```bash
+# One-shot flag activation
+chunkhound index \
+  --remote-config-url https://config.example.internal/chunkhound \
+  --remote-config-auth-header 'Bearer ${MY_TOKEN}'
+```
+
+### Envelope format
+
+The endpoint must return a JSON object:
+
+```json
+{
+  "version": 1,
+  "min_chunkhound_version": "5.3.0",
+  "rules": [
+    { "id": "embedding.model", "op": "set", "value": "voyage-3.5" }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `version` | integer | yes | Envelope schema version. Must equal `1`; any other value is rejected with `envelope_version_unsupported`. |
+| `min_chunkhound_version` | string | no | PEP 440 version. If the running client is older, the fetch is discarded so a payload targeted at a newer format never lands on an older binary. |
+| `rules` | array | no | Ordered list of rule objects (see below). Non-list values are rejected with `schema_error`. |
+
+### Rules
+
+Each rule mutates the working-copy config dict. Fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Dotted (`a.b.c`) or slash (`a/b/c`) path with an optional single leading `.` or `/`. Both forms accepted for copy-paste ergonomics. |
+| `op` | string | `merge` (default when omitted), `set`, or `remove`. |
+| `value` | any | Required for `merge` and `set`; ignored by `remove`. |
+| `when` | object | Optional predicates gating this rule. See [Predicates](#predicates) below. |
+| `min_chunkhound_version` | string | Optional PEP 440 gate applied per-rule. If the running client is older, the rule is skipped with a WARNING (the envelope as a whole is still applied). Unparseable values log a distinct WARNING. |
+
+Operation semantics:
+
+- **`merge`** — deep-merge dicts. Collapses to `set` when either the incoming value or the existing leaf isn't a dict (nothing to recurse into).
+- **`set`** — overwrite the leaf. Missing intermediate keys are created on write.
+- **`remove`** — delete the leaf. Missing paths are a no-op (logged).
+
+Rules apply in list order; later rules overwrite earlier ones at the same leaf. Multiple rules may share the same `id`, and failures are attributed by both 1-based ordinal position and path in log messages so duplicates remain distinguishable.
+
+```json
+{
+  "version": 1,
+  "rules": [
+    { "id": "embedding",         "op": "merge", "value": { "model": "voyage-3.5", "batch_size": 100 } },
+    { "id": "llm.timeout",       "op": "set",   "value": 180 },
+    { "id": "indexing.exclude",  "op": "remove" }
+  ]
+}
+```
+
+**Unknown-path handling.** Typos are surfaced, not absorbed:
+
+- Unknown top-level paths (e.g. `embeding.provider`) log `schema_error` and skip the rule.
+- Unknown depth-2 paths (e.g. `embedding.provder`) are also detected and skipped, because sub-model `extra="ignore"` semantics would otherwise silently swallow the typo.
+
+#### Predicates
+
+`when` gates a rule against runtime state. Predicates are evaluated against a **half-merged snapshot** — the on-disk global config as it was before any rule ran — so predicate results don't shift mid-loop as earlier rules mutate the working copy.
+
+| Key | Value | Meaning |
+|---|---|---|
+| `os` | string or list of strings | Matches against Python's `sys.platform` (`"linux"`, `"darwin"`, `"win32"`, ...). The rule applies iff the current platform is in the list. |
+| `existing` | string or list of paths (dotted or slash form) | Each path must resolve to a non-None value in the half-merged snapshot. Missing / null paths skip the rule. |
+
+Semantics:
+
+- All predicates must match (AND-logic). A single failing predicate skips the rule silently — the normal, non-error skip path, so log-scraping won't see spurious WARNINGs from platform-scoped envelopes.
+- **Unknown keys inside `when`** (e.g. an unsupported key like `arch`, or an `existng` typo of `existing`) surface as `schema_error` and skip the rule with a WARNING, so authoring typos don't quietly apply. Note: this check only fires for keys *inside* the `when` block — a typo of the outer key itself (e.g. `"wehn": {...}` at rule level) is indistinguishable from a rule that simply has no predicates, and applies unconditionally.
+
+```json
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "embedding.model",
+      "op": "set",
+      "value": "voyage-3.5-lite",
+      "when": { "os": ["linux", "darwin"] }
+    },
+    {
+      "id": "llm.timeout",
+      "op": "set",
+      "value": 300,
+      "when": { "existing": "llm.provider" },
+      "min_chunkhound_version": "5.3.0"
+    }
+  ]
+}
+```
+
+### Trust boundary and refused paths
+
+Some settings describe the local install and are protected against server override. After the rule loop, ChunkHound restores these paths from the pre-rules dict, regardless of what any rule did:
+
+- `database.path` — DB location is per-machine.
+- `target_dir` — the directory being indexed.
+- `embeddings_disabled` — operator kill-switch.
+- `local_config_file`, `global_config_file`, `config_file` — discovery inputs to the loader (allowing remote to override them would recurse).
+
+`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused wholesale — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable. One narrow guard applies: a rule-set `remote_config.url` that fails the fetcher's scheme rule (cleartext `http://` to a non-loopback host) is reverted to the pre-rules on-disk value — or removed if there is none — with a WARNING. Persisting such a URL would brick the next fetch, since the fetcher refuses to send credentials over cleartext to a non-loopback host. Every `https://` URL passes, so rotation to a new HTTPS origin is unrestricted; `remote_config.auth_header` has no scheme concept and is accepted verbatim.
+
+### Self-registration
+
+The first successful fetch seeds the effective `remote_config.url` and `remote_config.auth_header` (from the winning discovery layer — CLI > global > env, matching ChunkHound's overall config-layer precedence) into the global config file, so subsequent runs continue to fetch without needing the CLI flag or environment variable that triggered the initial run. Precedence:
+
+- If a rule in the envelope set `remote_config.url` or `remote_config.auth_header`, the rule's value wins and is persisted (server-driven URL/header rotation). For `remote_config.url` this requires the value to pass the fetcher's scheme rule; an unsafe URL rule (cleartext `http://` to a non-loopback host) is reverted to the on-disk value or removed with a WARNING before this step runs. When the revert leaves the slot empty, discovery-layer seeding still fires — a first-run CLI/env URL survives even when the same envelope also pushed a bad URL rule.
+- Otherwise, if the on-disk file has no value at that path (and no rule set one this run), the discovery-layer value is seeded.
+- If the on-disk file already carries a value at that path, it is left alone — self-registration is gap-fill only, never a rewrite.
+
+The target is:
+
+1. `CHUNKHOUND_GLOBAL_CONFIG_FILE` if set, else
+2. the first existing candidate from the global-config search path, else
+3. `~/.chunkhound.json` (created if absent).
+
+Writes are atomic (sibling `.tmp` + `replace()`), and any pre-existing target file is backed up as `<target>.bak` first.
+
+> **On-disk values are durable.** Once a URL or header is in the global config file — whether seeded by a first-time fetch, hand-edited by an operator, or written by an `op: set` rule — a later run with a differing `--remote-config-url` / `--remote-config-auth-header` (or env-var equivalent) will fetch against that transient value but will not overwrite what's on disk. This prevents a one-off invocation from silently replacing a fleet-wide URL. To change a persisted value, edit the global config file directly or push a rule that sets it.
+
+> **Warning:** A literal `auth_header` value lands on disk in plaintext under the user's account. ChunkHound restricts the file to the owning user where the OS supports it, but this is not an encryption boundary — anyone who can read the account's files (privileged local processes, backups, disk images) reads the token verbatim. To persist only a placeholder, use `${VAR}` interpolation:
+>
+> ```bash
+> chunkhound index --remote-config-auth-header 'Bearer ${MY_TOKEN}'
+> ```
+>
+> The raw templated string `Bearer ${MY_TOKEN}` is what gets stored; `${MY_TOKEN}` is resolved against `os.environ` at fetch time. If any referenced variable is unset or empty, the entire `Authorization` header is dropped and a WARNING is logged — a partial interpolation would leak the literal placeholder to the wire.
+
+### Delta-only validation gate
+
+After rules apply, the resulting config is snapshot-validated against the current command **and** every persistence-hazard command (currently `index`, `mcp`, and `research`). Each snapshot returns a set of structured `ConfigErrorCode` values (see [Startup validation](#startup-validation)). The pipeline compares pre-rules and post-rules error sets on **two substrates**; both must accept (`E_post ⊆ E_pre`) or the fetch is discarded:
+
+1. **Persisted global dict** — the JSON that would be written, with env / local / `--config` / CLI skipped, plus worst-case command substitutions (for example forcing `mcp.transport=http` so host/CORS guards enumerate). This stops a one-off `--auth-token`, a project-local `.chunkhound.json`, or a standing `CHUNKHOUND_MCP__*` env var from masking a newly written global hazard.
+2. **Active invocation** — every config layer of the current process (CLI, `--config`, local, global, env), plus the same worst-case substitutions. This stops a rule that is only unsafe in combination with this process's other sources.
+
+If either comparison introduces a new code, nothing is written and an ERROR is logged naming the substrate (`persisted` or `active`), the command, and the code.
+
+This prevents a well-intentioned rule change during a `search` invocation from silently breaking the next `mcp` startup or scheduled `research` run on the same machine, and prevents an overlay on the current process from laundering an unsafe value into the global file.
+
+### Fetch behavior and failure model
+
+- **Synchronous** on every invocation that goes through `create_validated_config`.
+- **Hard 10-second wall-clock budget** enforced by `asyncio.wait_for` on top of the per-phase `httpx` timeout, so a slow-drip server cannot stall startup indefinitely.
+- **Single attempt.** No retries. No client-side cache.
+- **Recoverable failures** (timeout, transport error, non-2xx response, JSON parse error, envelope validation, `min_chunkhound_version` gate) log a WARNING and the invocation proceeds against whatever is currently on disk. This is intentional — remote-config outages must not brick indexing or search.
+- **Disk-write failures during backup or persist escalate to `sys.exit(1)`** with the target path and errno on stderr. A silent write failure would leave the process running against a stale on-disk copy while advertising success.
+- **`httpx` runs with `trust_env=False`**, so `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `netrc` are ignored on the remote-config fetch. This is deliberate: a hostile `HTTPS_PROXY` could reroute the credentialed request, and a MITM proxy holding a system-trusted CA could terminate the tunnel and read the `Authorization` header. **Operational consequence** — an operator needing a private / internal CA must extend the **system** trust store (e.g. install the CA into `/etc/ssl/certs`, the OS keychain, or the process's baked-in bundle); pointing `SSL_CERT_FILE` at an internal bundle has no effect and the TLS handshake will fail. The failure looks like any other recoverable fetch WARNING ("Remote-config fetch failed"), which can be mistaken for a flaky server rather than an ignored CA bundle.
+
+### Startup validation
+
+The delta-only gate above relies on structured error codes returned by `Config.validate_for_command_structured()`. These are also surfaced in normal CLI startup errors alongside their human-readable messages, so log-scraping and monitoring can key off stable identifiers:
+
+| Code | Trigger |
+|---|---|
+| `missing_required_config` | Required top-level configuration is absent for the command. |
+| `llm_not_configured` | No LLM provider configured for a command that needs one. |
+| `llm_missing_role_config` | An LLM role (utility, synthesis, map_hyde, autodoc_cleanup) is missing its provider/model. |
+| `embedding_not_configured` | No embedding provider, or the provider is missing required fields for the command. |
+| `mcp_non_loopback_no_auth` | `mcp.host` binds to a non-loopback interface without `mcp.auth_token`. |
+| `mcp_cors_no_auth` | `mcp.cors` is enabled without `mcp.auth_token`. |
+| `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp` / `_quickresearch`. |
+| `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp`/`_quickresearch` commands hit `db_readonly_wrong_command` first.) |
+
 ## Embedding Providers
 
 | Provider | Config Value | Env Var | Default Model | Notes |
@@ -465,6 +659,8 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__READ_ONLY` | Open DB read-only (`true`/`1`/`yes`) |
 | `CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE` | LanceDB vector index type |
 | `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` | LanceDB fragment count to trigger optimize |
+| `CHUNKHOUND_REMOTE_CONFIG__URL` | URL to fetch remote configuration on startup (see [Remote Configuration](#remote-configuration)) |
+| `CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER` | Authorization header for the remote-config fetch; supports `${VAR}` interpolation against the environment at fetch time |
 | `CHUNKHOUND_LLM_PROVIDER` | LLM provider for research |
 | `CHUNKHOUND_LLM_MODEL` | LLM model shorthand that sets both utility and synthesis roles |
 | `CHUNKHOUND_LLM_UTILITY_MODEL` | LLM model for utility tasks (fast, lower cost) |
