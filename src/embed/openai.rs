@@ -212,11 +212,11 @@ fn encode_query_value(value: &str) -> Result<String, PipelineError> {
 fn percent_encode(value: &str) -> String {
     value
         .bytes()
-        .flat_map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-                vec![b as char]
+        .flat_map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                vec![byte as char].into_iter().collect::<Vec<_>>()
             } else {
-                format!("%{b:02X}").chars().collect::<Vec<_>>()
+                format!("%{byte:02X}").chars().collect::<Vec<_>>()
             }
         })
         .collect()

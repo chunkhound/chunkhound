@@ -4,7 +4,7 @@
 //! ~250-line duplication between `openai.rs` and `voyageai.rs`.
 
 use super::factory::EmbedConfig;
-use super::retry::{embed_with_split, embed_with_retry, RetryPolicy};
+use super::retry::{embed_with_retry, embed_with_split, RetryPolicy};
 use super::token::{estimate_tokens, BatchBuilder, BatchConfig};
 use super::EmbedBatchResult;
 use crate::error::PipelineError;
@@ -213,6 +213,9 @@ pub(crate) fn sanitize(value: String, secret: Option<&str>) -> String {
     if value.len() <= MAX_ERROR_LEN {
         value
     } else {
-        format!("{}...", value.chars().take(MAX_ERROR_LEN).collect::<String>())
+        format!(
+            "{}...",
+            value.chars().take(MAX_ERROR_LEN).collect::<String>()
+        )
     }
 }
