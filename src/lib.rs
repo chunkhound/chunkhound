@@ -4,6 +4,7 @@
 // fires in the proc-macro expansion, not in the function's textual body. Fixed upstream in PyO3 0.23+.
 #![allow(clippy::useless_conversion)]
 mod db;
+mod embed;
 mod error;
 mod types;
 

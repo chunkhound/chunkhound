@@ -583,6 +583,51 @@ def _detect_embed_concurrency(embedding_cfg: Any) -> int:
     return int(get_concurrency())
 
 
+def _embedding_native_capabilities(
+    embedding_cfg: Any, provider: str, model: str
+) -> tuple[int, bool]:
+    """Return the token envelope and Matryoshka flag for the native path.
+
+    These values mirror the actual ``embed_batch`` implementations. In
+    particular, OpenAI reserves 100 tokens below the model limit; the older
+    ``embedding_service`` batching constants are unrelated to this callback
+    path and must not be copied here.
+    """
+    if provider == "openai":
+        from chunkhound.providers.embeddings.openai_provider import OPENAI_MODEL_CONFIG
+
+        model_config = OPENAI_MODEL_CONFIG.get(model)
+        if model_config is None:
+            return 8191 - 100, False
+        return max(1, int(model_config["max_tokens"]) - 100), bool(
+            model_config.get("matryoshka", False)
+        )
+    if provider == "voyageai":
+        from chunkhound.providers.embeddings.voyageai_provider import (
+            DEFAULT_UNKNOWN_MODEL_CONFIG,
+            VOYAGE_MODEL_CONFIG,
+        )
+
+        voyage_config = VOYAGE_MODEL_CONFIG.get(model, DEFAULT_UNKNOWN_MODEL_CONFIG)
+        return int(voyage_config["max_tokens_per_batch"]), False
+    return 8191, False
+
+
+def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
+    """Use the provider's canonical default instead of crossing ``None``."""
+    get_default_model = getattr(embedding_cfg, "get_default_model", None)
+    if callable(get_default_model):
+        return str(get_default_model())
+    model = _cfg_or(embedding_cfg, "model", "", str)
+    if model:
+        return model
+    return {
+        "openai": "text-embedding-3-small",
+        "voyageai": "voyage-3.5",
+    }.get(provider, "")
+
+
+
 _T = TypeVar("_T")
 _MISSING = object()
 
@@ -671,7 +716,17 @@ async def run_rust_pipeline(
     )
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
-    embedding_model = _cfg_or(embedding_cfg, "model", "", str)
+    embedding_model = _resolved_embedding_model(embedding_cfg, embedding_provider)
+    embed_max_tokens_per_batch, embedding_matryoshka = _embedding_native_capabilities(
+        embedding_cfg, embedding_provider, embedding_model
+    )
+    embedding_api_key = getattr(embedding_cfg, "api_key", None)
+    if embedding_api_key is not None and hasattr(
+        embedding_api_key, "get_secret_value"
+    ):
+        embedding_api_key = embedding_api_key.get_secret_value()
+    embedding_base_url = getattr(embedding_cfg, "base_url", None)
+    embedding_azure_endpoint = getattr(embedding_cfg, "azure_endpoint", None)
 
     embed_batch_size = _cfg_or(embedding_cfg, "batch_size", 200, int)
     max_concurrent = _cfg_or(embedding_cfg, "max_concurrent_batches", 0, int)
@@ -703,6 +758,21 @@ async def run_rust_pipeline(
         "config_file_size_threshold_kb": config_file_threshold,
         "embedding_provider": embedding_provider,
         "embedding_model": embedding_model,
+        "embedding_api_key": embedding_api_key,
+        "embedding_base_url": embedding_base_url,
+        "embedding_output_dims": getattr(embedding_cfg, "output_dims", None),
+        "embedding_matryoshka": embedding_matryoshka,
+        "embedding_client_side_truncation": bool(
+            getattr(embedding_cfg, "client_side_truncation", False)
+        ),
+        "embedding_api_version": getattr(embedding_cfg, "api_version", None),
+        "embedding_ssl_verify": bool(getattr(embedding_cfg, "ssl_verify", True)),
+        "embedding_is_azure": bool(embedding_azure_endpoint),
+        "embedding_azure_endpoint": embedding_azure_endpoint,
+        "embedding_azure_deployment": getattr(
+            embedding_cfg, "azure_deployment", None
+        ),
+        "embed_max_tokens_per_batch": embed_max_tokens_per_batch,
         "disk_usage_limit_mb": disk_usage_limit_mb,
     }
 

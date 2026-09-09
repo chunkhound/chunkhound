@@ -71,6 +71,7 @@ def install_default_log_sink(verbose: bool = False) -> int:
     )
 
 
+
 def _format_duration(seconds: float) -> str:
     """Format a duration in seconds as HH:MM:SS."""
     total_seconds = int(round(seconds))

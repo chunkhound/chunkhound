@@ -4,6 +4,22 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::PathBuf;
 
+/// Secret wrapper whose derived/debugged parent structs cannot print the key.
+#[derive(Clone)]
+pub(crate) struct ApiKey(String);
+
+impl ApiKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
 /// Extract an optional field from a PyDict — returns None if key is absent or value is Python None.
 fn extract_opt<'py, T: FromPyObject<'py>>(
     dict: &Bound<'py, PyDict>,
@@ -80,6 +96,17 @@ pub(crate) struct PipelineConfig {
     // Pass-through (embed callback)
     pub embedding_provider: String,
     pub embedding_model: String,
+    pub embedding_api_key: Option<ApiKey>,
+    pub embedding_base_url: Option<String>,
+    pub embedding_output_dims: Option<usize>,
+    pub embedding_matryoshka: bool,
+    pub embedding_client_side_truncation: bool,
+    pub embedding_api_version: Option<String>,
+    pub embedding_ssl_verify: bool,
+    pub embedding_is_azure: bool,
+    pub embedding_azure_endpoint: Option<String>,
+    pub embedding_azure_deployment: Option<String>,
+    pub embed_max_tokens_per_batch: usize,
 }
 
 impl PipelineConfig {
@@ -110,6 +137,66 @@ impl PipelineConfig {
 
             embedding_provider: extract_or(dict, "embedding_provider", String::new())?,
             embedding_model: extract_or(dict, "embedding_model", String::new())?,
+            embedding_api_key: extract_opt::<String>(dict, "embedding_api_key")?.map(ApiKey),
+            embedding_base_url: extract_opt(dict, "embedding_base_url")?,
+            embedding_output_dims: extract_opt(dict, "embedding_output_dims")?,
+            embedding_matryoshka: extract_or(dict, "embedding_matryoshka", false)?,
+            embedding_client_side_truncation: extract_or(
+                dict,
+                "embedding_client_side_truncation",
+                false,
+            )?,
+            embedding_api_version: extract_opt(dict, "embedding_api_version")?,
+            embedding_ssl_verify: extract_or(dict, "embedding_ssl_verify", true)?,
+            embedding_is_azure: extract_or(dict, "embedding_is_azure", false)?,
+            embedding_azure_endpoint: extract_opt(dict, "embedding_azure_endpoint")?,
+            embedding_azure_deployment: extract_opt(dict, "embedding_azure_deployment")?,
+            embed_max_tokens_per_batch: extract_or(dict, "embed_max_tokens_per_batch", 8191u64)?
+                .max(1) as usize,
         })
+    }
+
+    pub fn embed_config(&self) -> crate::embed::EmbedConfig {
+        crate::embed::EmbedConfig {
+            provider: self.embedding_provider.clone(),
+            model: self.embedding_model.clone(),
+            api_key: self
+                .embedding_api_key
+                .as_ref()
+                .map(|key| key.as_str().to_string()),
+            base_url: self.embedding_base_url.clone(),
+            output_dims: self.embedding_output_dims,
+            matryoshka: self.embedding_matryoshka,
+            client_side_truncation: self.embedding_client_side_truncation,
+            api_version: self.embedding_api_version.clone(),
+            ssl_verify: self.embedding_ssl_verify,
+            is_azure: self.embedding_is_azure,
+            azure_endpoint: self.embedding_azure_endpoint.clone(),
+            azure_deployment: self.embedding_azure_deployment.clone(),
+            max_tokens_per_batch: self.embed_max_tokens_per_batch,
+            max_items_per_batch: self.embed_batch_size.max(1),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `extension-module` PyO3 feature means a standalone `cargo test`
+    /// binary cannot construct a real `Python<'_>` token (see lib.rs comment).
+    /// Test the `ApiKey` redaction invariant directly on the struct instead.
+    #[test]
+    fn api_key_debug_is_redacted() {
+        let key = ApiKey("secret-test-key".to_string());
+        let debug = format!("{key:?}");
+        assert!(
+            !debug.contains("secret-test-key"),
+            "ApiKey debug must not expose the raw key: {debug}"
+        );
+        assert!(
+            debug.contains("REDACTED"),
+            "ApiKey debug must say REDACTED: {debug}"
+        );
     }
 }

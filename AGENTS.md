@@ -71,6 +71,7 @@ NEVER manually edit version strings - ALWAYS create git tags instead.
 - ALWAYS run `cargo test` after Rust changes (`make rust-test`)
 - ALWAYS use owned types (`String`, `Vec<T>`) at the `allow_threads` boundary
 
+
 ## PROJECT_MAINTENANCE
 - Smoke tests are mandatory guardrails
 - Run `uv run mypy chunkhound` during reviews to catch Optional/type boundary issues
