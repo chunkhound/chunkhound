@@ -1,6 +1,7 @@
 //! Embedding adapters used by the native indexing pipeline.
 
 mod callback;
+mod common;
 mod factory;
 mod openai;
 mod retry;
