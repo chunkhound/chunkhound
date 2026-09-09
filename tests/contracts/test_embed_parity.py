@@ -110,6 +110,7 @@ def _run_pipeline(
     """Run a minimal two-function file through the Rust pipeline and return the
     PipelineReport.  Wires the native embed provider so no Python embed
     callback is used."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     src = tmp_path / "sample.py"
     src.write_text("def a():\n    return 1\n\ndef b():\n    return 2\n")
 
