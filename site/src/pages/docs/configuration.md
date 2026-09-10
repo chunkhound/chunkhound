@@ -163,7 +163,7 @@ Models outside this list still work. ChunkHound discovers their dimensions at ru
 
 ### Changing the embedding model
 
-An index built with one embedding configuration cannot be searched with another. Search reads the vector table matching the query's dimensions and filters it by provider and model, so a different model, or the same model at a different `output_dims`, returns nothing. Re-indexing does not repair a dimensions change either, because chunks that already have vectors for the provider and model are skipped at any dimension. Re-embedding under a new model costs tokens and time, and the superseded vectors stay in the database until removed.
+An index built with one embedding configuration cannot be searched with another. Search reads the stored vectors matching the query's dimensions and filters them by provider and model, so a different model, or the same model at a different `output_dims`, returns nothing. Re-indexing does not repair a dimensions change either, because chunks that already have vectors for the provider and model are skipped at any dimension. Re-embedding under a new model costs tokens and time, and the superseded vectors stay in the database until removed.
 
 The index therefore keeps the model and dimensions it was built with. Changing `embedding.model` or `embedding.output_dims` is a proposal, not an instruction:
 
@@ -176,6 +176,8 @@ The index therefore keeps the model and dimensions it was built with. Changing `
 | Different *provider* configured | Cannot be kept (credentials and dimensions differ), so the configured provider is used and every chunk is re-embedded. |
 
 If the index's dimensions are not valid for its model under the current settings, which can happen for an index built through a custom endpoint, ChunkHound keeps the model, warns that searches will not match, and still starts.
+
+Which model and dimensions an index uses is recorded in a small file beside the database (`chunks.db.embedding.json` for DuckDB, `lancedb.lancedb.embedding.json` for LanceDB). It is written the first time an index with vectors is opened and again when a switch is accepted, so a finished or interrupted switch is remembered rather than guessed from vector counts. It is never written for a read-only database. If the file cannot be read, ChunkHound warns, falls back to counting vectors, and leaves the file alone. Both DuckDB and LanceDB indexes are covered.
 
 To adopt a new model deliberately, accept the prompt. To change dimensions, or to start clean, delete the database directory and re-index. To stop being asked, set `embedding.model` and `embedding.output_dims` to whatever the index already holds.
 

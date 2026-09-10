@@ -20,7 +20,17 @@ from chunkhound.core.config.config import Config
 
 # Import embedding factory for unified provider creation
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-from chunkhound.core.embedding_model_drift import ModelDrift, detect_model_drift
+from chunkhound.core.embedding_model_drift import (
+    ActiveModel,
+    ActiveModelStateError,
+    ModelDrift,
+    active_model_path,
+    detect_model_drift,
+    read_active_model,
+    read_index_groups,
+    resolve_indexed_model,
+    write_active_model,
+)
 from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 
 # Import core types
@@ -169,14 +179,15 @@ class ProviderRegistry:
         *,
         announce: bool = True,
     ) -> None:
-        """Keep the model and dimensions the index was built with, unless told.
+        """Keep the model and dimensions the index uses, unless told otherwise.
 
-        Search reads the ``embeddings_<dims>`` table matching the query and
-        filters it by ``(provider, model)``, so a different model or different
+        Search reads the stored vectors matching the query's length and filters
+        them by ``(provider, model)``, so a different model or different
         dimensions return nothing, and re-indexing skips chunks that already
         hold vectors for the provider and model. Pinning to the index means a
         changed default or ``output_dims`` never silently rewrites, or strands,
-        an existing database.
+        an existing database. Which model the index uses comes from its
+        active-model record, claimed on first sight and updated on a switch.
         """
         # Only a provider built from this config is ours to check. Without an
         # embedding section nothing was built, and whatever is registered is left
@@ -193,14 +204,34 @@ class ProviderRegistry:
         if embedding_provider is None or database_provider is None:
             return
 
+        groups = read_index_groups(database_provider)
+        if not groups:
+            return  # an empty index has nothing to protect; unreadable is logged
+
+        record_path = self._active_model_record_path()
+        active, may_record = self._load_active_model(record_path)
+        indexed = resolve_indexed_model(groups, active)
+        if indexed is None:
+            return
+        if active is None and may_record:
+            # Claim what the index holds so later runs never infer it from counts.
+            self._save_active_model(
+                record_path,
+                ActiveModel(indexed.provider, indexed.model, indexed.dims),
+            )
+
+        configured_dims = _configured_embedding_dims(embedding_provider)
         drift = detect_model_drift(
-            database_provider,
+            indexed,
             embedding_provider.name,
             embedding_provider.model,
-            _configured_embedding_dims(embedding_provider),
+            configured_dims,
         )
         if drift is None:
             return
+        configured = ActiveModel(
+            embedding_provider.name, embedding_provider.model, configured_dims
+        )
 
         # A different provider cannot be pinned: its credentials, endpoint and
         # dimensions all differ, so there is nothing to fall back to. Say so
@@ -210,12 +241,16 @@ class ProviderRegistry:
                 f"Index was built with {drift.indexed} but {drift.configured} "
                 "is configured. Switching providers re-embeds every chunk."
             )
+            if may_record:
+                self._save_active_model(record_path, configured)
             return
 
         # The hook always hears about drift so it can explain it, but only a
         # model change can be re-embedded in place (see ModelDrift.model_changed).
         accepted = on_model_drift is not None and on_model_drift(drift)
         if accepted and drift.model_changed:
+            if may_record:
+                self._save_active_model(record_path, configured)
             logger.info(
                 f"Re-embedding {drift.indexed.embedding_count:,} chunks "
                 f"with {drift.configured} (accepted by operator)."
@@ -246,7 +281,7 @@ class ProviderRegistry:
         """
         indexed = drift.indexed
         pin: dict[str, Any] = {"model": indexed.model}
-        if drift.dims_changed:
+        if indexed.dims is not None:
             pin["output_dims"] = indexed.dims
 
         try:
@@ -277,11 +312,51 @@ class ProviderRegistry:
             if "output_dims" in pin:
                 self._config.embedding.output_dims = indexed.dims
 
-        if "output_dims" in pin or not drift.dims_changed:
+        if "output_dims" in pin or indexed.dims is None:
             report(
                 f"Using {indexed} because the index was built with it "
                 f"({indexed.embedding_count:,} embeddings). Configured "
                 f"{drift.configured} was not applied; nothing was re-embedded."
+            )
+
+    def _active_model_record_path(self) -> Path | None:
+        """Where this database's active-model record lives, if it can have one."""
+        if self._config is None:
+            return None
+        try:
+            return active_model_path(self._config.database.get_db_path())
+        except ValueError:
+            return None  # no database path configured
+
+    def _load_active_model(
+        self, path: Path | None
+    ) -> tuple[ActiveModel | None, bool]:
+        """Read the record, and say whether it may be written this run.
+
+        A read-only database is never written to, and neither is a record that
+        exists but cannot be understood: it may come from a newer ChunkHound,
+        and replacing it would discard that version's choice.
+        """
+        if path is None:
+            return None, False
+        read_only = self._config is not None and self._config.database.read_only
+        try:
+            return read_active_model(path), not read_only
+        except ActiveModelStateError as e:
+            logger.warning(
+                f"Ignoring the recorded embedding model: {e}. Delete the file "
+                "to let ChunkHound record it again."
+            )
+            return None, False
+
+    def _save_active_model(self, path: Path | None, active: ActiveModel) -> None:
+        if path is None:
+            return
+        try:
+            write_active_model(path, active)
+        except OSError as e:
+            logger.warning(
+                f"Could not record the active embedding model in {path}: {e}"
             )
 
     def register_provider(

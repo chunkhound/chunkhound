@@ -4639,6 +4639,31 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "dimensions": 0,
             }
 
+    def get_embedding_model_counts(self) -> list[dict[str, Any]]:
+        """Summarize stored vectors by provider, model and dimensions."""
+        return self._execute_in_db_thread_sync("get_embedding_model_counts")
+
+    def _executor_get_embedding_model_counts(
+        self, conn: Any, state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_embedding_model_counts - runs in DB thread."""
+        rows: list[dict[str, Any]] = []
+        for table_name in self._executor_get_all_embedding_tables(conn, state):
+            for provider, model, dims, count, latest in conn.execute(
+                "SELECT provider, model, dims, COUNT(*), MAX(created_at) "
+                f"FROM {table_name} GROUP BY provider, model, dims"
+            ).fetchall():
+                rows.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "dims": dims,
+                        "count": count,
+                        "latest": latest,
+                    }
+                )
+        return rows
+
     def execute_query(
         self, query: str, params: list[Any] | None = None
     ) -> list[dict[str, Any]]:
