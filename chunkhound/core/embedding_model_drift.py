@@ -1,15 +1,17 @@
-"""Detect when the configured embedding model differs from the indexed one.
+"""Detect when the configured embedding setup differs from the indexed one.
 
-An index built with one embedding model cannot be searched with another.
-``SearchService`` filters stored vectors by ``(provider, model)``, so a mismatch
-returns nothing at all until every chunk has been re-embedded under the new
-model. That re-embed costs tokens and wall-clock time, and the superseded
-vectors stay in the database until something removes them.
+An index built with one embedding configuration cannot be searched with
+another. Search embeds the query with the configured provider, reads the
+``embeddings_<dims>`` table matching the query vector's length, and filters it
+by ``(provider, model)``. A different model, or the same model at different
+dimensions, therefore matches nothing. Re-indexing does not repair it either:
+chunks that already hold vectors for the provider and model are skipped at any
+dimension.
 
-The index therefore owns the model. A configuration change is a proposal that
-has to be accepted, not an instruction that silently rewrites the database.
-Callers detect drift with :func:`detect_indexed_model`, then decide with
-:func:`resolve_model_drift`; only the CLI ever asks a human.
+The index therefore owns its model and dimensions. A configuration change is a
+proposal that has to be accepted, not an instruction that silently rewrites or
+strands the database. Callers find drift with :func:`detect_model_drift`; the
+registry decides what to pin, and only the CLI ever asks a human.
 """
 
 import re
@@ -22,7 +24,7 @@ from chunkhound.providers.database.duckdb.schema_constants import (
     EMBEDDING_TABLE_SIMILAR_PATTERN,
 )
 
-# Table names cannot be bound as query parameters, so the only defence against
+# Table names cannot be bound as query parameters, so the only defense against
 # interpolating something unexpected is to refuse anything that is not a
 # dimension-suffixed embedding table. Checked here rather than trusting the
 # information_schema filter, so the guarantee lives next to the interpolation.
@@ -39,7 +41,7 @@ class _QueryableDatabase(Protocol):
 
 @dataclass(frozen=True)
 class IndexedEmbeddingModel:
-    """The provider/model pair the existing embeddings were built with."""
+    """The provider, model and dimensions the existing embeddings were built with."""
 
     provider: str
     model: str
@@ -47,29 +49,60 @@ class IndexedEmbeddingModel:
     embedding_count: int
 
     def __str__(self) -> str:
-        return f"{self.provider}/{self.model}"
+        return f"{self.provider}/{self.model} @ {self.dims} dims"
 
 
 @dataclass(frozen=True)
 class ModelDrift:
-    """A configured model that disagrees with the indexed one."""
+    """Embedding configuration that disagrees with what the index was built with.
+
+    ``configured_dims`` is None when the configured provider cannot know its
+    dimensions before its first call (an unknown model on a custom endpoint).
+    Dimensions are then left out of the comparison rather than guessed.
+    """
 
     indexed: IndexedEmbeddingModel
     configured_provider: str
     configured_model: str
+    configured_dims: int | None
+
+    @property
+    def model_changed(self) -> bool:
+        """True when the provider or model differs, not only the dimensions.
+
+        Only a model change can be re-embedded in place. Chunks that already
+        hold vectors for the indexed provider and model are skipped at any
+        dimension, so accepting a dimensions-only change would strand search.
+        """
+        return (self.indexed.provider, self.indexed.model) != (
+            self.configured_provider,
+            self.configured_model,
+        )
+
+    @property
+    def dims_changed(self) -> bool:
+        return (
+            self.configured_dims is not None
+            and self.configured_dims != self.indexed.dims
+        )
 
     @property
     def configured(self) -> str:
-        return f"{self.configured_provider}/{self.configured_model}"
+        dims = (
+            f"{self.configured_dims} dims"
+            if self.configured_dims is not None
+            else "dims unknown until first call"
+        )
+        return f"{self.configured_provider}/{self.configured_model} @ {dims}"
 
 
 def detect_indexed_model(
     db: _QueryableDatabase,
 ) -> IndexedEmbeddingModel | None:
-    """Return the dominant provider/model in the index, or None if it is empty.
+    """Return the dominant provider/model/dims in the index, or None if empty.
 
-    "Dominant" means the pair with the most stored vectors. A database can hold
-    several pairs at once, which is exactly what a half-finished model switch
+    "Dominant" means the combination with the most stored vectors. A database
+    can hold several at once, which is exactly what a half-finished switch
     leaves behind; picking the largest keeps the answer stable across an
     interrupted re-embed rather than flip-flopping on row order.
 
@@ -120,32 +153,43 @@ def detect_model_drift(
     db: _QueryableDatabase,
     configured_provider: str,
     configured_model: str,
+    configured_dims: int | None,
 ) -> ModelDrift | None:
-    """Return drift between the index and the configured model, if any.
+    """Return drift between the index and the configuration, if any.
 
     None covers both "the index agrees" and "there is nothing indexed yet",
-    which callers treat identically: proceed with the configured model.
+    which callers treat identically: proceed with the configuration.
     """
     indexed = detect_indexed_model(db)
     if indexed is None:
         return None
-    if (indexed.provider, indexed.model) == (configured_provider, configured_model):
-        return None
-    return ModelDrift(
+    drift = ModelDrift(
         indexed=indexed,
         configured_provider=configured_provider,
         configured_model=configured_model,
+        configured_dims=configured_dims,
     )
+    if not drift.model_changed and not drift.dims_changed:
+        return None
+    return drift
 
 
 def format_drift_warning(drift: ModelDrift) -> str:
-    """Human-readable explanation of what a re-embed would cost."""
-    return (
-        "Embedding model changed since this index was built.\n"
-        f"  indexed with: {drift.indexed}"
-        f"  ({drift.indexed.embedding_count:,} embeddings)\n"
+    """Human-readable explanation of what switching costs, or why it cannot."""
+    count = drift.indexed.embedding_count
+    header = (
+        "Embedding configuration changed since this index was built.\n"
+        f"  indexed with: {drift.indexed}  ({count:,} embeddings)\n"
         f"  configured:   {drift.configured}\n"
-        f"Re-embedding rewrites all {drift.indexed.embedding_count:,} vectors, "
-        f"and the {drift.indexed.model} vectors stay in the database until "
-        "removed. Until then, searches run against the indexed model."
+    )
+    if drift.model_changed:
+        return header + (
+            f"Re-embedding rewrites all {count:,} vectors, and the "
+            f"{drift.indexed.model} vectors stay in the database until removed. "
+            "Until then, searches run against the indexed model."
+        )
+    return header + (
+        "Changing dimensions on the same model cannot be re-embedded in place, "
+        f"so the index keeps {drift.indexed.dims} dims. To change them, delete "
+        "the database directory and re-index."
     )

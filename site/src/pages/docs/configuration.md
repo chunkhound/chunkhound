@@ -163,20 +163,23 @@ Models outside this list still work. ChunkHound discovers their dimensions at ru
 
 ### Changing the embedding model
 
-An index built with one model cannot be searched with another: stored vectors are filtered by provider and model, so a mismatch returns nothing until every chunk has been re-embedded. Re-embedding costs tokens and time, and the superseded vectors stay in the database until removed.
+An index built with one embedding configuration cannot be searched with another. Search reads the vector table matching the query's dimensions and filters it by provider and model, so a different model, or the same model at a different `output_dims`, returns nothing. Re-indexing does not repair a dimensions change either, because chunks that already have vectors for the provider and model are skipped at any dimension. Re-embedding under a new model costs tokens and time, and the superseded vectors stay in the database until removed.
 
-The index therefore keeps the model it was built with. Changing `embedding.model` is a proposal, not an instruction:
+The index therefore keeps the model and dimensions it was built with. Changing `embedding.model` or `embedding.output_dims` is a proposal, not an instruction:
 
 | Context | Behavior |
 |---|---|
-| Interactive `chunkhound index` | Warns, shows the chunk count, and asks whether to re-embed. Declining keeps the indexed model and asks again next run. |
-| Non-interactive (CI, `CHUNKHOUND_NO_PROMPTS=1`) | Warns and keeps the indexed model. Nothing is re-embedded. |
-| MCP server startup | Keeps the indexed model silently, logging the reason to stderr. |
+| Interactive `chunkhound index`, different model | Warns, shows the chunk count, and asks whether to re-embed. Declining keeps the indexed model and dimensions and asks again next run. |
+| Same model, different `output_dims` | Keeps the indexed dimensions without asking, since the change cannot be re-embedded in place. |
+| Non-interactive (CI, `CHUNKHOUND_NO_PROMPTS=1`) | Warns and keeps the indexed model and dimensions. Nothing is re-embedded. |
+| MCP server startup | Keeps the indexed model and dimensions silently, logging the reason to stderr. |
 | Different *provider* configured | Cannot be kept (credentials and dimensions differ), so the configured provider is used and every chunk is re-embedded. |
 
-To adopt a new model deliberately, either accept the prompt, or start clean by deleting the database directory and re-indexing. To stop being asked, set `embedding.model` to whatever the index already holds.
+If the index's dimensions are not valid for its model under the current settings, which can happen for an index built through a custom endpoint, ChunkHound keeps the model, warns that searches will not match, and still starts.
 
-When a newer model supersedes the one in use, `chunkhound index` prints a one-line suggestion. It never acts on its own. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
+To adopt a new model deliberately, accept the prompt. To change dimensions, or to start clean, delete the database directory and re-index. To stop being asked, set `embedding.model` and `embedding.output_dims` to whatever the index already holds.
+
+When a newer model supersedes the one in use, an interactive `chunkhound index` prints a one-line suggestion. It never acts on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
 ### Embedding Options
 

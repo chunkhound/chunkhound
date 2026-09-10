@@ -36,23 +36,32 @@ from ..utils.validation import (
 from . import autodoc_prompts as prompts
 
 
+def _mcp_mode() -> bool:
+    """True under an MCP server, which must never prompt or print to stdout."""
+    return os.environ.get("CHUNKHOUND_MCP_MODE") == "1"
+
+
 def _make_model_drift_prompt(
     formatter: RichOutputFormatter,
     seen: list[ModelDrift],
 ) -> Callable[[ModelDrift], bool]:
     """Build the callback that decides whether to re-embed under a new model.
 
-    Declining costs nothing: the indexed model stays in use, search keeps
-    working, and the question returns on the next run. CI never stalls and
-    never re-embeds by surprise. Any drift is appended to ``seen`` so the
-    caller can suppress the upgrade hint rather than stack two model messages
-    in one run.
+    Declining costs nothing: the indexed model and dimensions stay in use,
+    search keeps working, and the question returns on the next run. CI never
+    stalls and never re-embeds by surprise. Any drift is appended to ``seen``
+    so the caller can suppress the upgrade hint rather than stack two model
+    messages in one run.
     """
 
     def decide(drift: ModelDrift) -> bool:
         seen.append(drift)
         formatter.warning(format_drift_warning(drift))
 
+        # A dimensions-only change cannot be re-embedded in place, so there is
+        # nothing to offer; the warning already says how to change them.
+        if not drift.model_changed:
+            return False
         if os.environ.get("CHUNKHOUND_NO_PROMPTS") == "1":
             formatter.info(f"Keeping {drift.indexed} (prompts disabled).")
             return False
@@ -62,13 +71,15 @@ def _make_model_drift_prompt(
 
         accepted = prompts.prompt_yes_no(
             f"Re-embed {drift.indexed.embedding_count:,} chunks "
-            f"with {drift.configured_model} now?",
+            f"with {drift.configured} now?",
             default=False,
         )
         if not accepted:
+            settings = f"embedding.model to {drift.indexed.model}"
+            if drift.dims_changed:
+                settings += f" and embedding.output_dims to {drift.indexed.dims}"
             formatter.info(
-                f"Keeping {drift.indexed}. Set embedding.model to "
-                f"{drift.indexed.model} to stop being asked."
+                f"Keeping {drift.indexed}. Set {settings} to stop being asked."
             )
         return accepted
 
@@ -76,21 +87,24 @@ def _make_model_drift_prompt(
 
 
 def _suggest_model_upgrade(formatter: RichOutputFormatter) -> None:
-    """Mention a newer embedding model, without acting on it.
+    """Mention a newer embedding model to an operator, without acting on it.
 
     Adopting one re-embeds the whole index, so this only ever prints.
     """
-    if os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
+    if _mcp_mode() or os.environ.get("CHUNKHOUND_NO_MODEL_SUGGESTIONS") == "1":
         return
-    if os.environ.get("CHUNKHOUND_NO_MODEL_SUGGESTIONS") == "1":
+    # Only someone at a terminal can act on it; in CI output it would repeat
+    # on every run as noise.
+    if not prompts.is_interactive():
         return
 
     try:
-        model = get_registry().get_provider("embedding").model
-    except Exception:
-        return
+        provider = get_registry().get_provider("embedding")
+    except ValueError:
+        return  # embeddings are not configured
 
-    successor = EMBEDDING_MODEL_UPGRADES.get(model)
+    model = provider.model
+    successor = EMBEDDING_MODEL_UPGRADES.get(provider.name, {}).get(model)
     if successor is None:
         return
 
@@ -150,7 +164,7 @@ async def _handle_daemon_lock_conflict(
 
     # Daemon is unresponsive — offer to kill in interactive mode only
     if (
-        os.environ.get("CHUNKHOUND_MCP_MODE") == "1"
+        _mcp_mode()
         or os.environ.get("CHUNKHOUND_NO_PROMPTS") == "1"
         or not sys.stdin.isatty()
     ):
@@ -239,9 +253,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     # the reason to stderr.
     drift_seen: list[ModelDrift] = []
     on_model_drift = (
-        None
-        if os.environ.get("CHUNKHOUND_MCP_MODE") == "1"
-        else _make_model_drift_prompt(formatter, drift_seen)
+        None if _mcp_mode() else _make_model_drift_prompt(formatter, drift_seen)
     )
 
     try:
@@ -385,7 +397,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                 skipped_timeouts = stats.skipped_due_to_timeout or []
 
             # Never prompt in MCP mode (stdio must not emit prompts/output)
-            if skipped_timeouts and os.environ.get("CHUNKHOUND_MCP_MODE") == "1":
+            if skipped_timeouts and _mcp_mode():
                 formatter.info(
                     f"{len(skipped_timeouts)} files timed out. "
                     "Prompts are disabled in MCP mode. To exclude them, add to "

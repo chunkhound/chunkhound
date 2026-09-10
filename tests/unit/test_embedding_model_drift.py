@@ -1,22 +1,36 @@
-"""Contract tests for embedding-model drift against an existing index.
+"""Contract tests for embedding drift against an existing index.
 
-The invariant under test: an index built with one model is never silently
-re-embedded under another. Search filters stored vectors by (provider, model),
-so an unannounced switch both bills the user for a full re-embed and returns
-nothing until that re-embed finishes.
+The invariant under test: an index built with one embedding model and
+dimensions is never silently re-embedded under, or stranded by, another.
+Search reads the ``embeddings_<dims>`` table matching the query and filters it
+by provider and model, so an unannounced change returns nothing at all, and
+re-indexing skips chunks that already hold vectors for the provider and model.
 """
 
-from types import SimpleNamespace
+from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from chunkhound.core.config.config import Config
+from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.config.embedding_config import EmbeddingConfig
+from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
 from chunkhound.core.embedding_model_drift import (
+    ModelDrift,
     detect_indexed_model,
     detect_model_drift,
     format_drift_warning,
 )
-from chunkhound.registry import ProviderRegistry
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
+from chunkhound.registry import ModelDriftDecision, ProviderRegistry
+
+# ---------------------------------------------------------------------------
+# Detection: pure functions over what the index reports
+# ---------------------------------------------------------------------------
 
 
 class _FakeDatabase:
@@ -43,22 +57,6 @@ class _ExplodingDatabase:
         raise RuntimeError("database is locked")
 
 
-class _FakeEmbeddingProvider:
-    def __init__(self, name: str, model: str):
-        self._name = name
-        self.model = model
-        self.update_calls: list[dict[str, Any]] = []
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    def update_config(self, **kwargs: Any) -> None:
-        self.update_calls.append(kwargs)
-        if "model" in kwargs:
-            self.model = kwargs["model"]
-
-
 def _db(provider: str = "voyageai", model: str = "voyage-code-3", count: int = 12431):
     return _FakeDatabase(
         {
@@ -71,21 +69,34 @@ def _db(provider: str = "voyageai", model: str = "voyage-code-3", count: int = 1
 
 class TestDriftDetection:
     def test_reports_drift_when_configured_model_differs(self):
-        drift = detect_model_drift(_db(), "voyageai", "voyage-code-4")
+        drift = detect_model_drift(_db(), "voyageai", "voyage-code-4", 1024)
 
         assert drift is not None
+        assert drift.model_changed
+        assert not drift.dims_changed
         assert drift.indexed.model == "voyage-code-3"
         assert drift.indexed.embedding_count == 12431
-        assert drift.configured_model == "voyage-code-4"
 
     def test_no_drift_when_index_and_config_agree(self):
-        assert detect_model_drift(_db(), "voyageai", "voyage-code-3") is None
+        assert detect_model_drift(_db(), "voyageai", "voyage-code-3", 1024) is None
+
+    def test_dims_change_on_the_same_model_is_drift(self):
+        """Same model at other dims queries a table the index never wrote."""
+        drift = detect_model_drift(_db(), "voyageai", "voyage-code-3", 512)
+
+        assert drift is not None
+        assert drift.dims_changed
+        assert not drift.model_changed
+
+    def test_unknown_configured_dims_compare_model_only(self):
+        """A provider that cannot know its dims before a call is not guessed at."""
+        assert detect_model_drift(_db(), "voyageai", "voyage-code-3", None) is None
 
     def test_no_drift_on_empty_index(self):
         empty = _FakeDatabase({"embeddings_1024": []})
 
         assert detect_indexed_model(empty) is None
-        assert detect_model_drift(empty, "voyageai", "voyage-code-4") is None
+        assert detect_model_drift(empty, "voyageai", "voyage-code-4", 1024) is None
 
     def test_unreadable_database_reports_no_drift(self):
         """An unreadable count must not block indexing outright."""
@@ -121,8 +132,8 @@ class TestDriftDetection:
         assert indexed is not None
         assert indexed.model == "voyage-code-3"
 
-    def test_warning_states_the_cost(self):
-        drift = detect_model_drift(_db(), "voyageai", "voyage-code-4")
+    def test_warning_states_the_cost_of_a_model_switch(self):
+        drift = detect_model_drift(_db(), "voyageai", "voyage-code-4", 1024)
         assert drift is not None
 
         message = format_drift_warning(drift)
@@ -131,108 +142,217 @@ class TestDriftDetection:
         assert "voyage-code-4" in message
         assert "12,431" in message
 
+    def test_warning_says_a_dims_change_cannot_be_reembedded(self):
+        drift = detect_model_drift(_db(), "voyageai", "voyage-code-3", 512)
+        assert drift is not None
 
-class TestRegistryKeepsIndexedModel:
-    """Without an operator decision, the index's model wins."""
+        message = format_drift_warning(drift)
 
-    def _registry(self, configured_model: str, indexed_model: str = "voyage-code-3"):
+        assert "keeps 1024 dims" in message
+        assert "delete the database directory" in message
+
+
+# ---------------------------------------------------------------------------
+# Resolution: configure() against a real DuckDB index
+# ---------------------------------------------------------------------------
+
+_CODE_3_INDEX = [("voyageai", "voyage-code-3", 1024)]
+
+
+def _seed_index(tmp_path: Path, indexed: list[tuple[str, str, int]]) -> DatabaseConfig:
+    """Write two vectors per (provider, model, dims) into a real DuckDB index."""
+    db_config = DatabaseConfig(provider="duckdb", path=tmp_path / ".chunkhound" / "db")
+    db_path = db_config.get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    database = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+    database.connect()
+    try:
+        chunk_id = 1
+        for provider, model, dims in indexed:
+            database.insert_embeddings_batch(
+                [
+                    {
+                        "chunk_id": chunk_id + offset,
+                        "provider": provider,
+                        "model": model,
+                        "embedding": [0.1] * dims,
+                        "dims": dims,
+                    }
+                    for offset in range(2)
+                ]
+            )
+            chunk_id += 2
+    finally:
+        database.disconnect()
+    return db_config
+
+
+ConfigureIndex = Callable[..., tuple[ProviderRegistry, Config]]
+
+
+@pytest.fixture
+def configure_index(
+    tmp_path: Path, clean_environment: None
+) -> Iterator[ConfigureIndex]:
+    """Seed an index, then run ``ProviderRegistry.configure`` against it."""
+    registries: list[ProviderRegistry] = []
+
+    def _configure(
+        indexed: list[tuple[str, str, int]],
+        *,
+        model: str,
+        output_dims: int | None = None,
+        on_model_drift: ModelDriftDecision | None = None,
+    ) -> tuple[ProviderRegistry, Config]:
+        config = Config(target_dir=tmp_path)
+        config.database = _seed_index(tmp_path, indexed)
+        config.embedding = EmbeddingConfig(
+            provider="voyageai",
+            model=model,
+            api_key="test-key",
+            output_dims=output_dims,
+        )
         registry = ProviderRegistry()
-        provider = _FakeEmbeddingProvider("voyageai", configured_model)
-        registry.register_provider("embedding", provider)
-        registry.register_provider("database", _db(model=indexed_model))
-        return registry, provider
+        registries.append(registry)
+        registry.configure(config, on_model_drift)
+        return registry, config
 
-    def test_no_callback_pins_provider_to_indexed_model(self):
-        registry, provider = self._registry("voyage-code-4")
+    yield _configure
 
-        registry._resolve_embedding_model_drift(None)
+    for registry in registries:
+        registry.get_provider("database").disconnect(skip_checkpoint=True)
 
-        assert provider.model == "voyage-code-3"
 
-    def test_declining_keeps_indexed_model(self):
-        registry, provider = self._registry("voyage-code-4")
+def _decline(drift: ModelDrift) -> bool:
+    return False
 
-        registry._resolve_embedding_model_drift(lambda drift: False)
 
-        assert provider.model == "voyage-code-3"
+def _accept(drift: ModelDrift) -> bool:
+    return True
 
-    def test_accepting_keeps_configured_model(self):
-        registry, provider = self._registry("voyage-code-4")
 
-        registry._resolve_embedding_model_drift(lambda drift: True)
-
-        assert provider.model == "voyage-code-4"
-        assert provider.update_calls == []
-
-    def test_matching_model_is_left_alone(self):
-        registry, provider = self._registry("voyage-code-3")
-
-        registry._resolve_embedding_model_drift(None)
-
-        assert provider.model == "voyage-code-3"
-        assert provider.update_calls == []
-
-    def test_pin_is_written_back_to_config(self):
-        """Pinning the live provider alone is not enough.
-
-        ``search`` and ``create_services`` build their own provider from
-        ``config.embedding`` instead of asking the registry. If the config
-        still names the configured model, those instances query a model the
-        index does not hold and the search returns nothing at all.
-        """
-        from chunkhound.core.config.embedding_config import EmbeddingConfig
-
-        registry, provider = self._registry("voyage-code-4")
-        registry._config = SimpleNamespace(
-            embeddings_disabled=False,
-            embedding=EmbeddingConfig(
-                provider="voyageai", model="voyage-code-4", api_key="test-key"
-            ),
+class TestConfigureKeepsTheIndexUsable:
+    @pytest.mark.parametrize(
+        "decision", [None, _decline], ids=["no-hook-as-mcp", "declined"]
+    )
+    def test_unaccepted_switch_keeps_indexed_model_and_dims(
+        self,
+        configure_index: ConfigureIndex,
+        decision: ModelDriftDecision | None,
+    ):
+        registry, _ = configure_index(
+            _CODE_3_INDEX,
+            model="voyage-code-4",
+            output_dims=2048,
+            on_model_drift=decision,
         )
 
-        registry._resolve_embedding_model_drift(None)
+        provider = registry.get_provider("embedding")
+        assert (provider.model, provider.dims) == ("voyage-code-3", 1024)
 
-        assert provider.model == "voyage-code-3"
-        assert registry._config.embedding.model == "voyage-code-3"
+    def test_pin_reaches_providers_rebuilt_from_config(
+        self, configure_index: ConfigureIndex
+    ):
+        """``search`` and ``create_services`` build providers from config.
 
-    def test_provider_change_is_not_pinned(self):
-        """A different provider has different credentials and dimensions.
-
-        There is nothing to fall back to, so the configured provider stands.
+        If only the registry's instance were pinned, those would embed queries
+        for a model and table the index does not hold and find nothing.
         """
-        registry = ProviderRegistry()
-        provider = _FakeEmbeddingProvider("openai", "text-embedding-3-small")
-        registry.register_provider("embedding", provider)
-        registry.register_provider("database", _db(provider="voyageai"))
+        _, config = configure_index(
+            _CODE_3_INDEX, model="voyage-code-4", output_dims=2048
+        )
+        assert config.embedding is not None
 
-        registry._resolve_embedding_model_drift(None)
+        rebuilt = EmbeddingProviderFactory.create_provider(config.embedding)
 
-        assert provider.model == "text-embedding-3-small"
-        assert provider.update_calls == []
+        assert (rebuilt.model, rebuilt.dims) == ("voyage-code-3", 1024)
+
+    def test_dims_change_on_the_same_model_keeps_indexed_dims_even_if_accepted(
+        self, configure_index: ConfigureIndex
+    ):
+        """Re-indexing skips chunks already embedded under the model, so the
+        new dims could never be written: accepting must not strand search."""
+        registry, config = configure_index(
+            _CODE_3_INDEX,
+            model="voyage-code-3",
+            output_dims=512,
+            on_model_drift=_accept,
+        )
+        assert config.embedding is not None
+
+        assert registry.get_provider("embedding").dims == 1024
+        assert config.embedding.output_dims == 1024
+
+    def test_accepted_model_switch_uses_configured_model_and_dims(
+        self, configure_index: ConfigureIndex
+    ):
+        registry, config = configure_index(
+            _CODE_3_INDEX,
+            model="voyage-code-4",
+            output_dims=2048,
+            on_model_drift=_accept,
+        )
+        assert config.embedding is not None
+
+        provider = registry.get_provider("embedding")
+        assert (provider.model, provider.dims) == ("voyage-code-4", 2048)
+        assert (config.embedding.model, config.embedding.output_dims) == (
+            "voyage-code-4",
+            2048,
+        )
+
+    def test_matching_index_is_left_alone(self, configure_index: ConfigureIndex):
+        consulted: list[ModelDrift] = []
+
+        def record(drift: ModelDrift) -> bool:
+            consulted.append(drift)
+            return False
+
+        registry, _ = configure_index(
+            _CODE_3_INDEX, model="voyage-code-3", on_model_drift=record
+        )
+
+        assert consulted == []
+        assert registry.get_provider("embedding").dims == 1024
+
+    def test_custom_indexed_model_is_pinned_with_its_dims(
+        self, configure_index: ConfigureIndex
+    ):
+        registry, _ = configure_index(
+            [("voyageai", "acme-custom", 777)], model="voyage-3.5"
+        )
+
+        provider = registry.get_provider("embedding")
+        assert (provider.model, provider.dims) == ("acme-custom", 777)
+
+    def test_index_dims_invalid_for_its_model_do_not_crash_startup(
+        self, configure_index: ConfigureIndex
+    ):
+        """``voyage-law-2`` only produces 1024 dims, so 2048 cannot be pinned.
+
+        configure() also runs at MCP startup, so it keeps the model and warns
+        rather than raising.
+        """
+        registry, _ = configure_index(
+            [("voyageai", "voyage-law-2", 2048)], model="voyage-3.5"
+        )
+
+        assert registry.get_provider("embedding").model == "voyage-law-2"
+
+    def test_provider_change_is_not_pinned(self, configure_index: ConfigureIndex):
+        """A different provider has other credentials and dimensions, so there
+        is nothing to fall back to and the configured provider stands."""
+        registry, _ = configure_index(
+            [("openai", "text-embedding-3-small", 1536)], model="voyage-3.5"
+        )
+
+        assert registry.get_provider("embedding").model == "voyage-3.5"
 
 
-class TestUpgradeSuggestion:
-    def test_every_superseded_model_maps_to_a_known_model(self):
+class TestUpgradeSuggestions:
+    def test_every_suggestion_names_models_the_provider_knows(self):
         """A hint pointing at a model the provider cannot batch is worse than none."""
-        from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
-        from chunkhound.providers.embeddings.voyageai_provider import (
-            VOYAGE_MODEL_CONFIG,
-        )
-
-        for superseded, successor in EMBEDDING_MODEL_UPGRADES.items():
+        for superseded, successor in EMBEDDING_MODEL_UPGRADES["voyageai"].items():
             assert superseded in VOYAGE_MODEL_CONFIG
             assert successor in VOYAGE_MODEL_CONFIG
-
-    @pytest.mark.parametrize(
-        ("superseded", "successor"),
-        [
-            ("voyage-code-3", "voyage-code-4"),
-            ("voyage-3.5", "voyage-4"),
-            ("voyage-3.5-lite", "voyage-4-lite"),
-            ("voyage-3-large", "voyage-4-large"),
-        ],
-    )
-    def test_upgrade_targets_stay_in_family(self, superseded: str, successor: str):
-        from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
-
-        assert EMBEDDING_MODEL_UPGRADES[superseded] == successor
