@@ -152,8 +152,22 @@ class ProviderRegistry:
         self._setup_language_parsers()
         self._resolve_embedding_model_drift(on_model_drift)
 
+    def register_embedding_provider(self, provider: EmbeddingProvider) -> None:
+        """Register a caller-built embedding provider, held to the index.
+
+        The MCP server and ``research`` build their provider from the config
+        before ``create_services`` configures the registry, so that instance
+        predates any pin. Checking it again here pins it in place; configure()
+        already announced the pin when it resolved its own provider.
+        """
+        self.register_provider("embedding", provider, singleton=True)
+        self._resolve_embedding_model_drift(None, announce=False)
+
     def _resolve_embedding_model_drift(
-        self, on_model_drift: ModelDriftDecision | None
+        self,
+        on_model_drift: ModelDriftDecision | None,
+        *,
+        announce: bool = True,
     ) -> None:
         """Keep the model and dimensions the index was built with, unless told.
 
@@ -164,7 +178,14 @@ class ProviderRegistry:
         changed default or ``output_dims`` never silently rewrites, or strands,
         an existing database.
         """
-        if self._config and getattr(self._config, "embeddings_disabled", False):
+        # Only a provider built from this config is ours to check. Without an
+        # embedding section nothing was built, and whatever is registered is left
+        # over from an earlier configure() or was placed there by another caller.
+        if (
+            self._config is None
+            or self._config.embedding is None
+            or getattr(self._config, "embeddings_disabled", False)
+        ):
             return
 
         embedding_provider = self._providers.get("embedding")
@@ -201,10 +222,11 @@ class ProviderRegistry:
             )
             return
 
-        # A caller that supplied a decision hook has already told the operator
-        # what is happening, on its own stream; repeating it here duplicates
-        # the message and interleaves badly with the CLI's own output.
-        report = logger.debug if on_model_drift is not None else logger.warning
+        # A decision hook has already told the operator on its own stream, and
+        # a re-check of an announced configuration has nothing new to say.
+        report = (
+            logger.warning if on_model_drift is None and announce else logger.debug
+        )
         self._pin_embedding_to_index(embedding_provider, drift, report)
 
     def _pin_embedding_to_index(

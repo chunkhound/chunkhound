@@ -9,6 +9,7 @@ re-indexing skips chunks that already hold vectors for the provider and model.
 
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +25,8 @@ from chunkhound.core.embedding_model_drift import (
     detect_model_drift,
     format_drift_warning,
 )
+from chunkhound.database_factory import create_services
+from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 from chunkhound.registry import ModelDriftDecision, ProviderRegistry
@@ -339,6 +342,59 @@ class TestConfigureKeepsTheIndexUsable:
         )
 
         assert registry.get_provider("embedding").model == "voyage-law-2"
+
+    def test_provider_built_before_configure_is_held_to_the_index(
+        self, tmp_path: Path, clean_environment: None
+    ):
+        """The MCP server and ``research`` build their provider first.
+
+        They create it from config, then call ``create_services``, which
+        configures the registry and registers that earlier instance. It must be
+        pinned too, or MCP search queries a model and table the index does not
+        hold and returns nothing.
+        """
+        config = Config(target_dir=tmp_path)
+        config.database = _seed_index(tmp_path, _CODE_3_INDEX)
+        config.embedding = EmbeddingConfig(
+            provider="voyageai",
+            model="voyage-code-4",
+            api_key="test-key",
+            output_dims=2048,
+        )
+        early = EmbeddingProviderFactory.create_provider(config.embedding)
+        embedding_manager = EmbeddingManager()
+        embedding_manager.register_provider(early, set_default=True)
+
+        services = create_services(
+            db_path=Path(config.database.path),
+            config=config,
+            embedding_manager=embedding_manager,
+        )
+        try:
+            assert (early.model, early.dims) == ("voyage-code-3", 1024)
+        finally:
+            services.provider.disconnect(skip_checkpoint=True)
+
+    def test_config_without_embeddings_leaves_other_providers_alone(
+        self, tmp_path: Path, clean_environment: None
+    ):
+        """``create_services`` registers a caller's provider after configure().
+
+        The next configure() without an embedding section built nothing of its
+        own, so it must not treat that leftover as its provider and fail on it.
+        """
+        leftover = SimpleNamespace(name="dummy", model="dummy")
+        config = Config(target_dir=tmp_path)
+        config.database = _seed_index(tmp_path, _CODE_3_INDEX)
+        config.embedding = None
+        registry = ProviderRegistry()
+        registry.register_provider("embedding", leftover)
+        try:
+            registry.configure(config)
+
+            assert registry.get_provider("embedding") is leftover
+        finally:
+            registry.get_provider("database").disconnect(skip_checkpoint=True)
 
     def test_provider_change_is_not_pinned(self, configure_index: ConfigureIndex):
         """A different provider has other credentials and dimensions, so there

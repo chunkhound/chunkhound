@@ -131,12 +131,12 @@ def create_services(
     # to prevent creating a second database provider connection in the same process.
 
     # If embedding_manager is provided, register its provider with the global registry
-    # to ensure services use the same provider instance
+    # so services use the same instance, held to the index like the registry's own
     if embedding_manager:
         try:
             provider = embedding_manager.get_default_provider()
             if provider:
-                registry.register_provider("embedding", provider, singleton=True)
+                registry.register_embedding_provider(provider)
         except Exception:
             # If no provider in embedding_manager, registry will handle provider creation
             pass
