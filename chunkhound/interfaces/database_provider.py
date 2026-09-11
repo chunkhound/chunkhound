@@ -469,6 +469,15 @@ class DatabaseProvider(Protocol):
         """Get statistics for a specific embedding provider/model."""
         ...
 
+    def get_embedding_model_counts(self) -> list[dict[str, Any]]:
+        """Summarize stored vectors by provider, model and dimensions.
+
+        Returns one row per combination with ``provider``, ``model``,
+        ``dims``, ``count`` and ``latest``: the newest vector's write time as
+        a datetime or POSIX timestamp, or None when the backend records none.
+        """
+        ...
+
     # Transaction and Bulk Operations
     def execute_query(
         self, query: str, params: list[Any] | None = None

@@ -71,6 +71,13 @@ _RERANK_LIMIT_PARAM = {"voyage": "top_k", "cohere": "top_n"}
 # Official VoyageAI model configuration based on API documentation
 VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
     # Models with 120,000 token limit per batch
+    "voyage-4-large": {
+        "max_tokens_per_batch": 120000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
     "voyage-3-large": {
         "max_tokens_per_batch": 120000,
         "max_texts_per_batch": 1000,
@@ -114,6 +121,20 @@ VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
         "default_dimension": 1024,
     },
     # Models with 320,000 token limit per batch
+    "voyage-code-4": {
+        "max_tokens_per_batch": 320000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
+    "voyage-4": {
+        "max_tokens_per_batch": 320000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
     "voyage-3.5": {
         "max_tokens_per_batch": 320000,
         "max_texts_per_batch": 1000,
@@ -128,7 +149,14 @@ VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
         "dimensions": [1024],
         "default_dimension": 1024,
     },
-    # Model with 1,000,000 token limit per batch
+    # Models with 1,000,000 token limit per batch
+    "voyage-4-lite": {
+        "max_tokens_per_batch": 1000000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
     "voyage-3.5-lite": {
         "max_tokens_per_batch": 1000000,
         "max_texts_per_batch": 1000,

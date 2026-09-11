@@ -148,7 +148,7 @@ export const embeddingProviders: ConfiguratorProviderOption[] = [
         id: "voyageai",
         name: "VoyageAI",
         svg: VOYAGEAI_SVG,
-        config: { provider: "voyageai", model: "voyage-3.5" },
+        config: { provider: "voyageai", model: "voyage-code-4" },
         apiKeyPlaceholder: "<YOUR_VOYAGE_API_KEY>",
     },
     {

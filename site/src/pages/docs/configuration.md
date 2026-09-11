@@ -33,7 +33,7 @@ Example global config (`~/.config/chunkhound/chunkhound.json`):
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5"
+    "model": "voyage-code-4"
   },
   "llm": {
     "provider": "anthropic"
@@ -102,7 +102,7 @@ Example — project uses its own exclude list (replaces global's list at the raw
   },
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5",
+    "model": "voyage-code-4",
     "batch_size": 100
   },
   "indexing": {
@@ -138,8 +138,50 @@ Global defaults let you maintain shared settings (e.g. embedding provider + API 
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Recommended for code search |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Set `model` to `voyage-code-4` for code search |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
+
+### VoyageAI Models
+
+All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. ChunkHound uses the per-batch token limit to size embedding requests, so picking a model with a larger limit means fewer round trips when indexing.
+
+| Model | Context | Tokens per batch | Notes |
+|---|---|---|---|
+| `voyage-code-4` | 32K | 320K | Code-specialized, built for coding-agent retrieval. Recommended for code search |
+| `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
+| `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
+| `voyage-4-lite` | 32K | 1M | General purpose, lowest cost and latency |
+| `voyage-code-3` | 32K | 120K | Previous-generation code model |
+| `voyage-3.5` | 32K | 320K | Default. Previous-generation general purpose |
+| `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
+| `voyage-3-large` | 32K | 120K | Previous-generation large |
+| `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
+| `voyage-law-2` | 16K | 120K | Legal domain, 1024 dims only |
+| `voyage-multilingual-2` | 32K | 120K | Multilingual, 1024 dims only |
+
+Models outside this list still work. ChunkHound discovers their dimensions at runtime and falls back to a conservative 320K token batch limit.
+
+### Changing the embedding model
+
+An index built with one embedding configuration cannot be searched with another. Search reads the stored vectors matching the query's dimensions and filters them by provider and model, so a different model, or the same model at a different `output_dims`, returns nothing. Re-indexing does not repair a dimensions change either, because chunks that already have vectors for the provider and model are skipped at any dimension. Re-embedding under a new model costs tokens and time, and the superseded vectors stay in the database until removed.
+
+The index therefore keeps the model and dimensions it was built with. Changing `embedding.model` or `embedding.output_dims` is a proposal, not an instruction:
+
+| Context | Behavior |
+|---|---|
+| Interactive `chunkhound index`, different model | Warns, shows the chunk count, and asks whether to re-embed. Declining keeps the indexed model and dimensions and asks again next run. |
+| Same model, different `output_dims` | Keeps the indexed dimensions without asking, since the change cannot be re-embedded in place. |
+| Non-interactive (CI, `CHUNKHOUND_NO_PROMPTS=1`) | Warns and keeps the indexed model and dimensions. Nothing is re-embedded. |
+| MCP server startup | Keeps the indexed model and dimensions silently, logging the reason to stderr. |
+| Different *provider* configured | Cannot be kept (credentials and dimensions differ), so the configured provider is used and every chunk is re-embedded. |
+
+If the index's dimensions are not valid for its model under the current settings, which can happen for an index built through a custom endpoint, ChunkHound keeps the model, warns that searches will not match, and still starts.
+
+Which model and dimensions an index uses is recorded in a small file beside the database (`chunks.db.embedding.json` for DuckDB, `lancedb.lancedb.embedding.json` for LanceDB). It is written the first time an index with vectors is opened and again when a switch is accepted, so a finished or interrupted switch is remembered rather than guessed from vector counts. It is never written for a read-only database. If the file cannot be read, ChunkHound warns, falls back to counting vectors, and leaves the file alone. Both DuckDB and LanceDB indexes are covered.
+
+To adopt a new model deliberately, accept the prompt. To change dimensions, or to start clean, delete the database directory and re-index. To stop being asked, set `embedding.model` and `embedding.output_dims` to whatever the index already holds.
+
+When a newer model supersedes the one in use, an interactive `chunkhound index` prints a one-line suggestion. It never acts on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
 ### Embedding Options
 
