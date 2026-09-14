@@ -37,14 +37,19 @@ def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
         Relative path from base_dir to path
 
     Raises:
-        ValueError: If path is not under base_dir
+        ValueError: If path is not under base_dir, or if preserving its logical
+            symlink spelling would require an unresolved parent traversal.
     """
     path_to_use, base_to_use = resolve_path_for_relative(path, base_dir)
     try:
-        return path_to_use.relative_to(base_to_use)
+        relative_path = path_to_use.relative_to(base_to_use)
     except ValueError:
-        # Fallback: path genuinely not under base_dir — propagate ValueError
-        return path.relative_to(base_dir)
+        # Preserve logical children of symlinked directories. A lexical prefix
+        # alone is not containment: relative_to() also accepts "base/../outside".
+        relative_path = path.relative_to(base_dir)
+    if ".." in relative_path.parts:
+        raise ValueError(f"Path {path} escapes base directory {base_dir}")
+    return relative_path
 
 
 def normalize_path_for_lookup(
