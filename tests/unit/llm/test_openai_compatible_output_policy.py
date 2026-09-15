@@ -39,7 +39,11 @@ def _manager_provider(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "cap_field"),
-    [("deepseek", "max_tokens"), ("grok", "max_completion_tokens")],
+    [
+        ("deepseek", "max_tokens"),
+        ("grok", "max_completion_tokens"),
+        ("openrouter", "max_tokens"),
+    ],
 )
 async def test_canonical_builtin_provider_managed_request_omits_cap(
     name: str,
@@ -79,7 +83,11 @@ async def test_canonical_builtin_provider_managed_request_omits_cap(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "cap_field"),
-    [("deepseek", "max_tokens"), ("grok", "max_completion_tokens")],
+    [
+        ("deepseek", "max_tokens"),
+        ("grok", "max_completion_tokens"),
+        ("openrouter", "max_tokens"),
+    ],
 )
 async def test_custom_builtin_endpoint_uses_fallback_cap(
     name: str,

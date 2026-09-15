@@ -247,10 +247,11 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Google Gemini API. Migration: `CHUNKHOUND_GEMINI_MODEL` was removed in v4.x — rename to `CHUNKHOUND_LLM_MODEL`. |
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
+| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OpenRouter API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to Grok when routed through a non-official endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, and OpenRouter) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
 ### LLM Options
 
@@ -278,7 +279,7 @@ For each provider-managed synthesis request, ChunkHound uses this precedence wit
 
 `UNKNOWN` omission capability is handled conservatively: ChunkHound does not assume omission is safe, so it uses a valid sourced declaration or the scalar fallback. This is intentionally not a per-model lookup table.
 
-Built-in DeepSeek and Grok configurations at their canonical first-party endpoints authoritatively support omission. Provider-managed DeepSeek requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on either built-in downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
+Built-in DeepSeek, Grok, and OpenRouter configurations at their canonical endpoints authoritatively support omission. Provider-managed DeepSeek and OpenRouter requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on any of these built-ins downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
 
 At research startup, the progress display reports the resolved synthesis request-limit policy using one of these forms (runtime cap values are comma-formatted):
 
@@ -573,9 +574,9 @@ Caveats:
 - **Concurrency throttled to 1 by default** when `base_url` is set, to respect Azure serverless rate limits. Override via `max_concurrent_batches` if your SKU permits.
 - **`api_key` still required.** The validator doesn't enforce it when `base_url` is present, but Azure-hosted endpoints still need their own key — supply it.
 
-### LLM via proxy (Anthropic, OpenAI, Grok)
+### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter)
 
-The Anthropic, OpenAI, and Grok LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, and OpenRouter LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) to centralize auth, logging, and rate limiting:
 
 ```json
 {

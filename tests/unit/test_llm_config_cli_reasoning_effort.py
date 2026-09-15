@@ -110,6 +110,26 @@ def test_cli_accepts_deepseek_provider_overrides() -> None:
     assert args.llm_autodoc_cleanup_provider == "deepseek"
 
 
+def test_cli_accepts_openrouter_provider_overrides() -> None:
+    parser = argparse.ArgumentParser()
+    LLMConfig.add_cli_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--llm-provider",
+            "openrouter",
+            "--llm-utility-provider",
+            "openrouter",
+            "--llm-synthesis-provider",
+            "openrouter",
+        ]
+    )
+
+    assert args.llm_provider == "openrouter"
+    assert args.llm_utility_provider == "openrouter"
+    assert args.llm_synthesis_provider == "openrouter"
+
+
 def test_cli_rejects_unknown_provider_with_valid_choices(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

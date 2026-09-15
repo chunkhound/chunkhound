@@ -69,6 +69,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "openrouter",
+            "model": "google/gemini-2.0-flash-001",
+            "expected_name": "openrouter",
+            "expected_base_url": "https://openrouter.ai/api/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'openrouter'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="openrouter",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -215,7 +230,9 @@ class TestFactoryPipeline:
         """Synthesis concurrency matches the spec value."""
         manager = _bare_manager()
         provider = manager._create_provider(spec)
-        expected = {"deepseek": 10, "grok": 5, "openai": 3}[spec["provider"]]
+        expected = {"deepseek": 10, "grok": 5, "openrouter": 10, "openai": 3}[
+            spec["provider"]
+        ]
         assert provider.get_synthesis_concurrency() == expected
 
 

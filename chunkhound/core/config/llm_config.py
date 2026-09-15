@@ -139,6 +139,7 @@ LLMProviderLiteral = Literal[
     "gemini",
     "anthropic",
     "grok",
+    "openrouter",
     "opencode-cli",
 ]
 
@@ -176,6 +177,7 @@ CLI_PROVIDER_CHOICES = (
     "anthropic",
     "gemini",
     "grok",
+    "openrouter",
     "opencode-cli",
 )
 

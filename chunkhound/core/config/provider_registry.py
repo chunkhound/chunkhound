@@ -75,4 +75,14 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://docs.x.ai/docs/models",
         auth_url="https://console.x.ai",
     ),
+    "openrouter": OpenAICompatibleSpec(
+        name="openrouter",
+        default_base_url="https://openrouter.ai/api/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
+        docs_url="https://openrouter.ai/docs",
+        auth_url="https://openrouter.ai",
+    ),
 }

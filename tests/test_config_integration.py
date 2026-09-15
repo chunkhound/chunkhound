@@ -276,6 +276,65 @@ def test_gemini_env_model_satisfies_runtime_config_validation(
     assert synthesis_config["model"] == "gemini-3.5-flash"
 
 
+def test_openrouter_json_config_with_model_loads_cleanly(clean_environment) -> None:
+    with windows_safe_tempdir() as temp_path:
+        config_path = temp_path / ".chunkhound.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "llm": {
+                        "provider": "openrouter",
+                        "model": "google/gemini-2.0-flash",
+                        "api_key": "sk-test",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        config = Config(target_dir=temp_path)
+
+    assert config.llm is not None
+    assert config.llm.provider == "openrouter"
+    assert config.llm.get_missing_config() == []
+
+
+def test_openrouter_json_config_without_model_reports_missing(
+    clean_environment,
+) -> None:
+    with windows_safe_tempdir() as temp_path:
+        config_path = temp_path / ".chunkhound.json"
+        config_path.write_text(
+            json.dumps(
+                {"llm": {"provider": "openrouter", "api_key": "sk-test"}}
+            ),
+            encoding="utf-8",
+        )
+
+        config = Config(target_dir=temp_path)
+
+    assert config.llm is not None
+    assert config.llm.get_missing_config() == [
+        "explicit model selection required for registry provider roles: "
+        "utility, synthesis, map_hyde, autodoc_cleanup"
+    ]
+
+
+def test_openrouter_env_model_satisfies_runtime_config_validation(
+    monkeypatch, clean_environment
+) -> None:
+    monkeypatch.setenv("CHUNKHOUND_LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("CHUNKHOUND_LLM_MODEL", "google/gemini-2.0-flash")
+    monkeypatch.setenv("CHUNKHOUND_LLM_API_KEY", "sk-test")
+
+    with windows_safe_tempdir() as temp_path:
+        config = Config(target_dir=temp_path)
+
+    assert config.llm is not None
+    assert config.llm.provider == "openrouter"
+    assert config.llm.get_missing_config() == []
+
+
 def test_gemini_legacy_env_model_does_not_satisfy_runtime_config_validation(
     monkeypatch, clean_environment
 ) -> None:

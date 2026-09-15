@@ -186,6 +186,14 @@ def test_grok_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_openrouter_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "openrouter")
+
+    assert config["provider"] == "openrouter"
+    assert config["model"] == "google/gemini-2.0-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 

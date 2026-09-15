@@ -40,9 +40,9 @@ def test_spec_names_match_dict_keys():
         )
 
 
-def test_canonical_deepseek_and_grok_specs_support_output_cap_omission():
+def test_canonical_registry_specs_support_output_cap_omission():
     """Canonical built-ins carry provider/API omission capability metadata."""
-    for name in ("deepseek", "grok"):
+    for name in ("deepseek", "grok", "openrouter"):
         assert (
             OPENAI_COMPATIBLE_PROVIDERS[name].output_limit_omission
             is OutputLimitCapability.SUPPORTED
