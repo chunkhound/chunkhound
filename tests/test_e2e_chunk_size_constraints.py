@@ -509,6 +509,14 @@ async def validating_db(tmp_path):
     yield services, validating_provider, tmp_path
 
 
+def test_validating_provider_extracts_language_from_target_header():
+    provider = ValidatingEmbeddingProvider()
+    long_path = "/private/tmp/" + ("a" * 240) + "/large_makefile.mk"
+    text = f'# {long_path} (makefile) [target: all:]\n\techo "building"'
+
+    assert provider._extract_language_from_header(text) == "makefile"
+
+
 @pytest.mark.asyncio
 async def test_all_parsers_respect_chunk_size_constraints(validating_db):
     """Verify ALL parsers using cAST NEVER produce chunks exceeding size constraints.
