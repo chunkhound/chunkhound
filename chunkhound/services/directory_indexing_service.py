@@ -1,5 +1,6 @@
 """Directory indexing service - extracted from CLI indexer for shared use."""
 
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -187,7 +188,7 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            db.drop_all_hnsw_indexes()
+            await asyncio.to_thread(db.drop_all_hnsw_indexes)
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")
@@ -217,7 +218,7 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            db.ensure_all_hnsw_indexes()
+            await asyncio.to_thread(db.ensure_all_hnsw_indexes)
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")
