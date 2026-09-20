@@ -24,6 +24,8 @@ Any changes to this factory must be tested across all execution paths:
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from loguru import logger
+
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.registry import configure_registry, get_registry
 
@@ -96,9 +98,9 @@ def create_services(
     # Avoid double-configuring the registry (which can open the DB twice and lock it).
     registry = get_registry()
     try:
-        existing_cfg = registry.get_config()
+        registry.get_config()
     except Exception:
-        existing_cfg = None
+        pass
 
     # Always (re)configure the registry with an effective per-call config so that
     # tests using distinct temporary directories get an IndexingCoordinator whose
@@ -123,7 +125,8 @@ def create_services(
                     )
                 )
             effective_config = config
-    except Exception:
+    except Exception as exc:
+        logger.debug(f"Config path normalization failed, using raw config: {exc}")
         effective_config = config
 
     configure_registry(effective_config)
@@ -137,9 +140,10 @@ def create_services(
             provider = embedding_manager.get_default_provider()
             if provider:
                 registry.register_embedding_provider(provider)
-        except Exception:
-            # If no provider in embedding_manager, registry will handle provider creation
-            pass
+        except Exception as exc:
+            logger.warning(
+                f"Failed to register embedding provider from manager: {exc}"
+            )
 
     return DatabaseServices(
         provider=registry.get_provider("database"),
