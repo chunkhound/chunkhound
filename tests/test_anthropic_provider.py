@@ -202,6 +202,7 @@ class TestProviderCapabilities:
         # Anthropic has higher rate limits than OpenAI
         assert provider.get_synthesis_concurrency() == 5
 
+
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestConfiguration:
     """Test various configuration scenarios."""
@@ -291,34 +292,6 @@ class TestStructuredOutputWithToolUse:
 
         assert hasattr(provider, "complete_structured")
         assert callable(provider.complete_structured)
-
-
-@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
-class TestStreaming:
-    """Test streaming functionality."""
-
-    def test_supports_streaming(self):
-        """Test provider reports streaming support."""
-        provider = AnthropicLLMProvider(api_key="test-key")
-
-        assert provider.supports_streaming() is True
-
-    def test_streaming_method_exists(self):
-        """Test that complete_streaming method exists."""
-        provider = AnthropicLLMProvider(api_key="test-key")
-
-        assert hasattr(provider, "complete_streaming")
-        assert callable(provider.complete_streaming)
-
-    def test_streaming_with_thinking(self):
-        """Test streaming can be combined with thinking."""
-        provider = AnthropicLLMProvider(
-            api_key="test-key",
-            thinking_enabled=True,
-        )
-
-        assert provider._thinking_enabled is True
-        assert provider.supports_streaming() is True
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -723,7 +696,12 @@ class TestStrictToolUse:
         """Test detecting strict tools."""
         tools = [
             {"name": "tool1", "description": "desc", "input_schema": {}},
-            {"name": "tool2", "description": "desc", "strict": True, "input_schema": {}},
+            {
+                "name": "tool2",
+                "description": "desc",
+                "strict": True,
+                "input_schema": {},
+            },
         ]
 
         has_strict = any(tool.get("strict") for tool in tools)
@@ -1188,13 +1166,11 @@ class TestToolChoiceContextManagement:
             thinking_enabled=True,
             interleaved_thinking=True,
         )
-        assert (
-            BETA_INTERLEAVED_THINKING
-            in provider._get_beta_headers(thinking_active=True)
+        assert BETA_INTERLEAVED_THINKING in provider._get_beta_headers(
+            thinking_active=True
         )
-        assert (
-            BETA_INTERLEAVED_THINKING
-            not in provider._get_beta_headers(thinking_active=False)
+        assert BETA_INTERLEAVED_THINKING not in provider._get_beta_headers(
+            thinking_active=False
         )
 
 
@@ -1394,10 +1370,13 @@ class TestClaudeHaikuModelResolution:
             lambda api_key=None: pytest.fail("discovery should not run"),
         )
 
-        assert resolve_claude_haiku_model(
-            CLAUDE_HAIKU_DEFAULT_SENTINEL,
-            discover=False,
-        ) == CLAUDE_HAIKU_FALLBACK_MODEL
+        assert (
+            resolve_claude_haiku_model(
+                CLAUDE_HAIKU_DEFAULT_SENTINEL,
+                discover=False,
+            )
+            == CLAUDE_HAIKU_FALLBACK_MODEL
+        )
 
     def test_model_discovery_picks_newest_haiku(self, monkeypatch):
         class FakeModels:
@@ -1424,10 +1403,13 @@ class TestClaudeHaikuModelResolution:
         import anthropic
 
         monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
-        assert resolve_claude_haiku_model(
-            CLAUDE_HAIKU_DEFAULT_SENTINEL,
-            "sk-ant-test",
-        ) == "claude-haiku-4-6-20260101"
+        assert (
+            resolve_claude_haiku_model(
+                CLAUDE_HAIKU_DEFAULT_SENTINEL,
+                "sk-ant-test",
+            )
+            == "claude-haiku-4-6-20260101"
+        )
 
     def test_model_discovery_failure_uses_fallback(self, monkeypatch):
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
@@ -1439,10 +1421,13 @@ class TestClaudeHaikuModelResolution:
         import anthropic
 
         monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
-        assert resolve_claude_haiku_model(
-            CLAUDE_HAIKU_DEFAULT_SENTINEL,
-            "sk-ant-test",
-        ) == CLAUDE_HAIKU_FALLBACK_MODEL
+        assert (
+            resolve_claude_haiku_model(
+                CLAUDE_HAIKU_DEFAULT_SENTINEL,
+                "sk-ant-test",
+            )
+            == CLAUDE_HAIKU_FALLBACK_MODEL
+        )
 
     @staticmethod
     def _all_fake_models():
@@ -1632,9 +1617,7 @@ class TestClaudeHaikuModelResolution:
             CLAUDE_OPUS_FALLBACK
         )
 
-    def test_sonnet_sentinel_discovery_cached_independently(
-        self, monkeypatch
-    ):
+    def test_sonnet_sentinel_discovery_cached_independently(self, monkeypatch):
         """Sonnet cache entry is independent of Haiku."""
         counter = self._make_api_key_sensitive_anthropic(monkeypatch)
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_SONNET_MODEL", raising=False)
@@ -1651,9 +1634,7 @@ class TestClaudeHaikuModelResolution:
         assert result2 == "claude-sonnet-4-6-20260217-B"
         assert counter.call_count == 2
 
-    def test_opus_sentinel_discovery_cached_independently(
-        self, monkeypatch
-    ):
+    def test_opus_sentinel_discovery_cached_independently(self, monkeypatch):
         """Opus cache entry is independent of Haiku and Sonnet."""
         counter = self._make_api_key_sensitive_anthropic(monkeypatch)
         monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_OPUS_MODEL", raising=False)
@@ -1670,9 +1651,7 @@ class TestClaudeHaikuModelResolution:
         assert result2 == "claude-opus-4-7-20260416-B"
         assert counter.call_count == 2
 
-    def test_sentinels_have_independent_cache_entries(
-        self, monkeypatch
-    ):
+    def test_sentinels_have_independent_cache_entries(self, monkeypatch):
         """Each sentinel has its own cache entry; discovering one does not
         populate another."""
         counter = self._make_counting_anthropic(monkeypatch)
@@ -1781,19 +1760,6 @@ class TestRequestShape:
         response.stop_reason = "end_turn"
         response.usage = MagicMock(input_tokens=10, output_tokens=5)
         return response
-
-    @staticmethod
-    async def _stream_events():
-        yield SimpleNamespace(
-            type="message_start",
-            message=SimpleNamespace(
-                usage=SimpleNamespace(input_tokens=10, output_tokens=5),
-            ),
-        )
-        yield SimpleNamespace(
-            type="content_block_delta",
-            delta=SimpleNamespace(text="ok"),
-        )
 
     @pytest.mark.asyncio
     async def test_complete_applies_sdk_096_request_fields(self):
@@ -1976,40 +1942,6 @@ class TestRequestShape:
         kwargs = provider._client.beta.messages.create.call_args.kwargs
         assert kwargs["betas"] == [BETA_CONTEXT_MANAGEMENT]
         assert "thinking" not in kwargs
-        assert kwargs["context_management"] == {
-            "edits": [{"type": "clear_tool_uses_20250919"}],
-        }
-
-    @pytest.mark.asyncio
-    async def test_complete_streaming_applies_request_fields_and_beta_routing(self):
-        from unittest.mock import AsyncMock, MagicMock
-
-        provider = AnthropicLLMProvider(
-            api_key="test-key",
-            model="claude-sonnet-4-6",
-            context_management_enabled=True,
-            effort="medium",
-            prompt_caching=True,
-        )
-        provider._client.messages = MagicMock()
-        provider._client.messages.create = AsyncMock(
-            return_value=self._stream_events(),
-        )
-        provider._client.beta = MagicMock()
-        provider._client.beta.messages = MagicMock()
-        provider._client.beta.messages.create = AsyncMock(
-            return_value=self._stream_events(),
-        )
-
-        chunks = [chunk async for chunk in provider.complete_streaming("hello")]
-
-        assert chunks == ["ok"]
-        assert provider._client.messages.create.call_args is None
-        kwargs = provider._client.beta.messages.create.call_args.kwargs
-        assert kwargs["betas"] == [BETA_CONTEXT_MANAGEMENT]
-        assert kwargs["stream"] is True
-        assert kwargs["output_config"] == {"effort": "medium"}
-        assert kwargs["cache_control"] == {"type": "ephemeral"}
         assert kwargs["context_management"] == {
             "edits": [{"type": "clear_tool_uses_20250919"}],
         }

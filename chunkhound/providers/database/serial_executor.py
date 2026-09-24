@@ -18,8 +18,18 @@ from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 
 
-class DatabaseCompactionInProgressError(RuntimeError):
+class DatabaseTemporarilyUnavailableError(RuntimeError):
+    """Base for errors raised when the DB is fast-failed because some other
+    owner (compaction, Rust pipeline) currently controls it."""
+
+
+class DatabaseCompactionInProgressError(DatabaseTemporarilyUnavailableError):
     """Raised when an operation is attempted while database compaction is active."""
+
+
+class DatabaseRustPipelineInProgressError(DatabaseTemporarilyUnavailableError):
+    """Raised when an operation is attempted while the Rust indexing pipeline
+    currently owns write access to the database file."""
 
 
 _COMPACTION_OPERATION_TIMEOUT_SECONDS = 660.0
@@ -132,6 +142,9 @@ class SerialDatabaseExecutor:
         # Shared visibility for callers outside the executor thread so they
         # fail fast instead of queueing behind a long compaction.
         self._compaction_in_progress = threading.Event()
+        # Same idea, for the window where the Rust pipeline owns write
+        # access to the DB file (Python's connection is closed).
+        self._rust_pipeline_in_progress = threading.Event()
         self._execute_timeout_seconds = execute_timeout_seconds
 
     def resolve_timeout(self, operation_name: str) -> float:
@@ -159,15 +172,37 @@ class SerialDatabaseExecutor:
         """Return True when compaction is currently active."""
         return self._compaction_in_progress.is_set()
 
-    def _raise_if_compacting_before_submit(self, operation_name: str) -> None:
-        """Fast-fail new work while compaction owns the database."""
+    def set_rust_pipeline_in_progress(self, active: bool) -> None:
+        """Publish Rust-pipeline-owns-the-file state to callers before they enqueue work."""
+        if active:
+            self._rust_pipeline_in_progress.set()
+            return
+        self._rust_pipeline_in_progress.clear()
+
+    def is_rust_pipeline_in_progress(self) -> bool:
+        """Return True when the Rust pipeline currently owns the database file."""
+        return self._rust_pipeline_in_progress.is_set()
+
+    def _raise_if_db_unavailable_before_submit(
+        self, operation_name: str, _bypass_rust_pipeline_guard: bool = False
+    ) -> None:
+        """Fast-fail new work while compaction or the Rust pipeline owns the database."""
         if self.is_compaction_in_progress():
             raise DatabaseCompactionInProgressError(
                 "Database compaction in progress — retry in a few seconds"
             )
+        if not _bypass_rust_pipeline_guard and self.is_rust_pipeline_in_progress():
+            raise DatabaseRustPipelineInProgressError(
+                "Rust indexing pipeline owns the database — retry once it finishes"
+            )
 
     def execute_sync(
-        self, provider: Any, operation_name: str, *args: Any, **kwargs: Any
+        self,
+        provider: Any,
+        operation_name: str,
+        *args: Any,
+        _bypass_rust_pipeline_guard: bool = False,
+        **kwargs: Any,
     ) -> Any:
         """Execute named operation synchronously in DB thread.
 
@@ -180,13 +215,22 @@ class SerialDatabaseExecutor:
             operation_name: Name of the executor method to call
                 (e.g., 'search_semantic')
             *args: Positional arguments for the operation
+            _bypass_rust_pipeline_guard: Skip only the Rust-pipeline fast-fail
+                check (the compaction check still applies). Only for
+                release_for_rust_pipeline()'s own "disconnect" submission —
+                set_rust_pipeline_in_progress(True) is published before that
+                call runs (to close a handoff race window), which would
+                otherwise make the guard reject the very disconnect that
+                releases the database to the Rust pipeline.
             **kwargs: Keyword arguments for the operation
 
         Returns:
             The result of the operation, fully materialized
         """
 
-        self._raise_if_compacting_before_submit(operation_name)
+        self._raise_if_db_unavailable_before_submit(
+            operation_name, _bypass_rust_pipeline_guard
+        )
 
         def executor_operation() -> Any:
             # Get thread-local connection (created on first access)
@@ -245,7 +289,7 @@ class SerialDatabaseExecutor:
         Returns:
             The result of the operation, fully materialized
         """
-        self._raise_if_compacting_before_submit(operation_name)
+        self._raise_if_db_unavailable_before_submit(operation_name)
         loop = asyncio.get_running_loop()
 
         def executor_operation():

@@ -1,0 +1,132 @@
+name: 'Build native wheel'
+description: >
+  Build the chunkhound_native release wheel via `maturin build --release
+  --auditwheel repair` and smoke-test that it actually imports. Shared by
+  release.yml and release-rc.yml, which previously each carried their own
+  byte-identical copy of this step, plus ci.yml's native-wheel-smoke-arm64,
+  native-dev-macos, watchman-runtime-validation (Linux/Windows), and
+  watchman-rollout-gate jobs (all with skip-tag-version-patch: true, since a
+  CI branch/PR ref has no release tag to derive a version from). Published
+  native-wheel support is
+  macOS arm64, Linux x86_64/aarch64 (manylinux_2_34), and Windows x86_64.
+  Intel macOS is deliberately excluded: free Intel macOS runners are retired,
+  and arm64 cross-compilation has unresolved PyO3 framework-linking failures.
+  musl and older glibc need a separate manylinux-container build; no native
+  sdist fallback exists. Assumes the calling job has already checked out the
+  repo and installed `uv`.
+
+inputs:
+  out-dir:
+    description: Directory where the repaired native wheel is written.
+    required: false
+    default: dist
+  skip-tag-version-patch:
+    description: >
+      Set to "true" for non-release callers (e.g. a CI smoke build) where
+      GITHUB_REF_NAME isn't a release tag. Leaving this false (the default)
+      preserves the original behavior for release.yml/release-rc.yml: a
+      malformed/missing tag crashes the build loudly instead of silently
+      publishing the Cargo.toml placeholder version.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Python 3.12  # abi3 wheel runs on Python 3.10+
+      shell: bash
+      run: uv python install 3.12
+
+    - name: Set up Rust toolchain
+      uses: ./.github/actions/setup-rust-toolchain
+
+    - name: Build native wheel
+      shell: bash
+      env:
+        DUCKDB_DOWNLOAD_LIB: "1"
+      run: |
+        # maturin build has no --set-version flag; it reads the wheel version from
+        # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
+        # before any pre-release suffix) while the git tag uses PEP 440 (no
+        # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
+        # Cargo version via pep440_rs, which normalizes the hyphenated form to
+        # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
+        if [[ "${{ inputs.skip-tag-version-patch }}" != "true" ]]; then
+          export TAG_VERSION="${GITHUB_REF_NAME#v}"
+          uv run --no-project --python 3.12 python - <<'PYEOF'
+        import os, re, pathlib
+
+        tag_version = os.environ["TAG_VERSION"]
+        m = re.match(r"^(\d+\.\d+\.\d+)([a-zA-Z].*)?$", tag_version)
+        if not m:
+            raise SystemExit(
+                f"GITHUB_REF_NAME {tag_version!r} is not a PEP 440 release tag; "
+                "refusing to build/publish an unversioned wheel. Pass "
+                "skip-tag-version-patch: true for non-release callers."
+            )
+        cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
+        path = pathlib.Path("Cargo.toml")
+        text = path.read_text()
+        new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
+        path.write_text(new_text)
+        PYEOF
+        fi
+        # maturin treats a sibling pyproject.toml as authoritative package metadata
+        # ("mixed" Rust/Python project support), which misnames this wheel as
+        # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
+        # Python package's pyproject.toml for the build; nothing else in this job
+        # needs it (the uv commands above already use --no-project).
+        mv pyproject.toml pyproject.toml.hidden
+        # maturin's repair step hard-links its staging copy
+        # (target/maturin/lib*.so) to the real cargo output
+        # (target/release/deps/lib*.so) and has patchelf rewrite that
+        # in-place file's RPATH/NEEDED entries for the wheel -- which,
+        # because of the hard link, permanently mutates the cached cargo
+        # artifact itself. Cargo's fingerprint then considers the crate
+        # unchanged and won't relink it, so a second build against the
+        # same warm `target/` cache fails with "Cannot repair wheel,
+        # because required library lib*-<hash>.so could not be located"
+        # -- reproduced directly. This specifically bites a manual re-run
+        # of this job for the *same* tag (Cargo.toml's version patch above
+        # means a genuinely new tag usually gets a fresh fingerprint, but
+        # a rerun of a failed/retried job for one tag does not).
+        # Force a fresh link of just this crate every time; the expensive
+        # dependency compilation (duckdb, arrow, ...) stays cached.
+        cargo clean -p chunkhound_native --release
+        mkdir -p "${{ inputs.out-dir }}"
+        # --auditwheel repair makes maturin bundle DuckDB's shared library
+        # into the wheel and rewrite the extension's link path to resolve
+        # it relative to itself (auditwheel-equivalent on Linux, its own
+        # native re-implementations of delocate/delvewheel on macOS/Windows
+        # -- see maturin >=1.13). Without this flag maturin only *warns*
+        # about the external dependency on macOS/Windows instead of fixing
+        # it (Linux's default is already "repair"; passing it explicitly
+        # everywhere keeps every platform's behavior identical).
+        # On Linux, repair shells out to `patchelf`, which is an optional
+        # maturin extra (not a default dependency) -- request it explicitly
+        # or the build fails with "Failed to execute 'patchelf'".
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          uvx --python 3.12 --from 'maturin[patchelf]' maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
+        else
+          uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
+        fi
+        mv pyproject.toml.hidden pyproject.toml
+
+    - name: Smoke test native wheel API
+      shell: bash
+      run: |
+        # Run outside the repo root: the repo's own chunkhound_native/__init__.py
+        # source-tree stub (populated by scripts/install_native.py for the local
+        # maturin build + install_native.py dev workflow) would otherwise shadow
+        # the installed wheel package,
+        # since it expects a compiled extension sitting next to it that only
+        # exists after a local editable build, not in this CI job. Catches a
+        # wheel that built successfully but doesn't actually import (e.g. a
+        # macOS/Windows repair edge case) before it reaches PyPI -- alpha/beta/rc
+        # tags publish with no other gate on the native wheel's importability.
+        WORKSPACE_DIR="$(pwd)"
+        WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"
+        TMP_DIR="$(mktemp -d)"
+        cd "$TMP_DIR"
+        uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \
+          python "$WORKSPACE_DIR/scripts/smoke_test_native_wheel.py"

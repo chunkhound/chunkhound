@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from chunkhound.core.types.common import ChunkType, Language
+from chunkhound.core.models.chunk import Chunk
+from chunkhound.core.types.common import ChunkType, FileId, Language
 
 
 @dataclass
@@ -69,14 +70,15 @@ class LanguageParser(Protocol):
         ...
 
     # Core Parsing Operations
-    def parse_file(self, file_path: Path) -> list[dict[str, Any]]:
+    def parse_file(self, file_path: Path, file_id: FileId) -> list[Chunk]:
         """Parse a file and extract semantic chunks.
 
         Args:
             file_path: Path to the file to parse
+            file_id: ID to assign to this file's chunks
 
         Returns:
-            List of chunk dictionaries with standardized structure
+            List of extracted Chunk objects
 
         Raises:
             ParseError: If parsing fails

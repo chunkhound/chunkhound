@@ -392,6 +392,7 @@ class ChunkHoundDaemon(MCPServerBase):
             llm_manager=self.llm_manager,
             config=self.config,
             ensure_services=self.ensure_tool_services,
+            analytics_recorder=self.analytics_recorder,
         )
 
         content = [{"type": tc.type, "text": tc.text} for tc in text_contents]

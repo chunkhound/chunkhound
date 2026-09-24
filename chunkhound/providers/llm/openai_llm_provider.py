@@ -6,6 +6,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 from chunkhound.interfaces.llm_provider import (
@@ -155,6 +156,34 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
 
         return False
 
+    async def _create_response(self, **kwargs: Any) -> Any:
+        """Single instrumented chokepoint for responses.create(), used by
+        every Responses API caller. Retries are SDK-internal (max_retries=
+        on the client): one call here can trigger several real HTTP
+        attempts that never surface individually, so record_provider_call
+        counts the outcome after the SDK's retry budget is exhausted, not
+        per-HTTP-attempt. A transient failure the SDK silently retries past
+        never appears in analytics -- mirrors
+        OpenAICompatibleProvider._create_chat_completion for the Chat
+        Completions API, and differs from the embedding/rerank providers,
+        which record one call per real manual-retry-loop attempt."""
+        try:
+            response = await self._client.responses.create(**kwargs)
+        except Exception as exc:
+            ch_analytics.record_provider_call(
+                "llm", self.name, self._model, False, error_type=type(exc).__name__
+            )
+            raise
+        ch_analytics.record_provider_call(
+            "llm",
+            self.name,
+            self._model,
+            True,
+            input_tokens=response.usage.input_tokens if response.usage else None,
+            output_tokens=response.usage.output_tokens if response.usage else None,
+        )
+        return response
+
     async def _complete_with_responses_api(
         self,
         prompt: str,
@@ -197,7 +226,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
 
         try:
             # Call Responses API
-            response = await self._client.responses.create(**request_params)
+            response = await self._create_response(**request_params)
 
             self._requests_made += 1
             if response.usage:
@@ -388,7 +417,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             request_params["reasoning"] = {"effort": self._reasoning_effort}
 
         try:
-            response = await self._client.responses.create(**request_params)
+            response = await self._create_response(**request_params)
 
             self._requests_made += 1
             if response.usage:

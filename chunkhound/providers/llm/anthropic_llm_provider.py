@@ -17,12 +17,12 @@ not currently offer a true low-cost utility tier.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from loguru import logger
 
+from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_HAIKU_SENTINEL,
     resolve_claude_model,
@@ -664,6 +664,16 @@ class AnthropicLLMProvider(LLMProvider):
         Uses the beta endpoint when beta features are enabled, otherwise
         uses the standard messages endpoint.
 
+        Also the single instrumented analytics chokepoint for this provider.
+        Retries are SDK-internal (max_retries= on the client): one call here
+        can trigger several real HTTP attempts that never surface
+        individually, so record_provider_call counts the outcome after the
+        SDK's retry budget is exhausted, not per-HTTP-attempt. A transient
+        failure the SDK silently retries past never appears in analytics.
+        This differs from the embedding/rerank providers, which wrap their
+        own manual retry loop and record one call per real attempt -- an
+        accepted fidelity tradeoff for the LLM path, not a bug.
+
         Args:
             request_kwargs: Request parameters for the API call
 
@@ -671,12 +681,27 @@ class AnthropicLLMProvider(LLMProvider):
             API response
         """
         beta_headers = request_kwargs.pop("betas", None)
-        if beta_headers:
-            return await self._client.beta.messages.create(
-                betas=beta_headers, **request_kwargs
+        try:
+            if beta_headers:
+                response = await self._client.beta.messages.create(
+                    betas=beta_headers, **request_kwargs
+                )
+            else:
+                response = await self._client.messages.create(**request_kwargs)
+        except Exception as exc:
+            ch_analytics.record_provider_call(
+                "llm", self.name, self._model, False, error_type=type(exc).__name__
             )
-        else:
-            return await self._client.messages.create(**request_kwargs)
+            raise
+        ch_analytics.record_provider_call(
+            "llm",
+            self.name,
+            self._model,
+            True,
+            input_tokens=response.usage.input_tokens if response.usage else None,
+            output_tokens=response.usage.output_tokens if response.usage else None,
+        )
+        return response
 
     async def complete(
         self,
@@ -1159,114 +1184,3 @@ class AnthropicLLMProvider(LLMProvider):
     def supports_tools(self) -> bool:
         """Whether provider supports tool use."""
         return True
-
-    def supports_streaming(self) -> bool:
-        """Whether provider supports streaming responses."""
-        return True
-
-    async def complete_streaming(
-        self,
-        prompt: str,
-        system: str | None = None,
-        max_completion_tokens: int = 4096,
-        timeout: int | None = None,
-    ) -> AsyncIterator[str]:
-        """Generate a streaming completion for the given prompt.
-
-        Yields text chunks as they arrive. Required for max_tokens > 21,333.
-
-        Args:
-            prompt: The user prompt
-            system: Optional system prompt
-            max_completion_tokens: Maximum tokens to generate
-            timeout: Optional timeout in seconds (overrides default)
-
-        Yields:
-            Text chunks as they are generated
-        """
-        # Build messages list
-        messages = [{"role": "user", "content": prompt}]
-
-        # Use provided timeout or fall back to default
-        request_timeout = timeout if timeout is not None else self._timeout
-
-        try:
-            # Build request kwargs
-            request_kwargs: dict[str, Any] = {
-                "model": self._model,
-                "messages": messages,
-                "max_tokens": max_completion_tokens,
-                "timeout": request_timeout,
-                "stream": True,
-            }
-
-            # Add system prompt if provided
-            if system:
-                request_kwargs["system"] = system
-
-            # Thinking configuration (adaptive / manual / off)
-            thinking_cfg = self._build_thinking_config()
-            thinking_active = thinking_cfg is not None
-            if thinking_cfg is not None:
-                if self._thinking_mode == "manual":
-                    self._ensure_thinking_max_tokens(
-                        request_kwargs, max_completion_tokens
-                    )
-                request_kwargs["thinking"] = thinking_cfg
-
-            beta_headers = self._get_beta_headers(thinking_active=thinking_active)
-            if beta_headers:
-                request_kwargs["betas"] = beta_headers
-
-            self._apply_common_request_fields(
-                request_kwargs, thinking_active=thinking_active
-            )
-
-            # Use beta endpoint when beta features are enabled.
-            beta_headers = request_kwargs.pop("betas", None)
-            if beta_headers:
-                stream = await self._client.beta.messages.create(
-                    betas=beta_headers, **request_kwargs
-                )
-            else:
-                stream = await self._client.messages.create(**request_kwargs)
-
-            # Track if we've incremented request count
-            request_counted = False
-
-            # Stream events
-            async for event in stream:
-                # Count request on first event
-                if not request_counted:
-                    self._requests_made += 1
-                    request_counted = True
-
-                # Handle different event types
-                event_type = getattr(event, "type", None)
-
-                if event_type == "content_block_delta":
-                    # Text delta from content block
-                    delta = getattr(event, "delta", None)
-                    if delta and hasattr(delta, "text"):
-                        yield delta.text
-
-                elif event_type == "message_stop":
-                    # Update final usage statistics
-                    # Note: usage info comes in message_start event
-                    pass
-
-                elif event_type == "message_start":
-                    # Track usage from message start
-                    message = getattr(event, "message", None)
-                    if message and hasattr(message, "usage"):
-                        self._prompt_tokens += message.usage.input_tokens
-                        self._completion_tokens += message.usage.output_tokens
-                        self._tokens_used += (
-                            message.usage.input_tokens + message.usage.output_tokens
-                        )
-
-        except RuntimeError:
-            raise
-        except Exception as e:
-            logger.error(f"Anthropic streaming completion failed: {e}")
-            raise RuntimeError(f"LLM streaming completion failed: {e}") from e

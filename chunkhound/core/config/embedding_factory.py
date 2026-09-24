@@ -85,6 +85,7 @@ class EmbeddingProviderFactory:
         client_side_truncation = config.get("client_side_truncation", False)
         ssl_verify = config.get("ssl_verify", True)
         rerank_ssl_verify = config.get("rerank_ssl_verify")
+        max_concurrent_batches = config.get("max_concurrent_batches")
 
         # Azure OpenAI parameters
         api_version = config.get("api_version")
@@ -140,6 +141,7 @@ class EmbeddingProviderFactory:
                 batch_size=config.get("batch_size", 100),
                 timeout=config.get("timeout", 30),
                 retry_attempts=config.get("max_retries", 3),
+                max_concurrent_batches=max_concurrent_batches,
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e

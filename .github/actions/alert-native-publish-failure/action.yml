@@ -1,0 +1,48 @@
+name: 'Alert on native publish failure'
+description: >
+  File a GitHub issue when chunkhound-native fails before chunkhound can be
+  released. Shared by
+  release.yml's publish-native job and release-rc.yml's publish-rc-native
+  job. Native publication is intentionally first, so this alert means the
+  main package was not released and the workflow can be retried safely.
+
+inputs:
+  tag:
+    description: >
+      The published tag to reference in the issue title/body. Callers must
+      resolve this themselves before invoking the action -- release.yml
+      (a `release: published` trigger) uses `github.event.release.tag_name`;
+      release-rc.yml (a `push: tags` trigger) uses `github.ref_name`. These
+      are NOT interchangeable: `github.event.release` is unset outside a
+      `release` event.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Deliberately no `if:` here. Composite-action steps' failure()/
+    # success()/always() see only this composite action's own internal
+    # step chain, not the calling job's prior steps -- an `if: failure()`
+    # here would never fire even though the caller's publish step failed.
+    # The gate belongs on the `uses:` line in the calling workflow instead
+    # (see release.yml/release-rc.yml), since that's what determines
+    # whether this action even runs. Once invoked, this single step
+    # should just run unconditionally.
+    - name: Create failure alert issue
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ALERT_TAG: ${{ inputs.tag }}
+        ALERT_REPO: ${{ github.repository }}
+        ALERT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        gh issue create \
+          --repo "$ALERT_REPO" \
+          --title "chunkhound-native publish failed for $ALERT_TAG" \
+          --body "chunkhound-native failed to publish for $ALERT_TAG before chunkhound could be released to PyPI.
+
+        Workflow run: $ALERT_RUN_URL
+
+        Next steps:
+        - Re-run the native publish job if the failure looks transient (flaky runner, wheel-repair issue, or PyPI propagation). The publish workflow skips native artifacts that were already uploaded, so the retry is safe after a partial upload.
+        - After native publication succeeds, re-run the main publish job."

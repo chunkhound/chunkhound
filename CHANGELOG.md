@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-09-14
+
+### Breaking Changes
+- **`chunkhound-native` is now a required dependency** — The Rust extension is no longer an optional extra; it installs by default and its parse→embed→write pipeline runs by default (`CHUNKHOUND_USE_RUST=0` to opt out). Installs where no native wheel is available fall back to the Python pipeline automatically.
+
 ### Added
+- **Rust-native indexing pipeline (default)** — Indexing now runs parsing, embedding, and database writes concurrently through the `chunkhound_native` extension by default, for meaningfully faster indexing with crash-safe recovery and more accurate progress reporting (including live DB-size-reduction stats during compaction). Falls back to the Python pipeline automatically for non-DuckDB providers (e.g. LanceDB).
+- **OrcaRouter LLM provider** — OrcaRouter is now supported as an OpenAI-compatible LLM provider (`provider: orcarouter` or `CHUNKHOUND_LLM_PROVIDER=orcarouter`).
+- **OpenRouter LLM provider** — OpenRouter is now supported as a first-class OpenAI-compatible LLM provider (`provider: openrouter` or `CHUNKHOUND_LLM_PROVIDER=openrouter`).
+- **Voyage-native rerank format** — Custom VoyageAI-compatible rerank endpoints (e.g. MongoDB Atlas) are now supported via `rerank_format="voyage"`, fixing reranking that previously silently fell back to raw vector scores against these endpoints.
+- **Provider-managed synthesis output limits** — Research synthesis output truncation is now managed per LLM provider, with explicit support for DeepSeek's and Grok's own output-limit semantics.
+- **Follow-up query chaining for research** — `websearch` and `code_research` now accept a `--previous-query` / `previous_query` parameter so a follow-up query is expanded and synthesized in the context of the prior topic instead of re-exploring the same ground.
+- **MCP HTTP transport** — The MCP server now supports Streamable HTTP transport (`--transport http`) alongside stdio, so remote and browser-based MCP clients can connect without spawning a local subprocess. Configurable via `--host`/`--port`/`--auth-token`/`--cors`; refuses to start on a non-loopback host without an auth token.
+- **Configurable DB execute timeout** — The database serial-executor timeout can now be set via `.chunkhound.json`, `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS`, or `--db-execute-timeout`, instead of only an internal env var.
+- **VoyageAI `voyage-4` series** (`voyage-code-4`, `voyage-4`, `voyage-4-large`, `voyage-4-lite`). All four support Matryoshka `output_dims` of 256, 512, 1024 (default), and 2048, and a 32K context window. `voyage-code-4` is code-specialized and built for coding-agent retrieval, which is ChunkHound's exact use case. The default stays `voyage-3.5`; set `embedding.model` to opt in.
+- **The index now owns its embedding model and dimensions.** Changing `embedding.model` or `embedding.output_dims` no longer silently re-embeds, or strands, an existing database. For a different model, `chunkhound index` warns, reports how many chunks a switch would rewrite, and asks; declining keeps the indexed model and dimensions, leaves search working, and asks again next run. A dimensions-only change on the same model cannot be re-embedded in place, so the indexed dimensions are kept without asking. Non-interactive runs and MCP startup keep the index's settings without prompting, so an upgraded default can never rewrite a database behind the operator's back. A configured *provider* change is still applied, since credentials and dimensions leave nothing to fall back to. Which model an index uses is recorded in a file beside the database, so a finished or interrupted switch is remembered rather than guessed from vector counts. DuckDB and LanceDB indexes are both covered.
+- **Upgrade suggestions.** When a newer model supersedes the one in use, an interactive `chunkhound index` prints a single informational line stating what a switch would cost. It never acts on its own and does not appear in non-interactive runs. Silence it with `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1`.
+- **VoyageAI model reference table** in `configuration.md`, listing context window and per-batch token limit for every model ChunkHound knows.
 - **Fetchurl CLI command and MCP tool** — New `chunkhound fetchurl <url> [-q "…"]` CLI subcommand and matching `fetchurl` MCP tool fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer.
   - Short pages are token-truncated and summarized in one LLM call; long pages with a query go through a chunk + rerank + elbow-filter pipeline that passes only the most relevant sections to the LLM.
   - Requires LLM + reranker providers — the MCP tool is hidden from `tools/list` when either is missing.
@@ -24,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Structured config validation error codes** — Startup validation now emits stable `ConfigErrorCode` identifiers (`missing_required_config`, `llm_not_configured`, `llm_missing_role_config`, `embedding_not_configured`, `mcp_non_loopback_no_auth`, `mcp_cors_no_auth`, `db_readonly_wrong_command`, `db_readonly_non_duckdb`) alongside human-readable messages, enabling machine-parseable diagnostics and powering the remote-config delta-only validation gate.
 
 ### Fixed
+- **OpenAI token-limit error detection** — A third real-world phrasing of OpenAI's context-length error ("the input length exceeds the context length") is now recognized, triggering the existing split-and-retry path instead of failing the batch outright.
+- **Windows project detection** — Directory discovery no longer fails when the current working directory is the user's home directory or sits under a locked-down parent on Windows.
+- **A changed embedding model or `output_dims` silently emptied search results.** Search reads the vector table matching the query's dimensions and filters it by provider and model, so either change returned zero results. Re-indexing never repaired a dimensions change, because chunks already embedded under the model were skipped at any dimension, and a re-embed interrupted partway left two model-tagged vectors per chunk. The index's model and dimensions are now kept unless a switch is explicitly accepted.
+- **Wrong batch token limits for the `voyage-4` series.** The whole series was previously unknown to the provider and fell through to the 320K-token fallback. `voyage-4-large` actually caps at 120K, so large batches failed with `TOO_MANY_TOKENS_IN_BATCH`, while `voyage-4-lite` was capped at a third of its real 1M limit. Unsupported `output_dims` on these models were also accepted locally and only rejected later by the API; they now fail at configuration time.
 - **PyMuPDF `fitz` import deprecation warning on stdout** — PDF parsing now imports `pymupdf` instead of the legacy `fitz` alias, which since PyMuPDF 1.28.2 prints a deprecation warning to stdout and corrupts MCP stdio clients (e.g. CURe preflight). Adds a regression test asserting parser imports write nothing to stdout.
 
 ## [5.2.0] - 2026-07-12
@@ -805,7 +826,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.2.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.0.0...HEAD
+[6.0.0]: https://github.com/chunkhound/chunkhound/compare/v5.2.1...v6.0.0
 [5.2.0]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0

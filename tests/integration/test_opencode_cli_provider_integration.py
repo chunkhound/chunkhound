@@ -2,7 +2,7 @@
 
 These tests exercise the real opencode subprocess and require the OpenCode CLI
 to be installed and authenticated. They are skipped automatically when the CLI
-is unavailable or no free models are found.
+is unavailable or no servable free models are found.
 """
 
 import pytest

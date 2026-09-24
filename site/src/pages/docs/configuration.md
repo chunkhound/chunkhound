@@ -33,7 +33,7 @@ Example global config (`~/.config/chunkhound/chunkhound.json`):
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5"
+    "model": "voyage-code-4"
   },
   "llm": {
     "provider": "anthropic"
@@ -102,7 +102,7 @@ Example — project uses its own exclude list (replaces global's list at the raw
   },
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5",
+    "model": "voyage-code-4",
     "batch_size": 100
   },
   "indexing": {
@@ -332,8 +332,50 @@ The delta-only gate above relies on structured error codes returned by `Config.v
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Recommended for code search |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Set `model` to `voyage-code-4` for code search |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
+
+### VoyageAI Models
+
+All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. ChunkHound uses the per-batch token limit to size embedding requests, so picking a model with a larger limit means fewer round trips when indexing.
+
+| Model | Context | Tokens per batch | Notes |
+|---|---|---|---|
+| `voyage-code-4` | 32K | 320K | Code-specialized, built for coding-agent retrieval. Recommended for code search |
+| `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
+| `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
+| `voyage-4-lite` | 32K | 1M | General purpose, lowest cost and latency |
+| `voyage-code-3` | 32K | 120K | Previous-generation code model |
+| `voyage-3.5` | 32K | 320K | Default. Previous-generation general purpose |
+| `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
+| `voyage-3-large` | 32K | 120K | Previous-generation large |
+| `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
+| `voyage-law-2` | 16K | 120K | Legal domain, 1024 dims only |
+| `voyage-multilingual-2` | 32K | 120K | Multilingual, 1024 dims only |
+
+Models outside this list still work. ChunkHound discovers their dimensions at runtime and falls back to a conservative 320K token batch limit.
+
+### Changing the embedding model
+
+An index built with one embedding configuration cannot be searched with another. Search reads the stored vectors matching the query's dimensions and filters them by provider and model, so a different model, or the same model at a different `output_dims`, returns nothing. Re-indexing does not repair a dimensions change either, because chunks that already have vectors for the provider and model are skipped at any dimension. Re-embedding under a new model costs tokens and time, and the superseded vectors stay in the database until removed.
+
+The index therefore keeps the model and dimensions it was built with. Changing `embedding.model` or `embedding.output_dims` is a proposal, not an instruction:
+
+| Context | Behavior |
+|---|---|
+| Interactive `chunkhound index`, different model | Warns, shows the chunk count, and asks whether to re-embed. Declining keeps the indexed model and dimensions and asks again next run. |
+| Same model, different `output_dims` | Keeps the indexed dimensions without asking, since the change cannot be re-embedded in place. |
+| Non-interactive (CI, `CHUNKHOUND_NO_PROMPTS=1`) | Warns and keeps the indexed model and dimensions. Nothing is re-embedded. |
+| MCP server startup | Keeps the indexed model and dimensions silently, logging the reason to stderr. |
+| Different *provider* configured | Cannot be kept (credentials and dimensions differ), so the configured provider is used and every chunk is re-embedded. |
+
+If the index's dimensions are not valid for its model under the current settings, which can happen for an index built through a custom endpoint, ChunkHound keeps the model, warns that searches will not match, and still starts.
+
+Which model and dimensions an index uses is recorded in a small file beside the database (`chunks.db.embedding.json` for DuckDB, `lancedb.lancedb.embedding.json` for LanceDB). It is written the first time an index with vectors is opened and again when a switch is accepted, so a finished or interrupted switch is remembered rather than guessed from vector counts. It is never written for a read-only database. If the file cannot be read, ChunkHound warns, falls back to counting vectors, and leaves the file alone. Both DuckDB and LanceDB indexes are covered.
+
+To adopt a new model deliberately, accept the prompt. To change dimensions, or to start clean, delete the database directory and re-index. To stop being asked, set `embedding.model` and `embedding.output_dims` to whatever the index already holds.
+
+When a newer model supersedes the one in use, an interactive `chunkhound index` prints a one-line suggestion. It never acts on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
 ### Embedding Options
 
@@ -373,6 +415,25 @@ Fast analytical queries and efficient storage.
   }
 }
 ```
+
+#### DuckDB storage paths
+
+`database.path` normally names a directory; ChunkHound stores the database as
+`chunks.db` inside it. A path ending in `.db` or `.duckdb` is an explicit
+DuckDB file instead. An existing regular file is also kept as a direct database
+path for older installations. If no path is configured, the default is
+`<project-root>/.chunkhound/db/chunks.db`.
+
+> **Gotchas:**
+> - Prefer passing the project directory as a positional argument
+>   (`chunkhound search "query" /path/to/project`) so its `.chunkhound.json`
+>   resolves correctly.
+> - A `--db` path pointing at the wrong subpath silently returns 0 results — no
+>   error, just empty. Verify with a regex search first.
+> - Pre-v4 flat `.chunkhound` files block directory creation — move them aside
+>   before re-indexing.
+> - `--config` does not override a project-local `.chunkhound.json` for the DB
+>   path — use an explicit `--db` when the target project has its own config.
 
 ### LanceDB
 
@@ -442,10 +503,11 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
 | OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OpenRouter API. Registry providers require explicit `model`. |
+| OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OrcaRouter API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, and OpenRouter) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, and OrcaRouter) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
 ### LLM Options
 
@@ -770,9 +832,9 @@ Caveats:
 - **Concurrency throttled to 1 by default** when `base_url` is set, to respect Azure serverless rate limits. Override via `max_concurrent_batches` if your SKU permits.
 - **`api_key` still required.** The validator doesn't enforce it when `base_url` is present, but Azure-hosted endpoints still need their own key — supply it.
 
-### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter)
+### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter)
 
-The Anthropic, OpenAI, Grok, DeepSeek, and OpenRouter LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, and OrcaRouter LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {

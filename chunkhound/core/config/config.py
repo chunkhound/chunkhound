@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
+from .analytics_config import AnalyticsConfig
 from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
 from .fetchurl_config import FetchUrlConfig
@@ -137,6 +138,7 @@ class Config(BaseModel):
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     fetchurl: FetchUrlConfig = Field(default_factory=FetchUrlConfig)
     remote_config: RemoteConfig | None = Field(default=None)
+    analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     debug: bool = Field(default=False)
 
     # Private field to store the target directory from CLI args
@@ -497,6 +499,8 @@ class Config(BaseModel):
             config["fetchurl"] = fetchurl_config
         if remote_config := RemoteConfig.load_from_env():
             config["remote_config"] = remote_config
+        if analytics_config := AnalyticsConfig.load_from_env():
+            config["analytics"] = analytics_config
 
         return config
 

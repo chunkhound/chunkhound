@@ -16,6 +16,8 @@ def _install_parser_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "chunkhound.parsers.universal_parser", up)
 
     # Stub for chunkhound.parsers.parser_factory
+    from chunkhound.core.types.common import Language
+
     pf = types.ModuleType("chunkhound.parsers.parser_factory")
     def create_parser_for_language(language):  # pragma: no cover - not used in this test
         class _DummyParser:
@@ -23,6 +25,10 @@ def _install_parser_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
                 return []
         return _DummyParser()
     pf.create_parser_for_language = create_parser_for_language
+    # Language.get_all_extensions() (used by discovery-time extension
+    # filtering) lazily imports this; the fixture's .txt files need to
+    # resolve as known, matching the real registry's mapping.
+    pf.EXTENSION_TO_LANGUAGE = {".txt": Language.TEXT}
     monkeypatch.setitem(sys.modules, "chunkhound.parsers.parser_factory", pf)
 
 

@@ -136,6 +136,20 @@ async def test_fetch_page_html_branch(
     assert final == baseline
 
 
+async def test_fetch_page_plain_text_branch(
+    chrome_browser: zd.Browser,
+    local_fetch_page_server: tuple[str, list[str]],
+) -> None:
+    """Plain-text responses use the raw CDP body instead of rendered DOM."""
+    base, _ = local_fetch_page_server
+
+    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/plain")
+
+    assert ct == "text/plain"
+    assert body == b"# Raw Markdown\n\nserved as plain text\n"
+    assert charset == "utf-8"
+
+
 async def test_fetch_page_pdf_branch(
     chrome_browser: zd.Browser,
     local_fetch_page_server: tuple[str, list[str]],
@@ -202,6 +216,14 @@ def local_fetch_page_server() -> Iterator[tuple[str, list[str]]]:
                 self.send_header("Content-Length", str(len(_MINIMAL_HTML)))
                 self.end_headers()
                 self.wfile.write(_MINIMAL_HTML)
+                return
+            if self.path == "/plain":
+                body = b"# Raw Markdown\n\nserved as plain text\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             if self.path == "/pdf":
                 self.send_response(200)

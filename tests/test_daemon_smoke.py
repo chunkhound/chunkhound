@@ -637,7 +637,7 @@ async def test_watchman_start_failure_cleans_up_after_eager_publication(
     expected_surfaces = (
         "closed the IPC connection before serving any MCP traffic",
         "exited before it became reachable",
-        "crashed after publishing lock",
+        "daemon may have shut down before accepting",
     )
     assert any(message in stderr_text for message in expected_surfaces), stderr_text
     assert "Watchman sidecar startup failed" in stderr_text

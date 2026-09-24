@@ -11,16 +11,42 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3       = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+rayon      = "1"
 ignore     = "0.4"
 # duckdb build mode is controlled by env vars, not Cargo features (duckdb default = []).
-# CI: DUCKDB_DOWNLOAD_LIB=1  — downloads precompiled shared lib from GitHub.
-# Local/air-gapped: DUCKDB_LIB_DIR + DUCKDB_STATIC=1 — reuses the static .a from a prior
-#   release build. See RUST_COMMANDS in AGENTS.md for the full command.
-duckdb     = { version = "1" }
+# DUCKDB_DOWNLOAD_LIB=1 downloads the precompiled shared lib from GitHub; it's
+# linked dynamically and resolved via a self-relative RPATH/DLL search set up
+# by RUSTFLAGS and scripts/copy_duckdb_runtime.py. The per-platform build
+# recipe lives in the Makefile dev/dev-release targets and
+# .github/actions/build-rust-extension/action.yml.
+# Pinned to 1.10504.0 (DuckDB core v1.5.4): 1.10505.0 (DuckDB core v1.5.5)
+# changed storage_manager.cpp's checkpoint-failure handling to invalidate a
+# non-initial attached database on error -- that invalidation path itself
+# throws AttachedDatabase::GetStorageManager()'s "Internal system catalog
+# does not have storage" against the system catalog, masking the real
+# checkpoint error. Trips deterministically in
+# run_attach_copy_compaction()'s DETACH src; CHECKPOINT sequence
+# (db/duckdb_backend/compaction.rs) on macOS CI. Unpin only after that's
+# fixed upstream or compaction's detach/checkpoint sequencing is reworked
+# to avoid it.
+duckdb     = { version = "=1.10504.0" }
 log        = "0.4"
+pyo3-log   = "0.11"
+rand       = "0.8"
+reqwest    = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2       = "0.10"
 thiserror  = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# S3 SigV4 request signing for the analytics upload path. HTTP-client-agnostic
+# (just computes signed headers/URLs) and has no tokio/async requirement,
+# matching this crate's fully-synchronous HTTP usage (see src/analytics/s3.rs).
+rusty-s3   = "0.5"
+# Calendar/timestamp formatting for the analytics object key
+# (analytics/<repo>/<privacy_id>/<YYYY>/<MM>/<DD>/<iso8601>_<uuid>.jsonl) — chosen
+# over hand-rolled calendar math for correctness; no tokio requirement.
+time       = { version = "0.3", features = ["formatting", "macros"] }
 
 [profile.dev]
 opt-level = 0
@@ -28,3 +54,7 @@ opt-level = 0
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[dev-dependencies]
+httpmock = "0.7"
+tempfile = "3"

@@ -3,6 +3,9 @@
 # Editor / IDE config
 .mcp.json
 opencode.json
+
+# Local task-tracking tool metadata
+.pi/
 # temp TypeScript files created by tsx_runner.py
 /tmp*.mts
 # Byte-compiled / optimized / DLL files
@@ -12,12 +15,20 @@ __pycache__/
 
 # C extensions
 *.so
+*.dylib
+*.dll
+*.pyd
+
+# Leftover atomic-write temp files (see scripts/install_native.py and
+# scripts/copy_duckdb_runtime.py) if a build is interrupted mid-write
+*.tmp
 
 # Distribution / packaging
 .Python
 build/
 develop-eggs/
 dist/
+native-dist/
 downloads/
 eggs/
 .eggs/
@@ -338,3 +349,9 @@ HUMAN_REVIEW.md
 
 # Test artifacts (playwright, vitest, etc.)
 site/test-results/
+
+# xwin (Windows SDK cross-compile cache)
+.xwin-cache/
+
+# Codex CLI
+.codex/

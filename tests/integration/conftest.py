@@ -1,6 +1,25 @@
 """Shared fixtures for integration tests."""
 
+from pathlib import Path
+
 import pytest
+
+
+def seed_py_and_png(root: Path) -> tuple[Path, Path]:
+    """Create `root/src/pkg/{module.py,image.png}` and return their paths.
+
+    Standard fixture layout for extension-support-filter discovery tests: a
+    supported Python file and an unsupported PNG under a custom
+    directory-wildcard include (e.g. `"src/**/*"`), used to verify the
+    unsupported one is filtered (or not) depending on the config under test.
+    """
+    pkg_dir = root / "src" / "pkg"
+    pkg_dir.mkdir(parents=True)
+    py_file = pkg_dir / "module.py"
+    py_file.write_text("print('ok')\n")
+    png_file = pkg_dir / "image.png"
+    png_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+    return py_file, png_file
 
 
 @pytest.fixture

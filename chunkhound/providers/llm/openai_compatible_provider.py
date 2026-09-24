@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 from chunkhound.core.utils.token_utils import estimate_tokens_llm
@@ -225,6 +226,34 @@ class OpenAICompatibleProvider(LLMProvider):
         """Request timeout in seconds."""
         return self._timeout
 
+    async def _create_chat_completion(self, **kwargs: Any) -> Any:
+        """Single instrumented chokepoint for chat.completions.create(),
+        used by every caller. Retries are SDK-internal (max_retries= on the
+        client): one call here can trigger several real HTTP attempts that
+        never surface individually, so record_provider_call counts the
+        outcome after the SDK's retry budget is exhausted, not
+        per-HTTP-attempt. A transient failure the SDK silently retries past
+        never appears in analytics. This differs from the embedding/rerank
+        providers, which wrap their own manual retry loop and record one
+        call per real attempt -- an accepted fidelity tradeoff for the LLM
+        path, not a bug."""
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            ch_analytics.record_provider_call(
+                "llm", self.name, self._model, False, error_type=type(exc).__name__
+            )
+            raise
+        ch_analytics.record_provider_call(
+            "llm",
+            self.name,
+            self._model,
+            True,
+            input_tokens=response.usage.prompt_tokens if response.usage else None,
+            output_tokens=response.usage.completion_tokens if response.usage else None,
+        )
+        return response
+
     async def complete(
         self,
         prompt: str,
@@ -255,7 +284,7 @@ class OpenAICompatibleProvider(LLMProvider):
         request_timeout = timeout if timeout is not None else self._timeout
 
         try:
-            response = await self._client.chat.completions.create(
+            response = await self._create_chat_completion(
                 **self._build_chat_completion_kwargs(
                     messages,
                     resolved_max_tokens,
@@ -365,7 +394,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     messages.append({"role": "system", "content": system})
                 messages.append({"role": "user", "content": prompt})
 
-                response = await self._client.chat.completions.create(
+                response = await self._create_chat_completion(
                     **self._build_chat_completion_kwargs(
                         messages,
                         resolved_max_tokens,
@@ -397,7 +426,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     {"role": "user", "content": prompt},
                 ]
 
-                response = await self._client.chat.completions.create(
+                response = await self._create_chat_completion(
                     **self._build_chat_completion_kwargs(
                         messages,
                         resolved_max_tokens,

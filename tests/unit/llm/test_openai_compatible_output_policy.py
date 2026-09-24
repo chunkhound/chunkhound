@@ -43,6 +43,7 @@ def _manager_provider(
         ("deepseek", "max_tokens"),
         ("grok", "max_completion_tokens"),
         ("openrouter", "max_tokens"),
+        ("orcarouter", "max_tokens"),
     ],
 )
 async def test_canonical_builtin_provider_managed_request_omits_cap(
@@ -87,6 +88,7 @@ async def test_canonical_builtin_provider_managed_request_omits_cap(
         ("deepseek", "max_tokens"),
         ("grok", "max_completion_tokens"),
         ("openrouter", "max_tokens"),
+        ("orcarouter", "max_tokens"),
     ],
 )
 async def test_custom_builtin_endpoint_uses_fallback_cap(

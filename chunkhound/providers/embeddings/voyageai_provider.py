@@ -8,6 +8,7 @@ from typing import Any, TypedDict, cast
 import httpx
 from loguru import logger
 
+from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
 from chunkhound.core.exceptions.embedding import (
@@ -71,6 +72,13 @@ _RERANK_LIMIT_PARAM = {"voyage": "top_k", "cohere": "top_n"}
 # Official VoyageAI model configuration based on API documentation
 VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
     # Models with 120,000 token limit per batch
+    "voyage-4-large": {
+        "max_tokens_per_batch": 120000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
     "voyage-3-large": {
         "max_tokens_per_batch": 120000,
         "max_texts_per_batch": 1000,
@@ -114,6 +122,20 @@ VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
         "default_dimension": 1024,
     },
     # Models with 320,000 token limit per batch
+    "voyage-code-4": {
+        "max_tokens_per_batch": 320000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
+    "voyage-4": {
+        "max_tokens_per_batch": 320000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
     "voyage-3.5": {
         "max_tokens_per_batch": 320000,
         "max_texts_per_batch": 1000,
@@ -128,7 +150,14 @@ VOYAGE_MODEL_CONFIG: dict[str, VoyageModelConfig] = {
         "dimensions": [1024],
         "default_dimension": 1024,
     },
-    # Model with 1,000,000 token limit per batch
+    # Models with 1,000,000 token limit per batch
+    "voyage-4-lite": {
+        "max_tokens_per_batch": 1000000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [256, 512, 1024, 2048],
+        "default_dimension": 1024,
+    },
     "voyage-3.5-lite": {
         "max_tokens_per_batch": 1000000,
         "max_texts_per_batch": 1000,
@@ -605,7 +634,24 @@ class VoyageAIEmbeddingProvider:
                 # Pass through; the API rejects unsupported dimensions on its own.
                 if dim_param is not None:
                     embed_kwargs["output_dimension"] = dim_param
-                result = await asyncio.to_thread(self._client.embed, **embed_kwargs)
+                try:
+                    result = await asyncio.to_thread(self._client.embed, **embed_kwargs)
+                except Exception as embed_call_error:
+                    ch_analytics.record_provider_call(
+                        "embedding",
+                        self.name,
+                        self._model,
+                        False,
+                        error_type=type(embed_call_error).__name__,
+                    )
+                    raise
+                ch_analytics.record_provider_call(
+                    "embedding",
+                    self.name,
+                    self._model,
+                    True,
+                    input_tokens=result.total_tokens,
+                )
 
                 self._requests_made += 1
                 self._tokens_used += result.total_tokens
@@ -948,12 +994,25 @@ class VoyageAIEmbeddingProvider:
                     f"VoyageAI reranking {len(documents)} documents with model {rerank_model}"
                 )
 
-                result = await asyncio.to_thread(
-                    self._client.rerank,
-                    query=query,
-                    documents=documents,
-                    model=rerank_model,
-                    top_k=top_k,
+                try:
+                    result = await asyncio.to_thread(
+                        self._client.rerank,
+                        query=query,
+                        documents=documents,
+                        model=rerank_model,
+                        top_k=top_k,
+                    )
+                except Exception as rerank_call_error:
+                    ch_analytics.record_provider_call(
+                        "reranker",
+                        self.name,
+                        rerank_model,
+                        False,
+                        error_type=type(rerank_call_error).__name__,
+                    )
+                    raise
+                ch_analytics.record_provider_call(
+                    "reranker", self.name, rerank_model, True
                 )
 
                 self._requests_made += 1
@@ -1053,16 +1112,30 @@ class VoyageAIEmbeddingProvider:
             f"(format={self._rerank_format})"
         )
 
-        async with httpx.AsyncClient(
-            timeout=self._timeout, verify=self._rerank_ssl_verify
-        ) as client:
-            headers = {"Content-Type": "application/json"}
-            if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
+        rerank_model = self._rerank_model or "unknown"
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, verify=self._rerank_ssl_verify
+            ) as client:
+                headers = {"Content-Type": "application/json"}
+                if self._api_key:
+                    headers["Authorization"] = f"Bearer {self._api_key}"
 
-            response = await client.post(rerank_url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+                response = await client.post(
+                    rerank_url, json=payload, headers=headers
+                )
+                response.raise_for_status()
+                data = response.json()
+        except Exception as rerank_call_error:
+            ch_analytics.record_provider_call(
+                "reranker",
+                self.name,
+                rerank_model,
+                False,
+                error_type=type(rerank_call_error).__name__,
+            )
+            raise
+        ch_analytics.record_provider_call("reranker", self.name, rerank_model, True)
 
         # Normalise bare-array response (TEI) to dict form
         if isinstance(data, list):

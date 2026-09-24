@@ -35,7 +35,9 @@ async def test_timeout_prompt_adds_exclusions(
     # Patch registry hooks used by run_command
     from chunkhound.api.cli.commands import run as run_mod
 
-    monkeypatch.setattr(run_mod, "configure_registry", lambda cfg: None)
+    monkeypatch.setattr(
+        run_mod, "configure_registry", lambda cfg, on_model_drift=None: None
+    )
     monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: coord)
 
     # Pretend we are in a TTY and accept the prompt
@@ -114,7 +116,9 @@ async def test_timeout_prompt_skipped_in_mcp_mode(
     from chunkhound.api.cli.commands import run as run_mod
 
     # Patch registry hooks used by run_command
-    monkeypatch.setattr(run_mod, "configure_registry", lambda cfg: None)
+    monkeypatch.setattr(
+        run_mod, "configure_registry", lambda cfg, on_model_drift=None: None
+    )
     monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: coord)
 
     # Force MCP mode, pretend we are in TTY, but ensure input() would raise if called
