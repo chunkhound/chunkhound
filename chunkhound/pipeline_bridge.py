@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from loguru import logger
 
 from chunkhound.core import analytics as ch_analytics
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
@@ -651,8 +652,8 @@ def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
     if model:
         return model
     return {
-        "openai": "text-embedding-3-small",
-        "voyageai": "voyage-3.5",
+        "openai": OPENAI_DEFAULT_MODEL,
+        "voyageai": VOYAGE_DEFAULT_MODEL,
     }.get(provider, "")
 
 

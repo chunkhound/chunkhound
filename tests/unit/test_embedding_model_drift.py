@@ -250,7 +250,7 @@ class _Index:
     def configure(
         self,
         *,
-        model: str,
+        model: str | None = None,
         output_dims: int | None = None,
         on_model_drift: ModelDriftDecision | None = None,
         read_only: bool = False,
@@ -315,6 +315,23 @@ class TestConfigureKeepsTheIndexUsable:
 
         provider = registry.get_provider("embedding")
         assert (provider.model, provider.dims) == ("voyage-code-3", 1024)
+
+    def test_index_built_with_the_previous_default_is_pinned(
+        self, index: _Index
+    ) -> None:
+        """Raising the provider default must not strand an index built under it.
+
+        An operator who never set ``embedding.model`` indexed under whatever
+        the default was then. After the default moves, the configured model
+        differs from the index and must be pinned back, not applied.
+        """
+        index.seed([("voyageai", "voyage-3.5", 1024)])
+
+        registry, config = index.configure()
+
+        assert registry.get_provider("embedding").model == "voyage-3.5"
+        assert config.embedding is not None
+        assert config.embedding.model == "voyage-3.5"
 
     def test_pin_reaches_providers_rebuilt_from_config(self, index: _Index):
         """``search`` and ``create_services`` build providers from config.
