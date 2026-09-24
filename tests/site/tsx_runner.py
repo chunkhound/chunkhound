@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import pathlib
@@ -24,8 +25,8 @@ _SUBPROCESS_ENV_ALLOWLIST = (
 )
 
 
-def sanitized_subprocess_env(**overrides: str) -> dict[str, str]:
-    """Build a hermetic runtime env for site subprocess tests."""
+def _base_subprocess_env(**overrides: str) -> dict[str, str]:
+    """Allowlisted host env without the npm cache entry."""
     env = {
         key: os.environ[key]
         for key in _SUBPROCESS_ENV_ALLOWLIST
@@ -35,31 +36,89 @@ def sanitized_subprocess_env(**overrides: str) -> dict[str, str]:
     return env
 
 
-def run_tsx_raw(script: str, **kwargs) -> subprocess.CompletedProcess:
-    """Write script to a temp .mts file in ROOT and run via npm exec tsx.
+def sanitized_subprocess_env(**overrides: str) -> dict[str, str]:
+    """Build a hermetic runtime env for site subprocess tests."""
+    env = _base_subprocess_env(**overrides)
+    # npm exec reads the host npm cache; a broken/hostile cache must not fail
+    # unrelated tests, so every subprocess gets its own private cache dir.
+    # Prefer isolated_subprocess_env() for new call sites: it owns the cache
+    # dir lifetime via TemporaryDirectory instead of leaving mkdtemp cleanup
+    # to the caller.
+    env.setdefault("npm_config_cache", tempfile.mkdtemp(prefix="npm-cache-"))
+    return env
 
-    Returns the raw CompletedProcess. Accepts subprocess.run kwargs except
-    capture_output, text, and cwd (already set). Typical usage: check=False
-    or env=... to support callers that need non-zero exit handling.
+
+@contextlib.contextmanager
+def isolated_subprocess_env(**overrides: str):
+    """Yield a hermetic env whose private npm cache dir is deleted on exit."""
+    with tempfile.TemporaryDirectory(prefix="npm-cache-") as cache_dir:
+        env = _base_subprocess_env(**overrides)
+        env.setdefault("npm_config_cache", cache_dir)
+        yield env
+
+
+def _absolute_site_imports(script: str) -> str:
+    """Rewrite './site/...' repo-relative specifiers to absolute file:// URIs.
+
+    The temp script lives outside the repo, so repo-relative specifiers no
+    longer resolve against it; absolute URIs target the same files.
     """
-    # Temp file placed in ROOT so relative imports like './site/src/...' resolve.
-    # Inline -e breaks on Windows: npm.CMD (batch file) treats newlines as
-    # command separators, truncating the script to an empty string.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".mts", dir=ROOT, delete=False, encoding="utf-8"
-    ) as f:
-        temp_path = pathlib.Path(f.name)
-        f.write(script)
+    root_uri = ROOT.as_uri()
+    return script.replace("'./site/", f"'{root_uri}/site/").replace(
+        '"./site/', f'"{root_uri}/site/'
+    )
+
+
+def _run_npm_tsx(
+    temp_path: pathlib.Path, env: dict[str, str], timeout: float, **kwargs
+) -> subprocess.CompletedProcess:
+    """Run the temp script via npm exec tsx with a hung-process guard."""
     try:
         return subprocess.run(
             [NPM, "exec", "--prefix", "site", "--", "tsx", str(temp_path)],
             capture_output=True,
             text=True,
             cwd=ROOT,
+            env=env,
+            timeout=timeout,
             **kwargs,
         )
-    finally:
-        temp_path.unlink(missing_ok=True)
+    # A stalled tsx subprocess must fail the test, not hang CI.
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"tsx run timed out after {timeout}s: {temp_path.name}"
+        ) from e
+
+
+def run_tsx_raw(script: str, **kwargs) -> subprocess.CompletedProcess:
+    """Write script to a temp .mts file in the system temp dir and run via npm exec tsx.
+
+    Returns the raw CompletedProcess. Accepts subprocess.run kwargs except
+    capture_output, text, and cwd (already set). Typical usage: check=False.
+    Defaults to an isolated env with a per-call npm cache dir (deleted after
+    the run); pass env=... to override.
+    """
+    # Inline -e breaks on Windows: npm.CMD (batch file) treats newlines as
+    # command separators, truncating the script to an empty string. The system
+    # temp dir is used so read-only checkouts stay runnable.
+    script = _absolute_site_imports(script)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".mts", delete=False, encoding="utf-8"
+    ) as f:
+        temp_path = pathlib.Path(f.name)
+        f.write(script)
+    timeout = kwargs.pop("timeout", 120)
+    if "env" in kwargs:
+        try:
+            return _run_npm_tsx(temp_path, kwargs.pop("env"), timeout, **kwargs)
+        finally:
+            temp_path.unlink(missing_ok=True)
+    # Default path owns its npm cache dir; TemporaryDirectory deletes it.
+    with isolated_subprocess_env() as env:
+        try:
+            return _run_npm_tsx(temp_path, env, timeout, **kwargs)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 def run_tsx_json(script: str) -> dict:

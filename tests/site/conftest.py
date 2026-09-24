@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.site.tsx_runner import NPM, sanitized_subprocess_env
+from tests.site.tsx_runner import NPM, isolated_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
@@ -24,13 +24,19 @@ def built_site() -> None:
         return
 
     print(f"Building site for tests... ({DIST})")
-    result = subprocess.run(
-        [NPM, "run", "build", "--prefix", "site"],
-        cwd=ROOT,
-        env=sanitized_subprocess_env(),
-        capture_output=True,
-        text=True,
-    )
+    # Cache dir is deleted on context exit; a stalled build fails, not hangs CI.
+    with isolated_subprocess_env() as env:
+        try:
+            result = subprocess.run(
+                [NPM, "run", "build", "--prefix", "site"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("site build timed out after 600s") from e
     if result.returncode != 0:
         sys.stderr.write("=== Site build failed ===\n")
         sys.stdout.write(result.stdout)
