@@ -2,27 +2,60 @@
 import Base from "../layouts/Base.astro";
 import Nav from "../components/Nav.astro";
 import Hero from "../components/Hero.astro";
-import ProblemStatement from "../components/ProblemStatement.astro";
-import UseCases from "../components/UseCases.astro";
-import CoreInsight from "../components/CoreInsight.astro";
-import TokenEconomics from "../components/TokenEconomics.astro";
-import Capabilities from "../components/Capabilities.astro";
+import ResearchStory from "../components/ResearchStory.astro";
+import ResearchQuestions from "../components/ResearchQuestions.astro";
 import ProvenAtScale from "../components/ProvenAtScale.astro";
+import NothingLeaves from "../components/NothingLeaves.astro";
+import EnterpriseTeaser from "../components/EnterpriseTeaser.astro";
 import Configurator from "../components/Configurator.astro";
+import InstallStep from "../components/InstallStep.astro";
+import StartHere from "../components/StartHere.astro";
 import Community from "../components/Community.astro";
----
 
+// Agent-readable substrate: JSON-LD SoftwareApplication so MCP clients and
+// crawlers can verify free/MIT/MCP-compatible claims without parsing prose.
+const softwareSchema = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  applicationCategory: "DeveloperApplication",
+  name: "ChunkHound",
+  operatingSystem: ["macOS", "Linux", "Windows"],
+  license: "https://github.com/chunkhound/chunkhound/blob/main/LICENSE",
+  isAccessibleForFree: true,
+  offers: { "@type": "Offer", price: 0, priceCurrency: "USD" },
+  softwareRequirements: "Any MCP client (Pi, Claude Code, Cursor) or the bundled CLI",
+  url: "https://chunkhound.ai",
+};
+---
 <Base>
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(softwareSchema)} />
     <Nav currentPath={Astro.url.pathname} />
-    <main>
+    <main data-nav-mobile-inert>
         <Hero />
-        <ProblemStatement />
-        <UseCases />
-        <CoreInsight />
-        <TokenEconomics />
-        <Capabilities />
         <ProvenAtScale />
-        <Configurator />
+        <NothingLeaves />
+        <ResearchStory />
+        <ResearchQuestions />
+        <EnterpriseTeaser />
+        <Configurator animated>
+            <InstallStep slot="preamble" />
+        </Configurator>
+        <StartHere />
     </main>
     <Community />
 </Base>
+
+<style is:global>
+    /* Full-bleed section banding: odd sections sit on the page tone (<html>'s
+       --bg-page) and even sections on the transitional --bg-band, so the
+       gutters read as intentional rhythm instead of dead space. Membership is
+       derived from page position (hero = page, scale = band, …), not declared
+       per component, so it cannot drift when sections are inserted/reordered.
+       :nth-of-type counts <section> siblings only — Astro injects <script>
+       nodes directly under <main>, which would break :nth-child.
+       The closing brand surface opts out: its tone is the page's bookend with
+       the hero, not another rhythm step, so it must not take a band. */
+    main > section:nth-of-type(even):not(.brand-surface) {
+        background: var(--bg-band);
+    }
+</style>

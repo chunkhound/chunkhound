@@ -1,0 +1,107 @@
+/**
+ * Shared primitives for the static architecture diagrams on /docs/architecture.
+ *
+ * One visual language, imported once (DocsLayout), used by every diagram so the
+ * set reads as a single system. Restraint is the design rule: hierarchy comes
+ * from type, weight, and whitespace — not from filled tiles, icons, or badges.
+ * Theme tokens only — no raw colors — so the diagrams pass the site contrast
+ * contract (tests/site/test_theme_contrast.py) in both themes.
+ */
+
+.d-figure {
+  margin: var(--space-6) 0;
+  padding: var(--space-5);
+  border: var(--border-w-default) solid var(--border-color);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface);
+}
+
+.d-figure > figcaption {
+  margin-bottom: var(--space-5);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.d-note {
+  margin: var(--space-5) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: var(--lh-sm);
+  text-align: center;
+}
+
+.d-note code {
+  font-size: 0.9em;
+}
+
+/* Result bar: the mono/primary-bg outcome strip closing a figure (or the
+   architecture page's cutoff section) — the docs counterpart of the landing
+   pages' .flow-bar (global.css). */
+.result {
+  margin: var(--space-5) 0 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--primary-bg);
+  color: var(--on-primary-bg);
+  font-family: "JetBrains Mono", monospace;
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* ── Nodes ─────────────────────────────────────────────────────── */
+
+/* A node is a label, not a box: a title plus at most one qualifier line. */
+.d-node {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.d-node-title {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: var(--lh-sm);
+}
+
+.d-node-detail {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: var(--lh-xs);
+}
+
+/* The figure's one accent: marks the single element that carries the point. */
+.d-node[data-tone="accent"] .d-node-title {
+  color: var(--primary);
+}
+
+/* ── Connectors ────────────────────────────────────────────────── */
+
+/* A quiet hairline rule with an optional sentence-case label; used at most
+   once per figure. */
+.d-connector {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-5) 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.d-connector::before,
+.d-connector::after {
+  content: "";
+  flex: 1;
+  border-top: var(--border-w-default) solid var(--border-color);
+}
+
+/* The one accent connector: the local↔remote boundary in the context diagram. */
+.d-connector[data-tone="accent"] {
+  color: var(--primary);
+}
+
+.d-connector[data-tone="accent"]::before,
+.d-connector[data-tone="accent"]::after {
+  border-top-color: var(--primary);
+}

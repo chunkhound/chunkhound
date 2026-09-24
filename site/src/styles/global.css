@@ -1,5 +1,5 @@
-/* ── Fonts ─────────────────────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap');
+/* Fonts are loaded via <link> in Base.astro (supports preconnect).
+   Do NOT add an @import here — it would duplicate the request. */
 
 /* ── Design Tokens ─────────────────────────────────────────────────── */
 /* Brand palette: cyan/teal — primary #22d3ee, bright #0891b2, dark #0e7490. */
@@ -9,10 +9,13 @@
   --bg-page: #2b2b2b;
   --bg-surface: #3c3c3c;
   --bg-muted: #4f4f4f;
+  /* Section banding: halfway between page and surface — visible rhythm on wide
+     screens without breaking the flat 3-tier surface hierarchy of cards. */
+  --bg-band: color-mix(in srgb, var(--bg-page) 50%, var(--bg-surface));
   --text-primary: #f4f4f4;
-  --text-secondary: #a8a8a8;
-  --text-tertiary: #919191;
-  --text-muted: #777777;
+  --text-secondary: #c2c2c2;
+  --text-tertiary: #aaaaaa;
+  --text-muted: #949494;
   --border-color: #4f4f4f;
   --border-subtle: #3c3c3c;
   --border-accent: color-mix(in srgb, var(--primary) 40%, var(--border-color));
@@ -33,12 +36,32 @@
   --code-text: #d3d3d3;
   --code-muted: #9b9b9b;
   --code-accent: #22d3ee;
+  /* The hero's annotation surface. A luminance step off --code-bg, not a
+     border, so an annotation reads as the same object raised — and a literal
+     token (not a color-mix) so the contrast matrix in tests/site actually
+     covers it. Its ceiling is a contrast contract: at 12% --code-muted drops
+     to 4.3:1 and fails AA, so this must not be lightened. */
+  --code-note-bg: #2e2e2e;
   --logo-invert: 1;
+
+  /* Brand surface — the sanctioned backdrop for the hound mark and the page's
+     closing section. Theme-stable on purpose: the page opens and closes on it,
+     and the CTA that sits there must not invert with the OS theme the way
+     --primary does. --brand-border is a hairline that only reads on it. */
+  --brand-surface: #21221e;
+  --on-brand-surface: #f4f4f4;
+  --on-brand-muted: #b7b7b7;
+  --brand-cta: #22d3ee;
+  --on-brand-cta: #083344;
+  --brand-border: #3d3e38;
 
   /* Green palette — success/shipped state, auto-invert per theme */
   --green: #22c55e;
   --green-bg: #14532d;
   --on-green-bg: #bbf7d0;
+
+  /* Danger palette — invalid input. */
+  --danger: #fca5a5;
 
   /* Spacing */
   --space-0: 0;
@@ -61,16 +84,30 @@
   --radius-xl: 12px;
   --radius-2xl: 18px;
   --radius-full: 9999px;
+  /* Every control — button, input, select, toggle, option row — takes its
+     resting radius from here, so the whole family moves with one edit. A
+     control that re-declares a radius is how the CTA became the page's only
+     12px control (12px is the CARD radius: see DESIGN_SYSTEM, Border Radius). */
+  --radius-control: var(--radius-md);
 
-  /* Typography */
-  --text-4xl: 49px;  --lh-4xl: 60px;
-  --text-3xl: 39px;  --lh-3xl: 48px;
-  --text-2xl: 31px;  --lh-2xl: 36px;
+  /* Typography — the display tiers are fluid: clamp(min, rem + vw, max) ramps
+     4xl 31→49px, 3xl 28→39px, 2xl 25→31px across a 320→1440px viewport, so a
+     phone never inherits a desktop-class page title (the bug this fixes). The
+     `rem` term keeps browser zoom working (WCAG 1.4.4; pure vw is a failure).
+     Unitless line height tracks the fluid size; a fixed px leading would drift
+     as the size ramps. Body tiers below stay fixed on the 4px grid. */
+  --text-4xl: clamp(1.9375rem, 1.616rem + 1.607vw, 3.0625rem); --lh-4xl: 1.22;
+  --text-3xl: clamp(1.75rem,   1.554rem + 0.982vw, 2.4375rem); --lh-3xl: 1.23;
+  --text-2xl: clamp(1.5625rem, 1.455rem + 0.536vw, 1.9375rem); --lh-2xl: 1.16;
   --text-xl: 25px;   --lh-xl: 32px;
   --text-lg: 20px;   --lh-lg: 32px;
   --text-base: 16px; --lh-base: 24px;
   --text-sm: 13px;   --lh-sm: 20px;
   --text-xs: 10px;   --lh-xs: 16px;
+
+  /* Layout */
+  --container-max: 1440px;   /* shared page-shell width: nav + docs + landing */
+  --accent-measure: 46rem;   /* shared width for short centered accent bars + their footnotes */
 
   /* Target sizes */
   --target-sm: 32px;
@@ -91,9 +128,10 @@
   --bg-page: #f4f4f4;
   --bg-surface: #ffffff;
   --bg-muted: #e8e8e8;
+  --bg-band: color-mix(in srgb, var(--bg-page) 50%, var(--bg-surface));
   --text-primary: #212121;
   --text-secondary: #5f5f5f;
-  --text-tertiary: #6e6e6e;
+  --text-tertiary: #676767;
   --text-muted: #707070;
   --border-color: #d3d3d3;
   --border-subtle: #e8e8e8;
@@ -115,11 +153,20 @@
   --code-text: #d3d3d3;
   --code-muted: #9b9b9b;
   --code-accent: #22d3ee;
+  --code-note-bg: #2e2e2e;
   --logo-invert: 0;
+  --brand-surface: #21221e;
+  --on-brand-surface: #f4f4f4;
+  --on-brand-muted: #b7b7b7;
+  --brand-cta: #22d3ee;
+  --on-brand-cta: #083344;
+  --brand-border: #3d3e38;
 
   --green: #16a34a;
   --green-bg: #dcfce7;
   --on-green-bg: #166534;
+
+  --danger: #b91c1c;
 }
 
 /* Colors — light mode (OS preference auto-detection) */
@@ -128,10 +175,11 @@
     --bg-page: #f4f4f4;
     --bg-surface: #ffffff;
     --bg-muted: #e8e8e8;
+    --bg-band: color-mix(in srgb, var(--bg-page) 50%, var(--bg-surface));
     --text-primary: #212121;
     --text-secondary: #5f5f5f;
-    --text-tertiary: #757575;
-    --text-muted: #8e8e8e;
+    --text-tertiary: #676767;
+    --text-muted: #707070;
     --border-color: #d3d3d3;
     --border-subtle: #e8e8e8;
     --border-accent: var(--primary);
@@ -152,11 +200,20 @@
     --code-text: #d3d3d3;
     --code-muted: #9b9b9b;
     --code-accent: #22d3ee;
+    --code-note-bg: #2e2e2e;
     --logo-invert: 0;
+    --brand-surface: #21221e;
+    --on-brand-surface: #f4f4f4;
+    --on-brand-muted: #b7b7b7;
+    --brand-cta: #22d3ee;
+    --on-brand-cta: #083344;
+    --brand-border: #3d3e38;
 
   --green: #16a34a;
   --green-bg: #dcfce7;
   --on-green-bg: #166534;
+
+  --danger: #b91c1c;
   }
 }
 
@@ -178,6 +235,7 @@ html {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   scroll-behavior: smooth;
+  scroll-padding-top: calc(var(--target-xl) + var(--space-2));
   transition: background 0.3s, color 0.3s, border-color 0.3s;
 }
 
@@ -185,10 +243,207 @@ body {
   min-height: 100vh;
 }
 
+/* Heading weight roles, declared once: display headings 700, section/sub
+   headings 600 (DESIGN_SYSTEM typography table; docs.css pins the same pair).
+   Without these the UA `bold` default silently decides every heading weight. */
+h1 { font-weight: 700; }
+h2, h3, h4 { font-weight: 600; }
+
 .container {
-  max-width: 1120px;
+  max-width: var(--container-max);
   margin: 0 auto;
   padding: 0 var(--space-6);
+}
+
+/* Narrow-viewport gutter shared by every landing section — declared once
+   here; components must not re-declare it. */
+@media (max-width: 600px) {
+  .container {
+    padding: 0 var(--space-4);
+  }
+}
+
+/* Section-intro shell shared by landing sections. Spans the container so
+   headers/body align with the global page margins; no per-section measure caps.
+   Left-anchored to the hero's copy column: the page runs one alignment system,
+   so section headers never re-center. */
+.intro {
+  margin: 0 0 var(--space-7);
+  text-align: start;
+}
+.intro > p:last-child {
+  color: var(--text-secondary);
+  font-size: var(--text-lg);
+  line-height: var(--lh-lg);
+  text-wrap: pretty;
+}
+/* Inline links inside an intro lead carry the page's 600 link weight. */
+.intro a {
+  color: var(--link);
+  font-weight: 600;
+}
+
+/* Landing-section h2 scale shared by .intro headers and the configurator's
+   section heading (same heading role, so one definition); components must not
+   re-declare it (weight comes from the heading roles above). */
+.intro h2,
+.section-heading {
+  color: var(--text-primary);
+  font-size: var(--text-2xl);
+  line-height: var(--lh-2xl);
+  text-wrap: balance;
+}
+.intro h2 {
+  margin-bottom: var(--space-4);
+}
+/* Brand-surface recipe: paints the tone and names the text colour in one place,
+   so a motif, the copy and a control on it can never disagree. The shared
+   section recipes below assume a page-tone surface, so they re-tint here —
+   declared once so any future brand section inherits the same correction. */
+.brand-surface {
+  background: var(--brand-surface);
+  color: var(--on-brand-surface);
+}
+.brand-surface .intro h2 {
+  color: var(--on-brand-surface);
+}
+.brand-surface .intro > p:last-child {
+  color: var(--on-brand-muted);
+}
+.brand-surface .eyebrow {
+  color: var(--brand-cta);
+}
+
+/* Tertiary trust-boundary footnote shared by landing sections; components
+   keep only their margin-top override. */
+.boundary {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: var(--lh-xs);
+  margin: var(--space-4) 0 0;
+  text-align: start;
+}
+
+/* Legal/affiliation disclaimer: a labelled fine-print notice. The label reuses
+   the eyebrow pattern (the page's one label voice) so the boundary is legible
+   at a glance; separation is spacing — DESIGN_SYSTEM prefers spacing and surface
+   tone over borders. Distinct from .boundary (a plain caveat footnote).
+   The child selectors are anchored on `.disclaimer` so the recipe's voice
+   outranks docs' `.docs-content p` (0,1,1): the shared Configurator renders
+   inside `.docs-content`, where a bare class (0,1,0) would silently lose. */
+.disclaimer {
+  margin: var(--space-6) 0 0;
+  text-align: start;
+}
+.disclaimer > .disclaimer-text {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  line-height: var(--lh-sm);
+  margin: 0;
+}
+
+/* Eyebrow label shared by landing section intros and labelled notices. */
+.eyebrow,
+.disclaimer > .eyebrow {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: .12em;
+  margin-bottom: var(--space-3);
+  text-transform: uppercase;
+}
+/* Notice label gap: must stay AFTER the label voice above — identical
+   specificity (.disclaimer .eyebrow vs .disclaimer > .eyebrow), so source
+   order decides. */
+.disclaimer .eyebrow {
+  margin-bottom: var(--space-2);
+}
+
+/* Card-tile recipe shared by landing-section tiles/cards. Grid, borders
+   variants, and content layout stay local to each component. */
+.card-tile {
+  background: var(--bg-surface);
+  border: var(--border-w-default) solid var(--border-color);
+  border-radius: var(--radius-xl);
+  padding: var(--space-5);
+}
+
+/* Shared 3-up tile row: peer card-tiles on equal columns with one entrance
+   rhythm. Peers carry the default [data-reveal] fade-up; the row's own
+   --reveal-delay staggers them left→right. A component overrides this recipe
+   only when its layout genuinely deviates (e.g. ResearchStory's flanking pair;
+   ProvenAtScale's stats receipt, which keeps the row but stacks earlier). */
+.card-grid {
+  --reveal-delay: 120ms;
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(3, 1fr);
+}
+@media (max-width: 800px) {
+  .card-grid { grid-template-columns: 1fr; }
+}
+
+/* Flow bar: the accent strip that states an outcome as one flow, "A → B". A bar
+   too narrow to hold both halves on one line stacks them; the axis is then
+   vertical, so its rule must also flip --flow-glyph to the down arrow in the
+   SAME declaration (see components/FlowArrow.astro). Call sites keep only their
+   own breakpoint and extras. */
+.flow-bar {
+  align-items: center;
+  background: var(--primary-bg);
+  border-radius: var(--radius-xl);
+  color: var(--on-primary-bg);
+  display: flex;
+  font-family: "JetBrains Mono", monospace;
+  font-size: var(--text-sm);
+  gap: var(--space-3);
+  justify-content: center;
+  margin: var(--space-5) auto 0;
+  max-width: var(--accent-measure);
+  padding: var(--space-4);
+  text-align: center;
+}
+
+/* Icon chip: primary-tinted square behind a landing-section icon. */
+.icon-chip {
+  align-items: center;
+  background: var(--primary-bg);
+  border-radius: var(--radius-md);
+  color: var(--on-primary-bg);
+  display: flex;
+  height: var(--target-lg);
+  justify-content: center;
+  width: var(--target-lg);
+}
+
+/* Screen-reader-only utility (shared with docs pages; docs.css loads on top
+   of global.css). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Large desktops (>=1600px): scale type ~118% — larger screens sit farther
+   away. Width stays put: the page shell is one width everywhere, so the nav,
+   docs, and landing sections never disagree on the left margin. */
+@media (min-width: 1600px) {
+  :root {
+    --text-4xl: 58px;  --lh-4xl: 72px;
+    --text-3xl: 46px;  --lh-3xl: 56px;
+    --text-2xl: 36px;  --lh-2xl: 42px;
+    --text-xl: 29px;   --lh-xl: 38px;
+    --text-lg: 23px;   --lh-lg: 37px;
+    --text-base: 18px; --lh-base: 28px;
+    --text-sm: 15px;   --lh-sm: 24px;
+    --text-xs: 12px;   --lh-xs: 18px;
+  }
 }
 
 code,
@@ -222,10 +477,150 @@ a:hover {
   text-decoration: underline;
 }
 
-a:focus-visible {
-  outline: var(--border-w-emphasis) solid var(--link-focus);
+/* Button: the ONE control recipe. Geometry and focus live here; colour is a
+   variant keyed to the surface behind the control, so no component re-declares
+   either. Controls are pills: --radius-full is declared once here, never per
+   control. A class + pseudo (`.btn--brand:hover`, specificity 0,2,0) outranks
+   the prose-link recipe (element + pseudo, 0,1,1), which is why each variant
+   restates the fill's foreground and cancels the underline in its states. */
+.btn {
+  align-items: center;
+  border: var(--border-w-default) solid transparent;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  gap: var(--space-2);
+  text-decoration: none;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+/* The ring contrasts the surface BEHIND the control, so every colour variant
+   sets --focus-ring; the page fallback is the global dark ring. */
+.btn:focus-visible {
+  outline: var(--border-w-emphasis) solid
+    var(--focus-ring, var(--link-focus));
   outline-offset: 3px;
-  border-radius: var(--radius-sm);
+}
+
+/* The box IS the target size and the line box centres inside it. Never derive
+   the height from the type: --lh-base grows to 28px at >=1600px, which pushed
+   the control 4px past target-xl while the field beside it stayed put. */
+.btn--xl {
+  font-size: var(--text-base);
+  font-weight: 600;
+  height: var(--target-xl);
+  line-height: var(--lh-base);
+  padding: 0 var(--space-8);
+}
+
+/* Command/copy field size: mono content, field weight. */
+.btn--lg {
+  min-height: var(--target-lg);
+  padding: var(--space-2) var(--space-5);
+}
+
+/* Colour variant — the brand action. One fill on every surface (the
+   theme-invariant brand CTA pair); only the hover shade and the focus ring
+   derive from the surface behind the control. :hover / :visited restate the
+   foreground and cancel the underline because the class + pseudo (0,2,0) must
+   outrank the prose-link recipe (0,1,1). */
+.btn--brand,
+.btn--brand:visited,
+.btn--brand:hover {
+  --focus-ring: var(--link-focus);
+  background: var(--brand-cta);
+  color: var(--on-brand-cta);
+  text-decoration: none;
+}
+
+/* On the brand surface the ring contrasts that surface, not the page. */
+.brand-surface .btn--brand {
+  --focus-ring: var(--on-brand-surface);
+}
+
+/* Hover shades are derived toward the surface behind the control, never a bare
+   token: a var() used as a background joins the contrast matrix as a surface. */
+.btn--brand:hover {
+  background: color-mix(in srgb, var(--brand-cta) 88%, var(--bg-page));
+}
+
+.brand-surface .btn--brand:hover {
+  background: color-mix(in srgb, var(--brand-cta) 88%, var(--brand-surface));
+}
+
+/* Colour variant — page surface. --primary is theme-adaptive: a dark teal fill
+   with white text in light mode, cyan with the dark on-colour in dark mode, so
+   the label is always the correct on-colour for the fill it sits on. */
+.btn--page,
+.btn--page:visited,
+.btn--page:hover {
+  --focus-ring: var(--link-focus);
+  background: var(--primary);
+  color: var(--on-primary);
+  text-decoration: none;
+}
+
+.btn--page:hover {
+  background: color-mix(in srgb, var(--primary) 88%, var(--bg-page));
+}
+
+/* Colour variant — quiet copy field beside a primary action: outline only, so
+   it can never read as a second action. */
+.btn--quiet {
+  --focus-ring: var(--on-brand-surface);
+  background: transparent;
+  border-color: var(--brand-border);
+  color: var(--on-brand-surface);
+}
+
+.btn--quiet:hover {
+  border-color: var(--on-brand-muted);
+}
+
+/* The narrow-viewport gutter is the binding constraint for both sizes. */
+@media (max-width: 360px) {
+  .btn--xl {
+    padding: 0 var(--space-4);
+  }
+
+  .btn--lg {
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-4);
+  }
+}
+
+/* Shared copy-controls recipe (CodeBlock + PlatformCodeBlock): the row
+   beside a copy button and its status line. Only the declarations identical
+   in both live here; each block keeps its own geometry (.code-block-md
+   overlays it, .platform-code-block docks it in the header). */
+.code-block-md .copy-controls,
+.platform-code-block .copy-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.code-block-md .copy-status,
+.platform-code-block .copy-status {
+    color: var(--text-tertiary);
+    font-size: var(--text-xs);
+    text-align: right;
+}
+
+.code-block-md .copy-status:empty,
+.platform-code-block .copy-status:empty {
+    display: none;
+}
+
+/* Focus is a state, never a shape: this recipe paints the ring and nothing
+   else. No width, no height, no radius — a focus rule that writes geometry
+   silently reshapes whichever control it lands on. :where() holds it at zero
+   specificity so it can never outrank a control's own resting declarations;
+   components that need a different ring still override it by specificity. */
+:where(a:focus-visible) {
+  outline: var(--border-w-emphasis) solid var(--focus-ring, var(--link-focus));
+  outline-offset: 3px;
 }
 
 img,
@@ -239,4 +634,30 @@ svg {
     scroll-behavior: auto;
     transition: none;
   }
+}
+
+/* Shared scroll-reveal variants (driven by scripts/count-reveal.ts).
+   The hidden pre-entrance state ([data-reveal-pending]) is applied ONLY by
+   JS — static CSS never hides content, so no-JS visitors see everything.
+   --i (per-parent sibling index) and --reveal-delay come from the element /
+   its container; variants are keyed off the data-reveal VALUE. */
+[data-reveal] {
+  opacity: 1;
+  transform: none;
+  transition: opacity 480ms ease, transform 480ms ease;
+  transition-delay: calc(var(--i, 0) * var(--reveal-delay, 90ms));
+}
+[data-reveal][data-reveal-pending] { opacity: 0; transform: translateY(16px); }
+/* Side-slide needs horizontal room: the 24px offset outruns the 16px mobile
+   gutter (.container @max-width:600px, --space-4). A full-bleed tile shifted
+   past the viewport edge widens the document (horizontal scroll), so the
+   horizontal variants stay off below the gutter breakpoint and the default
+   fade-up takes over. */
+@media (min-width: 601px) {
+  [data-reveal="left"][data-reveal-pending] { opacity: 0; transform: translateX(-24px); }
+  [data-reveal="right"][data-reveal-pending] { opacity: 0; transform: translateX(24px); }
+}
+[data-reveal="pop"][data-reveal-pending] { opacity: 0; transform: scale(0.6); }
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal] { transition: none; }
 }

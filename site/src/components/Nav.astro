@@ -1,5 +1,8 @@
 ---
 import Wordmark from "./Wordmark.astro";
+import DocsNav from "./DocsNav.astro";
+import PhosphorIcon from "./PhosphorIcon.astro";
+import { NAV_TABS, isActivePath } from "../lib/nav";
 
 interface Props {
   currentPath: string;
@@ -8,49 +11,52 @@ interface Props {
 
 const { currentPath, docsMenu = false } = Astro.props;
 
-const tabs = [
-  { label: "Docs", href: "/docs/getting-started/", activePrefix: "/docs/" },
-];
+// Active state delegates to the shared trailing-slash-insensitive compare
+// in lib/nav.ts (same rule as DocsNav.astro).
+const isActive = (href: string) => isActivePath(currentPath, href);
 ---
 
 <nav class:list={["nav", { "has-docs-menu": docsMenu }]}>
   <div class="nav-inner">
-    {docsMenu && (
-      <button
-        class="docs-nav-toggle"
-        type="button"
-        aria-label="Open docs menu"
-        aria-haspopup="dialog"
-        aria-controls="docs-sidebar"
-        aria-expanded="false"
-        data-docs-nav-toggle
-      >
-        <ph-list size="20" weight="bold" aria-hidden="true"></ph-list>
-      </button>
-    )}
-    <a href="/" class="nav-wordmark" aria-label="ChunkHound home" data-docs-mobile-inert>
-      <Wordmark size="sm" />
+    <button
+      class="nav-toggle"
+      type="button"
+      aria-haspopup="dialog"
+      aria-controls={docsMenu ? "docs-sidebar" : "nav-menu-panel"}
+      aria-expanded="false"
+      aria-label={docsMenu ? "Open docs menu" : "Open main menu"}
+      data-nav-toggle
+    >
+      <PhosphorIcon name="ph-list" size="20" weight="bold" aria-hidden="true" />
+      <span class="nav-toggle-label">Menu</span>
+    </button>
+
+    <a href="/" class="nav-wordmark" aria-label="ChunkHound home" data-nav-mobile-inert>
+      <Wordmark />
     </a>
 
-    <div class="nav-tabs" aria-label="Sections" data-docs-mobile-inert>
-      {tabs.map((tab) => (
-        <a
-          href={tab.href}
-          class:list={["nav-tab", { active: currentPath.startsWith(tab.activePrefix ?? tab.href) }]}
-          aria-current={currentPath.startsWith(tab.activePrefix ?? tab.href) ? "page" : undefined}
-        >
-          {tab.label}
-        </a>
-      ))}
+    <div class="nav-tabs" aria-label="Sections" data-nav-mobile-inert>
+      {NAV_TABS.map((tab) => {
+        const active = isActive(tab.href);
+        return (
+          <a
+            href={tab.href}
+            class:list={["nav-tab", { active }]}
+            aria-current={active ? "page" : undefined}
+          >
+            {tab.label}
+          </a>
+        );
+      })}
     </div>
 
-    <div class="nav-actions" data-docs-mobile-inert>
+    <div class="nav-actions" data-nav-mobile-inert>
       <a
         href="https://github.com/chunkhound/chunkhound"
         class="nav-github-link"
         aria-label="GitHub"
       >
-        <ph-github-logo size="18" weight="duotone" aria-hidden="true"></ph-github-logo>
+        <PhosphorIcon name="ph-github-logo" size="18" weight="duotone" aria-hidden="true" />
       </a>
 
       <button
@@ -58,13 +64,41 @@ const tabs = [
         onclick="toggleTheme()"
         aria-label="Toggle theme"
       >
-        <ph-sun class="icon-sun" size="16" weight="duotone" aria-hidden="true"></ph-sun>
-        <ph-moon class="icon-moon" size="16" weight="duotone" aria-hidden="true"></ph-moon>
-        <ph-monitor class="icon-system" size="16" weight="duotone" aria-hidden="true"></ph-monitor>
+        <PhosphorIcon name="ph-sun" class="icon-sun" size="16" weight="duotone" aria-hidden="true" />
+        <PhosphorIcon name="ph-moon" class="icon-moon" size="16" weight="duotone" aria-hidden="true" />
+        <PhosphorIcon name="ph-monitor" class="icon-system" size="16" weight="duotone" aria-hidden="true" />
       </button>
     </div>
   </div>
 </nav>
+
+{!docsMenu && (
+  <>
+    <div class="nav-menu-scrim" data-nav-menu-scrim></div>
+    <aside id="nav-menu-panel" class="nav-menu-panel" aria-label="Main menu">
+      <DocsNav currentPath={currentPath} />
+    </aside>
+    {/* Without JS the off-canvas panel never slides in and the toggle is
+        inert, so the nav would be unreachable. Only scripting-disabled
+        browsers apply these rules, leaving the JS drawer visuals untouched. */}
+    <noscript>
+      <style>
+        @media (max-width: 640px) {
+          .nav-menu-panel {
+            position: static;
+            transform: none;
+            height: auto;
+            width: auto;
+            border-right: none;
+          }
+          .nav-toggle {
+            display: none;
+          }
+        }
+      </style>
+    </noscript>
+  </>
+)}
 
 <script>
   import "@phosphor-icons/webcomponents/PhGithubLogo";
@@ -72,6 +106,26 @@ const tabs = [
   import "@phosphor-icons/webcomponents/PhMonitor";
   import "@phosphor-icons/webcomponents/PhMoon";
   import "@phosphor-icons/webcomponents/PhSun";
+  import { MOBILE_INERT_ATTR, initMobileDrawer } from "../scripts/mobile-drawer";
+  import { initNavFilter } from "../scripts/nav-filter";
+
+  // Docs pages bind their own drawer + filter in docs-runtime; here the
+  // marketing menu panel is absent, so this no-ops there.
+  const toggle = document.querySelector<HTMLButtonElement>("[data-nav-toggle]");
+  const panel = document.getElementById("nav-menu-panel");
+  if (toggle && panel) {
+    initMobileDrawer({
+      toggle,
+      panel,
+      scrim: document.querySelector<HTMLElement>("[data-nav-menu-scrim]"),
+      media: window.matchMedia("(max-width: 640px)"),
+      inertTargets: Array.from(
+        document.querySelectorAll<HTMLElement>(`[${MOBILE_INERT_ATTR}]`),
+      ),
+      labels: { open: "Open main menu", close: "Close main menu" },
+    });
+    initNavFilter();
+  }
 </script>
 
 <style>
@@ -86,13 +140,17 @@ const tabs = [
   }
 
   .nav-inner {
-    max-width: 1440px;
+    /* Same page shell as .container / .docs-shell — the nav is the visual
+       "page margin", so sections must not cap themselves independently. */
+    max-width: var(--container-max);
     margin: 0 auto;
     padding: 0 var(--space-6);
     height: 100%;
     display: flex;
     align-items: center;
     gap: var(--space-6);
+    /* Containing block for the mobile-centered wordmark. */
+    position: relative;
   }
 
   .nav-wordmark {
@@ -105,27 +163,34 @@ const tabs = [
     text-decoration: none;
   }
 
-  .docs-nav-toggle {
+  .nav-toggle {
     display: none;
-    width: 32px;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
     height: 32px;
-    padding: 0;
+    padding: 0 var(--space-2);
     background: none;
     color: var(--text-secondary);
     border: none;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
+    font: inherit;
+    font-size: var(--text-sm);
+    font-weight: 500;
     cursor: pointer;
-    align-items: center;
-    justify-content: center;
   }
 
-  .docs-nav-toggle:hover {
+  .nav-toggle:hover {
     color: var(--text-primary);
     background: var(--bg-muted);
   }
 
-  .docs-nav-toggle ph-list {
+  .nav-toggle ph-list {
     display: block;
+  }
+
+  .nav-toggle-label {
+    line-height: 1;
   }
 
   /* ── Section tabs ─────────────────────────────────────────────── */
@@ -181,13 +246,21 @@ const tabs = [
     align-items: center;
     justify-content: center;
     padding: 0;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     transition: color 0.2s, background-color 0.2s;
   }
 
   .theme-toggle:hover {
     color: var(--text-primary);
     background: var(--bg-muted);
+  }
+
+  /* Match the global anchor focus style for the toggle buttons. The radius is
+     deliberately absent: focus is a state, not a shape — a focus rule here used
+     to square the toggles (control radius → radius-sm) on keyboard focus. */
+  button:focus-visible {
+    outline: var(--border-w-emphasis) solid var(--link-focus);
+    outline-offset: 3px;
   }
 
   .icon-sun,
@@ -225,11 +298,28 @@ const tabs = [
     display: block;
   }
 
+  /* ── Off-canvas menu (marketing) ──────────────────────────────── */
+
+  .nav-menu-scrim {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 149;
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  .nav-menu-scrim.open {
+    display: block;
+  }
+
+  .nav-menu-panel {
+    display: none;
+  }
+
   /* ── Mobile (<=900px) ─────────────────────────────────────────── */
 
   @media (max-width: 900px) {
     .nav-inner {
-      padding: 0 var(--space-4);
       gap: var(--space-3);
     }
 
@@ -238,27 +328,98 @@ const tabs = [
       gap: var(--space-2);
     }
 
-    .has-docs-menu .docs-nav-toggle {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
+    .has-docs-menu .nav-toggle {
+      display: inline-flex;
       flex-shrink: 0;
     }
 
     .has-docs-menu .nav-tabs {
       display: none;
     }
+
+    /* Centre the wordmark in the header while the hamburger owns the left slot. */
+    .has-docs-menu .nav-wordmark {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+    }
+  }
+
+  @media (max-width: 640px) {
+    /* Marketing nav collapses into the shared off-canvas menu. */
+    .nav:not(.has-docs-menu) .nav-tabs {
+      display: none;
+    }
+
+    .nav:not(.has-docs-menu) .nav-toggle {
+      display: inline-flex;
+      flex-shrink: 0;
+    }
+
+    /* Centre the wordmark in the header while the hamburger owns the left slot. */
+    .nav:not(.has-docs-menu) .nav-wordmark {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    .nav-menu-panel {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: min(300px, 85vw);
+      height: 100dvh;
+      max-height: 100dvh;
+      z-index: 150;
+      background: var(--bg-page);
+      border-right: var(--border-w-subtle) solid var(--border-subtle);
+      padding: var(--space-5);
+      overflow-y: auto;
+      box-sizing: border-box;
+      transform: translateX(-100%);
+      transition: transform 0.25s ease;
+    }
+
+    .nav-menu-panel.open {
+      transform: translateX(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .nav-menu-panel {
+      transition: none;
+    }
+  }
+
+  /* Gutter matches .container (global.css) so nav and section content share one
+     left/right margin at every viewport — the nav is the page's visual margin. */
+  @media (max-width: 600px) {
+    .nav-inner {
+      padding: 0 var(--space-4);
+    }
   }
 
   @media (max-width: 360px) {
     .nav-inner {
-      padding: 0 var(--space-3);
       gap: var(--space-2);
     }
 
     .nav-actions {
       gap: var(--space-1);
+    }
+
+    /* Icon-only fallback: the label no longer fits next to the wordmark. */
+    .nav-toggle-label {
+      display: none;
+    }
+
+    .nav-toggle {
+      width: 32px;
+      padding: 0;
     }
   }
 </style>

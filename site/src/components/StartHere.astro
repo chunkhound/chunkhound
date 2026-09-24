@@ -1,0 +1,114 @@
+---
+// The page's closing act: the page opens on the terminal (the hero) and closes
+// on the same dark brand surface, so the last screen is a deliberate bookend
+// rather than one more neutral band. Peak-end: the ending is what a page is
+// remembered by, so it gets the page's single action and nothing competing.
+//
+// The brand surface is also what makes the hound mark legal here — the design
+// system licenses the logo on the brand tones only — and it lets the CTA use a
+// theme-stable fill instead of --primary, which would invert between themes.
+//
+// The fine print answers the objections the sections above raise but never close
+// on — cost, privacy, licence. Reassurance, not another action.
+import InstallCommand from "./InstallCommand.astro";
+---
+
+<section id="start" class="start-here brand-surface" aria-labelledby="start-heading">
+  <!-- Decorative brand motif: the standing hound, cropped at the page edge.
+       A mask rather than an <img> so one asset paints the silhouette and the
+       colour comes from a token. aria-hidden + pointer-events:none: texture. -->
+  <span class="start-hound" aria-hidden="true"></span>
+
+  <div class="container">
+    <header class="intro" data-reveal>
+      <p class="eyebrow">START HERE</p>
+      <h2 id="start-heading">Your first cited answer is one command away.</h2>
+      <p>Install once, index the repo you are already in, and ask your agent a question that needs the whole system.</p>
+    </header>
+
+    <!-- One row: the quiet command field, then the one loud action. The field
+         copies (a <button>); the CTA navigates (the section's only <a>). -->
+    <div class="start-action" data-reveal>
+      <InstallCommand variant="quiet" />
+      <!-- The page's single action, and a navigable link rather than a copy
+           control: the reader has already decided. .btn--brand carries the fill
+           and its foreground (including the link-state overrides). -->
+      <a class="btn btn--xl btn--brand" href="/docs/getting-started/">
+        Get started <span aria-hidden="true">&rarr;</span>
+      </a>
+    </div>
+
+    <!-- “Nothing leaves your machine” is intentional shorthand for local runtime
+         and index ownership, not a claim about operator-selected remote providers;
+         NothingLeaves.astro carries the trust-boundary disclosure. -->
+    <p class="start-facts" data-reveal>No license or per-seat fee &middot; Nothing leaves your machine &middot; MIT licensed</p>
+  </div>
+</section>
+
+<script>
+  import "../scripts/count-reveal.ts";
+</script>
+
+<style>
+  /* The section owns the brand surface; the global `.brand-surface` recipe
+     paints it and re-tints the shared intro/footnote recipes. overflow:hidden
+     clips the bleeding motif so it can never add horizontal scroll. */
+  .start-here {
+    overflow: hidden;
+    padding: var(--space-10) 0;
+    position: relative;
+  }
+
+  /* The motif is absolutely positioned, so it would paint over the static copy
+     column without this. */
+  .start-here .container {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* 10% opacity and a page-edge crop keep it a texture, never an object; it
+     never reaches the CTA column. Height/width are the mark's box, not the
+     logo's clearspace lockup — this is a watermark, not the logo. */
+  .start-hound {
+    /* currentColor inherits the brand surface's text tone, so the motif can
+       never drift from the surface it is painted on (and a background that is
+       not a bare token stays out of the contrast matrix's surface list). */
+    background: currentColor;
+    -webkit-mask: url("/logo-light.svg") right center / contain no-repeat;
+    mask: url("/logo-light.svg") right center / contain no-repeat;
+    height: 78%;
+    opacity: .1;
+    pointer-events: none;
+    position: absolute;
+    right: calc(-1 * var(--space-10));
+    top: 11%;
+    width: min(46%, 560px);
+  }
+
+  /* Below 900px the copy needs the full width; the motif is the first thing to
+     go. */
+  @media (max-width: 900px) {
+    .start-hound {
+      display: none;
+    }
+  }
+
+  /* The field and the action share one row and wrap together on narrow
+     viewports; align-items keeps the 48px field centred against the 56px CTA. */
+  .start-action {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+
+  /* One Gestalt tier below the controls it qualifies (between groups:
+     space-5–space-6). Licence and privacy fine print never shrink below
+     --text-sm, so this is deliberately NOT the --text-xs .boundary footnote. */
+  .start-facts {
+    color: var(--on-brand-muted);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    margin: var(--space-5) 0 0;
+  }
+</style>
