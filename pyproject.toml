@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "chunkhound"
 dynamic = ["version"]
-description = "Local-first codebase intelligence for AI assistants via MCP"
+description = "Local-first research engine for AI agents via MCP, with a CLI companion"
 readme = "README.md"
 keywords = [
     "code search",

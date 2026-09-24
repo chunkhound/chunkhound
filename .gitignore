@@ -36,6 +36,7 @@ lib/
 !site/src/lib/
 !site/src/lib/*.js
 !site/src/lib/*.ts
+!site/scripts/lib/
 lib64/
 parts/
 sdist/
