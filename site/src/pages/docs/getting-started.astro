@@ -15,7 +15,7 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
 
 <DocsLayout
     title="Getting Started"
-    description="Install ChunkHound, pick your stack, index your code, and verify search end to end."
+    description="Install ChunkHound, choose a setup route, index your code, and verify search end to end."
     toc={[
         { depth: 2, slug: "install", text: "Install" },
         { depth: 2, slug: "index-and-verify", text: "Index and verify" },
@@ -28,16 +28,29 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
     <h1>Get ChunkHound running<span class="title-dot" aria-hidden="true"
         ></span></h1>
     <p class="lead">
-        Install the CLI, pick your stack, index your code. Three commands, two
-        minutes.
+        Install the CLI, choose a setup route, and index your code. Start with
+        the recommended APIs or keep model processing local.
     </p>
 
     <h2 id="install">Install</h2>
-    <PlatformCodeBlock dataCopy={posixCode}>
-        <div data-platform-code="posix" data-platform-copy={posixCode}>
+    <PlatformCodeBlock dataCopy={posixCode} hasPanels idPrefix="install">
+        <div
+            role="tabpanel"
+            id="install-panel-posix"
+            aria-labelledby="install-tab-posix"
+            data-platform-code="posix"
+            data-platform-copy={posixCode}
+        >
             <Code lang="bash" themes={SHIKI_THEMES} defaultColor={false} code={posixCode} />
         </div>
-        <div data-platform-code="powershell" hidden data-platform-copy={psCode}>
+        <div
+            role="tabpanel"
+            id="install-panel-powershell"
+            aria-labelledby="install-tab-powershell"
+            data-platform-code="powershell"
+            hidden
+            data-platform-copy={psCode}
+        >
             <Code lang="powershell" themes={SHIKI_THEMES} defaultColor={false} code={psCode} />
         </div>
     </PlatformCodeBlock>
@@ -52,8 +65,8 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
     </DocsCallout>
 
     <p class="picker-lead">
-        Choose your editor, embedding provider, and LLM. Copy the three commands
-        below and run them from your project root.
+        Choose a route below, review its requirements, then copy the generated
+        setup from your project root.
     </p>
     <p>
         For local or proxied OpenAI-compatible LLM backends like Ollama or
@@ -62,12 +75,20 @@ const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPas
         <code>base_url</code> endpoints, including per-role overrides that
         resolve to OpenAI-compatible providers.
     </p>
-    <Configurator heading="Pick your stack" compact={false} />
+    <Configurator heading="Run ChunkHound locally" compact={false} />
+    <p>
+        For a fully local deployment, we recommend <a href="https://pi.dev">Pi</a>
+        with the <a href="https://pi.dev/packages/pi-mcp-adapter">Pi MCP adapter</a>.
+        Install the adapter once, then use the recommended or local route above.
+    </p>
+    <DocCode code="pi install npm:pi-mcp-adapter" />
 
     <h2 id="index-and-verify">Index and verify</h2>
     <p>
         Run these four commands in order. Each one verifies a different layer of
-        the stack: database, regex search, embeddings, then LLM.
+        the stack: database, regex search, embeddings, then LLM. The embedding
+        and LLM providers are configured independently, so you can set either on
+        its own.
     </p>
 
     <h4>1. Index the project</h4>
@@ -120,7 +141,7 @@ src/main.py:1: import os</code></pre>
     <h2 id="use-it-from-your-agent">Use it from your agent</h2>
     <p>
         Your agent already has ChunkHound &mdash; the editor command from
-        <strong>Pick your stack</strong> registered it as an MCP tool. The
+        <strong>setup route</strong> registered it as an MCP tool. The
         biggest unlock is calling <code>code_research</code> <em>before</em>
         writing code, not after.
     </p>
@@ -165,7 +186,7 @@ src/main.py:1: import os</code></pre>
         a handful of other tools as an <abbr title="Model Context Protocol"
             >MCP</abbr
         > server; your editor connected to it via the command in
-        <strong>Pick your stack</strong>.
+        <strong>setup route</strong>.
     </p>
 
     <h2 id="where-to-next">Where to next</h2>
@@ -192,23 +213,6 @@ src/main.py:1: import os</code></pre>
 </DocsLayout>
 
 <style>
-    .title-dot {
-        display: inline-block;
-        width: 0.18em;
-        height: 0.18em;
-        border-radius: 50%;
-        background: var(--primary-bright);
-        margin-left: 0.05em;
-        vertical-align: baseline;
-    }
-
-    .lead {
-        margin-bottom: var(--space-7);
-        font-size: var(--text-lg);
-        line-height: var(--lh-lg);
-        color: var(--text-secondary);
-    }
-
     /* The picker lead sits above the Configurator's own centered heading,
        so it acts as the §2 section intro. Push it down to space it from
        the previous section before the Configurator's own padding kicks in. */
@@ -237,48 +241,8 @@ src/main.py:1: import os</code></pre>
         color: var(--text-primary);
     }
 
-    .next-grid {
-        display: grid;
-        gap: var(--space-5);
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        margin-top: var(--space-5);
-    }
-
-    .next-card {
-        display: block;
-        padding: var(--space-5);
-        border: var(--border-w-default) solid var(--border-subtle);
-        border-radius: var(--radius-xl);
-        background: var(--bg-surface);
-        color: inherit;
-        text-decoration: none;
-        transition:
-            border-color 0.2s,
-            background 0.2s;
-    }
-
-    :global(html[data-theme="light"]) .next-card {
-        border-color: var(--border-color);
-    }
-
-    .next-card:hover {
-        border-color: var(--primary);
-        text-decoration: none;
-    }
-
-    .next-card h4 {
-        margin-top: 0;
-        margin-bottom: var(--space-3);
-    }
-
     .exit {
         margin-top: var(--space-5);
         color: var(--text-secondary);
-    }
-
-    @media (max-width: 640px) {
-        .next-grid {
-            grid-template-columns: 1fr;
-        }
     }
 </style>
