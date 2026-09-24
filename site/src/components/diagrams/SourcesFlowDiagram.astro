@@ -1,0 +1,115 @@
+---
+import DiagramFigure from "./DiagramFigure.astro";
+import { RESEARCH_PHASES } from "../../lib/architecture";
+
+/**
+ * Deep research as two decoupled phases, rendered from RESEARCH_PHASES.
+ * Exploration searches and narrows any corpus the same way; synthesis turns the
+ * converged result set into one cited answer. The sources are shown in the
+ * context diagram above, so this figure starts where they all enter.
+ *
+ * The accent is spent on the one load-bearing element: the boundary between the
+ * phases — the stable "converged results" seam that keeps the engine
+ * corpus-agnostic. All else is type, weight, and whitespace.
+ */
+---
+
+<DiagramFigure
+  caption="One pipeline, every source"
+  label="Two-phase research path: exploration, then synthesis"
+  description="Every source enters the same path. Exploration searches by meaning and by pattern, then interleaves reranking with a utility model's follow-ups, imports, and gaps until results plateau. Synthesis then map-reduces the converged results, extracts exact constants from chunk metadata, reconciles facts in a ledger, and writes one cited answer."
+>
+  <div class="d-connector">every source enters the same path</div>
+
+  {RESEARCH_PHASES.map((phase, index) => (
+    <>
+      {index > 0 && (
+        <div class="d-connector" data-tone="accent">
+          only the converged results cross this line
+        </div>
+      )}
+      <section class="phase" data-phase={phase.id}>
+        <header class="phase-head">
+          <span class="phase-label">{phase.label}</span>
+          <span class="phase-caption">{phase.caption}</span>
+        </header>
+        <dl class="mechanisms">
+          {phase.mechanisms.map((mechanism) => (
+            <div class="mechanism">
+              <dt>{mechanism.title}</dt>
+              <dd>{mechanism.detail}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+    </>
+  ))}
+
+  <p class="result">One question <span aria-hidden="true">→</span> one cited answer</p>
+</DiagramFigure>
+
+<style>
+  /* Band container = grouping structure, matching the context diagram. */
+  .phase {
+    padding: var(--space-2) var(--space-4);
+    border: var(--border-w-default) solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-surface);
+  }
+
+  .phase-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-3);
+    margin-bottom: var(--space-2);
+  }
+
+  .phase-label {
+    color: var(--text-tertiary);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .phase-caption {
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    line-height: var(--lh-xs);
+  }
+
+  /* Term/definition rows: each mechanism and its one-line meaning. */
+  .mechanisms {
+    display: grid;
+    gap: var(--space-2);
+    margin: 0;
+  }
+
+  .mechanism {
+    display: grid;
+    grid-template-columns: minmax(0, 9rem) 1fr;
+    gap: var(--space-1) var(--space-4);
+    align-items: baseline;
+  }
+
+  .mechanism dt {
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+
+  .mechanism dd {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    line-height: var(--lh-xs);
+  }
+
+  @media (max-width: 720px) {
+    .mechanism {
+      grid-template-columns: 1fr;
+      gap: 0;
+    }
+  }
+</style>

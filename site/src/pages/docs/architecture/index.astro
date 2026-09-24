@@ -1,0 +1,113 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import SystemContextDiagram from "../../../components/diagrams/SystemContextDiagram.astro";
+import SourcesFlowDiagram from "../../../components/diagrams/SourcesFlowDiagram.astro";
+import ElbowChart from "../../../components/diagrams/ElbowChart.astro";
+import TokenRoutingDiagram from "../../../components/diagrams/TokenRoutingDiagram.astro";
+import IndexFlowDiagram from "../../../components/diagrams/IndexFlowDiagram.astro";
+import EngineStages from "../../../components/EngineStages.astro";
+
+// Explanation (Diátaxis): WHY the engine is shaped this way. It opens with the
+// five-stage path, then closes by tying the five ideas together — no component
+// inventory, no limits list, no card grid.
+const toc = [
+    { depth: 2 as const, slug: "context", text: "Where the engine sits" },
+    { depth: 2 as const, slug: "pipeline", text: "One question, one cited answer" },
+    { depth: 2 as const, slug: "cutoff", text: "The adaptive cutoff" },
+    { depth: 2 as const, slug: "tokens", text: "Cheap tokens, expensive tokens" },
+    { depth: 2 as const, slug: "index", text: "From files to a current index" },
+    { depth: 2 as const, slug: "why", text: "Why it is shaped this way" },
+];
+---
+
+<DocsLayout
+    title="Architecture"
+    description="Why the ChunkHound engine is shaped this way: structural chunking, exact and semantic retrieval, an adaptive rerank cutoff, multi-hop exploration, and map-reduce synthesis, over a local code index."
+    toc={toc}
+>
+    <h1>How the engine works<span class="title-dot" aria-hidden="true"></span></h1>
+    <p class="lead">
+        ChunkHound turns your entire codebase, git history, and the web into
+        one cited answer — indexed on your machine, researched by affordable
+        models — because the engine thinks locally before a model writes a word.
+    </p>
+
+    <EngineStages />
+
+    <h2 id="context">Where the engine sits</h2>
+    <p>
+        ChunkHound is a local process that owns a local index. Agents reach it
+        through MCP; shells reach it through the CLI. It reads from your
+        repository, git, and the web, and it calls model providers for
+        embeddings, reranking, and writing. The index stays put; only request
+        content travels.
+    </p>
+    <SystemContextDiagram />
+
+    <h2 id="pipeline">One question, one cited answer</h2>
+    <p>
+        Sources reach the index by different routes: code, diffs, and pages are
+        not the same shape, so each has its own parsers that chunk it
+        accordingly. Once each is chunked and embedded, though, the research
+        that follows is the same for all of them. The engine runs two phases.
+        <strong>Exploration</strong> searches by meaning and by pattern, then
+        interleaves reranking with a utility model&rsquo;s follow-ups, imports, and
+        gaps until the results converge. <strong>Synthesis</strong> turns that
+        converged set into one cited answer through map-reduce, constant
+        extraction, and a fact ledger. Because the phases meet at one stable boundary — a converged
+        result set — the engine stays adaptable: the same exploration and
+        synthesis serve a code repository, a git history, or the open web.
+    </p>
+    <SourcesFlowDiagram />
+
+    <h2 id="cutoff">The adaptive cutoff</h2>
+    <p>
+        Most systems keep a fixed top-k, or scale the budget to repository size.
+        ChunkHound reads the score distribution of the query itself and cuts at
+        its natural elbow — the point that falls farthest from the line between
+        the best and worst scores. When the curve has no clear elbow the result
+        set is kept whole rather than truncated to a guess, while the follow-up
+        thresholds that guide exploration fall back to the median score. A broad
+        question keeps more results; a narrow one keeps less, with no
+        per-repository tuning.
+    </p>
+    <ElbowChart />
+    <p class="result">No fixed top-k. The score curve sets the cutoff.</p>
+
+    <h2 id="tokens">Cheap tokens, expensive tokens</h2>
+    <p>
+        Deep research makes a lot of small model calls — expanding the query,
+        writing follow-up questions, classifying results. ChunkHound routes that
+        volume to a cheap utility model and reserves the synthesis model for a
+        single pass over results that have already been narrowed, clustered, and
+        reduced.
+    </p>
+    <TokenRoutingDiagram />
+
+    <h2 id="index">From files to a current index</h2>
+    <p>
+        Before a question can be answered, files have to become a current index —
+        and at repository scale that is a throughput problem. The engine is
+        written in Rust: it scans in parallel, diffs against the stored index,
+        and overlaps parsing, embedding, and storage so all three run at once.
+        Database writes, compaction, crash recovery, and the embedding HTTP calls
+        are native too. Python still supplies tree-sitter parsing and the
+        embedding fallback for providers without a native client, called from the
+        engine — a holdover from when the whole system was Python. The project is
+        gradually leaving it behind, aiming to retire Python entirely.
+        Speed is only half the point. In a codebase built entirely by AI agents,
+        Rust's static types are the other half — the compiler rejects whole
+        classes of mistake before a single test runs.
+    </p>
+    <IndexFlowDiagram />
+
+    <h2 id="why">Why it is shaped this way</h2>
+    <p>
+        Every choice above follows from one constraint: answer questions larger
+        than the context window, on hardware you own. A local index makes that
+        possible. One retrieval path makes every source comparable. The adaptive
+        cutoff spends context only where the evidence is. The two-model split
+        keeps each answer cheap. And a Rust engine keeps the index current at
+        repository scale.
+    </p>
+</DocsLayout>
