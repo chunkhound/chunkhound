@@ -340,6 +340,10 @@ site/src/pages/docs/changelog.md
 site/public/og-image-dark.png
 site/public/og-image-light.png
 
+# Generated — llms.txt substrate built from docs at build time
+site/public/llms.txt
+site/public/llms-full.txt
+
 # Gemini-CLI
 .gemini/settings.json
 

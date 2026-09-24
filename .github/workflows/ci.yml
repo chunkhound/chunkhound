@@ -57,7 +57,13 @@ jobs:
       - name: Resolve docs version
         run: bash scripts/resolve_docs_version.sh
       - run: npm ci --prefix site
+      - run: npm run check --prefix site
+      # prepare:site runs inside `npm run build` via prebuild — no separate step.
+      - run: npm --prefix site run sync:readme-positioning -- --check
       - run: npm run build --prefix site
+      # llms.txt is gitignored, so the check must run after build regenerates it
+      # (missing files count as drift in check mode).
+      - run: npm --prefix site run generate:llms-txt -- --check
 
   tests:
     needs: site-build
