@@ -14,13 +14,13 @@ indexing rules, etc.) in one place instead of copying .chunkhound.json
 to every project directory. Project-local files override the global layer.
 """
 
-import json
 import os
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ._utils import read_json_file
 from .analytics_config import AnalyticsConfig
 from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
@@ -182,15 +182,15 @@ class Config(BaseModel):
 
         if global_config_file:
             try:
-                with open(global_config_file) as f:
-                    global_config = json.load(f)
-                    self._deep_merge(config_data, global_config)
-                    self._mark_exclude_user_supplied(config_data)
-            except json.JSONDecodeError as e:
+                global_config = read_json_file(global_config_file)
+            # ValueError covers UnicodeDecodeError from non-UTF-8 files too.
+            except ValueError as e:
                 raise ValueError(
                     f"Invalid JSON in global config file {global_config_file}: {e}. "
                     "Please check the file format and try again."
                 )
+            self._deep_merge(config_data, global_config)
+            self._mark_exclude_user_supplied(config_data)
 
         # 3. Check for local .chunkhound.json (overrides env vars and globals)
         if target_dir and target_dir.exists():
@@ -198,15 +198,14 @@ class Config(BaseModel):
             if local_config_path.exists() and local_config_path != config_file:
                 config_data["local_config_file"] = local_config_path.resolve()
                 try:
-                    with open(local_config_path) as f:
-                        local_config = json.load(f)
-                        self._deep_merge(config_data, local_config)
-                        self._mark_exclude_user_supplied(config_data)
-                except json.JSONDecodeError as e:
+                    local_config = read_json_file(local_config_path)
+                except ValueError as e:
                     raise ValueError(
                         f"Invalid JSON in config file {local_config_path}: {e}. "
                         "Please check the file format and try again."
                     )
+                self._deep_merge(config_data, local_config)
+                self._mark_exclude_user_supplied(config_data)
 
         # 4. Load explicit config file last so it wins over auto-discovered local config
         if config_file and not config_file.exists():
@@ -216,15 +215,14 @@ class Config(BaseModel):
             )
         if config_file:
             try:
-                with open(config_file) as f:
-                    file_config = json.load(f)
-                    self._deep_merge(config_data, file_config)
-                    self._mark_exclude_user_supplied(config_data)
-            except json.JSONDecodeError as e:
+                file_config = read_json_file(config_file)
+            except ValueError as e:
                 raise ValueError(
                     f"Invalid JSON in config file {config_file}: {e}. "
                     "Please check the file format and try again."
                 )
+            self._deep_merge(config_data, file_config)
+            self._mark_exclude_user_supplied(config_data)
 
         # 5. Apply CLI arguments (highest precedence)
         if args:
