@@ -352,6 +352,11 @@ plan.txt
 AGENT_REVIEW.md
 HUMAN_REVIEW.md
 
+# Sticker rendered artifacts — SVG is source of truth, PNGs are local renders
+brand/stickers/*.png
+brand/stickers/.outlined-text.svg
+brand/stickers/.outlined-text-vinyl.svg
+
 # Test artifacts (playwright, vitest, etc.)
 site/test-results/
 
