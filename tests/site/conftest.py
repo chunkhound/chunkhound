@@ -13,7 +13,13 @@ DIST = ROOT / "site" / "dist"
 
 @pytest.fixture(scope="session", autouse=True)
 def built_site() -> None:
-    """Build the site once per test session. Set CHUNKHOUND_USE_EXISTING_SITE_DIST=1 to skip and reuse an existing dist."""
+    """Build the site once per test session.
+
+    Set CHUNKHOUND_USE_EXISTING_SITE_DIST=1 to skip and reuse an existing dist.
+    Under reuse, gitignored generated sources (site/public/llms*.txt,
+    og-image-*.png) are absent: tests must read site/dist/** or git-tracked
+    files, never generated site/public files.
+    """
     if os.environ.get("CHUNKHOUND_USE_EXISTING_SITE_DIST") == "1":
         if not DIST.exists():
             raise RuntimeError(

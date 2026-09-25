@@ -740,21 +740,41 @@ def test_social_preview_accent_dot_matches_wordmark_spacing() -> None:
 
 
 def test_built_site_serves_agent_discovery_files() -> None:
-    """Agent-facing public files survive the production build unchanged."""
-    files = {
-        "llms.txt": "# ChunkHound\n",
-        "llms-full.txt": "Full documentation in Markdown for AI agents.",
-        "robots.txt": "User-agent: *\nAllow: /",
+    """Agent discovery files are served with their required content.
+
+    llms.txt/llms-full.txt are gitignored build products, so they do not exist
+    in a checkout (e.g. CI's artifact-reuse job). Assert the served file's
+    contract, never byte-equality with a generated source.
+    """
+    contracts = {
+        "llms.txt": ("# ChunkHound\n", "## Docs\n"),
+        "llms-full.txt": ("Full documentation in Markdown for AI agents.",),
+        "robots.txt": ("User-agent: *\nAllow: /",),
     }
 
-    for name, expected_content in files.items():
+    for name, markers in contracts.items():
         built = DIST / name
-        source = ROOT / "site" / "public" / name
-
         assert built.is_file(), f"Missing built agent discovery file: {name}"
         content = built.read_text(encoding="utf-8")
-        assert content == source.read_text(encoding="utf-8")
-        assert expected_content in content
+        for marker in markers:
+            assert marker in content, f"{name} missing {marker!r}"
+
+    # llms.txt spec: Markdown with exactly one H1.
+    llms = (DIST / "llms.txt").read_text(encoding="utf-8")
+    assert len(re.findall(r"^# ", llms, re.MULTILINE)) == 1
+
+
+def test_built_site_serves_public_assets_verbatim() -> None:
+    """Astro copies committed public/ assets into dist byte-for-byte.
+
+    Uses tracked files only: generated public/ assets are absent in the
+    artifact-reuse job, so they cannot prove verbatim passthrough there.
+    """
+    for name in ("robots.txt", "wordmark-text.svg", "favicon-dark.svg"):
+        source = ROOT / "site" / "public" / name
+        built = DIST / name
+        assert built.is_file(), f"Missing built public asset: {name}"
+        assert built.read_bytes() == source.read_bytes()
 
 
 def test_built_site_has_changelog_page() -> None:
