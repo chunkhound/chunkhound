@@ -142,6 +142,15 @@ jobs:
         # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
         #   process, used on Windows where the file-monitor can miss writes transiently.
         # timeout_minutes * max_attempts must stay below the job-level timeout.
+        # --splitting-algorithm least_duration: without .test_durations BOTH split
+        #   algorithms weight every test uniformly, so the difference is tie-breaking,
+        #   not weighting. duration_based_chunks cuts contiguous collection order; the
+        #   ~279 slow tests/site tests sit clustered there, so all land in group 1
+        #   (observed: 277/0/0). least_duration's heap tie-break round-robins the
+        #   interleaved order across shards, spreading them (observed: 92/97/88).
+        # --timeout activates the matrix keys below: ubuntu/macos 300s matches the
+        #   pyproject default; Windows relaxes per-test timeout 300→600 so a slow-OS
+        #   run isn't clipped mid site-build fixture (its subprocess cap is 600s).
         # continue-on-error: a persistent failure doesn't fail the job by itself — the
         # "Check flaky annotations" step below is the real gate, so the job stays green
         # when every failure is annotated '# flaky: reason'.
@@ -149,7 +158,7 @@ jobs:
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
           max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} --splitting-algorithm least_duration --timeout=${{ matrix.pytest_timeout_seconds }} ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()
