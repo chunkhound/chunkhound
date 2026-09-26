@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.site.process_runner import run_text_process
 from tests.site.tsx_runner import NPM, isolated_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,12 +34,10 @@ def built_site() -> None:
     # Cache dir is deleted on context exit; a stalled build fails, not hangs CI.
     with isolated_subprocess_env() as env:
         try:
-            result = subprocess.run(
+            result = run_text_process(
                 [NPM, "run", "build", "--prefix", "site"],
                 cwd=ROOT,
                 env=env,
-                capture_output=True,
-                text=True,
                 timeout=600,
             )
         except subprocess.TimeoutExpired as e:

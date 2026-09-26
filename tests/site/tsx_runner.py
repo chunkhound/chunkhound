@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 
+from tests.site.process_runner import run_text_process
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NPM: str = shutil.which("npm") or "npm"
 _SUBPROCESS_ENV_ALLOWLIST = (
@@ -28,9 +30,7 @@ _SUBPROCESS_ENV_ALLOWLIST = (
 def _base_subprocess_env(**overrides: str) -> dict[str, str]:
     """Allowlisted host env without the npm cache entry."""
     env = {
-        key: os.environ[key]
-        for key in _SUBPROCESS_ENV_ALLOWLIST
-        if key in os.environ
+        key: os.environ[key] for key in _SUBPROCESS_ENV_ALLOWLIST if key in os.environ
     }
     env.update(overrides)
     return env
@@ -70,18 +70,16 @@ def _absolute_site_imports(script: str) -> str:
 
 
 def _run_npm_tsx(
-    temp_path: pathlib.Path, env: dict[str, str], timeout: float, **kwargs
+    temp_path: pathlib.Path, env: dict[str, str], timeout: float, check: bool
 ) -> subprocess.CompletedProcess:
     """Run the temp script via npm exec tsx with a hung-process guard."""
     try:
-        return subprocess.run(
+        return run_text_process(
             [NPM, "exec", "--prefix", "site", "--", "tsx", str(temp_path)],
-            capture_output=True,
-            text=True,
             cwd=ROOT,
             env=env,
             timeout=timeout,
-            **kwargs,
+            check=check,
         )
     # A stalled tsx subprocess must fail the test, not hang CI.
     except subprocess.TimeoutExpired as e:
@@ -93,32 +91,34 @@ def _run_npm_tsx(
 def run_tsx_raw(script: str, **kwargs) -> subprocess.CompletedProcess:
     """Write script to a temp .mts file in the system temp dir and run via npm exec tsx.
 
-    Returns the raw CompletedProcess. Accepts subprocess.run kwargs except
-    capture_output, text, and cwd (already set). Typical usage: check=False.
-    Defaults to an isolated env with a per-call npm cache dir (deleted after
-    the run); pass env=... to override.
+    Accepts timeout=, env=, and check=; the rest of the subprocess options are
+    fixed here. Output is decoded as UTF-8 (see process_runner). Defaults to an
+    isolated env with a per-call npm cache dir (deleted after the run); pass
+    env=... to override.
     """
     # Inline -e breaks on Windows: npm.CMD (batch file) treats newlines as
     # command separators, truncating the script to an empty string. The system
     # temp dir is used so read-only checkouts stay runnable.
+    # Validate kwargs before writing the temp file so an error path can't leak it.
+    timeout = kwargs.pop("timeout", 120)
+    check = kwargs.pop("check", False)
+    custom_env = kwargs.pop("env", None)
+    if kwargs:
+        raise TypeError(f"unexpected run_tsx_raw kwargs: {sorted(kwargs)}")
     script = _absolute_site_imports(script)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".mts", delete=False, encoding="utf-8"
     ) as f:
         temp_path = pathlib.Path(f.name)
         f.write(script)
-    timeout = kwargs.pop("timeout", 120)
-    if "env" in kwargs:
-        try:
-            return _run_npm_tsx(temp_path, kwargs.pop("env"), timeout, **kwargs)
-        finally:
-            temp_path.unlink(missing_ok=True)
-    # Default path owns its npm cache dir; TemporaryDirectory deletes it.
-    with isolated_subprocess_env() as env:
-        try:
-            return _run_npm_tsx(temp_path, env, timeout, **kwargs)
-        finally:
-            temp_path.unlink(missing_ok=True)
+    try:
+        if custom_env is not None:
+            return _run_npm_tsx(temp_path, custom_env, timeout, check)
+        # Default path owns its npm cache dir; TemporaryDirectory deletes it.
+        with isolated_subprocess_env() as env:
+            return _run_npm_tsx(temp_path, env, timeout, check)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def run_tsx_json(script: str) -> dict:

@@ -12,6 +12,7 @@ from tests.site.html_helpers import (
     meta_tag_content,
 )
 from tests.site.png_helpers import png_dimensions
+from tests.site.process_runner import run_text_process
 from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +27,7 @@ def _clean_dev_suffix(version: str) -> str:
 
 
 def _run(command: list[str], cwd: Path) -> None:
-    subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
+    run_text_process(command, cwd=cwd, check=True)
 
 
 def _create_tagged_repo(repo_dir: Path, version_tag: str) -> None:
@@ -56,12 +57,10 @@ def _expected_docs_version(
             raise AssertionError("Could not parse chunkhound/_version.py version")
         return _normalize_version(match.group(1))
 
-    git_describe = subprocess.run(
+    git_describe = run_text_process(
         ["git", "describe", "--tags", "--abbrev=0"],
         cwd=root,
         check=True,
-        capture_output=True,
-        text=True,
     )
     return _normalize_version(git_describe.stdout.strip())
 
