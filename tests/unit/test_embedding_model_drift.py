@@ -19,7 +19,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
+from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES, VOYAGE_DEFAULT_MODEL
 from chunkhound.core.embedding_model_drift import (
     ActiveModel,
     ActiveModelStateError,
@@ -612,3 +612,11 @@ class TestUpgradeSuggestions:
         for superseded, successor in EMBEDDING_MODEL_UPGRADES["voyageai"].items():
             assert superseded in VOYAGE_MODEL_CONFIG
             assert successor in VOYAGE_MODEL_CONFIG
+
+    def test_the_previous_general_default_upgrades_to_the_current_default(self):
+        """voyage-3.5 was the general default; its successor must be the current
+        general default, or the hint strands operators on a non-default tier."""
+        assert (
+            EMBEDDING_MODEL_UPGRADES["voyageai"]["voyage-3.5"]
+            == VOYAGE_DEFAULT_MODEL
+        )
