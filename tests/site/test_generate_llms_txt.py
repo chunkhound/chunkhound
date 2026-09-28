@@ -16,7 +16,7 @@ import tempfile
 import pytest
 
 from tests.site.process_runner import run_text_process
-from tests.site.tsx_runner import NPM, ROOT, sanitized_subprocess_env
+from tests.site.tsx_runner import NPM, ROOT, isolated_subprocess_env
 
 GENERATE_SCRIPT = ROOT / "site" / "scripts" / "generate-llms-txt.mjs"
 
@@ -57,38 +57,63 @@ def _run_generate(
     repo_root: pathlib.Path, *extra: str
 ) -> subprocess.CompletedProcess:
     """Run generate-llms-txt.mjs against a fake repo directory."""
-    env = sanitized_subprocess_env(CHUNKHOUND_ROOT=str(repo_root))
-    return run_text_process(
-        [NPM, "exec", "--prefix", "site", "--", "node", str(GENERATE_SCRIPT), *extra],
-        cwd=ROOT,
-        env=env,
-    )
+    with isolated_subprocess_env(CHUNKHOUND_ROOT=str(repo_root)) as env:
+        return run_text_process(
+            [
+                NPM,
+                "exec",
+                "--prefix",
+                "site",
+                "--",
+                "node",
+                str(GENERATE_SCRIPT),
+                *extra,
+            ],
+            cwd=ROOT,
+            env=env,
+        )
 
 
 def _output(repo_root: pathlib.Path, name: str) -> str:
     return (repo_root / "site" / "public" / name).read_text(encoding="utf-8")
 
 
-def _markdown_docs_hrefs() -> list[str]:
-    """The .md docs pages flattened into llms-full.txt, parsed from the generator."""
-    source = GENERATE_SCRIPT.read_text(encoding="utf-8")
-    match = re.search(r"const MARKDOWN_DOCS_HREFS = \[(.*?)\];", source, re.DOTALL)
-    assert match, "MARKDOWN_DOCS_HREFS not found in generate-llms-txt.mjs"
-    return re.findall(r'"([^"]+)"', match.group(1))
+def _strip_frontmatter(text: str) -> str:
+    """Body after the closing frontmatter fence — the slice llms-full.txt keeps."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return text
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[index + 1 :])
+    return text
 
 
 def test_every_markdown_docs_page_reaches_llms_full() -> None:
     """A new .md docs page must fail here, not silently vanish from
-    llms-full.txt (MARKDOWN_DOCS_HREFS is the single list the generator flattens)."""
+    llms-full.txt. Rather than parse the generator's flatten list, we run the
+    real generator over the real docs and require every page's body to reach
+    the output, so the check is on what the generator emits."""
     docs_dir = ROOT / "site" / "src" / "pages" / "docs"
-    markdown_pages = {
-        f"/docs/{page.relative_to(docs_dir).with_suffix('').as_posix()}/"
-        for page in docs_dir.rglob("*.md")
-    }
-    missing = markdown_pages - set(_markdown_docs_hrefs())
-    assert not missing, (
-        f"add these to MARKDOWN_DOCS_HREFS in generate-llms-txt.mjs: {sorted(missing)}"
-    )
+    real_docs = {p.relative_to(docs_dir): p for p in docs_dir.rglob("*.md")}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo_root = pathlib.Path(tmp)
+        _write_fake_repo(repo_root)
+        staged_docs = repo_root / "site" / "src" / "pages" / "docs"
+        for relative, source in real_docs.items():
+            staged = staged_docs / relative
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+        result = _run_generate(repo_root)
+        assert result.returncode == 0, result.stderr
+        full = _output(repo_root, "llms-full.txt")
+
+    for relative, source in real_docs.items():
+        body = _strip_frontmatter(source.read_text(encoding="utf-8")).strip()
+        assert body, f"{relative} has no body to reach llms-full.txt"
+        assert body in full, f"{relative} is missing from llms-full.txt"
 
 
 def test_mcp_anchor_linked_by_llms_txt_exists_in_getting_started() -> None:

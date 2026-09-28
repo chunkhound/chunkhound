@@ -36,18 +36,6 @@ def _base_subprocess_env(**overrides: str) -> dict[str, str]:
     return env
 
 
-def sanitized_subprocess_env(**overrides: str) -> dict[str, str]:
-    """Build a hermetic runtime env for site subprocess tests."""
-    env = _base_subprocess_env(**overrides)
-    # npm exec reads the host npm cache; a broken/hostile cache must not fail
-    # unrelated tests, so every subprocess gets its own private cache dir.
-    # Prefer isolated_subprocess_env() for new call sites: it owns the cache
-    # dir lifetime via TemporaryDirectory instead of leaving mkdtemp cleanup
-    # to the caller.
-    env.setdefault("npm_config_cache", tempfile.mkdtemp(prefix="npm-cache-"))
-    return env
-
-
 @contextlib.contextmanager
 def isolated_subprocess_env(**overrides: str):
     """Yield a hermetic env whose private npm cache dir is deleted on exit."""

@@ -13,7 +13,7 @@ from tests.site.html_helpers import (
 )
 from tests.site.png_helpers import png_dimensions
 from tests.site.process_runner import run_text_process
-from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
+from tests.site.tsx_runner import isolated_subprocess_env, run_tsx_json, run_tsx_raw
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
@@ -236,13 +236,15 @@ def test_homepage_hero_is_one_terminal_surface() -> None:
     assert "hero-intro" not in homepage
     assert "hero-stage" not in homepage
 
-    # The surface itself owns the full-bleed code background.
+    # The surface itself owns the full-bleed code background. The hero's CSS
+    # was extracted to site/src/styles/hero-terminal.css (global, no Astro
+    # scoping attribute), so match the plain `.hero` rule.
     css = "".join(
         bundle.read_text(encoding="utf-8")
         for bundle in (DIST / "_astro").glob("*.css")
     )
     assert re.search(
-        r"\.hero\[[^\]]*\]\{[^}]*background:\s*var\(--code-bg\)", css
+        r"\.hero\{[^}]*background:\s*var\(--code-bg\)", css
     ), "the hero section must own the full-bleed code surface"
 
 
@@ -281,7 +283,8 @@ def test_homepage_section_banding_alternates_positionally() -> None:
     )
     assert _BAND_RULE.search(css), (
         "Homepage banding must be positional "
-        "(main > section:nth-of-type(even):not(.brand-surface) { background: var(--bg-band) }) "
+        "(main > section:nth-of-type(even):not(.brand-surface) "
+        "{ background: var(--bg-band) }) "
         "so adjacent sections can never share a tone"
     )
 
@@ -537,25 +540,24 @@ def test_homepage_closing_section_is_the_single_activation_cta() -> None:
 def test_version_helper_contract(scenario: str, expected_version: str | None) -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         repo_dir = Path(temp_dir)
-        env = sanitized_subprocess_env()
+        with isolated_subprocess_env() as env:
+            if scenario == "env_only":
+                env["CHUNKHOUND_DOCS_VERSION"] = "v4.1.0b1"
+            elif scenario == "env_over_file_and_git":
+                env["CHUNKHOUND_DOCS_VERSION"] = "v4.1.0b2"
+                _write_version_file(repo_dir, "4.2.0b1.dev3")
+                _create_tagged_repo(repo_dir, "v4.3.0rc1")
+            elif scenario == "version_file_only":
+                _write_version_file(repo_dir, "4.2.0b1.dev3")
+            elif scenario == "file_over_git":
+                _write_version_file(repo_dir, "4.2.1.dev2")
+                _create_tagged_repo(repo_dir, "v4.3.0rc1")
+            elif scenario == "git_tag_only":
+                _create_tagged_repo(repo_dir, "v4.3.0rc1")
+            elif scenario != "no_sources":
+                raise AssertionError(f"Unhandled scenario {scenario}")
 
-        if scenario == "env_only":
-            env["CHUNKHOUND_DOCS_VERSION"] = "v4.1.0b1"
-        elif scenario == "env_over_file_and_git":
-            env["CHUNKHOUND_DOCS_VERSION"] = "v4.1.0b2"
-            _write_version_file(repo_dir, "4.2.0b1.dev3")
-            _create_tagged_repo(repo_dir, "v4.3.0rc1")
-        elif scenario == "version_file_only":
-            _write_version_file(repo_dir, "4.2.0b1.dev3")
-        elif scenario == "file_over_git":
-            _write_version_file(repo_dir, "4.2.1.dev2")
-            _create_tagged_repo(repo_dir, "v4.3.0rc1")
-        elif scenario == "git_tag_only":
-            _create_tagged_repo(repo_dir, "v4.3.0rc1")
-        elif scenario != "no_sources":
-            raise AssertionError(f"Unhandled scenario {scenario}")
-
-        result = _run_version_helper(repo_dir, env)
+            result = _run_version_helper(repo_dir, env)
         combined_output = f"{result.stdout}\n{result.stderr}"
 
     if expected_version is not None:
@@ -569,8 +571,12 @@ def test_version_helper_contract(scenario: str, expected_version: str | None) ->
 
 def test_homepage_research_connects_repo_and_web_for_real_questions() -> None:
     homepage = (DIST / "index.html").read_text(encoding="utf-8")
-    research_match = re.search(r'<section id="research".*?</section>', homepage, re.DOTALL)
-    questions_match = re.search(r'<section id="questions".*?</section>', homepage, re.DOTALL)
+    research_match = re.search(
+        r'<section id="research".*?</section>', homepage, re.DOTALL
+    )
+    questions_match = re.search(
+        r'<section id="questions".*?</section>', homepage, re.DOTALL
+    )
     assert research_match is not None
     assert questions_match is not None
     research = research_match.group(0)
@@ -715,6 +721,29 @@ def test_built_site_has_og_meta_tags() -> None:
     tw_card = meta_tag_content(homepage, "name", "twitter:card")
     assert tw_card is not None, "Missing twitter:card meta tag"
     assert tw_card == "summary_large_image"
+
+
+def test_built_docs_meta_descriptions_follow_navigation() -> None:
+    nav = run_tsx_json(
+        """import { DOCS_PAGES } from './site/src/lib/nav.ts';
+console.log(JSON.stringify({ pages: DOCS_PAGES }));"""
+    )
+    # nav.ts is the SSOT for docs meta copy (DocsLayout resolves it by path), so
+    # a docs route absent from DOCS_PAGES silently falls back to its own prop.
+    # Assert the built docs tree and the nav list agree, not just the listed pages.
+    built = {
+        f"/{path.parent.relative_to(DIST).as_posix()}/"
+        for path in (DIST / "docs").glob("*/index.html")
+    }
+    assert built == {page["href"] for page in nav["pages"]}, (
+        "DOCS_PAGES and the built docs tree disagree"
+    )
+    for page in nav["pages"]:
+        html = (DIST / page["href"].strip("/") / "index.html").read_text(
+            encoding="utf-8"
+        )
+        expected = page.get("seoDescription", page["description"])
+        assert meta_tag_content(html, "name", "description") == expected, page["href"]
 
 
 def test_readme_branding_assets_exist() -> None:

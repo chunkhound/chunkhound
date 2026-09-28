@@ -46,7 +46,9 @@ if (!embedding || !llm) {{
   throw new Error('missing provider');
 }}
 
-console.log(JSON.stringify(buildCompactConfiguratorOutput(embedding, llm, '{editor_id}')));
+console.log(
+  JSON.stringify(buildCompactConfiguratorOutput(embedding, llm, '{editor_id}'))
+);
 """
     return run_tsx_json(script)
 
@@ -223,6 +225,9 @@ console.log(JSON.stringify({
 """
     rendered = run_tsx_json(script)
 
+    # Guard the denominator: `visited == count` is vacuous when both are 0
+    # (same source), so an empty provider matrix must fail here.
+    assert rendered["count"] > 0, "configurator matrix rendered no combinations"
     assert rendered["visited"] == rendered["count"]
     assert rendered["errors"] == []
 

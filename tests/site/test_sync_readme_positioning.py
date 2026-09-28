@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 
 from tests.site.process_runner import run_text_process
-from tests.site.tsx_runner import NPM, ROOT, sanitized_subprocess_env
+from tests.site.tsx_runner import NPM, ROOT, isolated_subprocess_env
 
 SYNC_SCRIPT = ROOT / "site" / "scripts" / "sync-readme-positioning.mjs"
 POSITIONING_FILE = ROOT / "site" / "src" / "lib" / "positioning.json"
@@ -77,12 +77,12 @@ def _make_repo_with_positioning(tmp: str, positioning: dict) -> pathlib.Path:
 
 def _run_sync(repo_root: pathlib.Path, *extra: str) -> subprocess.CompletedProcess:
     """Run sync-readme-positioning.mjs against a fake repo directory."""
-    env = sanitized_subprocess_env(CHUNKHOUND_ROOT=str(repo_root))
-    return run_text_process(
-        [NPM, "exec", "--prefix", "site", "--", "node", str(SYNC_SCRIPT), *extra],
-        cwd=ROOT,
-        env=env,
-    )
+    with isolated_subprocess_env(CHUNKHOUND_ROOT=str(repo_root)) as env:
+        return run_text_process(
+            [NPM, "exec", "--prefix", "site", "--", "node", str(SYNC_SCRIPT), *extra],
+            cwd=ROOT,
+            env=env,
+        )
 
 
 def test_sync_replaces_block_and_preserves_surroundings() -> None:

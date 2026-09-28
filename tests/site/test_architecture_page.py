@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_module
+import re
 from pathlib import Path
 
 from tests.site.html_helpers import (
@@ -58,7 +59,8 @@ def test_architecture_page_claims_one_pipeline_for_every_source() -> None:
 
 
 def test_architecture_page_states_how_the_index_is_built_accurately() -> None:
-    """The index build runs on a Rust engine; Python keeps parsing and the embedding fallback.
+    """The index build runs on a Rust engine; Python keeps parsing and the
+    embedding fallback.
 
     Guards the bug class the redesign removed: a page claiming the indexing
     pipeline is Python-orchestrated, or crediting Rust with parsing/embedding it
@@ -87,6 +89,22 @@ def test_architecture_page_states_how_the_index_is_built_accurately() -> None:
         assert false_claim not in text
 
 
+def test_architecture_page_toc_tracks_its_heading_anchors() -> None:
+    """The page's hand-written toc must mirror its rendered <h2 id> anchors.
+
+    Unlike Markdown pages, this .astro page cannot derive its toc from
+    `headings`, so the authored array is the source. Reading the rendered hrefs
+    keeps a heading rename from shipping a toc link that points at nothing (and
+    vice versa).
+    """
+    document = _read(EXPLANATION_ROUTE)
+    toc_slugs = re.findall(r'<a class="toc-link" href="#([^"]+)"', document)
+    anchor_ids = re.findall(r'<h2 id="([^"]+)"', document)
+
+    assert toc_slugs, "architecture page rendered no toc links"
+    assert toc_slugs == anchor_ids, "toc links drifted from the page's <h2 id> anchors"
+
+
 def test_architecture_is_reachable_from_docs_navigation() -> None:
     document = _read(EXPLANATION_ROUTE)
 
@@ -97,4 +115,14 @@ def test_retired_enterprise_architecture_route_redirects_here() -> None:
     redirect = DIST / "enterprise" / "architecture" / "index.html"
 
     assert redirect.exists()
-    assert "/docs/architecture/" in redirect.read_text(encoding="utf-8")
+    # Assert the redirect mechanism itself, not an incidental /docs/architecture/
+    # link (the page also carries the canonical URL): a meta refresh must point
+    # the retired route at the explanation page.
+    content = meta_tag_content(_read(redirect), "http-equiv", "refresh")
+    assert content is not None, "retired route lost its meta refresh redirect"
+    target = re.search(r"url\s*=\s*['\"]?([^'\";]+)", content, re.IGNORECASE)
+    assert target is not None, f"meta refresh has no redirect target: {content!r}"
+    expected = "/docs/architecture/"
+    assert target.group(1).rstrip("/") == expected.rstrip("/"), (
+        f"retired route redirects to {target.group(1)!r}, not {expected!r}"
+    )

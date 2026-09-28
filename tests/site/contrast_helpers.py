@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from tests.site.tsx_runner import ROOT
+
 GLOBAL_CSS = ROOT / "site" / "src" / "styles" / "global.css"
 
 

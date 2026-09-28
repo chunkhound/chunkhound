@@ -25,7 +25,8 @@ def built_site() -> None:
         if not DIST.exists():
             raise RuntimeError(
                 f"Expected prebuilt site at {DIST}. "
-                f"Run 'npm run build --prefix site' first, or unset CHUNKHOUND_USE_EXISTING_SITE_DIST."
+                f"Run 'npm run build --prefix site' first, or unset "
+                f"CHUNKHOUND_USE_EXISTING_SITE_DIST."
             )
         print(f"Reusing existing site dist at {DIST}")
         return
@@ -48,4 +49,6 @@ def built_site() -> None:
         sys.stderr.write(result.stderr)
         result.check_returncode()
     if not (DIST / "index.html").exists():
-        raise RuntimeError(f"Build succeeded but {DIST / 'index.html'} was not produced")
+        raise RuntimeError(
+            f"Build succeeded but {DIST / 'index.html'} was not produced"
+        )
