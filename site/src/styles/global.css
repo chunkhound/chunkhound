@@ -368,6 +368,31 @@ h2, h3, h4 { font-weight: 600; }
   padding: var(--space-5);
 }
 
+/* Tile type recipe: the heading, label, and body copy inside a tile. A
+   component owns only its deviations (margins, emphasis). A label paragraph is
+   not body copy, so it opts out of the body rule via :where (zero specificity)
+   and re-voices itself as .card-tile .card-label below; a label with its own
+   voice (.evidence) simply outranks the bare class. */
+.card-tile h3 {
+  color: var(--text-primary);
+  font-size: var(--text-lg);
+  line-height: var(--lh-lg);
+}
+.card-tile p:where(:not(.card-label)) {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: var(--lh-sm);
+}
+/* Tile label: uppercase micro-label above the heading (KnowledgeCard's label). */
+.card-tile .card-label {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: var(--space-2);
+}
+
 /* Shared 3-up tile row: peer card-tiles on equal columns with one entrance
    rhythm. Peers carry the default [data-reveal] fade-up; the row's own
    --reveal-delay staggers them left→right. A component overrides this recipe

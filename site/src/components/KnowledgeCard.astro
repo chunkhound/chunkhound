@@ -33,22 +33,13 @@ const { label, title, sources } = Astro.props;
 </article>
 
 <style>
+  /* Type comes from the shared .card-tile recipe (global.css); only the card
+     layout and the heading gap are local. */
   .knowledge-card {
     display: flex;
     flex-direction: column;
   }
-  .card-label {
-    color: var(--text-tertiary);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    margin-bottom: var(--space-2);
-  }
   .card-title {
-    color: var(--text-primary);
-    font-size: var(--text-lg);
-    line-height: var(--lh-lg);
     margin-bottom: var(--space-3);
   }
   ul {
