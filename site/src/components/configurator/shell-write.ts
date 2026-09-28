@@ -28,15 +28,15 @@ export function quotePowerShell(value: string): string {
 export function quotePosix(value: string): string {
   if (!/[^A-Za-z0-9_@%+=:,./~-]/.test(value)) return value;
   if (value.startsWith("~/")) {
-    // Double quotes expand `$` (and trigger backtick command substitution),
-    // so a later `$` must be escaped or a `$VAR` segment would interpolate.
-    // The leading `$HOME` itself must keep expanding — that is why this
-    // branch double-quotes — so only non-initial `$` are escaped.
+    // Double quotes expand `$` (and trigger backtick command substitution).
+    // `$HOME` is prepended unescaped so it expands; every `$` in the body
+    // (already stripped of `~/`) must be escaped or a `$VAR` segment would
+    // interpolate. An anchor cannot be used here — the body was sliced.
     const escaped = value
       .slice(2)
       .replace(/`/g, "\\`")
       .replace(/"/g, '\\"')
-      .replace(/(?!^)\$/g, "\\$");
+      .replace(/\$/g, "\\$");
     return `"$HOME/${escaped}"`;
   }
   return `'${value.replace(/'/g, "'\\''")}'`;
