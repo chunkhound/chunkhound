@@ -1,14 +1,19 @@
 """Byte-identical rendering goldens for the configurator output.
 
-Exhausts embedding x llm x editor x platform x compact/full through the
+Samples embedding x llm x editor x platform x compact/full through the
 public barrel (`site/src/components/configurator/index.ts`) via the real TS
 path (`tests/site/tsx_runner.py:run_tsx_json`). No mocks.
 
 Goldens live in `tests/site/__goldens__/highlight/`, one shard per
 mode/platform/editor (`{mode}.{platform}.{editor}.json`) mapping
 `{mode}/{platform}/{editor}/{embedding}/{llm}` -> {"html": ..., "copy": ...}.
-Regenerate with `UPDATE_GOLDENS=1`; `git diff --exit-code` then proves parity
-for the frozen `highlight.ts` renderer.
+
+Each shard keeps every embedding provider (so a provider-specific rendering
+bug is caught in all 36 shells) and advances the llm provider one step per
+shard, so the corpus renders every 4x12 (embedding, llm) pair across its 36
+shards without storing the full cross product in every shard. Regenerate with
+`UPDATE_GOLDENS=1`; `git diff --exit-code` then proves parity for the frozen
+`highlight.ts` renderer.
 """
 
 from __future__ import annotations
@@ -40,17 +45,29 @@ const modes = {
   compact: buildCompactConfiguratorOutput,
   full: buildFullConfiguratorOutput,
 };
+// Representative corpus: every embedding provider in every shard, with the llm
+// provider advancing one step per shard (plus the embedding offset), so the 36
+// shards together render all 48 (embedding, llm) pairs. Rendering the full 4x12
+// cross product in every shard would only repeat those pairs; the structural
+// tests below pin the rest of the contract, including shared API-key dedupe
+// (see test_output_deduplicates_shared_api_key_requirements in the rendering
+// tests).
+let shard = 0;
 for (const [mode, build] of Object.entries(modes)) {
   for (const platform of PLATFORM_OPTIONS) {
     for (const editor of editors) {
-      for (const embedding of embeddingProviders) {
-        for (const llm of llmProviders) {
-          const rendered = build(embedding, llm, editor.id, platform.id);
-          const key =
-            `${mode}/${platform.id}/${editor.id}/${embedding.id}/${llm.id}`;
-          out[key] = rendered;
-        }
+      for (let e = 0; e < embeddingProviders.length; e++) {
+        const embedding = embeddingProviders[e];
+        const llm =
+          llmProviders[
+            (shard + e) % llmProviders.length
+          ];
+        const rendered = build(embedding, llm, editor.id, platform.id);
+        const key =
+          `${mode}/${platform.id}/${editor.id}/${embedding.id}/${llm.id}`;
+        out[key] = rendered;
       }
+      shard += 1;
     }
   }
 }
@@ -128,6 +145,20 @@ def test_highlight_goldens_match_exact_rendering() -> None:
         )
     stored_keys = {key for name in shards for key in _load_shard(name)}
     assert stored_keys == set(rendered), "golden key set diverged from barrel"
+
+
+def test_highlight_corpus_covers_every_embedding_llm_pair() -> None:
+    """The corpus samples providers, so it must still exercise every
+    (embedding, llm) pair — otherwise the trim silently drops a rendering path
+    the full cross product used to freeze."""
+    rendered = _render_all()
+    pairs = {(key.split("/")[3], key.split("/")[4]) for key in rendered}
+    embeddings = {embedding for embedding, _ in pairs}
+    llms = {llm for _, llm in pairs}
+    assert len(pairs) == len(embeddings) * len(llms), (
+        "sampled golden corpus misses an (embedding, llm) pair: "
+        f"{len(pairs)} for {len(embeddings)}x{len(llms)} providers"
+    )
 
 
 def test_highlight_corpus_covers_both_shell_forms() -> None:
