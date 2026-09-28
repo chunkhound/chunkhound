@@ -3,7 +3,7 @@ import type { MarkdownLayoutProps } from 'astro';
 import Base from './Base.astro';
 import Nav from '../components/Nav.astro';
 import DocsSidebar from '../components/DocsSidebar.astro';
-import { DOCS_HOME } from '../lib/nav';
+import { DOCS_HOME, DOCS_PAGES, normalizePath } from '../lib/nav';
 import '../styles/docs.css';
 import '../styles/diagrams.css';
 
@@ -36,7 +36,18 @@ const normalizeToc = (
 
 const props = Astro.props as Props;
 const title = 'frontmatter' in props ? props.frontmatter.title : props.title;
-const description = 'frontmatter' in props ? props.frontmatter.description : props.description;
+const passedDescription =
+  'frontmatter' in props ? props.frontmatter.description : props.description;
+// nav.ts is the single source of truth for docs meta copy: matching by path
+// lets .md pages (which cannot import TS) derive it from the same blurb the
+// sidebar/hub/llms.txt use. `seoDescription` is a deliberate longer override for
+// pages whose search snippet must exceed the short blurb. A passed prop is used
+// solely for paths nav.ts does not model (e.g. the docs hub).
+const navPage = DOCS_PAGES.find(
+  (page) => normalizePath(page.href) === normalizePath(Astro.url.pathname),
+);
+const description =
+  navPage?.seoDescription ?? navPage?.description ?? passedDescription;
 const pageTitle = title ? `${title} — ChunkHound Docs` : 'ChunkHound Docs';
 const toc = 'toc' in props && props.toc?.length ? props.toc : normalizeToc('headings' in props ? props.headings : undefined);
 const showBreadcrumb = !('breadcrumb' in props) || props.breadcrumb !== false;

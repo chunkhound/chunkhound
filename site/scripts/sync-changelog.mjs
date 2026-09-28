@@ -24,7 +24,6 @@ const SITE_CHANGELOG = resolve(repoRoot, "site/src/pages/docs/changelog.md");
 const FRONTMATTER = `---
 layout: ../../layouts/DocsLayout.astro
 title: "Changelog"
-description: "Release history and breaking changes for ChunkHound."
 order: 4
 section: "manual"
 ---

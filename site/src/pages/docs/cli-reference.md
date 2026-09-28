@@ -1,7 +1,6 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: "CLI Reference"
-description: "Complete reference for all ChunkHound CLI commands and flags."
 order: 3
 section: "manual"
 ---

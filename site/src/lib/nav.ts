@@ -14,7 +14,15 @@ export type DocsPage = {
   href: string;
   /** Phosphor web-component name; rendered via PhosphorIcon. */
   icon: string;
+  /** Sidebar/hub blurb. */
   description: string;
+  /**
+   * Longer, search-optimized meta description for the page's `<head>`. Only set
+   * it when the short `description` would undersell the page in search results;
+   * otherwise DocsLayout falls back to `description`, so the sidebar/hub/llms.txt
+   * blurb stays the single source for short meta copy.
+   */
+  seoDescription?: string;
   /** Feature this guide as a top-nav destination on marketing pages. */
   inTopNav?: boolean;
 };
@@ -35,6 +43,8 @@ export const DOCS_PAGES: DocsPage[] = [
     icon: 'ph-tree-structure',
     description:
       'Why the engine is shaped this way: structural chunking, exact and semantic retrieval, and cited synthesis over a local index.',
+    seoDescription:
+      'Why the ChunkHound engine is shaped this way: structural chunking, exact and semantic retrieval, an adaptive rerank cutoff, multi-hop exploration, and map-reduce synthesis, over a local code index.',
     inTopNav: true,
   },
   {

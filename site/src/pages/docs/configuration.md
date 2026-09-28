@@ -1,7 +1,6 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: "Configuration"
-description: "Configure embedding providers, database backends, and indexing behavior."
 order: 2
 section: "manual"
 ---
