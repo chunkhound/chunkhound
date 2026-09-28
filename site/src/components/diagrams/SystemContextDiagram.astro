@@ -51,9 +51,9 @@ if (LINKS.length !== SYSTEM_LAYERS.length - 1) {
               </span>
             </div>
           )}
-          <section class="layer" data-layer={layer.id}>
-            <header class="layer-head">
-              <span class="layer-label">
+          <section class="layer d-band" data-layer={layer.id}>
+            <header class="layer-head d-band-head">
+              <span class="layer-label d-band-label">
                 {layer.id === "engine" && (
                   <span class="layer-mark" aria-hidden="true">
                     <img src="/logo.svg" alt="" class="layer-mark-light" />
@@ -62,7 +62,7 @@ if (LINKS.length !== SYSTEM_LAYERS.length - 1) {
                 )}
                 {layer.label}
               </span>
-              <span class="layer-caption">{layer.caption}</span>
+              <span class="layer-caption d-band-caption">{layer.caption}</span>
             </header>
             <ul class="nodes">
               {layer.nodes.map((node) => (
@@ -84,36 +84,21 @@ if (LINKS.length !== SYSTEM_LAYERS.length - 1) {
     gap: 0;
   }
 
-  /* The band container is grouping structure — one box per layer. */
-  .layer {
-    padding: var(--space-2) var(--space-4);
-    border: var(--border-w-default) solid var(--border-color);
-    border-radius: var(--radius-lg);
-    background: var(--bg-surface);
-  }
-
   /* The engine is the local process that owns the index — the figure's center. */
   .layer[data-layer="engine"] {
     border-color: var(--primary);
   }
 
+  /* This stack is tighter than the flow bands: the link rule supplies the gap. */
   .layer-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: var(--space-1) var(--space-3);
     margin-bottom: var(--space-1);
   }
 
+  /* The band label leads a mark only on the engine band, so it carries the glyph. */
   .layer-label {
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    color: var(--text-tertiary);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
   }
 
   /* Only the product's own band carries a mark; every other band is text.
@@ -142,12 +127,6 @@ if (LINKS.length !== SYSTEM_LAYERS.length - 1) {
 
   :global([data-theme="dark"]) .layer-mark-dark {
     display: block;
-  }
-
-  .layer-caption {
-    color: var(--text-secondary);
-    font-size: var(--text-xs);
-    line-height: var(--lh-xs);
   }
 
   /* Each band distributes its OWN nodes across the full width, so a band with

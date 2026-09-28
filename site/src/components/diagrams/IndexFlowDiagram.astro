@@ -17,17 +17,17 @@ import { INDEX_PHASES } from "../../lib/architecture";
   label="Index build phases from discovery to compaction"
   description="The indexing engine is written in Rust: it discovers files in parallel, diffs them against the stored index, overlaps parsing, embedding, and storage on dedicated threads, and owns the database writes, compaction, and crash recovery. Embedding providers are called natively over HTTP, with a Python fallback for providers without a native client. Parsing still runs in Python and is slated to move to Rust, with the goal of retiring Python entirely."
 >
-  <section class="engine">
-    <header class="engine-head">
-      <span class="engine-label">The indexing engine</span>
-      <span class="engine-caption">
+  <section class="engine d-band">
+    <header class="engine-head d-band-head">
+      <span class="engine-label d-band-label">The indexing engine</span>
+      <span class="engine-caption d-band-caption">
         Rust drives the build, HTTP embedding included; parsing runs in Python
         today.
       </span>
     </header>
-    <dl class="phases">
+    <dl class="phases d-term-list">
       {INDEX_PHASES.map((phase) => (
-        <div class="phase" data-language={phase.language}>
+        <div class="phase d-term" data-language={phase.language}>
           <dt>{phase.title}</dt>
           <dd>{phase.detail}</dd>
           <span class="phase-lang">{phase.language}</span>
@@ -42,67 +42,19 @@ import { INDEX_PHASES } from "../../lib/architecture";
 </DiagramFigure>
 
 <style>
-  /* Band container = grouping structure, matching the research-pipeline figure. */
-  .engine {
-    padding: var(--space-2) var(--space-4);
-    border: var(--border-w-default) solid var(--border-color);
-    border-radius: var(--radius-lg);
-    background: var(--bg-surface);
-  }
-
-  .engine-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: var(--space-1) var(--space-3);
-    margin-bottom: var(--space-2);
-  }
-
-  .engine-label {
-    color: var(--text-tertiary);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .engine-caption {
-    color: var(--text-secondary);
-    font-size: var(--text-xs);
-    line-height: var(--lh-xs);
-  }
-
-  /* Term/definition rows: each phase and its one-line meaning, plus the
-     ownership tag in its own column so the Rust core reads down the figure. */
-  .phases {
-    display: grid;
-    gap: var(--space-2);
-    margin: 0;
-  }
-
+  /* Ownership tag needs its own column, so this band's term rows add a third
+     track on top of the shared .d-term recipe (diagrams.css). Restating gap
+     here (rather than inheriting .d-term's) is what keeps the row spacing: this
+     scoped .phase rule outranks every .d-term declaration, including its
+     mobile stack. */
   .phase {
-    display: grid;
     grid-template-columns: minmax(0, 9rem) 1fr auto;
     gap: var(--space-1) var(--space-4);
-    align-items: baseline;
-  }
-
-  .phase dt {
-    color: var(--text-primary);
-    font-size: var(--text-sm);
-    font-weight: 600;
   }
 
   /* The Rust-owned phases take the accent; the mixed rows stay neutral. */
   .phase[data-language="Rust"] dt {
     color: var(--primary);
-  }
-
-  .phase dd {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: var(--text-xs);
-    line-height: var(--lh-xs);
   }
 
   .phase-lang {

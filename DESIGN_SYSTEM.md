@@ -156,8 +156,9 @@ across a 320→1440px viewport, then the `>=1600px` block steps the tokens up. T
 `rem` term keeps browser zoom working (WCAG 1.4.4 — pure `vw` fails it); the unitless
 line heights track the fluid size. Body tiers stay fixed on the 4px grid.
 Every font size comes from these tokens: no raw `px`/`rem` values outside the
-code and terminal surfaces (see Code Blocks). If a size is missing, add a tier —
-never hardcode one.
+code, terminal, and brand-lockup surfaces (see Code Blocks and Brand Identity). The
+lockup pins the nav brand at its own fixed 18px/16px so it never scales with the
+page's fluid type. If a size is missing, add a tier — never hardcode one.
 
 ### Weight Usage
 
@@ -181,6 +182,9 @@ never fall through to the browser's `bold` default:
 ### Section Title Pattern
 
 Uppercase, `--text-xs`, weight 600, letter-spacing `0.12em`, color `--text-tertiary`.
+Dense, chrome-adjacent micro-labels (diagram band labels, control badges) tighten
+to `0.08em`, and docs-sidebar chrome to `0.05em`: the tracking axis trades air for
+density as the label's container narrows.
 
 ## Spatial System
 

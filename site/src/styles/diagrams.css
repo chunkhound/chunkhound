@@ -105,3 +105,75 @@
 .d-connector[data-tone="accent"]::after {
   border-top-color: var(--primary);
 }
+
+/* ── Bands ─────────────────────────────────────────────────────── */
+
+/* A band is grouping structure, not a tile: one box per phase/engine/layer.
+   Shared by the flow and context diagrams so all three read as one system. */
+.d-band {
+  padding: var(--space-2) var(--space-4);
+  border: var(--border-w-default) solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+/* Band heading: the label leads, the caption trails on the same baseline. */
+.d-band-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+/* Uppercase micro-label. Its tighter 0.08em tracking (vs the 0.12em section
+   title) is the dense-diagram end of the tracking axis (DESIGN_SYSTEM). */
+.d-band-label {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.d-band-caption {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: var(--lh-xs);
+}
+
+/* ── Term rows ─────────────────────────────────────────────────── */
+
+/* A definition list of label→meaning rows inside a band. */
+.d-term-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.d-term {
+  display: grid;
+  grid-template-columns: minmax(0, 9rem) 1fr;
+  gap: var(--space-1) var(--space-4);
+  align-items: baseline;
+}
+
+.d-term dt {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.d-term dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: var(--lh-xs);
+}
+
+@media (max-width: 720px) {
+  .d-term {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
