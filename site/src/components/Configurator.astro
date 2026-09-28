@@ -90,7 +90,7 @@ const defaultRerankerStatus = rerankerStatus(defaultRetrieval);
           searchPlaceholder="retrieval providers"
           active={true}
         >
-          <section class="rerank-endpoint" data-rerank-endpoint data-rerank-state="included" aria-labelledby="reranking-heading">
+          <section class="rerank-endpoint" data-rerank-endpoint data-rerank-state={defaultRerankerState} aria-labelledby="reranking-heading">
             <div class="rerank-heading">
               <h4 id="reranking-heading">Reranking</h4>
               <p class="rerank-state-label" data-rerank-state-label>{defaultRerankerStateLabel}</p>

@@ -685,7 +685,7 @@ import {
   quotePowerShell,
   jsonWriteScaffold,
   assembleJsonWrite,
-} from './site/src/components/configurator/index.ts';
+} from './site/src/components/configurator/shell-write.ts';
 
 console.log(JSON.stringify({
   spaced: quotePowerShell('my projects/.chunkhound.json'),

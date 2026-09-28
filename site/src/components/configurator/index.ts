@@ -13,16 +13,6 @@ export type {
 export { requirementLabels, renderRequirements, optionSearchText } from "./utils.ts";
 export { requirements } from "./requirements.ts";
 export {
-  getParentDir,
-  quotePosix,
-  quotePowerShell,
-  jsonWriteScaffold,
-  assembleJsonWrite,
-  guardedJsonWriteScaffold,
-  assembleGuardedJsonWrite,
-} from "./shell-write.ts";
-export type { GuardedJsonWriteScaffold, JsonWriteScaffold } from "./shell-write.ts";
-export {
   PROVIDER_GROUP_ORDER,
   DEFAULT_AGENT,
   DEFAULT_RETRIEVAL,
@@ -30,7 +20,6 @@ export {
   DEFAULT_PLATFORM,
   PLATFORM_STORAGE_KEY,
   PLATFORM_OPTIONS,
-  CONFIGURATION_DOCS_URL,
 } from "./constants.ts";
 export {
   editors,
