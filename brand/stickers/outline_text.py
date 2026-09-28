@@ -207,9 +207,7 @@ def build_vinyl_svg(font: TTFont | None = None) -> str:
     def group(gid: str, paths: list[str]) -> str:
         return f'<g id="{gid}">\n' + "\n".join(paths) + "\n</g>"
 
-    return "\n".join(
-        [group("text-main", main_paths), group("text-dot", dot_paths)]
-    )
+    return "\n".join([group("text-main", main_paths), group("text-dot", dot_paths)])
 
 
 def main() -> None:

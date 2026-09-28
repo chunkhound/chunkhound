@@ -207,7 +207,9 @@ def caption_strip(text: str, y: float) -> str:
     )
 
 
-def lid_chrome(lid_w: float, lid_h: float, lid_x: float, rx: int, fill: str) -> list[str]:
+def lid_chrome(
+    lid_w: float, lid_h: float, lid_x: float, rx: int, fill: str
+) -> list[str]:
     """Lid body + sheen + edge stroke, shared by both laptops."""
     return [
         f'  <rect x="{fnum(lid_x)}" y="{fnum(LID_Y)}" width="{fnum(lid_w)}" height="{fnum(lid_h)}" rx="{rx}" fill="url(#{fill})"/>',
@@ -230,7 +232,9 @@ def build_mbp(size_in: int) -> str:
         f"TRUE TO SCALE ON 14&#8243; MACBOOK PRO LID (12.31&#8243; &#215; 8.71&#8243;)"
     )
     parts = [
-        canvas_open(f"Certified Code Hound {size_in} inch stickers at true scale on a 14 inch MacBook Pro lid"),
+        canvas_open(
+            f"Certified Code Hound {size_in} inch stickers at true scale on a 14 inch MacBook Pro lid"
+        ),
         f"  <!-- True scale: {PX_PER_IN} px/in. Lid {MBP_LID_W_IN}x{MBP_LID_H_IN} in; sticker {size_in}x{size_in} in = {size_in * PX_PER_IN} px; stock 0.25 in radius. See gen_showcases.py. -->",
         DEFS,
         f'  <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#f4f6f1"/>',
@@ -296,7 +300,9 @@ def build_x1c(size_in: int) -> str:
         f"TRUE TO SCALE ON THINKPAD X1 CARBON GEN 12 LID (12.31&#8243; &#215; 8.45&#8243;)"
     )
     parts = [
-        canvas_open(f"Certified Code Hound {size_in} inch stickers at true scale on a ThinkPad X1 Carbon Gen 12 lid"),
+        canvas_open(
+            f"Certified Code Hound {size_in} inch stickers at true scale on a ThinkPad X1 Carbon Gen 12 lid"
+        ),
         f"  <!-- True scale: {PX_PER_IN} px/in. Lid {X1C_LID_W_IN}x{X1C_LID_H_IN} in (312.8x214.75 mm, Lenovo PSREF); sticker {size_in}x{size_in} in = {size_in * PX_PER_IN} px; stock 0.25 in radius. See gen_showcases.py. -->",
         DEFS,
         f'  <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#f4f6f1"/>',
