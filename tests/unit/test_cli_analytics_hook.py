@@ -61,9 +61,11 @@ def _patch_common(
         ),
         target_dir=tmp_path,
     )
-    monkeypatch.setattr(
-        cli_main, "create_validated_config", lambda _a, _c: (config, [])
-    )
+
+    async def _fake_validated_config(_args, _command):
+        return (config, [])
+
+    monkeypatch.setattr(cli_main, "create_validated_config", _fake_validated_config)
     return buffer_dir
 
 
