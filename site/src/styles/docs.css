@@ -433,3 +433,10 @@
     padding: 0;
   }
 }
+
+/* Match Nav.astro: the drawer's slide must honor the OS motion setting. */
+@media (prefers-reduced-motion: reduce) {
+  .docs-sidebar {
+    transition: none;
+  }
+}
