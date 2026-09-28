@@ -60,6 +60,9 @@ Font loads vendored `../fonts/inter-variable.ttf` first (offline-safe), then
 `~/.cache/chunkhound/inter-variable.ttf`, then network (2 retries).
 
 ```bash
+# Scripts import their sibling numfmt.py, so run from this directory.
+cd brand/stickers
+
 # 1. Outline text for print files (font: Inter variable, wght=700, pinned to a
 #    google/fonts commit + sha256 and cached at ~/.cache/chunkhound/inter-variable.ttf).
 #    --out keeps the two modes' intermediates apart: the vinyl run would
