@@ -116,6 +116,26 @@ def glyph_path(glyph_set, glyph_name: str) -> str:
     return pen.getCommands()
 
 
+def _collect_glyph_segments(
+    glyph_set, cmap, hmtx, text: str, letter_spacing: float, scale: float
+) -> tuple[list[tuple[str, float]], float]:
+    """Advance across the run, collecting (glyph path, pen x) pairs.
+
+    Returns (segments, run width in font units). letter_spacing is px,
+    converted to font units here; the width includes the trailing spacing.
+    """
+    pen_x = 0.0
+    segments: list[tuple[str, float]] = []
+    for ch in text:
+        gname = cmap[ord(ch)]
+        advance = hmtx[gname][0]
+        d = glyph_path(glyph_set, gname)
+        if d:  # space glyphs have empty outlines
+            segments.append((d, pen_x * scale))
+        pen_x += advance + letter_spacing / scale  # spacing in font units
+    return segments, pen_x
+
+
 def outline_run(
     font: TTFont,
     text: str,
@@ -127,30 +147,16 @@ def outline_run(
     """Outline one text run.
 
     Returns (segments, x0, baseline_y, scale) where segments is
-    [(d, x_offset_px), ...] — each glyph path plus its pen x (advances + CSS
-    letter-spacing after every glyph). x0 places the run centered at
-    center_x; scale lets the caller build the flip+scale transform. Width
-    includes the trailing letter-spacing so centering matches CSS
-    text-anchor=middle semantics (consumed internally for x0).
+    [(d, x_offset_px), ...] — each glyph path plus its pen x. x0 places the
+    run centered at center_x; scale lets the caller build the flip+scale
+    transform. Width includes the trailing letter-spacing so centering
+    matches CSS text-anchor=middle semantics (consumed internally for x0).
     """
-    cmap = font.getBestCmap()
-    hmtx = font["hmtx"]
-    upm = font["head"].unitsPerEm  # Inter: 2048 — never assume 1000
-    glyph_set = font.getGlyphSet()
-    scale = size / upm
-
-    pen_x = 0.0
-    segments: list[tuple[str, float]] = []
-    for ch in text:
-        gname = cmap[ord(ch)]
-        advance = hmtx[gname][0]
-        d = glyph_path(glyph_set, gname)
-        if d:  # space glyphs have empty outlines
-            segments.append((d, pen_x * scale))
-        pen_x += advance + letter_spacing / scale  # spacing in font units
-
-    # Shift so the run is centered at center_x, then y-baseline: font units
-    # are flipped into y-down px by wrapping in a scaled transform below.
+    cmap, hmtx = font.getBestCmap(), font["hmtx"]
+    scale = size / font["head"].unitsPerEm  # Inter: 2048 — never assume 1000
+    segments, pen_x = _collect_glyph_segments(
+        font.getGlyphSet(), cmap, hmtx, text, letter_spacing, scale
+    )
     x0 = center_x - (pen_x * scale) / 2
     return segments, x0, baseline_y, scale
 
@@ -185,15 +191,10 @@ def build_svg(font: TTFont | None = None) -> str:
     return "\n".join(parts)
 
 
-def build_vinyl_svg(font: TTFont | None = None) -> str:
-    """Outline the light print runs: main text and terminal dot as separate
-    groups so the print SVG fills the dot cyan.
-
-    font is injectable (defaults to the cached Inter download) so callers can
-    pass a preloaded/pinned font instead of hitting the network.
-    """
-    if font is None:
-        font = load_inter_bold()
+def _partition_vinyl_paths(
+    font: TTFont,
+) -> tuple[list[str], list[str]]:
+    """Partition vinyl runs into main text and separate cyan dot paths."""
     main_paths: list[str] = []
     dot_paths: list[str] = []
     for text, size, ls, cx, by in VINYL_RUNS:
@@ -203,6 +204,19 @@ def build_vinyl_svg(font: TTFont | None = None) -> str:
             dot_paths = segment_paths(segments[-1:], x0, baseline_y, scale)
         else:
             main_paths.extend(segment_paths(segments, x0, baseline_y, scale))
+    return main_paths, dot_paths
+
+
+def build_vinyl_svg(font: TTFont | None = None) -> str:
+    """Outline the light print runs: main text and terminal dot as separate
+    groups so the print SVG fills the dot cyan.
+
+    font is injectable (defaults to the cached Inter download) so callers can
+    pass a preloaded/pinned font instead of hitting the network.
+    """
+    if font is None:
+        font = load_inter_bold()
+    main_paths, dot_paths = _partition_vinyl_paths(font)
 
     def group(gid: str, paths: list[str]) -> str:
         return f'<g id="{gid}">\n' + "\n".join(paths) + "\n</g>"

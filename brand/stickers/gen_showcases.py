@@ -207,6 +207,11 @@ def caption_strip(text: str, y: float) -> str:
     )
 
 
+def showcase_caption(text: str, lid_h: float) -> str:
+    """Caption strip placed in the band below the lid."""
+    return caption_strip(text, LID_Y + lid_h + 0.55 * PX_PER_IN)
+
+
 def lid_chrome(
     lid_w: float, lid_h: float, lid_x: float, rx: int, fill: str
 ) -> list[str]:
@@ -218,35 +223,57 @@ def lid_chrome(
     ]
 
 
-def build_mbp(size_in: int) -> str:
-    lid_w, lid_h = MBP_LID_W_IN * PX_PER_IN, MBP_LID_H_IN * PX_PER_IN
-    lid_x = (CANVAS_W - lid_w) / 2
-    cx_lid, cy_lid = CANVAS_W / 2, LID_Y + lid_h / 2
-    logo_scale = MBP_LOGO_H_IN * PX_PER_IN / 24
-    margin = CORNER_MARGIN_IN * PX_PER_IN
-    half = size_in * PX_PER_IN / 2
-    top_y = LID_Y + margin + half
-    caption_y = LID_Y + lid_h + 0.55 * PX_PER_IN
-    caption = (
+def apple_logo(cx_lid: float, cy_lid: float, scale: float) -> list[str]:
+    """Gloss black Apple logo centered on the lid with specular top edge."""
+    return [
+        "  <!-- Gloss black Apple logo, centered; faint top rim light = specular edge. -->",
+        f'  <path transform="translate({fnum(cx_lid)} {fnum(cy_lid - 2)}) scale({scale:.4f}) translate(-12 -12.4)" fill="#8a8580" opacity=".35" d="{APPLE_PATH}"/>',
+        f'  <path transform="translate({fnum(cx_lid)} {fnum(cy_lid)}) scale({scale:.4f}) translate(-12 -12.4)" fill="url(#glossblack)" d="{APPLE_PATH}"/>',
+    ]
+
+
+def mbp_caption(size_in: int) -> str:
+    """Header caption strip for MacBook Pro showcase."""
+    return (
         f"STICKER MULE {size_in}&#8243; &#215; {size_in}&#8243; ROUNDED CORNER &#183; "
         f"TRUE TO SCALE ON 14&#8243; MACBOOK PRO LID (12.31&#8243; &#215; 8.71&#8243;)"
     )
-    parts = [
-        canvas_open(
-            f"Certified Code Hound {size_in} inch stickers at true scale on a 14 inch MacBook Pro lid"
-        ),
-        f"  <!-- True scale: {PX_PER_IN} px/in. Lid {MBP_LID_W_IN}x{MBP_LID_H_IN} in; sticker {size_in}x{size_in} in = {size_in * PX_PER_IN} px; stock 0.25 in radius. See gen_showcases.py. -->",
-        DEFS,
-        f'  <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#f4f6f1"/>',
-        "  <!-- Lid: 14in MacBook Pro, space black anodized aluminum. -->",
-        *lid_chrome(lid_w, lid_h, lid_x, 19, "anodized"),
-        "  <!-- Gloss black Apple logo, centered; faint top rim light = specular edge. -->",
-        f'  <path transform="translate({fnum(cx_lid)} {fnum(cy_lid - 2)}) scale({logo_scale:.4f}) translate(-12 -12.4)" fill="#8a8580" opacity=".35" d="{APPLE_PATH}"/>',
-        f'  <path transform="translate({fnum(cx_lid)} {fnum(cy_lid)}) scale({logo_scale:.4f}) translate(-12 -12.4)" fill="url(#glossblack)" d="{APPLE_PATH}"/>',
+
+
+def mbp_stickers(lid_x: float, lid_w: float, size_in: int) -> list[str]:
+    """Light (top-left) and holo (top-right) stickers on the MacBook Pro lid."""
+    margin, half = CORNER_MARGIN_IN * PX_PER_IN, size_in * PX_PER_IN / 2
+    top_y = LID_Y + margin + half
+    return [
         "  <!-- Stickers: display art embedded so showcases track the source files. -->",
         sticker_group("light", lid_x + margin + half, top_y, size_in, 0),
         sticker_group("holo", lid_x + lid_w - margin - half, top_y, size_in, 0),
-        caption_strip(caption, caption_y),
+    ]
+
+
+def showcase_canvas(desc: str, comment: str) -> list[str]:
+    """Opening canvas tags, metadata comment, defs, and background surface."""
+    return [
+        canvas_open(desc),
+        comment,
+        DEFS,
+        f'  <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#f4f6f1"/>',
+    ]
+
+
+def build_mbp(size_in: int) -> str:
+    lid_w, lid_h = MBP_LID_W_IN * PX_PER_IN, MBP_LID_H_IN * PX_PER_IN
+    lid_x, cx_lid, cy_lid = (CANVAS_W - lid_w) / 2, CANVAS_W / 2, LID_Y + lid_h / 2
+    logo_scale = MBP_LOGO_H_IN * PX_PER_IN / 24
+    desc = f"Certified Code Hound {size_in} inch stickers at true scale on a 14 inch MacBook Pro lid"
+    comment = f"  <!-- True scale: {PX_PER_IN} px/in. Lid {MBP_LID_W_IN}x{MBP_LID_H_IN} in; sticker {size_in}x{size_in} in = {size_in * PX_PER_IN} px; stock 0.25 in radius. See gen_showcases.py. -->"
+    parts = [
+        *showcase_canvas(desc, comment),
+        "  <!-- Lid: 14in MacBook Pro, space black anodized aluminum. -->",
+        *lid_chrome(lid_w, lid_h, lid_x, 19, "anodized"),
+        *apple_logo(cx_lid, cy_lid, logo_scale),
+        *mbp_stickers(lid_x, lid_w, size_in),
+        showcase_caption(mbp_caption(size_in), lid_h),
         "</svg>",
     ]
     return "\n".join(parts) + "\n"
@@ -285,36 +312,40 @@ def lenovo_badge(lid_x: float, lid_w: float, lid_h: float) -> str:
     )
 
 
-def build_x1c(size_in: int) -> str:
-    lid_w, lid_h = X1C_LID_W_IN * PX_PER_IN, X1C_LID_H_IN * PX_PER_IN
-    lid_x = (CANVAS_W - lid_w) / 2
-    margin = CORNER_MARGIN_IN * PX_PER_IN
-    half = size_in * PX_PER_IN / 2
-    top_y = LID_Y + margin + half
-    # Diagonal: holo top-right, light bottom-left (top-left = ThinkPad
-    # wordmark, bottom-right = Lenovo badge).
-    bottom_y = LID_Y + lid_h - margin - half
-    caption_y = LID_Y + lid_h + 0.55 * PX_PER_IN
-    caption = (
+def x1c_caption(size_in: int) -> str:
+    """Header caption strip for ThinkPad X1 Carbon showcase."""
+    return (
         f"STICKER MULE {size_in}&#8243; &#215; {size_in}&#8243; ROUNDED CORNER &#183; "
         f"TRUE TO SCALE ON THINKPAD X1 CARBON GEN 12 LID (12.31&#8243; &#215; 8.45&#8243;)"
     )
+
+
+def x1c_stickers(lid_x: float, lid_w: float, lid_h: float, size_in: int) -> list[str]:
+    """Light (bottom-left) and holo (top-right) diagonal stickers on ThinkPad."""
+    margin, half = CORNER_MARGIN_IN * PX_PER_IN, size_in * PX_PER_IN / 2
+    top_y = LID_Y + margin + half
+    bottom_y = LID_Y + lid_h - margin - half
+    return [
+        "  <!-- Stickers: display art embedded so showcases track the source files. -->",
+        sticker_group("light", lid_x + margin + half, bottom_y, size_in, 0),
+        sticker_group("holo", lid_x + lid_w - margin - half, top_y, size_in, 0),
+    ]
+
+
+def build_x1c(size_in: int) -> str:
+    lid_w, lid_h = X1C_LID_W_IN * PX_PER_IN, X1C_LID_H_IN * PX_PER_IN
+    lid_x = (CANVAS_W - lid_w) / 2
+    desc = f"Certified Code Hound {size_in} inch stickers at true scale on a ThinkPad X1 Carbon Gen 12 lid"
+    comment = f"  <!-- True scale: {PX_PER_IN} px/in. Lid {X1C_LID_W_IN}x{X1C_LID_H_IN} in (312.8x214.75 mm, Lenovo PSREF); sticker {size_in}x{size_in} in = {size_in * PX_PER_IN} px; stock 0.25 in radius. See gen_showcases.py. -->"
     parts = [
-        canvas_open(
-            f"Certified Code Hound {size_in} inch stickers at true scale on a ThinkPad X1 Carbon Gen 12 lid"
-        ),
-        f"  <!-- True scale: {PX_PER_IN} px/in. Lid {X1C_LID_W_IN}x{X1C_LID_H_IN} in (312.8x214.75 mm, Lenovo PSREF); sticker {size_in}x{size_in} in = {size_in * PX_PER_IN} px; stock 0.25 in radius. See gen_showcases.py. -->",
-        DEFS,
-        f'  <rect width="{CANVAS_W}" height="{CANVAS_H}" fill="#f4f6f1"/>',
+        *showcase_canvas(desc, comment),
         "  <!-- Lid: ThinkPad X1 Carbon Gen 12, Eclipse Black matte carbon fiber. -->",
         *lid_chrome(lid_w, lid_h, lid_x, 12, "eclipse"),
         "  <!-- Lid branding: ThinkPad wordmark top-left, Lenovo badge bottom-right. -->",
         thinkpad_badge(lid_x),
         lenovo_badge(lid_x, lid_w, lid_h),
-        "  <!-- Stickers: display art embedded so showcases track the source files. -->",
-        sticker_group("light", lid_x + margin + half, bottom_y, size_in, 0),
-        sticker_group("holo", lid_x + lid_w - margin - half, top_y, size_in, 0),
-        caption_strip(caption, caption_y),
+        *x1c_stickers(lid_x, lid_w, lid_h, size_in),
+        showcase_caption(x1c_caption(size_in), lid_h),
         "</svg>",
     ]
     return "\n".join(parts) + "\n"
