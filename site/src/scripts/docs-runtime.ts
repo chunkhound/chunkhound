@@ -80,7 +80,12 @@ function enhanceTOC(): void {
         { rootMargin: "-80px 0px -70% 0px", threshold: 0 },
     );
 
-    headings.forEach((heading) => observer.observe(heading));
+    const linkedIds = new Set(Array.from(tocLinks, (link) => link.getAttribute("href")));
+    headings.forEach((heading) => {
+        if (linkedIds.has(`#${heading.id}`)) {
+            observer.observe(heading);
+        }
+    });
 }
 
 export function initMobileNav(doc: Document = document): void {
