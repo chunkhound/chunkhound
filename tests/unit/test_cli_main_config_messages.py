@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from types import SimpleNamespace
@@ -34,14 +35,11 @@ async def test_async_main_shows_web_configurator_banner_for_tty(
     )
     monkeypatch.setattr(cli_main, "create_parser", lambda: _Parser(args))
     monkeypatch.setattr(cli_main, "setup_logging", lambda _verbose: None)
-    monkeypatch.setattr(
-        cli_main,
-        "create_validated_config",
-        lambda _args, _command: (
-            object(),
-            ["Missing required configuration: embedding provider"],
-        ),
-    )
+
+    async def _fake_validated_config(_args, _command):
+        return object(), ["Missing required configuration: embedding provider"]
+
+    monkeypatch.setattr(cli_main, "create_validated_config", _fake_validated_config)
     monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
 
     with pytest.raises(SystemExit) as excinfo:
@@ -68,14 +66,11 @@ async def test_async_main_shows_web_configurator_banner_for_llm_command_tty(
     )
     monkeypatch.setattr(cli_main, "create_parser", lambda: _Parser(args))
     monkeypatch.setattr(cli_main, "setup_logging", lambda _verbose: None)
-    monkeypatch.setattr(
-        cli_main,
-        "create_validated_config",
-        lambda _args, _command: (
-            object(),
-            ["Missing required configuration: llm.api_key"],
-        ),
-    )
+
+    async def _fake_validated_config(_args, _command):
+        return object(), ["Missing required configuration: llm.api_key"]
+
+    monkeypatch.setattr(cli_main, "create_validated_config", _fake_validated_config)
     monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
 
     with pytest.raises(SystemExit) as excinfo:
@@ -103,14 +98,11 @@ async def test_async_main_skips_web_configurator_banner_for_non_tty(
     )
     monkeypatch.setattr(cli_main, "create_parser", lambda: _Parser(args))
     monkeypatch.setattr(cli_main, "setup_logging", lambda _verbose: None)
-    monkeypatch.setattr(
-        cli_main,
-        "create_validated_config",
-        lambda _args, _command: (
-            object(),
-            ["Missing required configuration: embedding provider"],
-        ),
-    )
+
+    async def _fake_validated_config(_args, _command):
+        return object(), ["Missing required configuration: embedding provider"]
+
+    monkeypatch.setattr(cli_main, "create_validated_config", _fake_validated_config)
     monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
 
     with pytest.raises(SystemExit) as excinfo:
@@ -154,7 +146,7 @@ def test_create_validated_config_reports_custom_llm_endpoint_missing_model(
         llm_autodoc_cleanup_reasoning_effort=None,
     )
 
-    config, errors = create_validated_config(args, "research")
+    config, errors = asyncio.run(create_validated_config(args, "research"))
 
     assert config.llm is not None
     assert any(
@@ -174,7 +166,7 @@ def test_create_validated_config_allows_autodoc_assets_only_without_llm() -> Non
         verbose=False,
     )
 
-    _config, errors = create_validated_config(args, "autodoc")
+    _config, errors = asyncio.run(create_validated_config(args, "autodoc"))
 
     assert "No LLM provider configured" not in errors
 
@@ -189,7 +181,7 @@ def test_create_validated_config_allows_map_overview_only_without_llm() -> None:
         verbose=False,
     )
 
-    _config, errors = create_validated_config(args, "map")
+    _config, errors = asyncio.run(create_validated_config(args, "map"))
 
     assert "No LLM provider configured" not in errors
 
@@ -210,7 +202,7 @@ def test_create_validated_config_reports_removed_ollama_provider_from_config_fil
         verbose=False,
     )
 
-    config, errors = create_validated_config(args, "research")
+    config, errors = asyncio.run(create_validated_config(args, "research"))
 
     assert config.llm is None
     assert any("ollama" in error and "base_url" in error for error in errors)
@@ -228,7 +220,7 @@ def test_create_validated_config_preserves_fallback_state_on_invalid_json(tmp_pa
         verbose=False,
     )
 
-    config, errors = create_validated_config(args, "index")
+    config, errors = asyncio.run(create_validated_config(args, "index"))
 
     assert config.llm is None
     assert config.embedding is None
@@ -262,6 +254,6 @@ def test_create_validated_config_research_ignores_cleanup_only_override_requirem
         llm_autodoc_cleanup_reasoning_effort=None,
     )
 
-    _config, errors = create_validated_config(args, "research")
+    _config, errors = asyncio.run(create_validated_config(args, "research"))
 
     assert errors == []

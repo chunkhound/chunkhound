@@ -232,16 +232,15 @@ def parse_file_callback(
 
     lang = detect_language(Path(file_path))
 
-    # Binary guard before unknown-type skip so a NUL-containing .bin is
-    # ``binary_file``, not ``Unknown file type``.
-    with open(file_path, "rb") as fh:
-        sample = fh.read(8192)
-    if b"\x00" in sample:
-        return ("", [], "binary_file")
-
+    # NUL check only for unrecognized extensions opted in as text, matching
+    # batch_processor. A known language such as PDF is parsed as that language.
     if lang is None or lang == Language.UNKNOWN:
         if not index_unknown_files:
             return ("", [], "Unknown file type")
+        with open(file_path, "rb") as fh:
+            sample = fh.read(8192)
+        if b"\x00" in sample:
+            return ("", [], "binary_file")
         lang = Language.TEXT
 
     # Config file size gate

@@ -147,6 +147,12 @@ async def test_openai_rerank_app_error_after_success_still_records_success(
 async def test_openai_rerank_connection_failure_records_a_failed_provider_call(
     open_command,
 ) -> None:
+    """The single-batch path now shares the multi-batch path's retry loop
+    (fix/408), so a persistent connection failure here retries
+    `retry_attempts` times before giving up. Each attempt is its own
+    analytics call, same contract as
+    test_openai_rerank_multi_batch_retry_records_one_call_per_attempt.
+    """
     from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 
     recorder, handle, buffer_dir = open_command
@@ -163,17 +169,21 @@ async def test_openai_rerank_connection_failure_records_a_failed_provider_call(
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
-    with patch(
-        "chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ),
+        patch.object(asyncio, "sleep", AsyncMock()),
     ):
         with pytest.raises(Exception):
             await provider.rerank("query", ["doc1", "doc2"])
     end_command(recorder, handle, False)
 
     reranker = _read_events(buffer_dir)[-1]["providers"]["reranker"][0]
-    assert reranker["fails"] == 1
-    assert reranker["error_types"] == {"RuntimeError": 1}
+    assert reranker["calls"] == provider._retry_attempts
+    assert reranker["fails"] == provider._retry_attempts
+    assert reranker["error_types"] == {"RuntimeError": provider._retry_attempts}
 
 
 @pytest.mark.asyncio

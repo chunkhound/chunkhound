@@ -62,3 +62,38 @@ def test_level_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     out = buf.getvalue()
     assert "lower-case level" in out
     assert "upper-case level" in out
+
+
+def test_exception_true_attaches_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exception=True inside an except block must attach the active traceback.
+
+    Absent the flag, the same call site must emit the message alone. Guards
+    the contract the remote-config pipeline's outer wrapper relies on.
+    """
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
+
+    def _emit(with_exception: bool) -> str:
+        buf = io.StringIO()
+        sink_id = logger.add(buf, level="DEBUG", backtrace=False, diagnose=False)
+        try:
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                log_if_not_mcp(
+                    "error", "captured failure", exception=with_exception
+                )
+        finally:
+            logger.remove(sink_id)
+        return buf.getvalue()
+
+    with_tb = _emit(True)
+    without_tb = _emit(False)
+
+    assert "captured failure" in with_tb
+    assert "Traceback" in with_tb
+    assert "ValueError: boom" in with_tb
+
+    assert "captured failure" in without_tb
+    assert "Traceback" not in without_tb
