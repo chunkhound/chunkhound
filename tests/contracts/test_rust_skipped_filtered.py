@@ -27,7 +27,14 @@ def _build_config(root: Path, db_dir: Path) -> Config:
     )
 
 
-def test_rust_pipeline_reports_binary_file_as_skipped_filtered(tmp_path, monkeypatch):
+def test_rust_pipeline_reports_flag_off_unknown_file_as_skipped_filtered(
+    tmp_path, monkeypatch
+):
+    """Flag off: an unrecognized file is Unknown file type, NUL bytes included.
+
+    The sample contains a NUL so this stays distinct from the flag-on binary
+    split in test_rust_index_unknown_files.py. Those bytes are not read.
+    """
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
 
     root = tmp_path / "repo"
@@ -45,7 +52,7 @@ def test_rust_pipeline_reports_binary_file_as_skipped_filtered(tmp_path, monkeyp
 
     assert stats.skipped_due_to_timeout == []
     assert stats.skipped_filtered >= 1, (
-        "binary blob.bin must count as skipped_filtered on the Rust path, "
+        "unknown blob.bin must count as skipped_filtered on the Rust path, "
         f"got skipped_filtered={stats.skipped_filtered}"
     )
 
@@ -58,4 +65,6 @@ def test_rust_pipeline_reports_binary_file_as_skipped_filtered(tmp_path, monkeyp
         conn.close()
 
     assert row is not None, "blob.bin must still get a files row"
-    assert row[0] == "binary_file", f"expected skip_reason binary_file, got {row[0]!r}"
+    assert row[0] == "Unknown file type", (
+        f"expected skip_reason 'Unknown file type', got {row[0]!r}"
+    )
