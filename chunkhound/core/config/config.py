@@ -181,31 +181,18 @@ class Config(BaseModel):
                     break
 
         if global_config_file:
-            try:
-                global_config = read_json_file(global_config_file)
-            # ValueError covers UnicodeDecodeError from non-UTF-8 files too.
-            except ValueError as e:
-                raise ValueError(
-                    f"Invalid JSON in global config file {global_config_file}: {e}. "
-                    "Please check the file format and try again."
-                )
-            self._deep_merge(config_data, global_config)
-            self._mark_exclude_user_supplied(config_data)
+            self._load_and_merge_config_file(
+                config_data, global_config_file, "global config file"
+            )
 
         # 3. Check for local .chunkhound.json (overrides env vars and globals)
         if target_dir and target_dir.exists():
             local_config_path = target_dir / ".chunkhound.json"
             if local_config_path.exists() and local_config_path != config_file:
                 config_data["local_config_file"] = local_config_path.resolve()
-                try:
-                    local_config = read_json_file(local_config_path)
-                except ValueError as e:
-                    raise ValueError(
-                        f"Invalid JSON in config file {local_config_path}: {e}. "
-                        "Please check the file format and try again."
-                    )
-                self._deep_merge(config_data, local_config)
-                self._mark_exclude_user_supplied(config_data)
+                self._load_and_merge_config_file(
+                    config_data, local_config_path, "config file"
+                )
 
         # 4. Load explicit config file last so it wins over auto-discovered local config
         if config_file and not config_file.exists():
@@ -214,15 +201,7 @@ class Config(BaseModel):
                 "Check the path or visit https://chunkhound.ai to generate a config."
             )
         if config_file:
-            try:
-                file_config = read_json_file(config_file)
-            except ValueError as e:
-                raise ValueError(
-                    f"Invalid JSON in config file {config_file}: {e}. "
-                    "Please check the file format and try again."
-                )
-            self._deep_merge(config_data, file_config)
-            self._mark_exclude_user_supplied(config_data)
+            self._load_and_merge_config_file(config_data, config_file, "config file")
 
         # 5. Apply CLI arguments (highest precedence)
         if args:
@@ -260,6 +239,24 @@ class Config(BaseModel):
 
         # Initialize the model
         super().__init__(**config_data)
+
+    def _load_and_merge_config_file(
+        self, config_data: dict[str, Any], path: Path, file_label: str
+    ) -> None:
+        """Merge one config file into config_data with a friendly decode error.
+
+        BOM tolerance itself lives in read_json_file (utf-8-sig).
+        """
+        try:
+            file_config = read_json_file(path)
+        # ValueError covers UnicodeDecodeError from non-UTF-8 files too.
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid JSON in {file_label} {path}: {e}. "
+                "Please check the file format and try again."
+            )
+        self._deep_merge(config_data, file_config)
+        self._mark_exclude_user_supplied(config_data)
 
     @staticmethod
     def _mark_exclude_user_supplied(data: dict[str, Any]) -> None:
