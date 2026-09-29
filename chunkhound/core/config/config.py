@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chunkhound.core.config._utils import read_json_file
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .analytics_config import AnalyticsConfig
@@ -381,10 +382,9 @@ class Config(BaseModel):
 
         if global_config_file:
             try:
-                with open(global_config_file, encoding="utf-8-sig") as f:
-                    global_config = json.load(f)
-                    Config.deep_merge(config_data, global_config)
-                    self._mark_exclude_user_supplied(config_data)
+                global_config = read_json_file(global_config_file)
+                Config.deep_merge(config_data, global_config)
+                self._mark_exclude_user_supplied(config_data)
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 raise ValueError(
                     f"Invalid JSON in global config file {global_config_file}: {e}. "
@@ -403,24 +403,23 @@ class Config(BaseModel):
             if local_config_path.exists() and local_config_path != config_file:
                 config_data["local_config_file"] = local_config_path.resolve()
                 try:
-                    with open(local_config_path, encoding="utf-8-sig") as f:
-                        local_config = json.load(f)
-                        # Trust boundary: remote-config URL/header must come
-                        # from operator-controlled surfaces (CLI or env), never
-                        # from a file — a project-local .chunkhound.json in a
-                        # cloned repo could otherwise redirect the fetch to an
-                        # attacker-controlled URL on first run.
-                        if local_config.pop("remote_config", None) is not None:
-                            log_if_not_mcp(
-                                "WARNING",
-                                "Ignoring 'remote_config' in {} — remote-config "
-                                "URL/auth may only be set via CLI flags, "
-                                "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
-                                "global config file.",
-                                local_config_path,
-                            )
-                        Config.deep_merge(config_data, local_config)
-                        self._mark_exclude_user_supplied(config_data)
+                    local_config = read_json_file(local_config_path)
+                    # Trust boundary: remote-config URL/header must come
+                    # from operator-controlled surfaces (CLI or env), never
+                    # from a file — a project-local .chunkhound.json in a
+                    # cloned repo could otherwise redirect the fetch to an
+                    # attacker-controlled URL on first run.
+                    if local_config.pop("remote_config", None) is not None:
+                        log_if_not_mcp(
+                            "WARNING",
+                            "Ignoring 'remote_config' in {} — remote-config "
+                            "URL/auth may only be set via CLI flags, "
+                            "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
+                            "global config file.",
+                            local_config_path,
+                        )
+                    Config.deep_merge(config_data, local_config)
+                    self._mark_exclude_user_supplied(config_data)
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     raise ValueError(
                         f"Invalid JSON in config file {local_config_path}: {e}. "
@@ -438,22 +437,21 @@ class Config(BaseModel):
             )
         if config_file:
             try:
-                with open(config_file, encoding="utf-8-sig") as f:
-                    file_config = json.load(f)
-                    # Trust boundary: see _apply_local_json — same reasoning
-                    # applies to an explicit --config file, which can just as
-                    # easily be a checked-in artifact from an untrusted source.
-                    if file_config.pop("remote_config", None) is not None:
-                        log_if_not_mcp(
-                            "WARNING",
-                            "Ignoring 'remote_config' in {} — remote-config "
-                            "URL/auth may only be set via CLI flags, "
-                            "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
-                            "global config file.",
-                            config_file,
-                        )
-                    Config.deep_merge(config_data, file_config)
-                    self._mark_exclude_user_supplied(config_data)
+                file_config = read_json_file(config_file)
+                # Trust boundary: see _apply_local_json — same reasoning
+                # applies to an explicit --config file, which can just as
+                # easily be a checked-in artifact from an untrusted source.
+                if file_config.pop("remote_config", None) is not None:
+                    log_if_not_mcp(
+                        "WARNING",
+                        "Ignoring 'remote_config' in {} — remote-config "
+                        "URL/auth may only be set via CLI flags, "
+                        "CHUNKHOUND_REMOTE_CONFIG__* env vars, or the "
+                        "global config file.",
+                        config_file,
+                    )
+                Config.deep_merge(config_data, file_config)
+                self._mark_exclude_user_supplied(config_data)
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 raise ValueError(
                     f"Invalid JSON in config file {config_file}: {e}. "
