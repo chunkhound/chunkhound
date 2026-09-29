@@ -216,11 +216,49 @@ console.log(JSON.stringify({ initialHidden, afterEmbed, afterExternalConfig, aft
     assert rendered["afterReset"]["calloutHidden"] is True
     assert rendered["afterReset"]["calloutCopy"] is None
     assert '"rerank_url"' not in rendered["afterReset"]["configCopy"]
-    assert rendered["afterReset"]["errorHidden"] is False
-    assert (
-        "requires this retrieval preset to have a base URL"
-        in rendered["afterReset"]["error"]
+    assert rendered["afterReset"]["errorHidden"] is True
+    assert rendered["afterReset"]["error"] == ""
+
+
+def test_retrieval_change_drops_custom_reranker_without_resetting_other_picks(
+    built_site,
+) -> None:
+    script = (
+        browser_dom(dist_body(_GETTING_STARTED))
+        + _INIT
+        + _SELECTORS
+        + """
+choose('data-retrieval', 'ollama-embed');
+rerankUrl.value = 'https://tei.example.com/rerank';
+rerankFormat.value = 'tei';
+rerankFormat.dispatchEvent(new window.Event('change'));
+const configured = q('#config-copy-btn').getAttribute('data-copy');
+
+choose('data-research', 'anthropic');
+choose('data-agent', 'codex');
+const retained = q('#config-copy-btn').getAttribute('data-copy');
+choose('data-retrieval', 'voyageai');
+const switched = {
+  copy: q('#config-copy-btn').getAttribute('data-copy'),
+  output: q('#config-output').textContent,
+  inputs: [rerankUrl.value, rerankFormat.value, rerankModel.value],
+  research: q('[data-research="anthropic"]').checked,
+  agent: q('[data-agent="codex"]').checked,
+};
+console.log(JSON.stringify({ configured, retained, switched }));
+"""
     )
+    rendered = run_tsx_json(script)
+
+    assert '"rerank_url": "https://tei.example.com/rerank"' in rendered["configured"]
+    assert '"rerank_url": "https://tei.example.com/rerank"' in rendered["retained"]
+    assert rendered["switched"]["inputs"] == ["", "", ""]
+    assert '"rerank_url"' not in rendered["switched"]["copy"]
+    assert '"rerank_format"' not in rendered["switched"]["copy"]
+    assert "tei.example.com" not in rendered["switched"]["output"]
+    assert '"model": "voyage-4-lite"' in rendered["switched"]["copy"]
+    assert rendered["switched"]["research"] is True
+    assert rendered["switched"]["agent"] is True
 
 
 def test_configurator_reranker_errors_flag_only_the_offending_input(

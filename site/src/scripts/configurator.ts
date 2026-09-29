@@ -384,6 +384,12 @@ function guardRequiredRerankerOpen(section: Element): void {
   });
 }
 
+function clearRerankerInputs(inputs: RerankerInputs): void {
+  if (inputs.url) inputs.url.value = "";
+  if (inputs.format) inputs.format.value = "";
+  if (inputs.model) inputs.model.value = "";
+}
+
 function bindStageOption(
   section: Element,
   context: ConfiguratorContext,
@@ -396,6 +402,10 @@ function bindStageOption(
     section,
     attribute,
     (id) => {
+      // The one shared editor must not carry a previous retrieval's override.
+      if (role === "retrievalId" && context.state.retrievalId !== id) {
+        clearRerankerInputs(context.inputs);
+      }
       context.state[role] = id;
     },
     () => context.renderSelection(),
