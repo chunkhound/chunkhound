@@ -123,10 +123,11 @@ export function rerankerValidationError(
   // (1) voyageai presets without a rerank URL still get the model-required
   // check (the backend returns early); (2) "auto" rerank_format is rejected
   // because the UI format field is a required <select> with explicit choices.
-  // URL is checked before model-required here (backend reversed) — UX-intent:
-  // surface the fixable endpoint field first. Reranking is implied by a model
-  // or TEI format; without a preset base_url the backend rejects it unless the
-  // provider reranks via SDK (VoyageAI).
+  // For the URL-less case, URL is checked before model-required here — matching
+  // the backend's no-base_url path, where RERANK_BASE_URL_REQUIRED is raised
+  // before the model check, so frontend messaging tracks that real failure.
+  // Reranking is implied by a model or TEI format; without a preset base_url
+  // the backend rejects it unless the provider reranks via SDK (VoyageAI).
   const rerankingImplied = effective.hasModel || effective.format === "tei";
   if (
     !url &&
