@@ -699,6 +699,8 @@ console.log(JSON.stringify({
   posixSafe: quotePosix('.chunkhound.json'),
   posixHomeSpaced: quotePosix('~/my dir/.chunkhound.json'),
   posixHomeDollar: quotePosix('~/$dir/.chunkhound.json'),
+  posixHomeQuote: quotePosix('~/"dir/.chunkhound.json'),
+  posixHomeBackslash: quotePosix('~/a\\\\"b/.chunkhound.json'),
   posixWrite: assembleJsonWrite(
     jsonWriteScaffold('my dir/.chunkhound.json', 'posix'),
     '{}',
@@ -728,6 +730,11 @@ console.log(JSON.stringify({
     # The body is sliced past `~/`, so the `$` escape must cover its FIRST
     # character too — `(?!^)` would leave `$dir` unescaped and interpolating.
     assert rendered["posixHomeDollar"] == '"$HOME/\\$dir/.chunkhound.json"'
+    # Backslash must be escaped FIRST: a body backslash before `"` would
+    # otherwise render as `\\"` — the `\\` pair consumes itself inside the
+    # double quotes and the bare `"` closes the string early.
+    assert rendered["posixHomeQuote"] == '"$HOME/\\"dir/.chunkhound.json"'
+    assert rendered["posixHomeBackslash"] == '"$HOME/a\\\\\\"b/.chunkhound.json"'
     # Shell-safe paths stay bare: quoting them adds noise with zero benefit.
     assert rendered["posixSafe"] == ".chunkhound.json"
     assert (

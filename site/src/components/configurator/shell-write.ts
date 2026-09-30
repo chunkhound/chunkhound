@@ -32,8 +32,11 @@ export function quotePosix(value: string): string {
     // `$HOME` is prepended unescaped so it expands; every `$` in the body
     // (already stripped of `~/`) must be escaped or a `$VAR` segment would
     // interpolate. An anchor cannot be used here — the body was sliced.
+    // Backslash is escaped FIRST: a later `\\"` would close the quoted
+    // string early (the `\\` pair consumes itself, leaving the `"` bare).
     const escaped = value
       .slice(2)
+      .replace(/\\/g, "\\\\")
       .replace(/`/g, "\\`")
       .replace(/"/g, '\\"')
       .replace(/\$/g, "\\$");
