@@ -5,8 +5,17 @@ This base class contains shared logic for CLI-based providers
 consistent behavior.
 """
 
+from __future__ import annotations
+
+import asyncio
+import ctypes
 import json
+import os
+import shutil
+import subprocess
+import sys
 from abc import abstractmethod
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -19,6 +28,185 @@ from chunkhound.interfaces.llm_provider import (
     OutputLimitIntent,
 )
 from chunkhound.utils.json_extraction import parse_and_validate_structured_json
+
+# cmd operators that split a command when the token is not quoted.
+# ``~`` is not one of them: 8.3 short paths use it and must stay unquoted.
+_CMD_OPERATORS = frozenset("&|<>^()")
+
+
+def resolve_cli_binary(
+    name: str,
+    *,
+    env_var: str | None = None,
+) -> str:
+    """Resolve a CLI executable path for ``create_subprocess_exec``.
+
+    Interactive shells on Windows find ``claude.cmd`` / ``codex.cmd`` via
+    PATHEXT. ``asyncio.create_subprocess_exec`` / CreateProcess with a bare
+    name does not — often only ``.exe`` is tried, causing WinError 2.
+
+    ``shutil.which`` respects PATHEXT and returns the full path to the shim.
+
+    Args:
+        name: Default command name (e.g. ``claude``).
+        env_var: Optional env var override (absolute path or name on PATH).
+
+    Returns:
+        Absolute path to the executable (or override path that exists / which found).
+
+    Raises:
+        FileNotFoundError: If no matching binary is found.
+    """
+    candidates: list[str] = []
+    if env_var:
+        env_val = os.environ.get(env_var)
+        if env_val and env_val.strip():
+            candidates.append(env_val.strip())
+    candidates.append(name)
+
+    for cand in candidates:
+        path = Path(cand)
+        # Only treat as an explicit filesystem path when it has a directory
+        # component (or is absolute). Bare names always go through which/PATH.
+        if (path.is_absolute() or os.path.dirname(cand)) and path.is_file():
+            return str(path.resolve())
+        found = shutil.which(cand)
+        if found:
+            return found
+
+    hint = f" (checked env {env_var} and PATH)" if env_var else " (checked PATH)"
+    raise FileNotFoundError(
+        f"CLI binary {name!r} not found{hint}. "
+        f"Install it or ensure it is on PATH. On Windows npm shims are often "
+        f"{name}.cmd — use a shell or this resolver, not a bare name with "
+        f"CreateProcess."
+    )
+
+
+def is_windows_batch_shim(binary: str) -> bool:
+    """True when CreateProcess must go through cmd.exe to run this file."""
+    if sys.platform != "win32":
+        return False
+    lower = binary.lower()
+    return lower.endswith(".cmd") or lower.endswith(".bat")
+
+
+def _windows_short_path(path: str) -> str:
+    """8.3 form when the OS can make one. A missing name comes back unchanged."""
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(path, buffer, len(buffer))
+    if length == 0 or length >= len(buffer):
+        return path
+    return buffer.value
+
+
+def _cmd_argv_blocker(arg: str) -> str | None:
+    """Text a ``.cmd`` ``%*`` forward cannot carry without changing it."""
+    if "\n" in arg or "\r" in arg:
+        return "a newline"
+    if "%" in arg:
+        return "'%'"
+    if '"' in arg:
+        return "a quote"
+    return None
+
+
+def _prepare_cmd_token(arg: str) -> str:
+    """One argv token for ``cmd /c``.
+
+    ``list2cmdline`` quotes whitespace. A bare ``&`` would start another
+    command, so those tokens gain a trailing space and the child keeps it.
+    Newlines, ``%``, and quotes are rejected: cmd rewrites them.
+    """
+    blocked = _cmd_argv_blocker(arg)
+    if blocked is not None:
+        raise RuntimeError(
+            f"Windows batch CLI arguments cannot contain {blocked}. "
+            "Pass that text via stdin or a file."
+        )
+    if arg == "" or any(char in arg for char in " \t"):
+        return arg
+    if any(char in arg for char in _CMD_OPERATORS):
+        return arg + " "
+    return arg
+
+
+def _batch_binary_token(binary: str) -> str:
+    """Binary path that ``cmd /s /c`` will not split.
+
+    ``/s`` strips the first and last quote when ``/c`` starts with one, so a
+    spaced path cannot sit next to another quoted argument. Prefer the 8.3
+    name. ``os.name`` guards ``ctypes.windll``, which a ``sys.platform``
+    monkeypatch does not provide.
+    """
+    path = _windows_short_path(binary) if os.name == "nt" else binary
+    blocked = _cmd_argv_blocker(path)
+    if blocked is not None:
+        raise RuntimeError(f"CLI path contains {blocked}, which cmd.exe cannot pass.")
+    if any(char in path for char in " \t"):
+        raise RuntimeError(
+            "Windows batch CLIs in a path with spaces need an 8.3 short name. "
+            f"Could not shorten {binary!r}."
+        )
+    return path
+
+
+def build_cli_argv(binary: str, *args: str) -> list[str]:
+    """Argv for ``create_subprocess_exec``.
+
+    A bare ``.cmd`` name raises WinError 2, and a direct ``.cmd`` path can
+    raise WinError 193. Those shims run as tokens after ``cmd /d /s /c``.
+    """
+    if is_windows_batch_shim(binary):
+        comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        tokens = [
+            _batch_binary_token(binary),
+            *(_prepare_cmd_token(arg) for arg in args),
+        ]
+        return [comspec, "/d", "/s", "/c", *tokens]
+    return [binary, *args]
+
+
+async def terminate_cli_process(process: asyncio.subprocess.Process) -> None:
+    """Kill a CLI subprocess, including the Windows process tree when needed.
+
+    When the child is ``cmd.exe`` wrapping a ``.cmd`` shim, ``process.kill()``
+    only stops cmd and can leave Node/CLI grandchildren running.
+    """
+    if process.returncode is not None:
+        return
+    if sys.platform == "win32" and process.pid:
+        taskkill_ok = False
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                check=False,
+                timeout=10,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            taskkill_ok = result.returncode == 0
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            taskkill_ok = False
+        if not taskkill_ok:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+        return
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        await process.wait()
+    except ProcessLookupError:
+        pass
 
 
 class BaseCLIProvider(LLMProvider):

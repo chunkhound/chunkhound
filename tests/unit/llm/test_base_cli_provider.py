@@ -1,4 +1,8 @@
-"""Tests for BaseCLIProvider double-wrap guard."""
+"""Tests for BaseCLIProvider double-wrap guard and CLI binary resolution."""
+
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -7,7 +11,11 @@ from chunkhound.interfaces.llm_provider import (
     OutputLimitCapability,
     OutputLimitMetadata,
 )
-from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
+from chunkhound.providers.llm.base_cli_provider import (
+    BaseCLIProvider,
+    build_cli_argv,
+    resolve_cli_binary,
+)
 
 
 class _CapturingCLIProvider(BaseCLIProvider):
@@ -132,3 +140,191 @@ async def test_internal_runtime_error_not_double_wrapped_complete_structured():
     msg = str(exc.value)
     assert "LLM structured completion returned empty response" in msg
     assert "LLM structured completion failed" not in msg
+
+
+def test_resolve_cli_binary_uses_which(monkeypatch, tmp_path: Path):
+    """shutil.which result is returned (simulates PATHEXT finding .cmd)."""
+    fake = tmp_path / "claude.cmd"
+    fake.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.shutil.which",
+        lambda name: str(fake) if name == "claude" else None,
+    )
+    assert resolve_cli_binary("claude") == str(fake)
+
+
+def test_resolve_cli_binary_prefers_env_path(monkeypatch, tmp_path: Path):
+    """Env override path wins when the file exists."""
+    fake = tmp_path / "my-claude.exe"
+    fake.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("CHUNKHOUND_TEST_BIN", str(fake))
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.shutil.which",
+        lambda name: pytest.fail("which should not run when env path exists"),
+    )
+    assert resolve_cli_binary("claude", env_var="CHUNKHOUND_TEST_BIN") == str(
+        fake.resolve()
+    )
+
+
+def test_resolve_cli_binary_missing_raises(monkeypatch):
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.shutil.which",
+        lambda name: None,
+    )
+    with pytest.raises(FileNotFoundError, match="not found"):
+        resolve_cli_binary("definitely-missing-cli-xyz")
+
+
+def test_build_cli_argv_wraps_cmd_on_windows(monkeypatch):
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.delenv("COMSPEC", raising=False)
+    binary = r"C:\Users\me\AppData\Roaming\npm\claude.cmd"
+    argv = build_cli_argv(binary, "--print")
+    assert argv[0] == "cmd.exe"
+    assert argv[1:4] == ["/d", "/s", "/c"]
+    assert argv[4:] == [binary, "--print"]
+
+
+def test_build_cli_argv_wraps_bat_on_windows(monkeypatch):
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    binary = r"D:\tools\tool.bat"
+    argv = build_cli_argv(binary, "run")
+    assert argv[0] == r"C:\Windows\System32\cmd.exe"
+    assert argv[1:4] == ["/d", "/s", "/c"]
+    assert argv[4:] == [binary, "run"]
+
+
+def test_build_cli_argv_quotes_metacharacters_for_cmd(monkeypatch):
+    """System-prompt-like args must not inject shell commands via &."""
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.delenv("COMSPEC", raising=False)
+    dangerous = "hello & calc.exe"
+    argv = build_cli_argv(
+        r"C:\npm\claude.cmd",
+        "--append-system-prompt",
+        dangerous,
+    )
+    assert argv[4:] == [r"C:\npm\claude.cmd", "--append-system-prompt", dangerous]
+    rendered = subprocess.list2cmdline(argv)
+    assert '"hello & calc.exe"' in rendered
+    assert " --append-system-prompt hello & " not in f" {rendered} "
+
+
+def test_build_cli_argv_rejects_percent_quote_and_newline(monkeypatch):
+    """cmd and a .cmd shim rewrite %, quotes, and newlines."""
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.delenv("COMSPEC", raising=False)
+    binary = r"C:\npm\claude.cmd"
+    with pytest.raises(RuntimeError, match="%"):
+        build_cli_argv(binary, "--x", "%PATH%")
+    with pytest.raises(RuntimeError, match="quote"):
+        build_cli_argv(binary, "--x", 'say "hi"')
+    with pytest.raises(RuntimeError, match="newline"):
+        build_cli_argv(binary, "--x", "line1\nline2")
+
+
+def test_build_cli_argv_rejects_unshortened_spaced_batch_path(monkeypatch):
+    """cmd /s splits a quoted long path, so an unshortened path must not launch."""
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.delenv("COMSPEC", raising=False)
+    path = r"C:\Program Files\npm\claude.cmd"
+    with pytest.raises(RuntimeError, match="8.3"):
+        build_cli_argv(path, "--print")
+
+
+def test_build_cli_argv_exe_keeps_freeform_text(monkeypatch):
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    argv = build_cli_argv(
+        r"C:\tools\claude.exe",
+        'say "hi"',
+        "%PATH%",
+        "a\nb",
+    )
+    assert argv == [r"C:\tools\claude.exe", 'say "hi"', "%PATH%", "a\nb"]
+
+
+def test_build_cli_argv_quotes_spaceless_cmd_operator(monkeypatch):
+    """An operator with no space must still be quoted, or cmd runs it."""
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.delenv("COMSPEC", raising=False)
+    argv = build_cli_argv(r"C:\npm\claude.cmd", "--x", "a&whoami")
+    assert argv[-1] == "a&whoami "
+    assert '"a&whoami "' in subprocess.list2cmdline(argv)
+
+
+def test_build_cli_argv_8dot3_short_path_stays_its_own_unquoted_token(
+    monkeypatch,
+):
+    """``cmd /s`` strips the first and last quote when /c starts with one.
+
+    An 8.3 path like ``...\\USER~1\\...`` must stay an unquoted token.
+    """
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.delenv("COMSPEC", raising=False)
+    short = r"C:\Users\USER~1\AppData\Roaming\npm\claude.cmd"
+    argv = build_cli_argv(short, "--print", "--model", "haiku")
+    assert argv[1:4] == ["/d", "/s", "/c"]
+    assert argv[4:] == [short, "--print", "--model", "haiku"]
+    rendered = subprocess.list2cmdline(argv)
+    assert f"/c {short} --print" in rendered
+
+
+def test_build_cli_argv_no_wrap_for_exe(monkeypatch):
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    argv = build_cli_argv(r"C:\tools\claude.exe", "--print")
+    assert argv == [r"C:\tools\claude.exe", "--print"]
+
+
+def test_resolve_cli_binary_env_missing_falls_back_to_which(
+    monkeypatch, tmp_path: Path
+):
+    fake = tmp_path / "claude.cmd"
+    fake.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("CHUNKHOUND_TEST_BIN", str(tmp_path / "missing.exe"))
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.shutil.which",
+        lambda name: str(fake) if name == "claude" else None,
+    )
+    # A missing override path is not used, so resolution continues with the name.
+    assert resolve_cli_binary("claude", env_var="CHUNKHOUND_TEST_BIN") == str(fake)
+
+
+def test_resolve_cli_binary_ignores_cwd_file_named_like_binary(
+    monkeypatch, tmp_path: Path
+):
+    """Bare name must not pick a same-named file only because CWD contains it."""
+    decoy = tmp_path / "claude"
+    decoy.write_text("not a real binary", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.shutil.which",
+        lambda name: None,
+    )
+    with pytest.raises(FileNotFoundError):
+        resolve_cli_binary("claude")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix path shape")
+def test_build_cli_argv_posix_passthrough():
+    argv = build_cli_argv("/usr/local/bin/claude", "--print")
+    assert argv == ["/usr/local/bin/claude", "--print"]

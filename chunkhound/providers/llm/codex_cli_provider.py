@@ -20,7 +20,13 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
+from chunkhound.providers.llm.base_cli_provider import (
+    BaseCLIProvider,
+    build_cli_argv,
+    is_windows_batch_shim,
+    resolve_cli_binary,
+    terminate_cli_process,
+)
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
 # Default synthesis-grade reasoning model for Codex CLI.
@@ -278,6 +284,32 @@ class CodexCLIProvider(BaseCLIProvider):
             logger.warning(f"Failed to build Codex overlay home: {e}")
         return str(overlay)
 
+    def _merge_batch_overlay_config(
+        self,
+        overlay_home: str,
+        *,
+        approval_policy: str,
+        max_output_tokens: int | None,
+    ) -> None:
+        """Write quoted Codex settings into the overlay config.
+
+        A ``.cmd`` shim rewrites quotes, so ``-c key="value"`` cannot carry
+        these settings. They are the same keys ``-c`` would set.
+        """
+        path = Path(overlay_home) / "config.toml"
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+        lines = [f"approval_policy = {self._toml_string(approval_policy)}"]
+        if max_output_tokens is not None:
+            lines.append(f"model_max_output_tokens = {int(max_output_tokens)}")
+        block = "\n".join(lines)
+        if "[history]" in existing:
+            updated = existing.replace("[history]", f"{block}\n\n[history]", 1)
+        elif existing.strip():
+            updated = existing.rstrip() + "\n" + block + "\n"
+        else:
+            updated = block + "\n"
+        path.write_text(updated, encoding="utf-8")
+
     def _codex_available(self) -> bool:
         """Return True if `codex` binary is available and functional (sync check)."""
         return self._codex_available_status() == "ok"
@@ -290,8 +322,9 @@ class CodexCLIProvider(BaseCLIProvider):
         auth or config) so health checks can report correctly.
         """
         try:
+            codex_bin = resolve_cli_binary("codex", env_var="CHUNKHOUND_CODEX_BIN")
             res = subprocess.run(
-                ["codex", "--version"],
+                build_cli_argv(codex_bin, "--version"),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=self.VERSION_CHECK_TIMEOUT,
@@ -316,10 +349,10 @@ class CodexCLIProvider(BaseCLIProvider):
 
         Returns None if the command fails or no visible models are found.
         """
-        codex_bin = os.getenv("CHUNKHOUND_CODEX_BIN", "codex")
         try:
+            codex_bin = resolve_cli_binary("codex", env_var="CHUNKHOUND_CODEX_BIN")
             result = subprocess.run(
-                [codex_bin, "debug", "models"],
+                build_cli_argv(codex_bin, "debug", "models"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
@@ -373,7 +406,11 @@ class CodexCLIProvider(BaseCLIProvider):
         model: str | None,
     ) -> str:
         """Run `codex exec` and capture stdout with robust fallbacks."""
-        binary = os.getenv("CHUNKHOUND_CODEX_BIN", "codex")
+        try:
+            binary = resolve_cli_binary("codex", env_var="CHUNKHOUND_CODEX_BIN")
+        except FileNotFoundError as e:
+            raise RuntimeError(str(e)) from e
+        batch_shim = is_windows_batch_shim(binary)
         overlay_home: str | None = None
         config_file_path: str | None = None
         extra_args: list[str] = []
@@ -431,23 +468,27 @@ class CodexCLIProvider(BaseCLIProvider):
         sandbox_mode = self._resolve_sandbox_mode()
         approval_policy = self._resolve_approval_policy()
 
-        # CLI flag covers sandboxing; approval policy is only configurable via -c.
+        # Sandbox has a CLI flag. Approval, reasoning effort, and the output
+        # cap are config keys. A batch shim rewrites the quotes in ``-c``
+        # values, so those keys go in the overlay file instead.
         extra_args += ["--sandbox", sandbox_mode]
-        extra_args += [
-            "-c",
-            f"approval_policy={self._toml_string(approval_policy)}",
-        ]
-
-        # Make reasoning effort explicit per-call.
-        extra_args += [
-            "-c",
-            f"model_reasoning_effort={self._toml_string(self._reasoning_effort)}",
-        ]
-
-        # Enforce an explicit output cap when one was resolved. Omitting this
-        # config delegates the output allowance to Codex/model defaults.
-        if max_tokens is not None:
-            extra_args += ["-c", f"model_max_output_tokens={max_tokens}"]
+        if batch_shim:
+            self._merge_batch_overlay_config(
+                overlay_home,
+                approval_policy=approval_policy,
+                max_output_tokens=max_tokens,
+            )
+        else:
+            extra_args += [
+                "-c",
+                f"approval_policy={self._toml_string(approval_policy)}",
+            ]
+            extra_args += [
+                "-c",
+                f"model_reasoning_effort={self._toml_string(self._reasoning_effort)}",
+            ]
+            if max_tokens is not None:
+                extra_args += ["-c", f"model_max_output_tokens={max_tokens}"]
 
         override_mode = (
             os.getenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env").strip().lower()
@@ -473,11 +514,17 @@ class CodexCLIProvider(BaseCLIProvider):
         request_timeout = timeout if timeout is not None else self._timeout
 
         # Use stdin by default to avoid leaking prompts in the process list.
-        # Fallback to argv if the CLI rejects stdin.
-        # Set CHUNKHOUND_CODEX_STDIN_FIRST=0 to prefer argv mode.
+        # Fallback to argv if the CLI rejects stdin, except for batch shims,
+        # which always use stdin. Set CHUNKHOUND_CODEX_STDIN_FIRST=0 to prefer
+        # argv mode for a native binary.
         max_arg_chars = int(os.getenv("CHUNKHOUND_CODEX_ARG_LIMIT", "200000"))
         stdin_first = os.getenv("CHUNKHOUND_CODEX_STDIN_FIRST", "1") != "0"
-        use_stdin = True if stdin_first else (len(content) > max_arg_chars)
+        # Free-form prompts contain quotes, newlines, and %. A batch shim
+        # cannot carry that text as an argument.
+        if batch_shim:
+            use_stdin = True
+        else:
+            use_stdin = True if stdin_first else (len(content) > max_arg_chars)
         if debug_codex:
             logger.debug(
                 "Codex CLI transport selection: stdin_first=%s, use_stdin=%s, "
@@ -505,12 +552,14 @@ class CodexCLIProvider(BaseCLIProvider):
                                 add_skip_git,
                             )
                         proc = await asyncio.create_subprocess_exec(
-                            binary,
-                            "exec",
-                            "-",
-                            *(["--json"] if json_mode else []),
-                            *extra_args,
-                            *(["--skip-git-repo-check"] if add_skip_git else []),
+                            *build_cli_argv(
+                                binary,
+                                "exec",
+                                "-",
+                                *(["--json"] if json_mode else []),
+                                *extra_args,
+                                *(["--skip-git-repo-check"] if add_skip_git else []),
+                            ),
                             cwd=cwd,
                             stdin=asyncio.subprocess.PIPE,
                             stdout=asyncio.subprocess.PIPE,
@@ -533,12 +582,14 @@ class CodexCLIProvider(BaseCLIProvider):
                                 add_skip_git,
                             )
                         proc = await asyncio.create_subprocess_exec(
-                            binary,
-                            "exec",
-                            content,
-                            *(["--json"] if json_mode else []),
-                            *extra_args,
-                            *(["--skip-git-repo-check"] if add_skip_git else []),
+                            *build_cli_argv(
+                                binary,
+                                "exec",
+                                content,
+                                *(["--json"] if json_mode else []),
+                                *extra_args,
+                                *(["--skip-git-repo-check"] if add_skip_git else []),
+                            ),
                             cwd=cwd,
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
@@ -577,10 +628,18 @@ class CodexCLIProvider(BaseCLIProvider):
                             )
                             continue
 
-                        # If stdin failed, fall back to argv.
+                        # If stdin failed, fall back to argv. A batch shim
+                        # cannot take the prompt on argv, so that fallback
+                        # is not available.
                         if use_stdin and (
                             "broken pipe" in err_lower or "stdin" in err_lower
                         ):
+                            if batch_shim:
+                                raise RuntimeError(
+                                    "codex exec rejected stdin, and a Windows "
+                                    "batch shim cannot carry the prompt on "
+                                    f"the command line: {err}"
+                                )
                             use_stdin = False
                             logger.warning(
                                 "codex exec stdin not supported; "
@@ -612,8 +671,7 @@ class CodexCLIProvider(BaseCLIProvider):
 
                 except asyncio.TimeoutError as e:
                     if proc and proc.returncode is None:
-                        proc.kill()
-                        await proc.wait()
+                        await terminate_cli_process(proc)
                     last_error = RuntimeError(
                         f"codex exec timed out after {request_timeout}s"
                     )
@@ -631,6 +689,12 @@ class CodexCLIProvider(BaseCLIProvider):
                     raise last_error from e
                 except (BrokenPipeError, ConnectionResetError) as e:
                     # Treat stdin connection loss as "no stdin support".
+                    if use_stdin and batch_shim:
+                        raise RuntimeError(
+                            "codex exec lost its stdin pipe, and a Windows "
+                            "batch shim cannot carry the prompt on the "
+                            "command line"
+                        ) from e
                     if use_stdin:
                         use_stdin = False
                         if debug_codex:
