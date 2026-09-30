@@ -54,6 +54,13 @@ export function rerankerState(
   return retrieval.reranker.included ? "included" : "required";
 }
 
+// Single source for the state label: the build-time pre-JS paint
+// (Configurator.astro) and the runtime text updates (configurator.ts)
+// must render the same string or the first JS repaint would flicker.
+export function rerankerStateLabel(state: string): string {
+  return state === "required" ? "Required dependency" : "";
+}
+
 export function rerankerStatus(
   retrieval: ConfiguratorEmbeddingProviderOption,
 ): string {

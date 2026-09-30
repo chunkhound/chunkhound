@@ -35,6 +35,7 @@ export {
   RERANK_URL_ERROR_ID,
   rerankUrlValidationError,
   rerankerState,
+  rerankerStateLabel,
   rerankerStatus,
   rerankerSummary,
   rerankerValidationError,

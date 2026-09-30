@@ -9,6 +9,7 @@ import {
   highlightInlineShellLine,
   RERANK_URL_ERROR_ID,
   rerankerState,
+  rerankerStateLabel,
   rerankerStatus,
   rerankerSummary,
   rerankerValidationError,
@@ -85,7 +86,7 @@ function rerankerLabelTexts(
   state: string,
 ): Array<[string, string]> {
   return [
-    ["[data-rerank-state-label]", state === "required" ? "Required dependency" : ""],
+    ["[data-rerank-state-label]", rerankerStateLabel(state)],
     ["[data-rerank-status]", rerankerStatus(retrieval)],
     ["[data-rerank-details-summary]", rerankerSummary(retrieval)],
     ["[data-rerank-url-hint]", rerankerHint(retrieval)],

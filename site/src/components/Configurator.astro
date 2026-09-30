@@ -16,6 +16,7 @@ import {
   groupProviders,
   llmProviders,
   rerankerState,
+  rerankerStateLabel,
   rerankerStatus,
 } from "./configurator/index.ts";
 import CodeBlock from "./CodeBlock.astro";
@@ -45,8 +46,7 @@ const groupedResearch = groupProviders(llmProviders);
 // Pre-JS paint must match the runtime literals single-sourced here — the
 // script (configurator.ts) derives the same values on state changes.
 const defaultRerankerState = rerankerState(defaultRetrieval);
-const defaultRerankerStateLabel =
-  defaultRerankerState === "required" ? "Required dependency" : "";
+const defaultRerankerStateLabel = rerankerStateLabel(defaultRerankerState);
 const defaultRerankerStatus = rerankerStatus(defaultRetrieval);
 ---
 
