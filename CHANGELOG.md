@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Documentation site upgraded to Astro 7** with a refreshed homepage, architecture page, and a rebuilt configurator/nav/hero experience.
 
 ### Fixed
-- **UTF-8-BOM config files now work consistently** for standard configuration loading, Code Mapper workspace overrides, and the CLI prompt that adds timeout exclusions. Files written by Windows tools are accepted, and non-UTF-8 input still fails — now with the friendly "Invalid JSON in config file" error instead of a raw decode traceback. The timeout-exclusion rewrite normalizes BOM files to plain UTF-8.
+- **UTF-8-BOM config files now work consistently** for standard configuration loading, Code Mapper workspace overrides, remote-config persistence, and the CLI prompt that adds timeout exclusions. Files written by Windows tools are accepted, and non-UTF-8 input still fails — now with the friendly "Invalid JSON in config file" error instead of a raw decode traceback. The timeout-exclusion rewrite normalizes BOM files to plain UTF-8.
 
 ### Removed
 - **`chunkhound.__description__` removed.** Its value duplicated the module docstring / `pyproject.toml` `project.description` (the single source), and the attribute had no runtime consumer. Read the module docstring or `importlib.metadata` if you need the description.
