@@ -22,8 +22,6 @@ const SITE_CHANGELOG = resolve(root, "site/src/pages/docs/changelog.md");
 const FRONTMATTER = `---
 layout: ../../layouts/DocsLayout.astro
 title: "Changelog"
-order: 4
-section: "manual"
 ---
 
 `;

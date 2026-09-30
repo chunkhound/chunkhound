@@ -27,8 +27,6 @@ CHANGELOG_CONTENT = """# Changelog
 EXPECTED_FRONTMATTER_LINES = (
     'layout: ../../layouts/DocsLayout.astro',
     'title: "Changelog"',
-    'order: 4',
-    'section: "manual"',
 )
 
 
@@ -67,6 +65,10 @@ def test_sync_prepends_frontmatter() -> None:
         # changelog prose later in the file may legitimately contain it.
         frontmatter = output_text.split("---", 2)[1]
         assert "description:" not in frontmatter
+        # Dead nav keys: nav.ts is the ordering SSOT, so the generator must
+        # never reintroduce frontmatter that pretends to own order/section.
+        assert "order:" not in frontmatter
+        assert "section:" not in frontmatter
         assert output_text.endswith(CHANGELOG_CONTENT)
 
 

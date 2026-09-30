@@ -1,8 +1,6 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: "Configuration"
-order: 2
-section: "manual"
 ---
 
 # Configuration

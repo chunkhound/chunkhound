@@ -1,8 +1,6 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: "CLI Reference"
-order: 3
-section: "manual"
 ---
 
 # CLI Reference
