@@ -4,18 +4,16 @@ Drives the real module (detectReducedMotion, onReducedMotionChange) through
 the shared happy-dom bootstrap — the reduced-motion media query is the one
 hand fake browser_dom owns, toggled via globalThis.setReducedMotion. The
 window-absent and matchMedia-missing branches run in bare tsx with no DOM.
+
+The CSS drawer gates are contracted against the shipped bundles (css_helpers)
+rather than the source, so a rule that never reaches dist fails the test.
 """
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
+from tests.site.css_helpers import bodies
 from tests.site.dom_helpers import browser_dom
 from tests.site.tsx_runner import run_tsx_json
-
-ROOT = Path(__file__).resolve().parents[2]
-DOCS_CSS = ROOT / "site" / "src" / "styles" / "docs.css"
 
 _IMPORT = (
     "const { detectReducedMotion, onReducedMotionChange } = "
@@ -95,21 +93,20 @@ console.log(JSON.stringify({ seen }));
     assert rendered == {"seen": [True, False, True]}
 
 
-# The docs drawer animates via CSS (not the TS module), so it is contracted
-# against the source stylesheet: the marketing drawer guards its transition in
-# Nav.astro, and the docs drawer must behave identically for the same user
-# setting. `\n\}` scopes the match to the media block's own closing brace.
-_REDUCED_MOTION_DRAWER = re.compile(
-    r"@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)\s*\{(?P<body>.*?)\n\}",
-    re.DOTALL,
-)
-
-
+# The drawers animate via CSS (not the TS module), so their gates are
+# contracted against the shipped bundles: a rule that never reaches dist must
+# fail, not just the source declaration.
 def test_docs_sidebar_drawer_honors_reduced_motion() -> None:
     """The docs drawer must disable its slide under prefers-reduced-motion."""
-    block = _REDUCED_MOTION_DRAWER.search(DOCS_CSS.read_text(encoding="utf-8"))
-    assert block, "docs.css needs a prefers-reduced-motion block"
+    still = bodies(".docs-sidebar", media="prefers-reduced-motion")
+    assert any("transition:none" in body for body in still), (
+        ".docs-sidebar is not zeroed under prefers-reduced-motion"
+    )
 
-    body = block.group("body")
-    assert ".docs-sidebar" in body
-    assert "transition: none" in body
+
+def test_nav_drawer_honors_reduced_motion() -> None:
+    """The nav drawer must disable its slide under prefers-reduced-motion."""
+    still = bodies(".nav-menu-panel", media="prefers-reduced-motion")
+    assert any("transition:none" in body for body in still), (
+        ".nav-menu-panel is not zeroed under prefers-reduced-motion"
+    )
