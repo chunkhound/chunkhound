@@ -77,15 +77,20 @@ def test_symlink_parent_escape_is_not_reinterpreted_lexically(tmp_path):
     base = tmp_path / "root"
     target = tmp_path / "shared/sub"
     base.mkdir()
-    target.mkdir(parents=True)
-    (target.parent / "outside.py").write_text("outside", encoding="utf-8")
+    (target / "child").mkdir(parents=True)
+    (target / "outside.py").write_text("outside", encoding="utf-8")
     link = base / "linked"
     try:
         link.symlink_to(target, target_is_directory=True)
     except (OSError, NotImplementedError) as error:
         pytest.skip(f"symlink creation unavailable: {error}")
+    # Windows collapses parent components before resolving directory symlinks.
+    # Cancel a real child, not the link, so both platforms resolve outside root
+    # while the logical fallback still contains an unresolved parent component.
+    path = link / "child/../outside.py"
+    assert path.resolve() == (target / "outside.py").resolve()
     with pytest.raises(ValueError):
-        normalize_path_for_lookup(link / "../outside.py", base)
+        normalize_path_for_lookup(path, base)
 
 
 def test_broken_symlink_preserves_logical_name(tmp_path):
