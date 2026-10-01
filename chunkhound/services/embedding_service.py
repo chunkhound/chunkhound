@@ -810,9 +810,8 @@ class EmbeddingService(BaseService):
         self, provider: str, model: str, exclude_patterns: list[str] | None = None
     ) -> list[ChunkId]:
         """Get just the IDs of chunks that don't have embeddings."""
-        embedding_tables = self._get_all_embedding_tables()
-
-        if embedding_tables:
+        if getattr(self._db, "supports_embedding_sql_queries", False):
+            embedding_tables = self._get_all_embedding_tables()
             return self._get_chunk_ids_without_embeddings_sql(
                 provider, model, exclude_patterns, embedding_tables
             )
@@ -840,21 +839,42 @@ class EmbeddingService(BaseService):
             params.extend([provider, model])
 
         exclude_clauses = []
+        python_exclude_patterns = []
         if exclude_patterns:
             for pattern in exclude_patterns:
+                if "[" in pattern or "]" in pattern:
+                    # SQL LIKE cannot express fnmatch bracket classes. Fetch only
+                    # paths for these patterns, then preserve fnmatch semantics.
+                    python_exclude_patterns.append(pattern)
+                    continue
                 sql_like = self._fnmatch_to_sql_like(pattern)
                 exclude_clauses.append("f.path NOT LIKE ? ESCAPE '\\'")
                 params.append(sql_like)
 
         where_parts = not_exists_clauses + exclude_clauses
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        selected_columns = (
+            "c.id, f.path AS file_path" if python_exclude_patterns else "c.id"
+        )
         query = (
-            "SELECT c.id FROM chunks c "
+            f"SELECT {selected_columns} FROM chunks c "
             "JOIN files f ON c.file_id = f.id "
-            f"WHERE {' AND '.join(where_parts)} "
+            f"{where_clause} "
             "ORDER BY c.id"
         )
 
         rows = self._db.execute_query(query, params)
+        if python_exclude_patterns:
+            import fnmatch
+
+            rows = [
+                row
+                for row in rows
+                if not any(
+                    fnmatch.fnmatch(row.get("file_path") or "", pattern)
+                    for pattern in python_exclude_patterns
+                )
+            ]
         return [ChunkId(row["id"]) for row in rows]
 
     def _get_chunk_ids_without_embeddings_fallback(
@@ -969,10 +989,9 @@ class EmbeddingService(BaseService):
             return []
 
         int_ids = [int(cid) for cid in chunk_ids]
-        try:
+        if getattr(self._db, "supports_embedding_sql_queries", False):
             return self._get_chunks_by_ids_sql(int_ids)
-        except Exception:
-            return self._get_chunks_by_ids_fallback(int_ids)
+        return self._get_chunks_by_ids_fallback(int_ids)
 
     def _get_chunks_by_ids_sql(self, chunk_ids: list[int]) -> list[dict[str, Any]]:
         """SQL path: targeted SELECT ... WHERE c.id IN (...)."""

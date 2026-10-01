@@ -22,7 +22,7 @@ _TOTAL_CHUNKS = 20
 _PRE_EMBEDDED = 12
 
 
-def _seed_db(provider):
+def _seed_db(provider, create_embedding_table: bool = True):
     """Insert files, chunks, and partial embeddings into a fresh DuckDB."""
     provider.connection.execute(
         "INSERT INTO files (id, path, name, content_hash) "
@@ -36,6 +36,9 @@ def _seed_db(provider):
             "VALUES (?, 1, ?, ?, 'function', ?, ?)",
             [cid, f"def func_{cid}(): pass", f"func_{cid}", cid, cid],
         )
+
+    if not create_embedding_table:
+        return
 
     dims = MockEmbeddingProvider.dims
     provider._ensure_embedding_table_exists(dims)
@@ -52,6 +55,71 @@ def _seed_db(provider):
 
 class TestMissingEmbeddingsTargetedQuery:
     """generate_missing_embeddings must find gaps via SQL, not full scans."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_database_without_embedding_table_uses_targeted_query(
+        self, tmp_path: Path
+    ):
+        """A new DuckDB still uses ID-only SQL when no embedding table exists."""
+        pytest.importorskip("duckdb")
+        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+        from chunkhound.services.embedding_service import EmbeddingService
+
+        provider = DuckDBProvider(
+            db_path=tmp_path / "test.duckdb", base_directory=tmp_path
+        )
+        provider.connect()
+
+        try:
+            _seed_db(provider, create_embedding_table=False)
+            service = EmbeddingService(
+                database_provider=provider,
+                embedding_provider=MockEmbeddingProvider(),
+            )
+
+            with patch.object(
+                provider,
+                "get_all_chunks_with_metadata",
+                side_effect=AssertionError(
+                    "fresh DuckDB must not load full chunk records"
+                ),
+            ):
+                result = await service.generate_missing_embeddings()
+
+            assert result["status"] == "success", f"unexpected status: {result}"
+            assert result["generated"] == _TOTAL_CHUNKS
+        finally:
+            provider.disconnect(skip_checkpoint=True)
+
+    def test_duckdb_query_errors_are_not_retried_as_full_scans(self, tmp_path: Path):
+        """A DuckDB error must surface rather than silently switching to a full scan."""
+        pytest.importorskip("duckdb")
+        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+        from chunkhound.services.embedding_service import EmbeddingService
+
+        provider = DuckDBProvider(
+            db_path=tmp_path / "test.duckdb", base_directory=tmp_path
+        )
+        provider.connect()
+        service = EmbeddingService(
+            database_provider=provider,
+            embedding_provider=MockEmbeddingProvider(),
+        )
+
+        try:
+            with (
+                patch.object(
+                    service,
+                    "_get_chunks_by_ids_sql",
+                    side_effect=RuntimeError("DuckDB read failed"),
+                ),
+                patch.object(service, "_get_chunks_by_ids_fallback") as fallback,
+            ):
+                with pytest.raises(RuntimeError, match="DuckDB read failed"):
+                    service._get_chunks_by_ids([1])
+                fallback.assert_not_called()
+        finally:
+            provider.disconnect(skip_checkpoint=True)
 
     @pytest.mark.asyncio
     async def test_embeds_only_missing_chunks_without_full_scan(self, tmp_path: Path):
@@ -151,9 +219,12 @@ class TestMissingEmbeddingsTargetedQuery:
         finally:
             provider.disconnect(skip_checkpoint=True)
 
+    @pytest.mark.parametrize("exclude_pattern", ["vendor/*", "vendor/[l]ib.py"])
     @pytest.mark.asyncio
-    async def test_exclude_patterns_filter_via_sql(self, tmp_path: Path):
-        """exclude_patterns must filter files in SQL, not Python post-filter."""
+    async def test_exclude_patterns_filter_via_sql(
+        self, tmp_path: Path, exclude_pattern: str
+    ):
+        """Glob filtering preserves fnmatch semantics without loading chunk contents."""
         pytest.importorskip("duckdb")
         from chunkhound.providers.database.duckdb_provider import DuckDBProvider
         from chunkhound.services.embedding_service import EmbeddingService
@@ -192,7 +263,7 @@ class TestMissingEmbeddingsTargetedQuery:
                 ),
             ):
                 result = await service.generate_missing_embeddings(
-                    exclude_patterns=["vendor/*"]
+                    exclude_patterns=[exclude_pattern]
                 )
 
             assert result["status"] == "success", f"unexpected result: {result}"

@@ -45,6 +45,11 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    @property
+    def supports_embedding_sql_queries(self) -> bool:
+        """Whether targeted chunk/file/embedding SQL queries are supported."""
+        ...
+
     def release_for_rust_pipeline(self) -> None:
         """Release this provider's connection so the Rust pipeline can take
         write ownership of the database file.
