@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
-    from chunkhound.services.search_service import SearchService
 
 
 class DatabaseServices(NamedTuple):
@@ -95,12 +94,7 @@ def create_services(
     Returns:
         DatabaseServices bundle with all components
     """
-    # Avoid double-configuring the registry (which can open the DB twice and lock it).
     registry = get_registry()
-    try:
-        registry.get_config()
-    except Exception:
-        pass
 
     # Always (re)configure the registry with an effective per-call config so that
     # tests using distinct temporary directories get an IndexingCoordinator whose
@@ -130,8 +124,6 @@ def create_services(
         effective_config = config
 
     configure_registry(effective_config)
-    # else: assume already configured by caller (e.g., CLI), do not reconfigure again
-    # to prevent creating a second database provider connection in the same process.
 
     # If embedding_manager is provided, register its provider with the global registry
     # so services use the same instance, held to the index like the registry's own
@@ -141,9 +133,7 @@ def create_services(
             if provider:
                 registry.register_embedding_provider(provider)
         except Exception as exc:
-            logger.warning(
-                f"Failed to register embedding provider from manager: {exc}"
-            )
+            logger.opt(exception=True).warning("Provider registration failed: {}", exc)
 
     return DatabaseServices(
         provider=registry.get_provider("database"),
