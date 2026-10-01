@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from loguru import logger
 
 from chunkhound.core import analytics as ch_analytics
-from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
@@ -642,18 +641,12 @@ def _embedding_native_capabilities(
     return 8191, False, True
 
 
-def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
-    """Use the provider's canonical default instead of crossing ``None``."""
+def _resolved_embedding_model(embedding_cfg: Any) -> str:
+    """Return the configured model, else the provider's canonical default."""
     get_default_model = getattr(embedding_cfg, "get_default_model", None)
     if callable(get_default_model):
         return str(get_default_model())
-    model = _cfg_or(embedding_cfg, "model", "", str)
-    if model:
-        return model
-    return {
-        "openai": OPENAI_DEFAULT_MODEL,
-        "voyageai": VOYAGE_DEFAULT_MODEL,
-    }.get(provider, "")
+    return _cfg_or(embedding_cfg, "model", "", str)
 
 
 
@@ -754,7 +747,7 @@ async def run_rust_pipeline(
     )
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
-    embedding_model = _resolved_embedding_model(embedding_cfg, embedding_provider)
+    embedding_model = _resolved_embedding_model(embedding_cfg)
     (
         embed_max_tokens_per_batch,
         embedding_matryoshka,
