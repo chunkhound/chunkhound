@@ -24,6 +24,8 @@ Any changes to this factory must be tested across all execution paths:
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from loguru import logger
+
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.registry import configure_registry, get_registry
 
@@ -33,7 +35,6 @@ if TYPE_CHECKING:
     from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
-    from chunkhound.services.search_service import SearchService
 
 
 class DatabaseServices(NamedTuple):
@@ -93,12 +94,7 @@ def create_services(
     Returns:
         DatabaseServices bundle with all components
     """
-    # Avoid double-configuring the registry (which can open the DB twice and lock it).
     registry = get_registry()
-    try:
-        existing_cfg = registry.get_config()
-    except Exception:
-        existing_cfg = None
 
     # Always (re)configure the registry with an effective per-call config so that
     # tests using distinct temporary directories get an IndexingCoordinator whose
@@ -123,12 +119,11 @@ def create_services(
                     )
                 )
             effective_config = config
-    except Exception:
+    except Exception as exc:
+        logger.debug(f"Config path normalization failed, using raw config: {exc}")
         effective_config = config
 
     configure_registry(effective_config)
-    # else: assume already configured by caller (e.g., CLI), do not reconfigure again
-    # to prevent creating a second database provider connection in the same process.
 
     # If embedding_manager is provided, register its provider with the global registry
     # so services use the same instance, held to the index like the registry's own
@@ -137,9 +132,8 @@ def create_services(
             provider = embedding_manager.get_default_provider()
             if provider:
                 registry.register_embedding_provider(provider)
-        except Exception:
-            # If no provider in embedding_manager, registry will handle provider creation
-            pass
+        except Exception as exc:
+            logger.opt(exception=True).warning("Provider registration failed: {}", exc)
 
     return DatabaseServices(
         provider=registry.get_provider("database"),
