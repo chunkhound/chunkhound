@@ -188,7 +188,7 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            await asyncio.to_thread(db.drop_all_hnsw_indexes)
+            await self._run_hnsw_database_operation(db.drop_all_hnsw_indexes)
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")
@@ -218,11 +218,40 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            await asyncio.to_thread(db.ensure_all_hnsw_indexes)
+            await self._run_hnsw_database_operation(db.ensure_all_hnsw_indexes)
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")
             logger.info(f"Rebuilt HNSW indexes in {elapsed_ms:.0f}ms")
+
+    async def _run_hnsw_database_operation(
+        self, operation: Callable[[], None]
+    ) -> None:
+        """Offload HNSW work and drain it before propagating cancellation.
+
+        Cancelling ``asyncio.to_thread`` does not stop its synchronous callable.
+        Waiting for the worker here ensures MCP shutdown cannot proceed to close
+        the database while an indexing task still has HNSW work in flight.
+        """
+        worker = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if worker.done():
+                try:
+                    worker.result()
+                except Exception:
+                    logger.exception(
+                        "HNSW operation failed while draining cancelled indexing work"
+                    )
+            raise
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""
