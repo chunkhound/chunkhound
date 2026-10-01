@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, File
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
@@ -102,6 +103,13 @@ class SerialDatabaseProvider(ABC):
         return self._db_path
 
     @property
+    def supports_rust_pipeline(self) -> bool:
+        """The Rust pipeline only implements a DuckDB backend; override to
+        True in providers it actually supports.
+        """
+        return False
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active."""
         # For serial providers, we consider it connected if executor exists
@@ -150,6 +158,42 @@ class SerialDatabaseProvider(ABC):
             self._executor.clear_thread_local()
             # Shutdown executor with Windows-specific handling
             self._executor.shutdown(wait=True)
+
+    def release_for_rust_pipeline(self) -> None:
+        """Close the DuckDB connection without shutting down the executor.
+
+        Called before handing write ownership to the Rust pipeline.  Unlike
+        disconnect(), this keeps the ThreadPoolExecutor alive so connect()
+        can reopen the connection once the Rust pipeline has finished.
+
+        Raises:
+            DatabaseError: if the connection could not be closed. The caller
+                must not proceed to hand write ownership to the Rust pipeline
+                in that case — Python's DuckDB connection would still be open
+                on the same file Rust is about to write to.
+        """
+        try:
+            self._execute_in_db_thread_sync(
+                "disconnect", False, _bypass_rust_pipeline_guard=True
+            )
+        except Exception as e:
+            raise DatabaseError(
+                operation="release_for_rust_pipeline",
+                reason=(
+                    "failed to close the Python DuckDB connection before "
+                    f"handing write ownership to the Rust pipeline: {e}"
+                ),
+            ) from e
+        finally:
+            self._executor.clear_thread_local()
+
+    def set_rust_pipeline_in_progress(self, active: bool) -> None:
+        """Publish whether the Rust pipeline currently owns the database file."""
+        self._executor.set_rust_pipeline_in_progress(active)
+
+    def is_rust_pipeline_in_progress(self) -> bool:
+        """Return True when the Rust pipeline currently owns the database file."""
+        return self._executor.is_rust_pipeline_in_progress()
 
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""

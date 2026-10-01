@@ -1,12 +1,14 @@
 name: Release
 
+# Publishing a GitHub Release is the maintainer gate for stable releases.
+# This workflow owns PyPI publication through its two OIDC environments; do
+# not publish with uv manually.
 on:
   release:
     types: [published]
 
 permissions:
-  contents: write  # gh release delete --cleanup-tag on failure
-  id-token: write  # OIDC Trusted Publishing
+  contents: read  # default for build jobs; publish jobs elevate below
 
 jobs:
   build-sdist:
@@ -15,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # hatch-vcs requires full history for version derivation
 
@@ -31,6 +33,7 @@ jobs:
           name: release-dist-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
+          overwrite: true
 
   build-runtime-wheels:
     runs-on: ${{ matrix.os }}
@@ -42,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # hatch-vcs requires full history for version derivation
 
@@ -60,6 +63,7 @@ jobs:
           name: release-dist-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
 
   build-native-wheel:
     runs-on: ${{ matrix.os }}
@@ -67,77 +71,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      - name: Install Python 3.12  # abi3 wheel runs on Python 3.10+
-        run: uv python install 3.12
-
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
       - name: Build native wheel
-        shell: bash
-        run: |
-          # maturin build has no --set-version flag; it reads the wheel version from
-          # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
-          # before any pre-release suffix) while the git tag uses PEP 440 (no
-          # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
-          # Cargo version via pep440_rs, which normalizes the hyphenated form to
-          # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
-          export TAG_VERSION="${GITHUB_REF_NAME#v}"
-          uv run --no-project --python 3.12 python - <<'PYEOF'
-          import os, re, pathlib
-
-          tag_version = os.environ["TAG_VERSION"]
-          m = re.match(r"^(\d+\.\d+\.\d+)([a-zA-Z].*)?$", tag_version)
-          cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
-
-          path = pathlib.Path("Cargo.toml")
-          text = path.read_text()
-          new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
-          path.write_text(new_text)
-          PYEOF
-          # maturin treats a sibling pyproject.toml as authoritative package metadata
-          # ("mixed" Rust/Python project support), which misnames this wheel as
-          # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
-          # Python package's pyproject.toml for the build; nothing else in this job
-          # needs it (the uv commands above already use --no-project).
-          mv pyproject.toml pyproject.toml.hidden
-          uvx --python 3.12 maturin build --release --out dist/
-          mv pyproject.toml.hidden pyproject.toml
-
-      - name: Smoke test native wheel
-        shell: bash
-        run: |
-          # Run outside the repo root: the repo's own chunkhound_native/__init__.py
-          # source-tree stub (kept so `maturin develop` re-exports survive editable
-          # reinstalls locally) would otherwise shadow the installed wheel package,
-          # since it expects a compiled extension sitting next to it that only
-          # exists after a local editable build, not in this CI job.
-          WHEEL_DIR="$(pwd)/dist"
-          TMP_DIR="$(mktemp -d)"
-          cd "$TMP_DIR"
-          uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \
-            python -c "from chunkhound_native import scan_files; r = scan_files('.', ['py']); assert isinstance(r, list)"
+        uses: ./.github/actions/build-native-wheel
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4
@@ -145,12 +91,72 @@ jobs:
           name: release-dist-native-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
+
+  validate-release:
+    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # macOS/arm64 excluded: runner cost. Coverage exists via native-dev-macos
+      # in ci.yml (source-level make dev) and build-native-wheel (wheel build).
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download matching main wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-${{ matrix.os }}
+          path: main-dist
+
+      - name: Download matching native wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-native-${{ matrix.os }}
+          path: native-dist
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Validate combined wheel installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          main_wheels=(main-dist/*.whl)
+          native_wheels=(native-dist/*.whl)
+          if [[ ${#main_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching main wheel, found ${#main_wheels[@]}"
+            exit 1
+          fi
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching native wheel, found ${#native_wheels[@]}"
+            exit 1
+          fi
+
+          uv python install 3.12
+          workspace_dir="$(pwd)"
+          validation_dir="$(mktemp -d)"
+          cd "$validation_dir"
+          uv run --no-project --python 3.12 \
+            --with "$workspace_dir/main-dist"/*.whl \
+            --with "$workspace_dir/native-dist"/*.whl \
+            python "$workspace_dir/scripts/smoke_test_native_wheel.py"
 
   publish:
-    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    needs: [publish-native, build-sdist, build-runtime-wheels]
     runs-on: ubuntu-latest
+    # PyPI must trust this repository's release.yml workflow in the `pypi`
+    # environment for OIDC publishing to work.
     environment: pypi
     timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC Trusted Publishing
 
     steps:
       - name: Download main distribution artifacts
@@ -165,29 +171,27 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-
-      - name: Cleanup on failure (delete release and tag)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete "${{ github.event.release.tag_name }}" \
-            --cleanup-tag \
-            --yes \
-            --repo "${{ github.repository }}"
+          skip-existing: true
 
   publish-native:
-    needs: [publish]
+    needs: [build-native-wheel, validate-release]
     runs-on: ubuntu-latest
     # Separate environment so this job carries an OIDC token scoped to the
     # chunkhound-native PyPI project (each project needs its own trusted-publisher
-    # entry referencing this environment name). Depends on publish so the main
-    # package is confirmed live before attempting the native publish — avoids
-    # deleting a successfully-published release if only the native wheel fails.
+    # entry referencing this environment name). Native publication is deliberately
+    # first so the main package cannot become installable before its required
+    # native wheels are available.
     environment: pypi-native
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write  # OIDC Trusted Publishing (chunkhound-native PyPI project)
+      issues: write    # gh issue create alert if publish-native fails
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
       - name: Download native wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -195,8 +199,41 @@ jobs:
           path: dist-native
           merge-multiple: true
 
+      - name: Validate native wheel versions
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/validate_native_wheel_versions.py
+
       - name: Publish chunkhound-native to PyPI
         id: publish-native
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-native
+          skip-existing: true
+
+      - name: Alert on native publish failure
+        # Native publication runs before publish, so a failure prevents the
+        # main package from being released. The alert still makes failures in
+        # publication or the pre-publish version gate visible to maintainers.
+        if: failure()
+        uses: ./.github/actions/alert-native-publish-failure
+        with:
+          tag: ${{ github.event.release.tag_name }}
+
+  alert-native-prepublish-failure:
+    needs: [build-native-wheel, validate-release]
+    if: ${{ always() && (needs['build-native-wheel'].result == 'failure' || needs['validate-release'].result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Alert on native build or validation failure
+        uses: ./.github/actions/alert-native-publish-failure
+        with:
+          tag: ${{ github.event.release.tag_name }}

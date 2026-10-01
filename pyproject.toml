@@ -39,7 +39,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
-    "duckdb==1.4.4",
+    "duckdb==1.5.4",
     "openai>=1.0.0",
     "jsonschema>=4.0.0",
     "packaging>=21.0",
@@ -122,12 +122,10 @@ dependencies = [
     # Response.charset workaround). Bumping requires re-validating the
     # response-event race ordering and the async-handler dispatch path.
     "zendriver==0.15.3",
+    "chunkhound-native>=5.2.0",
 ]
 
 [project.optional-dependencies]
-native = [
-    "chunkhound-native>=5.2.0",
-]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
@@ -240,6 +238,12 @@ addopts = [
     "--verbose",
     "--tb=short",
     "--strict-markers",
+    # pytest-xdist's default "load" scheduler ignores the xdist_group marker
+    # entirely -- only "loadgroup" honors it, co-locating same-group tests on
+    # one worker. Several tests rely on this (see native_ext_fs_mutation in
+    # tests/contracts/) to avoid racing each other's real filesystem mutation
+    # under `-n auto`. No-op for ungrouped tests and for runs without -n.
+    "--dist=loadgroup",
 ]
 filterwarnings = [
     # Suppress SWIG-related warnings from tree-sitter bindings
@@ -262,6 +266,7 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "maturin>=1.15.0",
     "mypy>=1.16.0",
     "nuitka>=2.7.7",
     "pyinstaller>=6.14.1",

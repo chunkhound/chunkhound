@@ -84,6 +84,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "orcarouter",
+            "model": "anthropic/claude-sonnet-5",
+            "expected_name": "orcarouter",
+            "expected_base_url": "https://api.orcarouter.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'orcarouter'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="orcarouter",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -230,9 +245,9 @@ class TestFactoryPipeline:
         """Synthesis concurrency matches the spec value."""
         manager = _bare_manager()
         provider = manager._create_provider(spec)
-        expected = {"deepseek": 10, "grok": 5, "openrouter": 10, "openai": 3}[
-            spec["provider"]
-        ]
+        expected = {
+            "deepseek": 10, "grok": 5, "openrouter": 10, "orcarouter": 10, "openai": 3
+        }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected
 
 

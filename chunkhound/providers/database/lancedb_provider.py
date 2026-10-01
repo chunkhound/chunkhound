@@ -2310,6 +2310,54 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.error(f"Error getting provider stats: {e}")
             return {"provider": provider, "model": model, "embedding_count": 0}
 
+    def get_embedding_model_counts(self) -> list[dict[str, Any]]:
+        """Summarize stored vectors by provider, model and dimensions."""
+        return self._execute_in_db_thread_sync("get_embedding_model_counts")
+
+    def _executor_get_embedding_model_counts(
+        self, conn: Any, state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_embedding_model_counts - runs in DB thread.
+
+        Vectors live on chunk rows here, so this groups the chunks table. Once
+        any vectors exist the column is fixed-size, which fixes the dimensions
+        for the whole table; a variable-size column is measured row by row.
+        """
+        if not self._chunks_table:
+            return []
+        import pyarrow.compute as pc
+
+        embedding_type = self._chunks_table.schema.field("embedding").type
+        fixed_dims = getattr(embedding_type, "list_size", None)
+        columns = ["provider", "model", "created_time"]
+        if not fixed_dims:
+            columns.append("embedding")
+        table = self._chunks_table.to_lance().to_table(
+            columns=columns,
+            filter="embedding IS NOT NULL AND provider != '' AND model != ''",
+        )
+        if table.num_rows == 0:
+            return []
+        if fixed_dims:
+            dims = pa.array([fixed_dims] * table.num_rows, pa.int64())
+        else:
+            dims = pc.list_value_length(table["embedding"])
+        grouped = (
+            table.append_column("dims", dims)
+            .group_by(["provider", "model", "dims"])
+            .aggregate([([], "count_all"), ("created_time", "max")])
+        )
+        return [
+            {
+                "provider": row["provider"],
+                "model": row["model"],
+                "dims": row["dims"],
+                "count": row["count_all"],
+                "latest": row["created_time_max"],
+            }
+            for row in grouped.to_pylist()
+        ]
+
     # Transaction and Bulk Operations
     def execute_query(
         self, query: str, params: list[Any] | None = None

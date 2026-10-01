@@ -484,6 +484,19 @@ class Language(Enum):
         return patterns
 
     @classmethod
+    def is_known_path(cls, path: Path) -> bool:
+        """Check whether a path's extension or filename is a supported language.
+
+        Case-insensitive on both the extension and the filename. Extensions
+        are lowercased here rather than relying on the registry to always
+        provide a lowercase sibling for mixed-case keys (e.g. ``.TcPOU``).
+        """
+        known_extensions = {ext.lower() for ext in cls.get_all_extensions()}
+        if path.suffix.lower() in known_extensions:
+            return True
+        return path.name.lower() in cls.get_all_filename_patterns()
+
+    @classmethod
     def get_file_patterns(cls) -> list[str]:
         """Get glob patterns for all supported file types.
 

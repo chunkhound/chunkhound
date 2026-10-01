@@ -21,6 +21,7 @@ class RealtimePathFilterSettings:
     chignore_file: str = ".chignore"
     gitignore_backend: str = "python"
     workspace_root_only_gitignore: bool = False
+    index_unknown_files: bool = False
 
     @classmethod
     def from_config(
@@ -48,6 +49,7 @@ class RealtimePathFilterSettings:
             workspace_root_only_gitignore=bool(
                 getattr(indexing, "workspace_gitignore_nonrepo", False)
             ),
+            index_unknown_files=bool(getattr(indexing, "index_unknown_files", False)),
         )
 
 
@@ -67,6 +69,7 @@ class RealtimePathFilter:
         self._ignore_engine_degraded = False
         self._ignore_engine_degraded_warned = False
         self._include_patterns: list[str] | None = None
+        self._extension_filter: tuple[frozenset[str], frozenset[str]] | None = None
         self._include_degraded = False
         self._include_degraded_warned = False
         self._pattern_cache: dict[str, Any] = {}
@@ -156,24 +159,42 @@ class RealtimePathFilter:
 
         try:
             if self._include_patterns is None:
-                from chunkhound.utils.file_patterns import normalize_include_patterns
+                from chunkhound.utils.file_patterns import (
+                    normalize_include_patterns,
+                    prepare_extension_filter,
+                )
 
                 if settings.include_patterns is None:
                     return self._language_fallback(file_path)
 
                 includes = list(settings.include_patterns)
                 self._include_patterns = normalize_include_patterns(includes)
+                # Prepared once here because should_index() runs per filesystem
+                # event — re-summarizing patterns per call would be wasteful.
+                self._extension_filter = prepare_extension_filter(
+                    self._include_patterns
+                )
 
             if not self._include_patterns:
                 return False
 
             from chunkhound.utils.file_patterns import should_include_file
 
-            return should_include_file(
+            if not should_include_file(
                 file_path,
                 self._root,
                 self._include_patterns,
                 self._pattern_cache,
+            ):
+                return False
+
+            from chunkhound.utils.file_patterns import passes_extension_filter
+
+            return passes_extension_filter(
+                file_path,
+                self._include_patterns,
+                settings.index_unknown_files,
+                prepared=self._extension_filter,
             )
         except Exception as error:
             self._include_degraded = True
@@ -204,8 +225,4 @@ class RealtimePathFilter:
     def _language_fallback(file_path: Path) -> bool:
         from chunkhound.core.types.common import Language
 
-        if file_path.suffix.lower() in Language.get_all_extensions():
-            return True
-        if file_path.name.lower() in Language.get_all_filename_patterns():
-            return True
-        return False
+        return Language.is_known_path(file_path)

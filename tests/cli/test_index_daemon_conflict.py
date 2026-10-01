@@ -271,7 +271,7 @@ async def test_index_with_stuck_daemon_kills_and_retries(
     lock_error = Exception("Could not set lock on file")
     call_count = 0
 
-    def mock_configure_registry(config):
+    def mock_configure_registry(config, on_model_drift=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:

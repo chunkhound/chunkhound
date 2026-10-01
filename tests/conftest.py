@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 
 import pytest
 from loguru import logger
@@ -79,13 +80,73 @@ def _discover_free_opencode_models() -> list[str]:
         return []
 
 
+# Probe timeout: below the integration test's 30s to bound fixture latency.
+_OPENCODE_PROBE_TIMEOUT = 20
+# Tests use models[0] only; probe up to 4 candidates to find one servable model.
+_MAX_OPENCODE_PROBES = 4
+
+
+def _probe_opencode_model(slug: str) -> tuple[bool, str | None]:
+    """Return (servable, reason) by running one minimal JSON-mode request.
+
+    Invokes the CLI the same way OpenCodeCLIProvider does (temp cwd,
+    --format json) and reuses its NDJSON classifier to check the success path.
+    A catalog entry marked free is not proof the
+    upstream serves it, so tests skip rather than fail when no candidate is
+    servable.
+    """
+    from chunkhound.providers.llm.opencode_cli_provider import (
+        OpenCodeCLIProvider,
+    )
+
+    provider = OpenCodeCLIProvider(model=slug, max_retries=1)
+    try:
+        result = subprocess.run(
+            ["opencode", "run", "--model", slug, "--format", "json"],
+            input=b"ping\n",
+            capture_output=True,
+            timeout=_OPENCODE_PROBE_TIMEOUT,
+            cwd=tempfile.gettempdir(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"probe timed out after {_OPENCODE_PROBE_TIMEOUT}s"
+    except OSError as exc:
+        return False, f"probe could not run the opencode CLI: {exc}"
+
+    stderr_msg = result.stderr.decode("utf-8", errors="replace")
+    # intentional: reuse production parser so probe and provider agree on "usable"
+    parsed = provider._parse_json_output(
+        result.stdout, stderr_msg, result.returncode, model=slug
+    )
+    if parsed.action == "success":
+        return True, None
+    if parsed.action == "retry_plain":
+        return False, "JSON probe unsupported or returned no text"
+    return False, parsed.error_message or "JSON probe failed without a message"
+
+
 @pytest.fixture(scope="session")
 def free_opencode_models() -> list[str]:
-    """Discover all free OpenCode model slugs for integration tests."""
+    """Discover free OpenCode model slugs that actually serve requests."""
     models = _discover_free_opencode_models()
     if not models:
         pytest.skip("No free OpenCode models available")
-    return models
+
+    servable: list[str] = []
+    rejected: list[tuple[str, str]] = []
+    for slug in models:
+        if len(servable) >= 1 or len(servable) + len(rejected) >= _MAX_OPENCODE_PROBES:
+            break
+        ok, reason = _probe_opencode_model(slug)
+        if ok:
+            servable.append(slug)
+        else:
+            rejected.append((slug, reason))
+
+    if not servable:
+        reasons = "; ".join(f"{slug}: {reason}" for slug, reason in rejected)
+        pytest.skip(f"No servable free OpenCode models ({reasons})")
+    return servable
 
 
 @pytest.fixture

@@ -1397,3 +1397,49 @@ class TestGetModelInfo:
     def test_custom_endpoint_with_rerank_url_is_true(self, provider_with_rerank_url):
         info = provider_with_rerank_url.get_model_info()
         assert info["supports_reranking"] is True
+
+
+# ===========================================================================
+# 12. voyage-4 series batching and dimension contracts
+# ===========================================================================
+
+
+class TestVoyage4SeriesLimits:
+    """The 4-series entries must carry the limits the Voyage API enforces.
+
+    Batch limits differ per model, and exceeding one is a hard 400
+    (TOO_MANY_TOKENS_IN_BATCH), so a wrong entry here fails at index time
+    rather than at config time.
+    """
+
+    @pytest.mark.parametrize(
+        ("model", "max_tokens_per_batch"),
+        [
+            ("voyage-code-4", 320000),
+            ("voyage-4", 320000),
+            ("voyage-4-large", 120000),
+            ("voyage-4-lite", 1000000),
+        ],
+    )
+    def test_max_tokens_per_batch_matches_api_limit(
+        self, model: str, max_tokens_per_batch: int
+    ):
+        p = _make_provider(api_key="test-key", model=model)
+        assert p.get_max_tokens_per_batch() == max_tokens_per_batch
+
+    @pytest.mark.parametrize(
+        "model", ["voyage-code-4", "voyage-4", "voyage-4-large", "voyage-4-lite"]
+    )
+    def test_series_advertises_matryoshka_dimensions(self, model: str):
+        p = _make_provider(api_key="test-key", model=model)
+        assert list(p.supported_dimensions) == [256, 512, 1024, 2048]
+        assert p.dims == 1024
+
+    @pytest.mark.parametrize(
+        "model", ["voyage-code-4", "voyage-4", "voyage-4-large", "voyage-4-lite"]
+    )
+    def test_series_rejects_unsupported_output_dims(self, model: str):
+        with pytest.raises(
+            EmbeddingConfigurationError, match="not in supported dimensions"
+        ):
+            _make_provider(api_key="test-key", model=model, output_dims=768)
