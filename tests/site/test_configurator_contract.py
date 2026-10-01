@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
 from chunkhound.api.cli.utils.config_factory import create_validated_config
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.embedding_config import EmbeddingConfig
 from tests.site.dom_helpers import browser_dom, dist_body
 from tests.site.tsx_runner import run_tsx_json
 
@@ -822,3 +824,27 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
 
     # The gateway default's rationale must state the default is not a compromise.
     assert "not a compromise" in by_id["openrouter"]["recommendation"]
+
+
+def test_rerank_format_parity_between_ts_and_python() -> None:
+    """The TS guard must accept exactly the backend's rerank formats minus 'auto'.
+
+    'auto' is a backend runtime sentinel, so the configurator excludes it. The
+    Python set is read from the field annotation (not source text) and the TS
+    guard is executed, so renames or reordering on either side cannot silently
+    desync them.
+    """
+    py_formats = set(get_args(EmbeddingConfig.model_fields["rerank_format"].annotation))
+    candidates = sorted(py_formats | {"bogus"})
+    script = (
+        "const { isRerankFormat } = await import("
+        "'./site/src/components/configurator/rerank-validate.ts');\n"
+        f"const candidates = {json.dumps(candidates)};\n"
+        "console.log(JSON.stringify(candidates.filter(isRerankFormat)));"
+    )
+    accepted = set(run_tsx_json(script))
+
+    assert accepted == py_formats - {"auto"}, (
+        f"Rerank formats desynced: Python accepts {py_formats}, "
+        f"the TS guard accepts {accepted}."
+    )
