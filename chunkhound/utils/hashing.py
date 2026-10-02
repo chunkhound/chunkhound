@@ -3,6 +3,11 @@ from pathlib import Path
 import xxhash
 
 
+def compute_text_hash(text: str) -> str:
+    """Compute an XXH3-64 digest without retaining the source text."""
+    return xxhash.xxh3_64_hexdigest(text.encode("utf-8"))
+
+
 def compute_file_hash(path: Path) -> str:
     """Compute a fast full-file checksum using xxHash3-64.
 

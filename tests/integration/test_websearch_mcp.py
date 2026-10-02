@@ -6,10 +6,9 @@ from the transient web-content index). The happy-path roundtrip is already
 covered by the lighter `test_mcp_websearch_stdio_mocked` smoke test; this
 file focuses solely on isolation.
 
-With `CH_TEST_WEBSEARCH_STUB=1` the research subprocess is replaced by a
-one-liner (`python -c "print('ANSWER')"`), so the check verifies the
-parent-process half of the invariant: that `websearch_impl` itself does not
-mutate the registry before delegating to the child.
+With `CH_TEST_WEBSEARCH_STUB=1`, network fetch and in-process research are
+replaced with deterministic stubs. The check verifies that transient research
+does not mutate the process registry.
 """
 
 from __future__ import annotations

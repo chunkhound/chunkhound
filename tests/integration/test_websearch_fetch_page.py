@@ -12,7 +12,7 @@ branch's known one-tab leak cannot bleed into the HTML branch's target
 count, regardless of test execution order.
 
 The test resolves Chrome via ``_resolve_chrome_path`` so the same
-explicit-path probe + version check that ``fetch_and_save`` relies on
+explicit-path probe + version check that ``fetch_pages`` relies on
 runs here too — a Chrome <124 raises out of the resolver, matching
 production's fail-loud contract for the silent ``Response.charset``
 parse-failure loop on older Chrome.
@@ -82,7 +82,7 @@ async def chrome_browser() -> AsyncIterator[zd.Browser]:
     """Per-test Chrome. Function-scoped so target counts start clean.
 
     Uses the production ``_resolve_chrome_path`` so the explicit-path
-    probe + version check that ``fetch_and_save`` relies on is exercised
+    probe + version check that ``fetch_pages`` relies on is exercised
     here — a Chrome <124 or otherwise unverifiable binary returns ``None``
     and skips the test instead of letting it hit the silent-event-drop
     loop in zendriver's listener.

@@ -7,7 +7,6 @@ codebase relationships iteratively.
 import asyncio
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -21,6 +20,7 @@ from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
     get_unified_score,
 )
+from chunkhound.services.research.shared.file_reader import resolve_source_text
 from chunkhound.services.research.shared.models import (
     FILE_CONTENT_TOKENS_MAX,
     FILE_CONTENT_TOKENS_MIN,
@@ -447,7 +447,6 @@ class BFSExplorationStrategy:
         file_contents: dict[str, str] = {}
         total_tokens = 0
         llm = self._llm_manager.get_utility_provider()
-        base_dir = self._db_services.provider.get_base_directory()
 
         for file_path, file_chunks in files_to_chunks.items():
             # Skip budget check if unlimited
@@ -455,15 +454,9 @@ class BFSExplorationStrategy:
                 break
 
             try:
-                path = (
-                    Path(file_path)
-                    if Path(file_path).is_absolute()
-                    else base_dir / file_path
-                )
-                if not path.exists():
+                content = resolve_source_text(self._db_services.provider, file_path)
+                if content is None:
                     continue
-
-                content = path.read_text(encoding="utf-8", errors="ignore")
                 estimated_tokens = llm.estimate_tokens(content)
 
                 # Always include file if unlimited, else check budget

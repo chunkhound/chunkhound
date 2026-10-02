@@ -12,7 +12,6 @@ The service coordinates:
 """
 
 import asyncio
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -31,6 +30,7 @@ from chunkhound.services.research.shared.chunk_range import (
     expand_to_natural_boundaries,
     get_chunk_expanded_range,
 )
+from chunkhound.services.research.shared.file_reader import resolve_source_text
 from chunkhound.services.research.shared.citation_manager import CitationManager
 from chunkhound.services.research.shared.evidence_ledger import (
     EvidenceLedger,
@@ -377,6 +377,7 @@ class PluggableResearchService(ProgressEmitterMixin):
                 evidence_ledger=evidence_ledger,
                 max_concurrency=max_concurrency,
             )
+
 
             logger.info(
                 f"Map step complete: {len(cluster_results)} cluster summaries generated"
@@ -749,9 +750,6 @@ class PluggableResearchService(ProgressEmitterMixin):
         total_tokens = 0
         llm = self._llm_manager.get_utility_provider()
 
-        # Get base directory for path resolution
-        base_dir = self._db_services.provider.get_base_directory()
-
         for file_path, file_chunks in files_to_chunks.items():
             # Check if we've hit the overall token limit
             if total_tokens >= budget_limit:
@@ -761,22 +759,14 @@ class PluggableResearchService(ProgressEmitterMixin):
                 break
 
             try:
-                # Resolve path relative to base directory
-                if Path(file_path).is_absolute():
-                    path = Path(file_path)
-                else:
-                    path = base_dir / file_path
-
-                if not path.exists():
-                    logger.warning(f"File not found (expected at {path}): {file_path}")
+                content = resolve_source_text(self._db_services.provider, file_path)
+                if content is None:
+                    logger.warning(f"File not found: {file_path}")
                     continue
 
                 # Calculate token budget for this file
                 num_chunks = len(file_chunks)
                 budget = TOKEN_BUDGET_PER_FILE * num_chunks
-
-                # Read file
-                content = path.read_text(encoding="utf-8", errors="ignore")
 
                 # Estimate tokens
                 estimated_tokens = llm.estimate_tokens(content)
@@ -857,7 +847,7 @@ class PluggableResearchService(ProgressEmitterMixin):
                 f"but failed to read ANY file contents. "
                 f"Possible causes: "
                 f"(1) Token budget exhausted ({budget_limit:,} tokens insufficient), "
-                f"(2) Files not found at base_directory: {base_dir}, "
+                f"(2) Files not found on disk or in the transient store, "
                 f"(3) All file read operations failed. "
                 f"Check logs above for file-specific errors."
             )
