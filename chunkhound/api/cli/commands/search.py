@@ -128,7 +128,7 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
             # is skipped. The guard above (line 83) blocks --force-strategy with commit
             # params to prevent silent no-diff behaviour. Tracked for follow-up.
             if not embedding_manager or not embedding_manager.list_providers():
-                raise Exception(
+                raise ValueError(
                     "No embedding providers available. "
                     "Configure an embedding provider via:\n"
                     "1. Create .chunkhound.json with embedding configuration, OR\n"
@@ -143,7 +143,7 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                 provider_name = default_provider_obj.name
                 model_name = default_provider_obj.model
             except ValueError:
-                raise Exception(
+                raise ValueError(
                     "No default embedding provider configured. "
                     "Configure a default provider in config."
                 )
