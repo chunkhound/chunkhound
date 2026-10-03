@@ -345,6 +345,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         return True
 
     @property
+    def supports_embedding_sql_queries(self) -> bool:
+        """DuckDB supports targeted joins over chunks, files, and embeddings."""
+        return True
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active - delegate to connection manager."""
         return self._connection_manager.is_connected
