@@ -246,7 +246,7 @@ class TestConfigIntegration:
         assert openai_config.get_default_model() == "text-embedding-3-small"
 
         voyageai_config = EmbeddingConfig(provider="voyageai")
-        assert voyageai_config.get_default_model() == "voyage-3.5"
+        assert voyageai_config.get_default_model() == "voyage-4-lite"
 
     def test_default_openai_model_has_correct_dimensions(self):
         """Default OpenAI model (text-embedding-3-small) maps to 1536 native dims."""
@@ -279,6 +279,8 @@ class TestConfigIntegration:
             1024,
             2048,
         ]
+        # The lite default is chosen for its 1M-token batch limit; guard it.
+        assert VOYAGE_MODEL_CONFIG[default_model]["max_tokens_per_batch"] == 1_000_000
 
 
 class TestVoyageSingleDimModels:

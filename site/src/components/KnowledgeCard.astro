@@ -1,0 +1,77 @@
+---
+import PhosphorIcon from "./PhosphorIcon.astro";
+
+export interface Source {
+  icon: string;
+  label: string;
+}
+
+export interface Props {
+  label: string;
+  title: string;
+  sources: Source[];
+}
+
+const { label, title, sources } = Astro.props;
+---
+
+<article class="knowledge-card card-tile">
+  <p class="card-label">{label}</p>
+  <h3 class="card-title">{title}</h3>
+  <ul>
+    {sources.map((source) => (
+      <li>
+        {/* Wrapper is template-rendered so scoped styles reach the icon;
+            the PhosphorIcon child root carries no parent scope id. */}
+        <span class="source-icon">
+          <PhosphorIcon name={source.icon} size="20" weight="duotone" aria-hidden="true" />
+        </span>
+        <span class="label-text">{source.label}</span>
+      </li>
+    ))}
+  </ul>
+</article>
+
+<style>
+  /* Type comes from the shared .card-tile recipe (global.css); only the card
+     layout and the heading gap are local. */
+  .knowledge-card {
+    display: flex;
+    flex-direction: column;
+  }
+  .card-title {
+    margin-bottom: var(--space-3);
+  }
+  ul {
+    color: var(--text-secondary);
+    display: grid;
+    font-size: var(--text-sm);
+    gap: var(--space-3);
+    line-height: var(--lh-sm);
+    list-style: none;
+    margin: 0;
+  }
+  li {
+    align-items: center;
+    display: flex;
+    gap: var(--space-2);
+  }
+  .source-icon {
+    color: var(--primary);
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+  .label-text {
+    word-break: break-word;
+  }
+</style>
+
+<script>
+  import "@phosphor-icons/webcomponents/PhCode";
+  import "@phosphor-icons/webcomponents/PhGitCommit";
+  import "@phosphor-icons/webcomponents/PhTreeStructure";
+  import "@phosphor-icons/webcomponents/PhBookOpenText";
+  import "@phosphor-icons/webcomponents/PhGithubLogo";
+  import "@phosphor-icons/webcomponents/PhGraduationCap";
+  import "@phosphor-icons/webcomponents/PhChartLineUp";
+</script>

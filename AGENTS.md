@@ -1,9 +1,9 @@
 # ChunkHound LLM Context
 
 ## PROJECT_IDENTITY
-ChunkHound: Semantic and regex search tool for codebases with MCP integration
+ChunkHound: Local-first research engine for AI agents via MCP, with a CLI companion
 Built: 100% by AI agents - NO human-written code
-Purpose: Transform codebases into searchable knowledge bases for AI assistants
+Purpose: Transform codebases into searchable knowledge bases for AI agents
 
 ## MODIFICATION_RULES
 **NEVER:**

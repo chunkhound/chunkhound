@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Default VoyageAI embedding model is now `voyage-4-lite`.** Retrieval relevance is set by the bundled `rerank-2.5` reranker and the LLM that expands and synthesizes, not by the embedding model, so the cheaper general embedder (and its 1M-token batch limit) is the better default. `voyage-code-4` remains available for maximum code recall. Existing indexes keep the model they were built with, so only new indexes pick up the change; existing `voyage-3.5` indexes now receive an upgrade *suggestion* to `voyage-4-lite`, which is applied only on operator confirmation.
+- **Package description updated** to "Local-first research engine for AI agents via MCP, with a CLI companion", matching the refreshed site positioning.
+- **Site configurator: the Ollama-embed preset no longer bundles a reranker.** Generated configs for Ollama embedding now contain only embedding settings; add a reranker explicitly if you want one.
+- **Site configurator default selections changed.** New visitors now start with Pi as the default agent and OpenRouter as the default research model (previously Cursor and Anthropic).
+- **Site configurator adds a validated reranker editor.** The rebuilt configurator lets you set the reranker URL, format, and model, and validates them client-side against the backend rule (`rerank_model` or `rerank_format` requires `base_url` or an explicit `rerank_url`), flagging the URL field so the emitted config passes backend validation.
+- **Documentation site upgraded to Astro 7** with a refreshed homepage, architecture page, and a rebuilt configurator/nav/hero experience.
+
+### Fixed
+- **UTF-8-BOM config files now work consistently** for standard configuration loading, Code Mapper workspace overrides, remote-config persistence, and the CLI prompt that adds timeout exclusions. Files written by Windows tools are accepted, and non-UTF-8 input still fails — now with the friendly "Invalid JSON in config file" error instead of a raw decode traceback. The timeout-exclusion rewrite normalizes BOM files to plain UTF-8.
+
+### Removed
+- **`chunkhound.__description__` removed.** Its value duplicated the module docstring / `pyproject.toml` `project.description` (the single source), and the attribute had no runtime consumer. Read the module docstring or `importlib.metadata` if you need the description.
+
 ## [6.0.0] - 2026-09-14
 
 ### Breaking Changes

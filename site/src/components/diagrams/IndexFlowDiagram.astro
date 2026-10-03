@@ -1,0 +1,90 @@
+---
+import DiagramFigure from "./DiagramFigure.astro";
+import { INDEX_PHASES } from "../../lib/architecture";
+
+/**
+ * The real index build, phase by phase, straight from INDEX_PHASES. The Rust
+ * engine drives every phase and calls embedding providers natively; the one row
+ * it still delegates to Python (parsing) carries the combined ownership tag.
+ * The accent is the load-bearing seam: the engine is Rust and the boundary is
+ * moving outward. Rendered as a band + term/definition rows so it reads as a
+ * sibling of the research-pipeline figure, not a plainer cousin.
+ */
+---
+
+<DiagramFigure
+  caption="The index build, phase by phase"
+  label="Index build phases from discovery to compaction"
+  description="The indexing engine is written in Rust: it discovers files in parallel, diffs them against the stored index, overlaps parsing, embedding, and storage on dedicated threads, and owns the database writes, compaction, and crash recovery. Embedding providers are called natively over HTTP, with a Python fallback for providers without a native client. Parsing still runs in Python and is slated to move to Rust, with the goal of retiring Python entirely."
+>
+  <section class="engine d-band">
+    <header class="engine-head d-band-head">
+      <span class="engine-label d-band-label">The indexing engine</span>
+      <span class="engine-caption d-band-caption">
+        Rust drives the build, HTTP embedding included; parsing runs in Python
+        today.
+      </span>
+    </header>
+    <dl class="phases d-term-list">
+      {INDEX_PHASES.map((phase) => (
+        <div class="phase d-term" data-language={phase.language}>
+          <dt>{phase.title}</dt>
+          <dd>{phase.detail}</dd>
+          <span class="phase-lang">{phase.language}</span>
+        </div>
+      ))}
+    </dl>
+  </section>
+
+  <div class="d-connector" data-tone="accent">
+    The engine is Rust — the boundary only moves one way
+  </div>
+</DiagramFigure>
+
+<style>
+  /* Ownership tag needs its own column, so this band's term rows add a third
+     track on top of the shared .d-term recipe (diagrams.css). Restating gap
+     here (rather than inheriting .d-term's) is what keeps the row spacing: this
+     scoped .phase rule outranks every .d-term declaration, including its
+     mobile stack. */
+  .phase {
+    grid-template-columns: minmax(0, 9rem) 1fr auto;
+    gap: var(--space-1) var(--space-4);
+  }
+
+  /* The Rust-owned phases take the accent; the mixed rows stay neutral. */
+  .phase[data-language="Rust"] dt {
+    color: var(--primary);
+  }
+
+  .phase-lang {
+    color: var(--text-tertiary);
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+    font-variant: small-caps;
+    white-space: nowrap;
+  }
+
+  .phase[data-language="Rust"] .phase-lang {
+    color: var(--primary);
+  }
+
+  @media (max-width: 720px) {
+    /* Title + ownership tag share the first line; the meaning spans below. */
+    .phase {
+      grid-template-columns: 1fr auto;
+    }
+
+    .phase dt {
+      grid-area: 1 / 1;
+    }
+
+    .phase-lang {
+      grid-area: 1 / 2;
+    }
+
+    .phase dd {
+      grid-area: 2 / 1 / 2 / -1;
+    }
+  }
+</style>

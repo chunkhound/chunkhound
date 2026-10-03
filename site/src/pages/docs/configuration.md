@@ -1,14 +1,24 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: "Configuration"
-description: "Configure embedding providers, database backends, and indexing behavior."
-order: 2
-section: "manual"
 ---
 
 # Configuration
 
 ChunkHound is configured through a JSON file, environment variables, and CLI flags.
+
+## Local-first and provider boundaries
+
+ChunkHound is a local-first runtime: the CLI, the local database, indexing, and the research pipeline run on your machine. Acquisition, indexing, and research stay local by default. Two boundaries are explicit:
+
+- **Web research always egresses.** `websearch` contacts DuckDuckGo for discovery and fetches the source websites; `fetchurl` contacts the target site. That traffic goes out from your machine and is inherent to web research.
+- **Remote providers receive relevant content.** If you configure remote embedding, reranking, or LLM providers, the content needed for those requests crosses that provider boundary. Local OpenAI-compatible endpoints (Ollama, vLLM) keep the entire workflow on your hardware.
+
+Choose local providers for fully local operation; there is no mandatory hosted ChunkHound service either way.
+
+### Recommended VoyageAI setup
+
+This setup keeps the runtime and index local, but sends relevant content to VoyageAI for embeddings and reranking. Before using it with sensitive content, [opt out under VoyageAI&rsquo;s Terms](https://dashboard.voyageai.com/organization/tos) to prevent future submissions from training or improving its service; Voyage requires a payment method for the opt-out. Choose Ollama or vLLM for local/on-prem processing, or a provider/private deployment whose terms meet your organization&rsquo;s requirements.
 
 ## Configuration File
 
@@ -33,10 +43,11 @@ Example global config (`~/.config/chunkhound/chunkhound.json`):
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-code-4"
+    "model": "voyage-4-lite"
   },
   "llm": {
-    "provider": "anthropic"
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash"
   },
   "indexing": {
     "exclude": ["**/node_modules/**", "**/.git/**", "**/dist/**"]
@@ -102,7 +113,7 @@ Example — project uses its own exclude list (replaces global's list at the raw
   },
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-code-4",
+    "model": "voyage-4-lite",
     "batch_size": 100
   },
   "indexing": {
@@ -114,9 +125,8 @@ Example — project uses its own exclude list (replaces global's list at the raw
     "detect_embedded_sql": true
   },
   "llm": {
-    "provider": "anthropic",
-    "utility_model": "claude-haiku-4-5-20251001",
-    "synthesis_model": "claude-sonnet-4-5-20250929"
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash"
   }
 }
 ```
@@ -332,7 +342,7 @@ The delta-only gate above relies on structured error codes returned by `Config.v
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Set `model` to `voyage-code-4` for code search |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-4-lite` | Set `model` to `voyage-code-4` for maximum code recall |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
 
 ### VoyageAI Models
@@ -344,9 +354,9 @@ All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. Chun
 | `voyage-code-4` | 32K | 320K | Code-specialized, built for coding-agent retrieval. Recommended for code search |
 | `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
 | `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
-| `voyage-4-lite` | 32K | 1M | General purpose, lowest cost and latency |
+| `voyage-4-lite` | 32K | 1M | Default. General purpose, lowest cost and latency |
 | `voyage-code-3` | 32K | 120K | Previous-generation code model |
-| `voyage-3.5` | 32K | 320K | Default. Previous-generation general purpose |
+| `voyage-3.5` | 32K | 320K | Previous-generation general purpose |
 | `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
 | `voyage-3-large` | 32K | 120K | Previous-generation large |
 | `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
@@ -377,6 +387,8 @@ To adopt a new model deliberately, accept the prompt. To change dimensions, or t
 
 When a newer model supersedes the one in use, an interactive `chunkhound index` prints a one-line suggestion. It never acts on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
+`voyage-4-lite` is the default for both the homepage configurator and the VoyageAI provider.
+
 ### Embedding Options
 
 | Option | Type | Default | Description |
@@ -386,7 +398,7 @@ When a newer model supersedes the one in use, an interactive `chunkhound index` 
 | `rerank_model` | `string` | `null` | Reranking model name (enables multi-hop reranking) |
 | `rerank_url` | `string` | `null` | Separate rerank endpoint URL (optional when reranking is served from `base_url`) |
 | `rerank_ssl_verify` | `boolean` | `null` | Verify TLS certificates for rerank requests. Inherits `ssl_verify` when unset. |
-| `rerank_format` | `string` | `"auto"` | Reranking API format: `cohere`, `tei`, or `auto` |
+| `rerank_format` | `string` | `"auto"` | Reranking API format: `cohere`, `tei`, `voyage`, or `auto` (`voyage` for native VoyageAI-compatible endpoints such as MongoDB Atlas — uses `top_k` and returns a `data` array) |
 | `rerank_batch_size` | `number` | `null` | Max documents per rerank request |
 | `timeout` | `number` | `30` | Request timeout in seconds |
 | `max_retries` | `number` | `3` | Max retry attempts on failure |
@@ -492,18 +504,20 @@ By default, ChunkHound excludes common noise directories (`node_modules`, `dist`
 
 The LLM provider is used for deep code research (`chunkhound research` and the `code_research` MCP tool).
 
+The `llm` section is configured independently of `embedding`: you can set `llm.provider` with no embedding config (and vice versa), and the two may point at different providers. ChunkHound validates each section separately per command.
+
 | Provider | Config Value | Env Var | Utility Default | Synthesis Default | Notes |
 |---|---|---|---|---|---|
 | Claude Code CLI | `claude-code-cli` | -- | `claude-haiku-4-5-20251001` | `claude-haiku-4-5-20251001` | Uses local Claude Code installation |
 | Codex CLI | `codex-cli` | -- | `codex` | `codex` | Uses local Codex CLI installation |
-| OpenCode CLI | `opencode-cli` | -- | `opencode/grok-code` | `opencode/grok-code` | Uses local OpenCode CLI installation |
-| Anthropic | `anthropic` | `CHUNKHOUND_LLM_API_KEY` | `claude-haiku-4-5-20251001` | `claude-sonnet-4-5-20250929` | Direct API access |
+| OpenCode CLI | `opencode-cli` | -- | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` | Uses local OpenCode CLI installation |
+| Anthropic | `anthropic` | `CHUNKHOUND_LLM_API_KEY` | `claude-haiku-4-5-20251001` | `claude-haiku-4-5-20251001` | Direct API access |
 | OpenAI | `openai` | `CHUNKHOUND_LLM_API_KEY` | `gpt-5-nano` | `gpt-5` | Direct API access |
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Google Gemini API. Migration: `CHUNKHOUND_GEMINI_MODEL` was removed in v4.x — rename to `CHUNKHOUND_LLM_MODEL`. |
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
-| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OpenRouter API. Registry providers require explicit `model`. |
-| OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OrcaRouter API. Registry providers require explicit `model`. |
+| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `google/gemini-3.5-flash`) | Must be set explicitly (configurator defaults to `google/gemini-3.5-flash`) | OpenRouter API. Registry providers require explicit `model`. |
+| OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
@@ -686,7 +700,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_EMBEDDING__RERANK_MODEL` | Reranking model name |
 | `CHUNKHOUND_EMBEDDING__RERANK_URL` | Separate rerank endpoint URL |
 | `CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY` | Verify TLS certificates for rerank requests (overrides `ssl_verify`) |
-| `CHUNKHOUND_EMBEDDING__RERANK_FORMAT` | Reranking API format: `cohere`, `tei`, or `auto` |
+| `CHUNKHOUND_EMBEDDING__RERANK_FORMAT` | Reranking API format: `cohere`, `tei`, `voyage`, or `auto` (`voyage` for native VoyageAI-compatible endpoints such as MongoDB Atlas — uses `top_k` and returns a `data` array) |
 | `CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE` | Max documents per rerank request |
 | `CHUNKHOUND_EMBEDDING__TIMEOUT` | Request timeout in seconds (default: 30) |
 | `CHUNKHOUND_EMBEDDING__MAX_RETRIES` | Max retry attempts on failure (default: 3) |
@@ -810,7 +824,7 @@ VoyageAI models are available on the Azure Marketplace and in Microsoft Foundry.
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5",
+    "model": "voyage-4-lite",
     "api_key": "<YOUR_AZURE_VOYAGE_KEY>",
     "base_url": "https://<your-resource>.services.ai.azure.com/models",
     "ssl_verify": true,
@@ -832,6 +846,25 @@ Caveats:
 - **Concurrency throttled to 1 by default** when `base_url` is set, to respect Azure serverless rate limits. Override via `max_concurrent_batches` if your SKU permits.
 - **`api_key` still required.** The validator doesn't enforce it when `base_url` is present, but Azure-hosted endpoints still need their own key — supply it.
 
+### MongoDB Atlas (Voyage-native reranker)
+
+MongoDB Atlas exposes a native Voyage-compatible rerank endpoint. Use `rerank_format: "voyage"` (uses `top_k` and returns a `data` array):
+
+```json
+{
+  "embedding": {
+    "provider": "voyageai",
+    "model": "voyage-4-lite",
+    "api_key": "<YOUR_VOYAGE_API_KEY>",
+    "rerank_model": "rerank-2.5",
+    "rerank_url": "https://<atlas-host>/v1/rerank",
+    "rerank_format": "voyage"
+  }
+}
+```
+
+In the configurator, select **Retrieval → VoyageAI** and open **Customize reranker** to set the Atlas URL, `voyage` format, and rerank model.
+
 ### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter)
 
 The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, and OrcaRouter LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
@@ -850,24 +883,36 @@ The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, and OrcaRouter LLM providers 
 
 The gateway must preserve each provider's native request/response shape — ChunkHound uses the vendor SDKs, not a generic HTTP client.
 
+OpenRouter is a first-class provider, and the configurator's default research route selects it with an OpenRouter API key:
+
+```json
+{
+  "llm": {
+    "provider": "openrouter",
+    "model": "google/gemini-3.5-flash",
+    "api_key": "<YOUR_OPENROUTER_API_KEY>"
+  }
+}
+```
+
 ### Local OpenAI-compatible servers (Ollama, vLLM)
 
 Local inference servers that speak the OpenAI API work via `provider: "openai"` with `base_url` pointing at the local endpoint. No `api_key` is needed for servers that don't enforce auth, but you must set an explicit `model`.
 
 #### Ollama
 
-Ollama provides embeddings, reranking, and LLM inference in a single process. Pull the models you need, then point ChunkHound at the Ollama endpoint:
+Ollama provides embeddings and LLM inference in a single process. Pull the models you need, then point ChunkHound at the Ollama endpoint:
 
 ```bash
-# Embedding + reranker models
-ollama pull qwen3-embedding && ollama pull qwen3-reranker
+# Embedding model
+ollama pull qwen3-embedding
 
 # LLM — pick one
 ollama pull qwen3-coder:30b
 ollama pull gemma4:27b
 ```
 
-Embedding and reranker config (`.chunkhound.json`):
+Embedding config (`.chunkhound.json`):
 
 ```json
 {
@@ -875,14 +920,12 @@ Embedding and reranker config (`.chunkhound.json`):
     "provider": "openai",
     "model": "qwen3-embedding",
     "base_url": "http://localhost:11434/v1",
-    "ssl_verify": false,
-    "rerank_model": "qwen3-reranker",
-    "rerank_format": "cohere"
+    "ssl_verify": false
   }
 }
 ```
 
-No `rerank_url` is needed — it is auto-derived from `base_url`.
+Ollama does not provide a reranking endpoint. To use research, web search, or fetch, configure an external reranker.
 
 LLM config:
 
@@ -921,15 +964,20 @@ If your embeddings stay on the official provider but reranking goes to a local H
 
 #### vLLM
 
-vLLM gives you dedicated processes per model, which is better for throughput and lets you serve HuggingFace model IDs directly. When embeddings and reranking are served from the same OpenAI-compatible endpoint, ChunkHound infers the reranker path from `base_url` just like it does for Ollama:
+vLLM gives you dedicated processes per model, which is better for throughput and lets you serve HuggingFace model IDs directly. Run embeddings and reranking as separate services, then point the embedding configuration at both endpoints:
 
 ```bash
-# Embedding + reranker server
+# Embeddings
 vllm serve Qwen/Qwen3-Embedding-0.6B --port 8000
 
-# LLM server
-vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --port 11434
+# Reranker
+vllm serve Qwen/Qwen3-Reranker-0.6B --task score --hf-overrides '{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}' --port 8001
+
+# LLM
+vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --port 8002
 ```
+
+The original Qwen reranker requires the score task and these Hugging Face overrides to expose vLLM's Cohere-compatible rerank API.
 
 Embedding and reranker config (`.chunkhound.json`):
 
@@ -940,27 +988,13 @@ Embedding and reranker config (`.chunkhound.json`):
     "model": "Qwen/Qwen3-Embedding-0.6B",
     "base_url": "http://localhost:8000/v1",
     "rerank_model": "Qwen/Qwen3-Reranker-0.6B",
+    "rerank_url": "http://localhost:8001/v1/rerank",
     "rerank_format": "cohere"
   }
 }
 ```
 
-No `rerank_url` is needed when the reranker lives behind the same OpenAI-compatible endpoint. ChunkHound auto-derives `/rerank` from `base_url`.
-
-If you split embeddings and reranking across different services, keep `base_url` pointed at the embedding server and set `rerank_url` explicitly:
-
-```json
-{
-  "embedding": {
-    "provider": "openai",
-    "model": "Qwen/Qwen3-Embedding-0.6B",
-    "base_url": "http://localhost:8025/v1",
-    "rerank_model": "Qwen/Qwen3-Reranker-0.6B",
-    "rerank_url": "http://localhost:8000/rerank",
-    "rerank_format": "cohere"
-  }
-}
-```
+ChunkHound sends Cohere-compatible rerank requests to the explicit reranker endpoint. For another server that genuinely colocates embeddings and reranking, omit `rerank_url` and ChunkHound derives `/rerank` from `base_url`.
 
 LLM config:
 
@@ -969,7 +1003,7 @@ LLM config:
   "llm": {
     "provider": "openai",
     "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-    "base_url": "http://localhost:11434/v1"
+    "base_url": "http://localhost:8002/v1"
   }
 }
 ```
@@ -979,6 +1013,8 @@ LLM config:
 ## Web Search
 
 The `websearch` tool searches the web via DuckDuckGo, fetches the top pages, indexes the fetched content in memory, and runs the same deep research pipeline used for local code search. It is available as an MCP tool and as `chunkhound websearch`.
+
+Web research is inherently external: `websearch` contacts DuckDuckGo and the source websites it fetches over the network from your machine. Fetched content is rendered, chunked, and indexed locally. Remote embedding, reranking, or LLM providers receive only the content relevant to their requests; local endpoints (Ollama, vLLM) keep processing local.
 
 ### Requirements
 
@@ -1020,6 +1056,9 @@ The web search tool delegates to the same deep research pipeline as `code_resear
 ## Fetch URL
 
 The `fetchurl` tool fetches a single URL, extracts its content, and returns a focused Markdown answer via one LLM call (short pages) or a rerank+elbow pipeline over page chunks (long pages with a query). It is available as an MCP tool and as `chunkhound fetchurl`. Fetches use the same **zendriver + system Chrome** transport as [Web Search](#web-search) with the same `urllib` fallback — see that section's [Browser Dependency](#browser-dependency) note for Chrome version requirements and fallback behavior.
+
+<!-- "Processed locally" refers to fetching and preparing content, not zero egress. The provider boundaries above govern any subsequent model requests. -->
+Fetching contacts the target site directly from your machine; the fetched content is processed locally.
 
 ### Requirements
 

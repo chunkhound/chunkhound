@@ -19,7 +19,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
+from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES, VOYAGE_DEFAULT_MODEL
 from chunkhound.core.embedding_model_drift import (
     ActiveModel,
     ActiveModelStateError,
@@ -250,7 +250,7 @@ class _Index:
     def configure(
         self,
         *,
-        model: str,
+        model: str | None = None,
         output_dims: int | None = None,
         on_model_drift: ModelDriftDecision | None = None,
         read_only: bool = False,
@@ -315,6 +315,23 @@ class TestConfigureKeepsTheIndexUsable:
 
         provider = registry.get_provider("embedding")
         assert (provider.model, provider.dims) == ("voyage-code-3", 1024)
+
+    def test_index_built_with_the_previous_default_is_pinned(
+        self, index: _Index
+    ) -> None:
+        """Raising the provider default must not strand an index built under it.
+
+        An operator who never set ``embedding.model`` indexed under whatever
+        the default was then. After the default moves, the configured model
+        differs from the index and must be pinned back, not applied.
+        """
+        index.seed([("voyageai", "voyage-3.5", 1024)])
+
+        registry, config = index.configure()
+
+        assert registry.get_provider("embedding").model == "voyage-3.5"
+        assert config.embedding is not None
+        assert config.embedding.model == "voyage-3.5"
 
     def test_pin_reaches_providers_rebuilt_from_config(self, index: _Index):
         """``search`` and ``create_services`` build providers from config.
@@ -595,3 +612,11 @@ class TestUpgradeSuggestions:
         for superseded, successor in EMBEDDING_MODEL_UPGRADES["voyageai"].items():
             assert superseded in VOYAGE_MODEL_CONFIG
             assert successor in VOYAGE_MODEL_CONFIG
+
+    def test_the_previous_general_default_upgrades_to_the_current_default(self):
+        """voyage-3.5 was the general default; its successor must be the current
+        general default, or the hint strands operators on a non-default tier."""
+        assert (
+            EMBEDDING_MODEL_UPGRADES["voyageai"]["voyage-3.5"]
+            == VOYAGE_DEFAULT_MODEL
+        )

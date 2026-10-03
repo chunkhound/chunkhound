@@ -1,10 +1,8 @@
-"""ChunkHound - Local-first semantic code search with vector and regex capabilities."""
-# ci: merge queue test
+"""Local-first research engine for AI agents via MCP, with a CLI companion."""
 
 from .version import __version__
 
 __author__ = "Ofri Wolfus"
-__description__ = "Local-first semantic code search with vector and regex capabilities"
 
 # Import modules only when needed to avoid dependency issues during setup
 __all__ = [

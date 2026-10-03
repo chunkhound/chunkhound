@@ -1,0 +1,50 @@
+---
+import InstallCommand from "./InstallCommand.astro";
+
+// Homepage-only precondition for the generated setup, shown above the
+// configurator's provider choices. This is section content, not Configurator
+// logic: the Configurator owns no install knowledge — it exposes the `preamble`
+// slot this fills (see Configurator.astro). The ending section carries its own
+// command field as a bookend; this one states the setup's first step.
+---
+
+<div class="install-step" data-reveal>
+  <p class="install-step-label">First, install ChunkHound</p>
+  <InstallCommand variant="page" />
+  <p class="install-step-note">
+    Requires <a href="https://astral.sh/uv/">uv</a>.
+  </p>
+</div>
+
+<style>
+  /* One row: label, the shared command button, and the note. The button's
+     page-surface colour variant is selected at the call site, so this recipe
+     owns layout only (no palette, no geometry). */
+  .install-step {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    margin: 0 0 var(--space-5);
+  }
+
+  /* The step's own label, one tier above the note it qualifies. */
+  .install-step-label {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    font-weight: 600;
+  }
+
+  .install-step-note {
+    margin: 0;
+    color: var(--text-tertiary);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+  }
+
+  .install-step-note a {
+    color: var(--link);
+  }
+</style>

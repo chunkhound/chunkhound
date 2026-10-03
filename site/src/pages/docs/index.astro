@@ -1,0 +1,79 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import PhosphorIcon from '../../components/PhosphorIcon.astro';
+import { DOCS_HOME, DOCS_PAGES } from '../../lib/nav';
+---
+
+<DocsLayout
+    title={DOCS_HOME.title}
+    description={DOCS_HOME.description}
+    breadcrumb={false}
+>
+    <h1>Documentation<span class="title-dot" aria-hidden="true"></span></h1>
+    <p class="lead">
+        Everything you need to install, configure, operate, and understand
+        ChunkHound. Start with the guides, then go as deep as you need.
+    </p>
+
+    <div class="docs-hub-grid">
+        {DOCS_PAGES.map((page) => (
+            <a href={page.href} class="docs-hub-card">
+                <PhosphorIcon name={page.icon} size="20" weight="duotone" aria-hidden="true" />
+                <div class="docs-hub-body">
+                    <h2>{page.title}</h2>
+                    <p>{page.description}</p>
+                </div>
+            </a>
+        ))}
+    </div>
+</DocsLayout>
+
+<style>
+    .docs-hub-grid {
+        display: grid;
+        gap: var(--space-5);
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .docs-hub-card {
+        display: flex;
+        gap: var(--space-4);
+        padding: var(--space-5);
+        border: var(--border-w-default) solid var(--border-subtle);
+        border-radius: var(--radius-xl);
+        background: var(--bg-surface);
+        color: inherit;
+        text-decoration: none;
+        transition: border-color 0.2s, background 0.2s;
+    }
+
+    html[data-theme="light"] .docs-hub-card {
+        border-color: var(--border-color);
+    }
+
+    .docs-hub-card:hover {
+        border-color: var(--primary);
+        text-decoration: none;
+    }
+
+    .docs-hub-body {
+        display: block;
+        min-width: 0;
+    }
+
+    .docs-hub-card h2 {
+        margin: 0 0 var(--space-2);
+    }
+
+    .docs-hub-card p {
+        margin: 0;
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+    }
+
+    @media (max-width: 640px) {
+        .docs-hub-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>

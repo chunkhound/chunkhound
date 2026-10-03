@@ -1,0 +1,18 @@
+---
+/** Shared wrapper for Phosphor web-component icons. Phosphor ships no
+ * typings, so the name→element cast lives here instead of in every
+ * consumer; renders as the custom element tag (e.g. <ph-code ...>). */
+import type { PhosphorIcon, PhosphorIconProps } from "../lib/phosphor-icon";
+
+interface Props extends Pick<PhosphorIconProps, "aria-hidden"> {
+  name: string;
+  size: string;
+  weight: string;
+  class?: string;
+}
+
+const { name, size, weight, class: className, "aria-hidden": ariaHidden } = Astro.props;
+const Icon = name as unknown as PhosphorIcon;
+---
+
+<Icon size={size} weight={weight} class={className} aria-hidden={ariaHidden} />
