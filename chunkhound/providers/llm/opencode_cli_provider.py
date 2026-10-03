@@ -24,7 +24,11 @@ from typing import Literal
 from loguru import logger
 
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
-from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
+from chunkhound.providers.llm.base_cli_provider import (
+    BaseCLIProvider,
+    build_cli_argv,
+    resolve_cli_binary,
+)
 
 VALID_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 
@@ -124,8 +128,9 @@ class OpenCodeCLIProvider(BaseCLIProvider):
     def _opencode_available(self) -> bool:
         """Check if opencode CLI is available in PATH."""
         try:
+            opencode_bin = resolve_cli_binary("opencode")
             result = subprocess.run(
-                ["opencode", "--version"],
+                build_cli_argv(opencode_bin, "--version"),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=5,
@@ -303,13 +308,16 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         """Build the opencode run command list without the prompt.
 
         The prompt is sent via stdin to avoid ARG_MAX limits on large inputs.
+        Resolves the binary via PATH/PATHEXT so Windows ``.cmd`` shims work
+        with ``create_subprocess_exec``.
         """
-        cmd = ["opencode", "run", "--model", model]
+        opencode_bin = resolve_cli_binary("opencode")
+        args = ["run", "--model", model]
         if use_json:
-            cmd.extend(["--format", "json"])
+            args.extend(["--format", "json"])
         if self._reasoning_effort:
-            cmd.extend(["--variant", self._reasoning_effort])
-        return cmd
+            args.extend(["--variant", self._reasoning_effort])
+        return build_cli_argv(opencode_bin, *args)
 
     def _ndjson_parse_stdout(self, stdout: bytes) -> tuple[list[str], str | None]:
         """Parse NDJSON output from opencode --format json.

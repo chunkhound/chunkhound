@@ -371,6 +371,10 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(
         lambda self: True,
         raising=True,
     )
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     captured: dict[str, object] = {"env": None, "config_text": None}
 
