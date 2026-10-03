@@ -811,18 +811,18 @@ async def deep_research_impl(
         Dict with answer and metadata
 
     Raises:
-        Exception: If LLM or reranker not configured
+        ValueError: If LLM or reranker not configured
     """
     # Validate LLM is configured
     if not llm_manager:
-        raise Exception(
+        raise ValueError(
             "No LLM provider configured. Code research requires an LLM. "
             "Configure an llm section in your chunkhound configuration."
         )
 
     # Validate reranker is configured
     if not embedding_manager or not embedding_manager.list_providers():
-        raise Exception(
+        raise ValueError(
             "No embedding providers available. Code research requires reranking "
             "support."
         )
@@ -832,7 +832,7 @@ async def deep_research_impl(
         hasattr(embedding_provider, "supports_reranking")
         and embedding_provider.supports_reranking()
     ):
-        raise Exception(
+        raise ValueError(
             "Code research requires a provider with reranking support. "
             "Configure a rerank_model in your embedding configuration."
         )
