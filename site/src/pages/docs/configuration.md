@@ -509,6 +509,20 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 
 When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, and OrcaRouter) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
+### OpenRouter structured reasoning negotiation
+
+OpenRouter can reject requests that disable reasoning for structured (`response_format` with `json_schema`) calls. ChunkHound probes this once per provider/model and caches the outcome:
+
+- **Accepted** (30-day lease): the reasoning-disable payload stays attached to every structured call for that provider/model, so reasoning is disabled there for the lease duration. Non-structured calls (`complete()`), including research synthesis, are unaffected.
+- **Rejected** (24-hour lease): structured calls omit the payload and re-probe once the lease expires. A long-running process enforces the lease in memory, so it re-probes without a restart.
+- **Unknown**: the first structured call optimistically sends the payload; a 400/422 response triggers one unflagged replay.
+
+Negotiation only happens for the built-in canonical OpenRouter endpoint. Setting `llm.base_url` — even to the canonical URL — routes through a generic backend and disables the probe and payload entirely, exactly like a proxy.
+
+Some models require reasoning and can still return empty `content` after the payload is dropped, so a `rejected` cache entry records only the HTTP outcome. When that happens, ChunkHound raises an error naming the provider, model, and capability state, and research results carry a caller-visible note (a `> **Note:**` blockquote advising a switch of `llm.utility_model`) plus a `metadata.warnings` entry.
+
+To reset a stale decision, delete the resolved capability cache file (default `~/.cache/chunkhound/llm-capabilities.json`, or `%LOCALAPPDATA%\ChunkHound\llm-capabilities.json` on Windows) and restart. Set `CHUNKHOUND_LLM_CAPABILITY_CACHE` to override the path. Constructing a provider does not renew a lease.
+
 ### LLM Options
 
 | Option | Type | Default | Description |

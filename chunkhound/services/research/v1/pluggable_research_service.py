@@ -56,6 +56,28 @@ if TYPE_CHECKING:
     from chunkhound.core.config.research_config import ResearchConfig
 
 
+def apply_structured_reasoning_degradation_note(
+    result: dict[str, Any],
+    *,
+    failed_stages: int,
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """Prepend a caller-visible note when structured stages degraded."""
+    if failed_stages <= 0:
+        return result
+    warning = (
+        f"{failed_stages} structured stage(s) failed because "
+        f"{provider}:{model} cannot disable reasoning; results may be "
+        "incomplete — consider switching `llm.utility_model`"
+    )
+    metadata = result.setdefault("metadata", {})
+    metadata.setdefault("warnings", []).append(warning)
+    answer = result.get("answer", "")
+    result["answer"] = f"> **Note:** {warning}\n\n{answer}"
+    return result
+
+
 class PluggableResearchService(ProgressEmitterMixin):
     """Service for performing deep research with pluggable exploration strategies.
 
@@ -124,6 +146,28 @@ class PluggableResearchService(ProgressEmitterMixin):
             return self._config.num_expanded_queries
         return NUM_LLM_EXPANDED_QUERIES
 
+    def _structured_reasoning_health(self) -> dict[str, Any] | None:
+        get_utility = getattr(self._llm_manager, "get_utility_provider", None)
+        if get_utility is None:
+            return None
+        provider = get_utility()
+        get_health = getattr(provider, "get_structured_reasoning_health", None)
+        return get_health() if get_health is not None else None
+
+    def _attach_structured_reasoning_note(
+        self, result: dict[str, Any], start_health: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        end_health = self._structured_reasoning_health()
+        if not end_health:
+            return result
+        start_count = int(start_health["empty_failures"]) if start_health else 0
+        return apply_structured_reasoning_degradation_note(
+            result,
+            failed_stages=int(end_health["empty_failures"]) - start_count,
+            provider=str(end_health["provider"]),
+            model=str(end_health["model"]),
+        )
+
     async def deep_research(
         self, query: str, previous_query: str | None = None
     ) -> dict[str, Any]:
@@ -144,6 +188,7 @@ class PluggableResearchService(ProgressEmitterMixin):
             Dictionary with answer and metadata
         """
         logger.info(f"Starting deep research for query: '{query}'")
+        start_health = self._structured_reasoning_health()
 
         # Emit main start event
         await self._emit_event("main_start", f"Starting deep research: {query[:60]}...")
@@ -280,16 +325,21 @@ class PluggableResearchService(ProgressEmitterMixin):
                 "- Mention classes/functions (e.g., 'DeepResearchService._single_pass_synthesis')\n"
                 "- Include keywords that appear in code (constants, config keys)\n"
             )
-            return {
-                "answer": friendly,
-                "metadata": {
-                    "depth_reached": 0,
-                    "nodes_explored": aggregated.get("stats", {}).get("total_nodes", 1),
-                    "chunks_analyzed": 0,
-                    "files_analyzed": 0,
-                    "skipped_synthesis": True,
+            return self._attach_structured_reasoning_note(
+                {
+                    "answer": friendly,
+                    "metadata": {
+                        "depth_reached": 0,
+                        "nodes_explored": aggregated.get("stats", {}).get(
+                            "total_nodes", 1
+                        ),
+                        "chunks_analyzed": 0,
+                        "files_analyzed": 0,
+                        "skipped_synthesis": True,
+                    },
                 },
-            }
+                start_health,
+            )
 
         # Pass pre-filtered chunks to synthesis (elbow detection done in exploration strategies)
         (
@@ -436,10 +486,9 @@ class PluggableResearchService(ProgressEmitterMixin):
             chunks_analyzed=metadata["chunks_analyzed"],
         )
 
-        return {
-            "answer": answer,
-            "metadata": metadata,
-        }
+        return self._attach_structured_reasoning_note(
+            {"answer": answer, "metadata": metadata}, start_health
+        )
 
     async def _run_synthesis_maps(
         self,
