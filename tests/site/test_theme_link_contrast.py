@@ -5,8 +5,10 @@ from pathlib import Path
 
 from tests.site.contrast_helpers import (
     GLOBAL_CSS,
+    HERO_CSS,
     contrast_ratio,
     extract_block,
+    extract_tokens,
     theme_tokens,
 )
 
@@ -49,6 +51,48 @@ def test_link_tokens_meet_aa_contrast_in_light_and_dark_themes() -> None:
 
     for foreground, background in token_pairs:
         assert contrast_ratio(foreground, background) >= 4.5
+
+
+def _hero_surface_tokens() -> dict[str, dict[str, str]]:
+    """Page theme tokens overlaid with the hero scope's local re-points.
+
+    One alias level, like theme_tokens(): a surface re-points the link family to
+    code tones, and those aliases must resolve to the hex the browser paints.
+    """
+    local = extract_tokens(extract_block(HERO_CSS.read_text(encoding="utf-8"), ".hero"))
+
+    scoped_by_theme: dict[str, dict[str, str]] = {}
+    for theme, page in theme_tokens().items():
+        scoped = dict(page)
+        for name, value in local.items():
+            scoped[name] = page[value[4:-1]] if value.startswith("var(") else value
+        scoped_by_theme[theme] = scoped
+    return scoped_by_theme
+
+
+def test_hero_cta_link_recipe_carries_the_code_surface_highlight() -> None:
+    """The hero's main CTA must carry the code surface's highlight, not body text.
+
+    DESIGN_SYSTEM (Code Surface Accent): on --code-bg use --code-accent, never
+    the theme-adaptive --primary. The prose-link rules (`a`, `a:visited`,
+    `a:hover` — element + pseudo, 0,1,1) outrank the CTA's lone class (0,1,0), so
+    the surface — not the control — re-points the family; otherwise a visited
+    CTA takes light theme's ink --link-visited (1.55:1 on --code-bg) and the
+    page's one action disappears.
+    """
+    for theme, scoped in _hero_surface_tokens().items():
+        highlight = scoped["--code-accent"]
+        surface = scoped["--code-bg"]
+        for state in ("--link", "--link-hover", "--link-visited"):
+            assert scoped[state] == highlight, (
+                f"{theme}: {state} must resolve to the code-surface highlight "
+                f"(--code-accent), got {scoped[state]}"
+            )
+            ratio = contrast_ratio(scoped[state], surface)
+            assert ratio >= 4.5, f"{theme}: {state} on --code-bg = {ratio:.2f}:1"
+        # Non-text contrast: the focus ring must clear the surface behind it.
+        ring = contrast_ratio(scoped["--link-focus"], surface)
+        assert ring >= 3.0, f"{theme}: --link-focus on --code-bg = {ring:.2f}:1"
 
 
 def test_astro_code_background_uses_shared_code_surface_token() -> None:

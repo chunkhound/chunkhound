@@ -28,6 +28,19 @@
            for the page, which would render the prompt and verdict invisible
            on this dark surface. --code-* tokens are theme-stable already. */
         --text-primary: #f4f4f4;
+        /* The permanently-dark surface re-points the link recipe to the code
+           surface's highlight. DESIGN_SYSTEM (Code Surface Accent): on --code-bg
+           use --code-accent, never the theme-adaptive --primary — its ink value
+           in light theme would vanish here. The surface — never the CTA's lone
+           class (0,1,0), which loses to the prose-link rules (0,1,1) — must own
+           the family, or a visited CTA falls back to light theme's ink
+           --link-visited (#164e63 = 1.55:1 here). Same move as the
+           --text-primary pin above; the CTA stays highlighted in every state
+           and hover is carried by the underline alone. */
+        --link: var(--code-accent);
+        --link-hover: var(--code-accent);
+        --link-visited: var(--code-accent);
+        --link-focus: var(--code-accent);
         /* Decorative mask fill for the hound mark: an alias of --code-text,
            kept theme-invariant with the code surface it decorates. Lives
            outside the contrast matrix (see UNRESOLVED_TOKENS in
@@ -201,18 +214,16 @@
        the headline's font size and collapses on wrap; a margin here would
        indent the wrapped line and a container-sized space would look cramped
        beside the display type. */
+    /* Geometry only: the hero surface owns every link colour (--link* family,
+       pinned on .hero to the code surface's highlight). Restating a tone here is
+       what broke the visited state — the prose-link recipe outranks a lone class,
+       so the class cannot defend its colour, and the hover underline is
+       `a:hover`'s. */
     .hero-setup-link {
-        color: var(--code-text);
         display: inline-block;
         font-size: var(--text-sm);
         font-weight: 600;
         padding: var(--space-1) 0;
-        text-decoration: none;
-    }
-
-    .hero-setup-link:hover {
-        color: var(--code-accent);
-        text-decoration: underline;
     }
 
     .hero-setup-link:focus-visible {

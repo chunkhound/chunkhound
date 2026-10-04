@@ -7,13 +7,26 @@ import re
 from tests.site.tsx_runner import ROOT
 
 GLOBAL_CSS = ROOT / "site" / "src" / "styles" / "global.css"
+HERO_CSS = ROOT / "site" / "src" / "styles" / "hero-terminal.css"
 
 
 def extract_block(css: str, selector: str) -> str:
-    pattern = rf"{re.escape(selector)}\s*\{{(.*?)\n\}}"
-    match = re.search(pattern, css, re.DOTALL)
+    """Body of the first rule whose selector is exactly `selector`.
+
+    Brace-matched, not anchored on a column-0 `}`: hero-terminal.css ships its
+    rules indented, so an anchor would read past the block it asked for.
+    """
+    match = re.search(rf"{re.escape(selector)}\s*\{{", css)
     assert match, f"Missing CSS block for {selector}"
-    return match.group(1)
+    depth = 1
+    for index, char in enumerate(css[match.end() :], match.end()):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return css[match.end() : index]
+    raise AssertionError(f"Unbalanced braces after {selector}")
 
 
 def extract_tokens(block: str) -> dict[str, str]:

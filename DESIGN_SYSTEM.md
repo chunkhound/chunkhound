@@ -306,7 +306,11 @@ Selected chips / active nav items:
 Cyan (--primary) is a structural accent only — never a text color on interactive selected states.
 
 Text links use dedicated `--link*` tokens. On `--primary-bg` or primary-tinted surfaces, use
-`--link-on-primary-bg*` tokens rather than `--primary`.
+`--link-on-primary-bg*` tokens rather than `--primary`. A permanently-dark surface
+(`--code-bg`, `--brand-surface`) re-points the whole `--link*` family to its own highlight: on
+`--code-bg` that is `--code-accent`, so the hero's main CTA reads as the page's one action. The
+prose-link recipe is element + pseudo (0,1,1), so it outranks a lone class (0,1,0) — the surface,
+never the control, owns the palette.
 
 ### Buttons
 

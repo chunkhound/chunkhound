@@ -117,6 +117,9 @@ jobs:
           cache-dependency-path: site/package-lock.json
       - run: npm ci --prefix site
 
+      - name: Install Chromium for site browser contracts
+        run: npm exec --prefix site -- playwright install --with-deps chromium
+
       - name: Install dependencies
         run: uv sync --locked
 

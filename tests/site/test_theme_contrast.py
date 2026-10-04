@@ -120,7 +120,10 @@ def _is_structural_exclusion(foreground: str, background: str) -> bool:
     if background == "--green-bg":
         return foreground != "--on-green-bg"  # green chip hosts only --on-green-bg
     if background == "--code-bg":
-        # on --code-bg only code tokens are checked
+        # on --code-bg only code tokens are checked. Theme-adaptive tokens that a
+        # permanently-dark surface re-points (the hero's --link* family) are out
+        # of scope here: that surface resolves them itself, and
+        # test_theme_link_contrast.py contracts the resolved pair.
         return foreground not in CODE_TOKENS
     if background == "--code-note-bg":
         # the hero's annotation surface is a code surface too: only code tokens
