@@ -99,6 +99,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "requesty",
+            "model": "openai/gpt-4o-mini",
+            "expected_name": "requesty",
+            "expected_base_url": "https://router.requesty.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'requesty'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="requesty",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -246,7 +261,12 @@ class TestFactoryPipeline:
         manager = _bare_manager()
         provider = manager._create_provider(spec)
         expected = {
-            "deepseek": 10, "grok": 5, "openrouter": 10, "orcarouter": 10, "openai": 3
+            "deepseek": 10,
+            "grok": 5,
+            "openrouter": 10,
+            "orcarouter": 10,
+            "requesty": 10,
+            "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected
 
