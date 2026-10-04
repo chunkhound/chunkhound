@@ -8,10 +8,10 @@ Goldens live in `tests/site/__goldens__/highlight/`, one shard per
 mode/platform/editor (`{mode}.{platform}.{editor}.json`) mapping
 `{mode}/{platform}/{editor}/{embedding}/{llm}` -> {"html": ..., "copy": ...}.
 
-Each shard keeps every embedding provider (so a provider-specific rendering
-bug is caught in all 36 shells) and advances the llm provider one step per
-shard, so the corpus renders every 4x12 (embedding, llm) pair across its 36
-shards without storing the full cross product in every shard. Regenerate with
+Each shard keeps every embedding provider. Explicit provider-ID assignments
+remove the catalog-order dependency; the render-script guard fails when the
+catalog's provider set drifts from the assignments. Pair coverage is asserted
+by test_highlight_corpus_covers_every_embedding_llm_pair. Regenerate with
 `UPDATE_GOLDENS=1`; `git diff --exit-code` then proves parity for the frozen
 `highlight.ts` renderer.
 """
@@ -45,30 +45,70 @@ const modes = {
   compact: buildCompactConfiguratorOutput,
   full: buildFullConfiguratorOutput,
 };
-// Representative corpus: every embedding provider in every shard, with the llm
-// provider advancing one step per shard (plus the embedding offset), so the 36
-// shards together render all 48 (embedding, llm) pairs. Rendering the full 4x12
-// cross product in every shard would only repeat those pairs; the structural
-// tests below pin the rest of the contract, including shared API-key dedupe
-// (see test_output_deduplicates_shared_api_key_requirements in the rendering
-// tests).
-let shard = 0;
+// Named embedding slots make catalog reordering irrelevant. Both modes use
+// the same fixed shell assignments; the guards below fail when the catalog
+// drifts. Pair coverage is asserted by
+// test_highlight_corpus_covers_every_embedding_llm_pair in the Python tests.
+function assignments(voyageai, openai, ollama, vllm) {
+  return {
+    voyageai,
+    'openai-embed': openai,
+    'ollama-embed': ollama,
+    'vllm-embed': vllm,
+  };
+}
+const shellAssignments = {
+  'posix/pi': assignments('vercel', 'openrouter', 'orcarouter', 'anthropic'),
+  'posix/cursor': assignments('openrouter', 'orcarouter', 'anthropic', 'openai-llm'),
+  'posix/claude-code': assignments(
+    'orcarouter', 'anthropic', 'openai-llm', 'codex-cli'),
+  'posix/vscode': assignments(
+    'anthropic', 'openai-llm', 'codex-cli', 'claude-code-cli'),
+  'posix/opencode': assignments('openai-llm', 'codex-cli', 'claude-code-cli', 'gemini'),
+  'posix/codex': assignments('codex-cli', 'claude-code-cli', 'gemini', 'deepseek'),
+  'posix/windsurf': assignments('claude-code-cli', 'gemini', 'deepseek', 'grok'),
+  'posix/roo-code': assignments('gemini', 'deepseek', 'grok', 'ollama-llm'),
+  'posix/zed': assignments('deepseek', 'grok', 'ollama-llm', 'vllm-llm'),
+  'powershell/pi': assignments('grok', 'ollama-llm', 'vllm-llm', 'opencode-cli'),
+  'powershell/cursor': assignments('ollama-llm', 'vllm-llm', 'opencode-cli', 'vercel'),
+  'powershell/claude-code': assignments(
+    'vllm-llm', 'opencode-cli', 'vercel', 'openrouter'),
+  'powershell/vscode': assignments(
+    'opencode-cli', 'vercel', 'openrouter', 'orcarouter'),
+  'powershell/opencode': assignments('vercel', 'openrouter', 'orcarouter', 'anthropic'),
+  'powershell/codex': assignments(
+    'openrouter', 'orcarouter', 'anthropic', 'openai-llm'),
+  'powershell/windsurf': assignments(
+    'orcarouter', 'anthropic', 'openai-llm', 'codex-cli'),
+  'powershell/roo-code': assignments(
+    'anthropic', 'openai-llm', 'codex-cli', 'claude-code-cli'),
+  'powershell/zed': assignments('openai-llm', 'codex-cli', 'claude-code-cli', 'gemini'),
+};
+function requireAssignedProviders(providers, assigned, kind) {
+  const catalog = providers.map(provider => provider.id).sort();
+  const expected = [...new Set(assigned)].sort();
+  if (JSON.stringify(catalog) !== JSON.stringify(expected)) {
+    throw new Error(`Update golden ${kind} assignments: ${catalog} != ${expected}`);
+  }
+}
+const samples = Object.values(shellAssignments);
+requireAssignedProviders(embeddingProviders, samples.flatMap(Object.keys), 'embedding');
+requireAssignedProviders(llmProviders, samples.flatMap(Object.values), 'LLM');
+function renderShard(mode, build, platform, editor) {
+  const assigned = shellAssignments[`${platform.id}/${editor.id}`];
+  if (!assigned) {
+    throw new Error(`Missing golden assignments: ${platform.id}/${editor.id}`);
+  }
+  for (const embedding of embeddingProviders) {
+    const llm = llmProviders.find(provider => provider.id === assigned[embedding.id]);
+    if (!llm) throw new Error(`Missing golden LLM assignment: ${embedding.id}`);
+    const key = `${mode}/${platform.id}/${editor.id}/${embedding.id}/${llm.id}`;
+    out[key] = build(embedding, llm, editor.id, platform.id);
+  }
+}
 for (const [mode, build] of Object.entries(modes)) {
   for (const platform of PLATFORM_OPTIONS) {
-    for (const editor of editors) {
-      for (let e = 0; e < embeddingProviders.length; e++) {
-        const embedding = embeddingProviders[e];
-        const llm =
-          llmProviders[
-            (shard + e) % llmProviders.length
-          ];
-        const rendered = build(embedding, llm, editor.id, platform.id);
-        const key =
-          `${mode}/${platform.id}/${editor.id}/${embedding.id}/${llm.id}`;
-        out[key] = rendered;
-      }
-      shard += 1;
-    }
+    for (const editor of editors) renderShard(mode, build, platform, editor);
   }
 }
 console.log(JSON.stringify(out));
