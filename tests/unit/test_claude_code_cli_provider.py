@@ -282,6 +282,50 @@ class TestClaudeCodeCLIProvider:
         assert not cfg.exists()
 
     @pytest.mark.asyncio
+    async def test_mcp_config_write_error_is_runtime_error(self, provider, monkeypatch):
+        """A failed MCP config write stays inside the RuntimeError contract."""
+
+        def _boom():
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.claude_code_cli_provider.resolve_cli_binary",
+            lambda name: r"C:\fake\claude.exe",
+        )
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.claude_code_cli_provider._write_empty_mcp_config_file",
+            _boom,
+        )
+        with pytest.raises(RuntimeError, match="Claude MCP config"):
+            await provider.complete("Test prompt")
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_write_error_is_runtime_error(self, monkeypatch):
+        """A failed system-prompt file write stays inside the RuntimeError contract."""
+
+        def _boom(system: str):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.base_cli_provider.sys.platform",
+            "win32",
+        )
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.claude_code_cli_provider.resolve_cli_binary",
+            lambda name: r"C:\npm\claude.cmd",
+        )
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.claude_code_cli_provider._write_system_prompt_file",
+            _boom,
+        )
+        provider = ClaudeCodeCLIProvider(
+            model="claude-sonnet-4-5-20250929",
+            max_retries=1,
+        )
+        with pytest.raises(RuntimeError, match="Claude system prompt"):
+            await provider.complete("User prompt", system="hello")
+
+    @pytest.mark.asyncio
     async def test_write_empty_mcp_config_file_contents(self, tmp_path, monkeypatch):
         """Temp MCP config is valid empty-servers JSON."""
         import json

@@ -176,7 +176,10 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         # Inline JSON on --mcp-config is mangled by Windows cmd.exe / .cmd
         # batch reparse (nested quotes). CLI accepts a file path instead.
         system_prompt_path: Path | None = None
-        mcp_config_path = _write_empty_mcp_config_file()
+        try:
+            mcp_config_path = _write_empty_mcp_config_file()
+        except OSError as e:
+            raise RuntimeError(f"Failed to write Claude MCP config: {e}") from e
         try:
             # Prompt is passed via stdin, not CLI args (avoids ARG_MAX limit).
             cli_args = [
@@ -196,7 +199,12 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 # Batch shims rewrite newlines, quotes, and % on the command
                 # line. The file flag keeps that text intact.
                 if is_windows_batch_shim(claude_bin):
-                    system_prompt_path = _write_system_prompt_file(system)
+                    try:
+                        system_prompt_path = _write_system_prompt_file(system)
+                    except OSError as e:
+                        raise RuntimeError(
+                            f"Failed to write Claude system prompt: {e}"
+                        ) from e
                     cli_args.extend(
                         [
                             "--append-system-prompt-file",

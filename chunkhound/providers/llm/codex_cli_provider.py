@@ -472,13 +472,7 @@ class CodexCLIProvider(BaseCLIProvider):
         # cap are config keys. A batch shim rewrites the quotes in ``-c``
         # values, so those keys go in the overlay file instead.
         extra_args += ["--sandbox", sandbox_mode]
-        if batch_shim:
-            self._merge_batch_overlay_config(
-                overlay_home,
-                approval_policy=approval_policy,
-                max_output_tokens=max_tokens,
-            )
-        else:
+        if not batch_shim:
             extra_args += [
                 "-c",
                 f"approval_policy={self._toml_string(approval_policy)}",
@@ -541,6 +535,17 @@ class CodexCLIProvider(BaseCLIProvider):
 
         last_error: Exception | None = None
         try:
+            if batch_shim:
+                try:
+                    self._merge_batch_overlay_config(
+                        overlay_home,
+                        approval_policy=approval_policy,
+                        max_output_tokens=max_tokens,
+                    )
+                except OSError as e:
+                    raise RuntimeError(
+                        f"Failed to write Codex batch overlay config: {e}"
+                    ) from e
             for attempt in range(self._max_retries):
                 proc: asyncio.subprocess.Process | None = None
                 try:

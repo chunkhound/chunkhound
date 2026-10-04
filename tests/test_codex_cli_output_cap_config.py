@@ -231,6 +231,47 @@ async def test_codex_batch_shim_does_not_retry_prompt_on_argv(
 
 
 @pytest.mark.asyncio
+async def test_codex_batch_overlay_write_error_is_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed overlay write is a RuntimeError and the overlay is removed."""
+    homes: list[str] = []
+    original = CodexCLIProvider._build_overlay_home
+
+    def _record(self: CodexCLIProvider, model_override: str | None = None) -> str:
+        home = original(self, model_override)
+        homes.append(home)
+        return home
+
+    def _boom(
+        self: CodexCLIProvider,
+        overlay_home: str,
+        *,
+        approval_policy: str,
+        max_output_tokens: int | None,
+    ) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setenv("CHUNKHOUND_CODEX_KEEP_OVERLAY", "0")
+    monkeypatch.setattr(CodexCLIProvider, "_build_overlay_home", _record)
+    monkeypatch.setattr(CodexCLIProvider, "_merge_batch_overlay_config", _boom)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: r"C:\npm\codex.cmd",
+    )
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform",
+        "win32",
+    )
+
+    provider = CodexCLIProvider(model="test-explicit-model", max_retries=1)
+    with pytest.raises(RuntimeError, match="batch overlay config"):
+        await provider.complete("hi")
+    assert homes
+    assert not Path(homes[0]).exists()
+
+
+@pytest.mark.asyncio
 async def test_codex_timeout_terminates_the_process_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
