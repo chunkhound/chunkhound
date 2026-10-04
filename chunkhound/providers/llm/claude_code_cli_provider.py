@@ -4,8 +4,7 @@ This provider wraps the Claude Code CLI (claude --print) to enable deep research
 using the user's existing Claude subscription instead of API credits.
 
 Note: This provider is configured for vanilla LLM behavior:
-- All tools disabled via bare ``--disallowedTools`` (CLI: flag alone = deny all;
-  avoids empty ``--tools ""`` which Windows ``.cmd`` shims garble)
+- All tools disabled via ``--tools ""``
 - MCP servers disabled via empty --mcp-config (temp JSON file on disk so
   Windows ``claude.cmd`` shims do not garble inline JSON quotes)
 - On Windows ``.cmd`` / ``.bat`` shims, the system prompt is a file passed to
@@ -206,11 +205,11 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     )
                 else:
                     cli_args.extend(["--append-system-prompt", system])
-            # Deny all tools (flag alone per claude --help). Non-empty token so
-            # Windows .cmd reparse cannot garble an empty --tools "" value.
-            # Always last so a value-taking parser cannot swallow a following
-            # --option (e.g. --append-system-prompt) as a tool name.
-            cli_args.append("--disallowedTools")
+            # Disable every built-in tool. The empty string is its own argv
+            # token, so a .cmd shim keeps it. A wrapper can still append
+            # --append-system-prompt after this pair; a bare variadic flag
+            # would consume that option as a tool name.
+            cli_args.extend(["--tools", ""])
             cmd = build_cli_argv(claude_bin, *cli_args)
 
             # Set environment for subscription-based auth

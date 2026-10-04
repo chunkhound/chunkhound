@@ -179,10 +179,10 @@ class TestClaudeCodeCLIProvider:
             assert ".json" in blob
 
     @pytest.mark.asyncio
-    async def test_complete_uses_disallowed_tools_not_empty_tools(
+    async def test_complete_disables_tools_with_empty_tools_value(
         self, provider, mock_subprocess
     ):
-        """Bare --disallowedTools denies all tools; avoid empty --tools ""."""
+        """--tools "" disables built-in tools and stays a separate argv token."""
         mock_process = AsyncMock()
         mock_process.returncode = 0
         mock_process.communicate.return_value = (b"ok", b"")
@@ -192,14 +192,14 @@ class TestClaudeCodeCLIProvider:
 
         cmd = mock_subprocess.call_args.args
         # mock_subprocess fixture uses a .exe path → multi-token argv
-        assert cmd[-1] == "--disallowedTools"
-        assert "--tools" not in cmd
+        assert list(cmd[-2:]) == ["--tools", ""]
+        assert "--disallowedTools" not in cmd
 
     @pytest.mark.asyncio
-    async def test_complete_disallowed_tools_last_even_with_system_prompt(
+    async def test_complete_passes_system_prompt_before_empty_tools_value(
         self, provider, mock_subprocess
     ):
-        """System prompt must not follow --disallowedTools."""
+        """The system prompt is its own option, followed by --tools ""."""
         mock_process = AsyncMock()
         mock_process.returncode = 0
         mock_process.communicate.return_value = (b"ok", b"")
@@ -210,7 +210,7 @@ class TestClaudeCodeCLIProvider:
         cmd = mock_subprocess.call_args.args
         assert "--append-system-prompt" in cmd
         assert cmd[cmd.index("--append-system-prompt") + 1] == "System instructions"
-        assert cmd[-1] == "--disallowedTools"
+        assert list(cmd[-2:]) == ["--tools", ""]
 
     @pytest.mark.asyncio
     async def test_batch_shim_puts_system_prompt_in_a_file(self, monkeypatch):
@@ -254,7 +254,8 @@ class TestClaudeCodeCLIProvider:
         assert "--append-system-prompt" not in cmd
         assert "--append-system-prompt-file" in cmd
         assert captured["system"] == system
-        assert cmd[-1] == "--disallowedTools"
+        assert list(cmd[-2:]) == ["--tools", ""]
+        assert "--disallowedTools" not in cmd
         assert "\n" not in " ".join(cmd)
         prompt_file = Path(cmd[cmd.index("--append-system-prompt-file") + 1])
         assert not prompt_file.exists()
