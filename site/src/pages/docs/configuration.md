@@ -517,11 +517,12 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
 | OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `google/gemini-3.5-flash`) | Must be set explicitly (configurator defaults to `google/gemini-3.5-flash`) | OpenRouter API. Registry providers require explicit `model`. |
+| Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, and OrcaRouter) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, and Vercel) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
 ### LLM Options
 
@@ -549,7 +550,7 @@ For each provider-managed synthesis request, ChunkHound uses this precedence wit
 
 `UNKNOWN` omission capability is handled conservatively: ChunkHound does not assume omission is safe, so it uses a valid sourced declaration or the scalar fallback. This is intentionally not a per-model lookup table.
 
-Built-in DeepSeek, Grok, and OpenRouter configurations at their canonical endpoints authoritatively support omission. Provider-managed DeepSeek and OpenRouter requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on any of these built-ins downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
+Built-in DeepSeek, Grok, OpenRouter, and OrcaRouter configurations at their canonical endpoints authoritatively support omission. Provider-managed DeepSeek, OpenRouter, and OrcaRouter requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on any of these built-ins downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
 
 At research startup, the progress display reports the resolved synthesis request-limit policy using one of these forms (runtime cap values are comma-formatted):
 
@@ -865,9 +866,9 @@ MongoDB Atlas exposes a native Voyage-compatible rerank endpoint. Use `rerank_fo
 
 In the configurator, select **Retrieval → VoyageAI** and open **Customize reranker** to set the Atlas URL, `voyage` format, and rerank model.
 
-### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter)
+### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel)
 
-The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, and OrcaRouter LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, and Vercel LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {

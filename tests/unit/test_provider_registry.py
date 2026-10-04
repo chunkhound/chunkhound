@@ -11,7 +11,11 @@ from typing import get_args
 
 import pytest
 
-from chunkhound.core.config.llm_config import LLMProviderLiteral
+from chunkhound.core.config.llm_config import (
+    CLI_PROVIDER_CHOICES,
+    REMOVED_PROVIDERS,
+    LLMProviderLiteral,
+)
 from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
 from chunkhound.interfaces.llm_provider import OutputLimitCapability
 
@@ -38,6 +42,22 @@ def test_spec_names_match_dict_keys():
         assert spec.name == key, (
             f"Spec name {spec.name!r} does not match dict key {key!r}"
         )
+
+
+def test_cli_provider_choices_cover_all_live_literals():
+    """The CLI picker must offer every live provider literal.
+
+    ``CLI_PROVIDER_CHOICES`` is hand-maintained, so a new provider added to the
+    ``LLMProviderLiteral`` union would be unreachable from the CLI unless this
+    test forces both lists to stay in sync. Removed providers are excluded.
+    """
+    live_literals = set(get_args(LLMProviderLiteral)) - set(REMOVED_PROVIDERS)
+    choices = set(CLI_PROVIDER_CHOICES)
+    assert choices == live_literals, (
+        "CLI_PROVIDER_CHOICES out of sync with LLMProviderLiteral: "
+        f"missing {sorted(live_literals - choices)}, "
+        f"extra {sorted(choices - live_literals)}"
+    )
 
 
 def test_canonical_registry_specs_support_output_cap_omission():

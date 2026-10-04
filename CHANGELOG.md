@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Vercel AI Gateway LLM provider** — Vercel AI Gateway is now supported as an OpenAI-compatible LLM provider (`provider: vercel` or `CHUNKHOUND_LLM_PROVIDER=vercel`). Like every registry provider it requires an explicit `model`; the configurator's Vercel preset defaults to `poolside/laguna-s-2.1`. Because the gateway's output-cap omission behavior is not yet verifiable, the default research route sends the configured `llm.output_limit_fallback` cap (default 64,000) instead of omitting the cap.
+
 ### Changed
 - **Default VoyageAI embedding model is now `voyage-4-lite`.** Retrieval relevance is set by the bundled `rerank-2.5` reranker and the LLM that expands and synthesizes, not by the embedding model, so the cheaper general embedder (and its 1M-token batch limit) is the better default. `voyage-code-4` remains available for maximum code recall. Existing indexes keep the model they were built with, so only new indexes pick up the change; existing `voyage-3.5` indexes now receive an upgrade *suggestion* to `voyage-4-lite`, which is applied only on operator confirmation.
 - **Package description updated** to "Local-first research engine for AI agents via MCP, with a CLI companion", matching the refreshed site positioning.
