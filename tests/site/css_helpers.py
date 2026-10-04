@@ -81,10 +81,8 @@ def _index(css: str) -> dict[str, list[Rule]]:
 def _shipped() -> dict[str, list[Rule]]:
     bundles = sorted((DIST / "_astro").glob("*.css"))
     assert bundles, "No CSS bundles in site/dist/_astro — was the site built?"
-    raw = _SCOPING.sub(
-        "", "".join(bundle.read_text(encoding="utf-8") for bundle in bundles)
-    )
-    return _index(raw)
+    css = "".join(bundle.read_text(encoding="utf-8") for bundle in bundles)
+    return _index(_SCOPING.sub("", css))
 
 
 def rules(selector: str, *, media: str | None = None) -> list[Rule]:

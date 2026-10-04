@@ -21,8 +21,8 @@ const { label, title, sources } = Astro.props;
   <ul>
     {sources.map((source) => (
       <li>
-        {/* Wrapper is template-rendered so scoped styles reach the icon;
-            the PhosphorIcon child root carries no parent scope id. */}
+        {/* The span is the styled box: it owns the icon's color and acts as
+            the flex item (`.source-icon`); the icon itself carries no styling. */}
         <span class="source-icon">
           <PhosphorIcon name={source.icon} size="20" weight="duotone" aria-hidden="true" />
         </span>
