@@ -29,13 +29,15 @@ def _seed_db(provider, create_embedding_table: bool = True):
         "VALUES (1, 'src/app.py', 'app.py', 'aaa')"
     )
 
-    for cid in range(1, _TOTAL_CHUNKS + 1):
-        provider.connection.execute(
-            "INSERT INTO chunks "
-            "(id, file_id, code, symbol, chunk_type, start_line, end_line) "
-            "VALUES (?, 1, ?, ?, 'function', ?, ?)",
-            [cid, f"def func_{cid}(): pass", f"func_{cid}", cid, cid],
-        )
+    provider.connection.executemany(
+        "INSERT INTO chunks "
+        "(id, file_id, code, symbol, chunk_type, start_line, end_line) "
+        "VALUES (?, 1, ?, ?, 'function', ?, ?)",
+        [
+            (cid, f"def func_{cid}(): pass", f"func_{cid}", cid, cid)
+            for cid in range(1, _TOTAL_CHUNKS + 1)
+        ],
+    )
 
     if not create_embedding_table:
         return
@@ -43,14 +45,21 @@ def _seed_db(provider, create_embedding_table: bool = True):
     dims = MockEmbeddingProvider.dims
     provider._ensure_embedding_table_exists(dims)
 
-    for cid in range(1, _PRE_EMBEDDED + 1):
-        vec = [float(cid) / 100.0] * dims
-        provider.connection.execute(
-            f"INSERT INTO embeddings_{dims} "
-            "(chunk_id, provider, model, embedding, dims) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [cid, MockEmbeddingProvider.name, MockEmbeddingProvider.model, vec, dims],
-        )
+    provider.connection.executemany(
+        f"INSERT INTO embeddings_{dims} "
+        "(chunk_id, provider, model, embedding, dims) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                cid,
+                MockEmbeddingProvider.name,
+                MockEmbeddingProvider.model,
+                [float(cid) / 100.0] * dims,
+                dims,
+            )
+            for cid in range(1, _PRE_EMBEDDED + 1)
+        ],
+    )
 
 
 class TestMissingEmbeddingsTargetedQuery:
@@ -77,17 +86,28 @@ class TestMissingEmbeddingsTargetedQuery:
                 embedding_provider=MockEmbeddingProvider(),
             )
 
-            with patch.object(
-                provider,
-                "get_all_chunks_with_metadata",
-                side_effect=AssertionError(
-                    "fresh DuckDB must not load full chunk records"
+            with (
+                patch.object(
+                    provider,
+                    "get_all_chunks_with_metadata",
+                    side_effect=AssertionError(
+                        "fresh DuckDB must not load full chunk records"
+                    ),
                 ),
+                patch.object(
+                    provider, "execute_query", wraps=provider.execute_query
+                ) as execute_query,
             ):
                 result = await service.generate_missing_embeddings()
 
             assert result["status"] == "success", f"unexpected status: {result}"
             assert result["generated"] == _TOTAL_CHUNKS
+            id_query = next(
+                query
+                for (query, *_), _ in execute_query.call_args_list
+                if "SELECT c.id" in query and "FROM chunks c" in query
+            )
+            assert "JOIN files" not in id_query
         finally:
             provider.disconnect(skip_checkpoint=True)
 
@@ -118,6 +138,30 @@ class TestMissingEmbeddingsTargetedQuery:
                 with pytest.raises(RuntimeError, match="DuckDB read failed"):
                     service._get_chunks_by_ids([1])
                 fallback.assert_not_called()
+        finally:
+            provider.disconnect(skip_checkpoint=True)
+
+    def test_embedding_catalog_errors_propagate(self, tmp_path: Path):
+        """A failed catalog lookup must not masquerade as a fresh database."""
+        pytest.importorskip("duckdb")
+        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+        from chunkhound.services.embedding_service import EmbeddingService
+
+        provider = DuckDBProvider(
+            db_path=tmp_path / "test.duckdb", base_directory=tmp_path
+        )
+        provider.connect()
+        service = EmbeddingService(
+            database_provider=provider,
+            embedding_provider=MockEmbeddingProvider(),
+        )
+
+        try:
+            with patch.object(
+                provider, "execute_query", side_effect=RuntimeError("catalog failed")
+            ):
+                with pytest.raises(RuntimeError, match="catalog failed"):
+                    service._get_all_embedding_tables()
         finally:
             provider.disconnect(skip_checkpoint=True)
 
@@ -190,14 +234,21 @@ class TestMissingEmbeddingsTargetedQuery:
             mock_embed = MockEmbeddingProvider()
             dims = mock_embed.dims
 
-            for cid in range(_PRE_EMBEDDED + 1, _TOTAL_CHUNKS + 1):
-                vec = [float(cid) / 100.0] * dims
-                provider.connection.execute(
-                    f"INSERT INTO embeddings_{dims} "
-                    "(chunk_id, provider, model, embedding, dims) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [cid, mock_embed.name, mock_embed.model, vec, dims],
-                )
+            provider.connection.executemany(
+                f"INSERT INTO embeddings_{dims} "
+                "(chunk_id, provider, model, embedding, dims) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        cid,
+                        mock_embed.name,
+                        mock_embed.model,
+                        [float(cid) / 100.0] * dims,
+                        dims,
+                    )
+                    for cid in range(_PRE_EMBEDDED + 1, _TOTAL_CHUNKS + 1)
+                ],
+            )
 
             service = EmbeddingService(
                 database_provider=provider,
