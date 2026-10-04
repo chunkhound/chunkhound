@@ -12,6 +12,7 @@ import {
   ORCAROUTER_SVG,
   PI_SVG,
   ROO_CODE_SVG,
+  VERCEL_SVG,
   VLLM_SVG,
   VOYAGEAI_SVG,
   VSCODE_SVG,
@@ -158,6 +159,12 @@ export const requirements = {
     label: "OpenRouter API key",
     url: "https://openrouter.ai/keys",
     svg: OPENROUTER_SVG,
+  },
+  vercelApiKey: {
+    id: "vercel-api-key",
+    label: "Vercel AI Gateway API key",
+    url: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
+    svg: VERCEL_SVG,
   },
   orcarouterApiKey: {
     id: "orcarouter-api-key",

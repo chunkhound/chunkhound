@@ -148,7 +148,7 @@ console.log(JSON.stringify({ stages }));
                 "Opt out of VoyageAI training for true privacy",
             ],
         },
-        {"role": "research", "links": ["OpenRouter API key"]},
+        {"role": "research", "links": ["Vercel AI Gateway API key"]},
         {"role": "agent", "links": ["pi-mcp-adapter"]},
     ]
 
@@ -471,9 +471,9 @@ def test_every_supported_llm_preset_parses_through_backend_config(
         assert config.llm.model == model
 
 
-def test_default_research_route_declares_openrouter_api_key_requirement() -> None:
-    """The default research route (OpenRouter) must declare the API key it
-    needs and emit the matching placeholder."""
+def test_default_research_route_declares_vercel_api_key_requirement() -> None:
+    """The default research route (Vercel AI Gateway) must declare the API key
+    it needs and emit the matching placeholder."""
     script = """
 import {
   DEFAULT_RESEARCH,
@@ -496,13 +496,13 @@ console.log(JSON.stringify({
 """
     rendered = run_tsx_json(script)
 
-    assert rendered["llmId"] == "openrouter"
-    assert "openrouter-api-key" in rendered["requirementIds"]
-    assert "OpenRouter API key" in rendered["requirementLabels"]
-    assert rendered["apiKey"] == "<YOUR_OPENROUTER_API_KEY>"
+    assert rendered["llmId"] == "vercel"
+    assert "vercel-api-key" in rendered["requirementIds"]
+    assert "Vercel AI Gateway API key" in rendered["requirementLabels"]
+    assert rendered["apiKey"] == "<YOUR_VERCEL_API_KEY>"
 
 
-def test_recommended_route_emits_voyage_4_lite_and_openrouter() -> None:
+def test_recommended_route_emits_voyage_4_lite_and_vercel() -> None:
     defaults = _selection_defaults()
     config = _build_chunkhound_config(
         defaults["defaultRetrieval"], defaults["defaultResearch"]
@@ -514,9 +514,9 @@ def test_recommended_route_emits_voyage_4_lite_and_openrouter() -> None:
         "api_key": "<YOUR_VOYAGE_API_KEY>",
     }
     assert config["llm"] == {
-        "provider": "openrouter",
-        "model": "google/gemini-3.5-flash",
-        "api_key": "<YOUR_OPENROUTER_API_KEY>",
+        "provider": "vercel",
+        "model": "poolside/laguna-s-2.1",
+        "api_key": "<YOUR_VERCEL_API_KEY>",
     }
 
 
@@ -534,8 +534,8 @@ def test_recommended_route_config_round_trips_through_backend_config(
     assert config.embedding is not None
     assert config.embedding.model == "voyage-4-lite"
     assert config.llm is not None
-    assert config.llm.model == "google/gemini-3.5-flash"
-    assert config.llm.provider == "openrouter"
+    assert config.llm.model == "poolside/laguna-s-2.1"
+    assert config.llm.provider == "vercel"
 
 
 @pytest.mark.parametrize("command", ["index", "research"])
@@ -590,7 +590,15 @@ def test_openrouter_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "openrouter")
 
     assert config["provider"] == "openrouter"
-    assert config["model"] == "google/gemini-3.5-flash"
+    assert config["model"] == "poolside/laguna-s-2.1"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_vercel_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "vercel")
+
+    assert config["provider"] == "vercel"
+    assert config["model"] == "poolside/laguna-s-2.1"
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
@@ -770,8 +778,9 @@ console.log(JSON.stringify(buildCompactConfiguratorOutput(embedding, llm, 'curso
 
 
 def test_recommended_pill_marks_voyageai_only() -> None:
-    """Gateway choice is not a recommendation (OpenRouter is merely the more
-    common default); the recommended default is the retrieval provider."""
+    """LLM route choice is not a recommendation (the default is expressed by
+    DEFAULT_RESEARCH, not the pill); the recommended default is the retrieval
+    provider."""
     script = """
 import {
   embeddingProviders,
@@ -790,9 +799,9 @@ console.log(JSON.stringify({
     assert rendered["llm"] == []
 
 
-def test_llm_providers_recommend_their_cheapest_fastest_model() -> None:
-    """Every recommendation names the provider's cheapest/fastest model, and
-    the emitted config uses that model, so the default is never a compromise."""
+def test_llm_providers_recommend_their_default_model() -> None:
+    """Every recommendation names a concrete fitted model, and the emitted
+    config uses that model, so the default is never a guess."""
     script = """
 import { llmProviders } from './site/src/components/configurator/index.ts';
 console.log(JSON.stringify(llmProviders.map((provider) => ({
@@ -805,7 +814,8 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
     by_id = {row["id"]: row for row in rendered}
 
     expected_models = {
-        "openrouter": "google/gemini-3.5-flash",
+        "vercel": "poolside/laguna-s-2.1",
+        "openrouter": "poolside/laguna-s-2.1",
         "orcarouter": "qwen/qwen3.7-flash",
         "gemini": "gemini-3.5-flash",
         "grok": "grok-4.3",
@@ -818,12 +828,23 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
         assert by_id[provider_id]["model"] == model, provider_id
         assert by_id[provider_id]["recommendation"], provider_id
 
+    # Drift guard: `expected_models` must cover exactly the catalog rows that
+    # carry a fitted model (native/agent-backed providers omit `model` and
+    # defer to the product default). Adding a preset without pinning its model
+    # here would otherwise leave it unverified.
+    native_or_modeless = {"anthropic", "openai-llm", "codex-cli", "claude-code-cli"}
+    catalog_ids = {row["id"] for row in rendered}
+    assert set(expected_models) == catalog_ids - native_or_modeless, (
+        "expected_models drifted from the catalog's modelled providers: "
+        f"{sorted(set(expected_models) ^ (catalog_ids - native_or_modeless))}"
+    )
+
     # Providers whose config omits `model` defer to the product default.
     for provider_id in ("anthropic", "openai-llm"):
         assert by_id[provider_id]["model"] is None
 
-    # The gateway default's rationale must state the default is not a compromise.
-    assert "not a compromise" in by_id["openrouter"]["recommendation"]
+    # The default route's rationale must state the default is not a compromise.
+    assert "not a compromise" in by_id["vercel"]["recommendation"]
 
 
 def test_rerank_format_parity_between_ts_and_python() -> None:

@@ -1,3 +1,4 @@
+import html
 import os
 import re
 import subprocess
@@ -141,7 +142,7 @@ def _extract_astro_code_block_after_marker(html: str, marker: str) -> str:
 # and therefore the row whose reveal carries the prerequisite chips.
 _DEFAULT_OPTION = {
     "retrieval": "voyageai",
-    "research": "openrouter",
+    "research": "vercel",
     "agent": "pi",
 }
 
@@ -359,14 +360,17 @@ def test_configurator_ui_has_reranker_and_prerequisites() -> None:
             "https://dashboard.voyageai.com/api-keys",
             "VoyageAI API key",
         ),
-        "research": ("https://openrouter.ai/keys", "OpenRouter API key"),
+        "research": (
+            "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
+            "Vercel AI Gateway API key",
+        ),
         "agent": ("https://pi.dev/packages/pi-mcp-adapter", "pi-mcp-adapter"),
     }
     for stage, (href, label) in expected_prerequisites.items():
         anchors = _stage_prerequisites(homepage, stage)
         visible_labels = [re.sub(r"<[^>]+>", "", body).strip() for _, body in anchors]
         assert visible_labels[0] == label, f"Unexpected prerequisites for {stage!r}"
-        assert f'href="{href}"' in anchors[0][0]
+        assert f'href="{href}"' in html.unescape(anchors[0][0])
         for attrs, body in anchors:
             assert 'target="_blank"' in attrs
             assert 'rel="noopener noreferrer"' in attrs
@@ -824,15 +828,15 @@ def test_built_configuration_docs_render_markdown_tables() -> None:
     assert "<table" in configuration
 
 
-def test_built_configuration_docs_document_openrouter_proxy() -> None:
-    """The default research route (OpenRouter) is documented with the config
-    the configurator emits."""
+def test_built_configuration_docs_document_default_research_route() -> None:
+    """The default research route (Vercel AI Gateway) is documented with the
+    config the configurator emits."""
     configuration = (DIST / "docs" / "configuration" / "index.html").read_text(
         encoding="utf-8"
     )
 
-    assert "google/gemini-3.5-flash" in configuration
-    assert "OpenRouter API key" in configuration
+    assert "poolside/laguna-s-2.1" in configuration
+    assert "Vercel AI Gateway API key" in configuration
 
 
 def test_built_configuration_docs_state_provider_independence() -> None:
@@ -843,7 +847,7 @@ def test_built_configuration_docs_state_provider_independence() -> None:
     )
 
     assert "configured independently of" in configuration
-    assert "google/gemini-3.5-flash" in configuration
+    assert "poolside/laguna-s-2.1" in configuration
     assert "qwen/qwen3.7-flash" in configuration
     assert "grok-4.3" in configuration
     assert "gemini-3.5-flash" in configuration

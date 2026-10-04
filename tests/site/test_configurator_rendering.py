@@ -107,7 +107,7 @@ def test_full_mode_output_is_copy_pasteable_without_json_comments() -> None:
     rendered = _render_full_output("voyageai", "openrouter", "cursor")
 
     assert '"model": "voyage-4-lite"' in rendered["copy"]
-    assert '"model": "google/gemini-3.5-flash"' in rendered["copy"]
+    assert '"model": "poolside/laguna-s-2.1"' in rendered["copy"]
 
     assert "json-comment" not in rendered["html"]
     stripped = re.sub(r"<[^>]+>", "", rendered["html"])

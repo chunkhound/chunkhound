@@ -180,9 +180,12 @@ console.log(JSON.stringify({ initialHidden, afterEmbed, afterExternalConfig, aft
         ),
     ]
     # The other two stages keep their server-rendered defaults: the checked
-    # OpenRouter and Pi rows carry their own chips.
+    # Vercel AI Gateway and Pi rows carry their own chips.
     assert after_embed["researchLinks"] == [
-        link_contract("https://openrouter.ai/keys", "OpenRouter API key")
+        link_contract(
+            "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
+            "Vercel AI Gateway API key",
+        )
     ]
     assert after_embed["agentLinks"] == [
         link_contract("https://pi.dev/packages/pi-mcp-adapter", "pi-mcp-adapter")
@@ -194,7 +197,7 @@ console.log(JSON.stringify({ initialHidden, afterEmbed, afterExternalConfig, aft
     assert '"rerank_format": "tei"' in rendered["afterExternalConfig"]["configCopy"]
     assert rendered["afterExternalConfig"]["errorHidden"] is True
     assert rendered["afterEditor"]["researchChecked"] is False
-    assert '"model": "google/gemini-3.5-flash"' in rendered["afterEditor"]["configCopy"]
+    assert '"model": "poolside/laguna-s-2.1"' in rendered["afterEditor"]["configCopy"]
     vllm_callout = rendered["afterVllm"]["calloutCopy"]
     assert "Qwen/Qwen3-Coder-30B-A3B-Instruct --port 8002" in vllm_callout
     vllm_config = rendered["afterVllm"]["configCopy"]
@@ -465,20 +468,21 @@ console.log(JSON.stringify({ before, filtered, cleared }));
     )
     rendered = run_tsx_json(script)
 
-    assert rendered["before"] == {"total": 12, "hidden": 0}
+    assert rendered["before"]["hidden"] == 0
     assert rendered["filtered"]["matchesOllama"] is True
     assert rendered["filtered"]["visible"] == 1
     assert rendered["filtered"]["groupHidden"] == [True, False, True]
     assert rendered["filtered"]["status"] == "1 result"
-    # OpenRouter stays the selection while filtered out, so the hidden row is
-    # the one that carries the only open reveal — filtering must hide both.
+    # The default research row stays the selection while filtered out, so the
+    # hidden row is the one that carries the only open reveal — filtering must
+    # hide both.
     assert rendered["filtered"]["openRowHidden"] is True
     assert rendered["filtered"]["revealTravelsWithTheRow"] is True
     assert rendered["filtered"]["revealedRows"] == rendered["before"]["total"]
     assert rendered["filtered"]["strayReveals"] == 0
-    assert rendered["cleared"]["visible"] == 12
+    assert rendered["cleared"]["visible"] == rendered["before"]["total"]
     assert rendered["cleared"]["groupHidden"] == [False, False, False]
-    assert rendered["cleared"]["status"] == "12 results"
+    assert rendered["cleared"]["status"] == f"{rendered['before']['total']} results"
     assert rendered["cleared"]["openRowHidden"] is False
 
 
@@ -658,7 +662,7 @@ def test_a_pick_lands_in_the_terminal_and_the_copy_at_once(
 // already-checked radio fires no `change`.
 const picksFor = (retrieval, research, agent) => [
   ['retrieval', retrieval[0], retrieval[1], 'voyage-4-lite'],
-  ['research', research[0], research[1], 'google/gemini-3.5-flash'],
+  ['research', research[0], research[1], 'poolside/laguna-s-2.1'],
   ['agent', agent[0], agent[1], 'pi install npm:pi-mcp-adapter'],
 ];
 const snapshot = (role) => ({

@@ -516,7 +516,7 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Google Gemini API. Migration: `CHUNKHOUND_GEMINI_MODEL` was removed in v4.x — rename to `CHUNKHOUND_LLM_MODEL`. |
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
-| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `google/gemini-3.5-flash`) | Must be set explicitly (configurator defaults to `google/gemini-3.5-flash`) | OpenRouter API. Registry providers require explicit `model`. |
+| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | OpenRouter API. Registry providers require explicit `model`. |
 | Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
 
@@ -884,14 +884,14 @@ The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, and Vercel LLM pr
 
 The gateway must preserve each provider's native request/response shape — ChunkHound uses the vendor SDKs, not a generic HTTP client.
 
-OpenRouter is a first-class provider, and the configurator's default research route selects it with an OpenRouter API key:
+Vercel AI Gateway is a first-class provider, and the configurator's default research route selects it with a Vercel AI Gateway API key:
 
 ```json
 {
   "llm": {
-    "provider": "openrouter",
-    "model": "google/gemini-3.5-flash",
-    "api_key": "<YOUR_OPENROUTER_API_KEY>"
+    "provider": "vercel",
+    "model": "poolside/laguna-s-2.1",
+    "api_key": "<YOUR_VERCEL_API_KEY>"
   }
 }
 ```

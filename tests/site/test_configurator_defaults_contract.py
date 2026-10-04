@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 from tests.site.tsx_runner import run_tsx_json
 
@@ -24,6 +25,11 @@ console.log(JSON.stringify(Object.fromEntries(
     .filter((provider) => provider.config.model)
     .map((provider) => [provider.config.provider, provider.config.model])
 )));
+"""
+
+_PROVIDER_IDS_SCRIPT = """
+import { llmProviders } from './site/src/components/configurator/index.ts';
+console.log(JSON.stringify(llmProviders.map((provider) => provider.config.provider)));
 """
 
 # '| Name | `provider` | ... (configurator defaults to `model`) ...' rows in the
@@ -70,3 +76,14 @@ def test_configuration_docs_match_configurator_llm_defaults() -> None:
             f"configuration.md says {provider} defaults to {model}, but the "
             f"configurator emits {presets[provider]}"
         )
+
+
+def test_every_registry_provider_has_a_configurator_preset() -> None:
+    """Every OpenAI-compatible provider the backend registers must be
+    selectable in the configurator; otherwise a provider ships with no way to
+    pick it, and the two catalogs drift silently."""
+    catalog_providers = set(run_tsx_json(_PROVIDER_IDS_SCRIPT))
+    missing = set(OPENAI_COMPATIBLE_PROVIDERS) - catalog_providers
+    assert not missing, (
+        f"configurator has no preset for registered providers: {sorted(missing)}"
+    )
