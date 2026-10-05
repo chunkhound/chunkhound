@@ -519,10 +519,11 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | OpenRouter API. Registry providers require explicit `model`. |
 | Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
+| Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `anthropic/claude-sonnet-5`) | Must be set explicitly (configurator defaults to `anthropic/claude-sonnet-5`) | Requesty API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, and Vercel) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Vercel, and Requesty) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
 ### LLM Options
 
@@ -866,9 +867,9 @@ MongoDB Atlas exposes a native Voyage-compatible rerank endpoint. Use `rerank_fo
 
 In the configurator, select **Retrieval → VoyageAI** and open **Customize reranker** to set the Atlas URL, `voyage` format, and rerank model.
 
-### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel)
+### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, Requesty)
 
-The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, and Vercel LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, and Requesty LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {

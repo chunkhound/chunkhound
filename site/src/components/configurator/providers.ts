@@ -14,6 +14,7 @@ import {
   OPENCODE_SVG,
   OPENROUTER_SVG,
   ORCAROUTER_SVG,
+  REQUESTY_SVG,
   VERCEL_SVG,
   VLLM_SVG,
   VOYAGEAI_SVG,
@@ -274,6 +275,18 @@ export const llmProviders: ConfiguratorProviderOption[] = [
     requirements: [requirements.orcarouterApiKey],
     recommendation:
       "<strong>Qwen3.7 Flash</strong> — a fast, cost-effective research model routed through OrcaRouter.",
+  },
+  {
+    id: "requesty",
+    name: "Requesty",
+    svg: REQUESTY_SVG,
+    description: "Claude Sonnet 5 via Requesty",
+    config: { provider: "requesty", model: "anthropic/claude-sonnet-5" },
+    apiKeyPlaceholder: "<YOUR_REQUESTY_API_KEY>",
+    group: "cloud",
+    requirements: [requirements.requestyApiKey],
+    recommendation:
+      "<strong>Claude Sonnet 5</strong> — Anthropic's balanced model routed through Requesty.",
   },
   {
     id: "anthropic",

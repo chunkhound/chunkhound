@@ -62,7 +62,7 @@ def test_cli_provider_choices_cover_all_live_literals():
 
 def test_canonical_registry_specs_support_output_cap_omission():
     """Canonical built-ins carry provider/API omission capability metadata."""
-    for name in ("deepseek", "grok", "openrouter", "orcarouter"):
+    for name in ("deepseek", "grok", "openrouter", "orcarouter", "requesty"):
         assert (
             OPENAI_COMPATIBLE_PROVIDERS[name].output_limit_omission
             is OutputLimitCapability.SUPPORTED

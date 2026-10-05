@@ -11,6 +11,7 @@ import {
   OPENROUTER_SVG,
   ORCAROUTER_SVG,
   PI_SVG,
+  REQUESTY_SVG,
   ROO_CODE_SVG,
   VERCEL_SVG,
   VLLM_SVG,
@@ -171,5 +172,11 @@ export const requirements = {
     label: "OrcaRouter API key",
     url: "https://www.orcarouter.ai",
     svg: ORCAROUTER_SVG,
+  },
+  requestyApiKey: {
+    id: "requesty-api-key",
+    label: "Requesty API key",
+    url: "https://app.requesty.ai/api-keys",
+    svg: REQUESTY_SVG,
   },
 } satisfies Record<string, ConfiguratorRequirement>;

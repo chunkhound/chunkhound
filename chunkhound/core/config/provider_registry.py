@@ -115,4 +115,14 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://vercel.com/docs/ai-gateway",
         auth_url="https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
     ),
+    "requesty": OpenAICompatibleSpec(
+        name="requesty",
+        default_base_url="https://router.requesty.ai/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
+        docs_url="https://docs.requesty.ai",
+        auth_url="https://app.requesty.ai/api-keys",
+    ),
 }
