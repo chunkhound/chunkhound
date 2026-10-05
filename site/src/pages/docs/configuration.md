@@ -857,7 +857,7 @@ MongoDB Atlas exposes a native Voyage-compatible rerank endpoint. Use `rerank_fo
     "provider": "voyageai",
     "model": "voyage-4-lite",
     "api_key": "<YOUR_VOYAGE_API_KEY>",
-    "rerank_model": "rerank-2.5",
+    "rerank_model": "rerank-3-lite",
     "rerank_url": "https://<atlas-host>/v1/rerank",
     "rerank_format": "voyage"
   }
