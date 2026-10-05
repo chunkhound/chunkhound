@@ -510,6 +510,18 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 
 When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, and Requesty) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
+### Claude Code CLI
+
+`provider: "claude-code-cli"` runs the local `claude` program in print mode. ChunkHound does not pass `--append-system-prompt` or `--append-system-prompt-file`. Research instructions are written to stdin, followed by a blank line and the user request. The last arguments ChunkHound adds are `--tools` and an empty value, which disables Claude's built-in tools.
+
+`--append-system-prompt` and `--append-system-prompt-file` share one slot. Claude Code uses both together starting in 2.1.283. Older builds keep only one. A corporate wrapper often appends one of those flags. ChunkHound leaves the slot free so the wrapper's flag is the one Claude sees.
+
+That works when the wrapper forwards stdin to `claude` and forwards ChunkHound's arguments unchanged, including the empty `--tools` value. A wrapper that replaces stdin with its own prompt argument, or that drops empty arguments, does not.
+
+ChunkHound's instructions are part of the prompt body. A wrapper's `--append-system-prompt` is still appended to the system prompt. When the two disagree, the wrapper text is the one in the system channel.
+
+Stdin also keeps quotes, percent signs, and newlines intact when Windows launches `claude` through `cmd.exe`. Those characters are not safe on that command line.
+
 ### LLM Options
 
 | Option | Type | Default | Description |

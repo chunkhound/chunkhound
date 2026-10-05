@@ -7,8 +7,9 @@ Note: This provider is configured for vanilla LLM behavior:
 - All tools disabled via ``--tools ""``
 - MCP servers disabled via empty --mcp-config (temp JSON file on disk so
   Windows ``claude.cmd`` shims do not garble inline JSON quotes)
-- On Windows ``.cmd`` / ``.bat`` shims, the system prompt is a file passed to
-  ``--append-system-prompt-file`` so the shim cannot rewrite it
+- System instructions travel on stdin. A wrapper may append
+  ``--append-system-prompt`` or ``--append-system-prompt-file``; passing
+  either flag ourselves collides with that wrapper.
 - Workspace isolation (runs from temp directory to prevent context gathering)
 - Clean API access without workspace overhead
 """
@@ -33,7 +34,6 @@ from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import (
     BaseCLIProvider,
     build_cli_argv,
-    is_windows_batch_shim,
     resolve_cli_binary,
     terminate_cli_process,
 )
@@ -64,24 +64,15 @@ def _write_empty_mcp_config_file() -> Path:
     return path.resolve()
 
 
-def _write_system_prompt_file(system: str) -> Path:
-    """Write the system prompt for ``--append-system-prompt-file``."""
-    fd, name = tempfile.mkstemp(
-        prefix="chunkhound_claude_system_",
-        suffix=".txt",
-        text=False,
-    )
-    path = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(system.encode("utf-8"))
-    except Exception:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    return path.resolve()
+def _stdin_prompt(prompt: str, system: str | None) -> str:
+    """Join instructions and the request on stdin.
+
+    Wrappers append ``--append-system-prompt`` or its file form. Claude
+    treats those as the same slot, so ChunkHound must not pass either one.
+    """
+    if system is None or not system.strip():
+        return prompt
+    return f"{system.rstrip()}\n\n{prompt}"
 
 
 class ClaudeCodeCLIProvider(BaseCLIProvider):
@@ -154,7 +145,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
 
         Args:
             prompt: User prompt
-            system: Optional system prompt (appended to default)
+            system: Optional instructions sent on stdin ahead of the prompt
             max_completion_tokens: Maximum tokens to generate
             timeout: Optional timeout override
 
@@ -175,7 +166,6 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
 
         # Inline JSON on --mcp-config is mangled by Windows cmd.exe / .cmd
         # batch reparse (nested quotes). CLI accepts a file path instead.
-        system_prompt_path: Path | None = None
         try:
             mcp_config_path = _write_empty_mcp_config_file()
         except OSError as e:
@@ -195,28 +185,10 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 # Prevent session persistence (avoid context bleed between calls).
                 "--no-session-persistence",
             ]
-            if system:
-                # Batch shims rewrite newlines, quotes, and % on the command
-                # line. The file flag keeps that text intact.
-                if is_windows_batch_shim(claude_bin):
-                    try:
-                        system_prompt_path = _write_system_prompt_file(system)
-                    except OSError as e:
-                        raise RuntimeError(
-                            f"Failed to write Claude system prompt: {e}"
-                        ) from e
-                    cli_args.extend(
-                        [
-                            "--append-system-prompt-file",
-                            str(system_prompt_path),
-                        ]
-                    )
-                else:
-                    cli_args.extend(["--append-system-prompt", system])
             # Disable every built-in tool. The empty string is its own argv
-            # token, so a .cmd shim keeps it. A wrapper can still append
-            # --append-system-prompt after this pair; a bare variadic flag
-            # would consume that option as a tool name.
+            # token, so a .cmd shim keeps it, and it stays last. --tools
+            # consumes the next token, so a wrapper flag after a bare --tools
+            # would be read as a tool name.
             cli_args.extend(["--tools", ""])
             cmd = build_cli_argv(claude_bin, *cli_args)
 
@@ -252,7 +224,9 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     # Wrap communicate() with timeout (this is the long-running part)
                     # Pass prompt via stdin to avoid OS ARG_MAX limits (~256KB on macOS)
                     stdout, stderr = await asyncio.wait_for(
-                        process.communicate(input=prompt.encode("utf-8")),
+                        process.communicate(
+                            input=_stdin_prompt(prompt, system).encode("utf-8")
+                        ),
                         timeout=request_timeout,
                     )
 
@@ -314,10 +288,9 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             # Should not reach here, but just in case
             raise last_error or RuntimeError("CLI command failed after retries")
         finally:
-            for path in (mcp_config_path, system_prompt_path):
-                if path is None:
-                    continue
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError as e:
-                    logger.debug("Failed to remove temp CLI file {}: {}", path, e)
+            try:
+                mcp_config_path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.debug(
+                    "Failed to remove temp CLI file {}: {}", mcp_config_path, e
+                )

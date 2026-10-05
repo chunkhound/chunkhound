@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Claude Code CLI instructions go on stdin** — `claude-code-cli` no longer passes `--append-system-prompt` or `--append-system-prompt-file`. Research instructions are prepended to the prompt on stdin so a wrapper can append either flag. The wrapper must forward stdin and ChunkHound's arguments, including the empty `--tools` value. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
+
 ## [6.0.0] - 2026-09-14
 
 ### Breaking Changes

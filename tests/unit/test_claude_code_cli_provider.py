@@ -196,10 +196,10 @@ class TestClaudeCodeCLIProvider:
         assert "--disallowedTools" not in cmd
 
     @pytest.mark.asyncio
-    async def test_complete_passes_system_prompt_before_empty_tools_value(
+    async def test_complete_sends_system_prompt_on_stdin(
         self, provider, mock_subprocess
     ):
-        """The system prompt is its own option, followed by --tools ""."""
+        """Instructions stay off argv so a wrapper can append its own flag."""
         mock_process = AsyncMock()
         mock_process.returncode = 0
         mock_process.communicate.return_value = (b"ok", b"")
@@ -208,27 +208,28 @@ class TestClaudeCodeCLIProvider:
         await provider.complete("User prompt", system="System instructions")
 
         cmd = mock_subprocess.call_args.args
-        assert "--append-system-prompt" in cmd
-        assert cmd[cmd.index("--append-system-prompt") + 1] == "System instructions"
+        assert "--append-system-prompt" not in cmd
+        assert "--append-system-prompt-file" not in cmd
         assert list(cmd[-2:]) == ["--tools", ""]
+        assert mock_process.communicate.await_args.kwargs["input"] == (
+            b"System instructions\n\nUser prompt"
+        )
 
     @pytest.mark.asyncio
-    async def test_batch_shim_puts_system_prompt_in_a_file(self, monkeypatch):
+    async def test_batch_shim_sends_system_prompt_on_stdin(self, monkeypatch):
         """A .cmd shim must not receive newlines, quotes, or % on argv."""
-        from pathlib import Path
-
         captured: dict[str, object] = {}
 
         async def fake_exec(*args, **kwargs):
-            cmd = [str(part) for part in args]
-            captured["cmd"] = cmd
-            flag = "--append-system-prompt-file"
-            captured["system"] = Path(cmd[cmd.index(flag) + 1]).read_text(
-                encoding="utf-8"
-            )
+            captured["cmd"] = [str(part) for part in args]
             process = AsyncMock()
             process.returncode = 0
-            process.communicate = AsyncMock(return_value=(b"ok", b""))
+
+            async def fake_communicate(input=None):
+                captured["stdin"] = input
+                return (b"ok", b"")
+
+            process.communicate = fake_communicate
             return process
 
         monkeypatch.setattr(
@@ -252,13 +253,16 @@ class TestClaudeCodeCLIProvider:
         assert isinstance(cmd, list)
         assert response.content == "ok"
         assert "--append-system-prompt" not in cmd
-        assert "--append-system-prompt-file" in cmd
-        assert captured["system"] == system
+        assert "--append-system-prompt-file" not in cmd
         assert list(cmd[-2:]) == ["--tools", ""]
         assert "--disallowedTools" not in cmd
-        assert "\n" not in " ".join(cmd)
-        prompt_file = Path(cmd[cmd.index("--append-system-prompt-file") + 1])
-        assert not prompt_file.exists()
+        rendered = " ".join(cmd)
+        assert "\n" not in rendered
+        assert "%" not in rendered
+        assert '"' not in rendered
+        assert captured["stdin"] == (
+            b'You are "helpful".\nFact: 100% done.\n\nUser prompt'
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_config_temp_file_removed_after_cli_error(
@@ -298,32 +302,6 @@ class TestClaudeCodeCLIProvider:
         )
         with pytest.raises(RuntimeError, match="Claude MCP config"):
             await provider.complete("Test prompt")
-
-    @pytest.mark.asyncio
-    async def test_system_prompt_write_error_is_runtime_error(self, monkeypatch):
-        """A failed system-prompt file write stays inside the RuntimeError contract."""
-
-        def _boom(system: str):
-            raise OSError("disk full")
-
-        monkeypatch.setattr(
-            "chunkhound.providers.llm.base_cli_provider.sys.platform",
-            "win32",
-        )
-        monkeypatch.setattr(
-            "chunkhound.providers.llm.claude_code_cli_provider.resolve_cli_binary",
-            lambda name: r"C:\npm\claude.cmd",
-        )
-        monkeypatch.setattr(
-            "chunkhound.providers.llm.claude_code_cli_provider._write_system_prompt_file",
-            _boom,
-        )
-        provider = ClaudeCodeCLIProvider(
-            model="claude-sonnet-4-5-20250929",
-            max_retries=1,
-        )
-        with pytest.raises(RuntimeError, match="Claude system prompt"):
-            await provider.complete("User prompt", system="hello")
 
     @pytest.mark.asyncio
     async def test_write_empty_mcp_config_file_contents(self, tmp_path, monkeypatch):
@@ -382,8 +360,10 @@ class TestClaudeCodeCLIProvider:
         response = await provider.complete("User prompt", system="System instructions")
 
         assert response.content == "Response with system"
-        # Verify that CLI was called with --append-system-prompt
-        # (we'd need to inspect mock_subprocess.call_args for this)
+        assert "--append-system-prompt" not in mock_subprocess.call_args.args
+        assert mock_process.communicate.await_args.kwargs["input"] == (
+            b"System instructions\n\nUser prompt"
+        )
 
     @pytest.mark.asyncio
     async def test_complete_timeout(self, provider, mock_subprocess):
