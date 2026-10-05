@@ -8,7 +8,6 @@ export interface ConfiguratorEditor {
   mcpFilePowerShell?: string;
   mcp?: ConfigRecord;
   rawCmd?: string;
-  installCommand?: string;
   gitignoreEntries?: string[];
   requirements: ConfiguratorRequirement[];
 }

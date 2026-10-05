@@ -246,21 +246,21 @@ def test_full_mode_renderer_outputs_stable_html_and_copy_for_non_default_selecti
     assert '<span class="json-comment">' not in rendered["html"]
 
 
-def test_pi_output_installs_adapter_writes_project_config_and_ignores_it() -> None:
+def test_pi_output_writes_builtin_project_config_and_ignores_it() -> None:
     rendered = _render_full_output("voyageai", "openrouter", "pi")
 
     assert rendered["copy"].startswith(
         "# Keep generated configuration files out of version control.\n"
-        "echo .chunkhound.json >> .gitignore\necho .mcp.json >> .gitignore"
+        "echo .chunkhound.json >> .gitignore\necho .pi/mcp.json >> .gitignore"
     )
-    assert "pi install npm:pi-mcp-adapter" in rendered["copy"]
-    assert "cat > .mcp.json <<'CHUNKHOUND_EOF'" in rendered["copy"]
+    # Pi 1.0+ ships built-in MCP: no adapter install command.
+    assert "pi install npm:pi-mcp-adapter" not in rendered["copy"]
+    assert "mkdir -p .pi" in rendered["copy"]
+    assert "cat > .pi/mcp.json <<'CHUNKHOUND_EOF'" in rendered["copy"]
     html = re.sub(r"<[^>]+>", "", rendered["html"])
     for value in (
-        '"directTools": true',
-        '"lifecycle": "eager"',
-        '"requestTimeoutMs": 1200000',
-        '"outputGuard": false',
+        '"timeout": 1200',
+        '"exposure": "direct"',
     ):
         assert value in rendered["copy"]
         assert value in html

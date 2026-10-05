@@ -364,7 +364,7 @@ def test_configurator_ui_has_reranker_and_prerequisites() -> None:
             "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
             "Vercel AI Gateway API key",
         ),
-        "agent": ("https://pi.dev/packages/pi-mcp-adapter", "pi-mcp-adapter"),
+        "agent": ("https://pi.dev", "Pi 1.0+"),
     }
     for stage, (href, label) in expected_prerequisites.items():
         anchors = _stage_prerequisites(homepage, stage)
@@ -384,7 +384,7 @@ def test_configurator_ui_has_reranker_and_prerequisites() -> None:
         in _stage_prerequisites(homepage, "retrieval")[1][1]
     )
     assert 'class="prerequisite-item prerequisite-item-optional"' in homepage
-    assert "pi-mcp-adapter" in homepage
+    assert "Pi 1.0+" in homepage
 
 
 def test_getting_started_docs_render_platform_code_and_setup() -> None:
@@ -418,8 +418,18 @@ def test_getting_started_docs_render_platform_code_and_setup() -> None:
     assert "Expected output" in getting_started
     assert "For a fully local deployment, we recommend" in getting_started
     assert 'href="https://pi.dev"' in getting_started
-    assert 'href="https://pi.dev/packages/pi-mcp-adapter"' in getting_started
-    assert "pi install npm:pi-mcp-adapter" in getting_started
+    assert "pi install npm:pi-mcp-adapter" not in getting_started
+    assert "Pi 1.0 and later include MCP support" in getting_started
+    assert "pi mcp list" in getting_started
+    visible_text = " ".join(re.sub(r"<[^>]+>", "", getting_started).split())
+    for instruction in (
+        "pi remove npm:pi-mcp-adapter",
+        "--local",
+        "grant project trust",
+        "In the Pi session, run /mcp",
+        "ChunkHound is connected",
+    ):
+        assert instruction in visible_text
     assert f"chunkhound {_expected_docs_version()}" in getting_started
     # Platform shell-chooser code blocks render twice (install + configurator),
     # the first one before the configurator's copyable generated commands.

@@ -27,25 +27,21 @@ export const editors: ConfiguratorEditor[] = [
     name: "Pi",
     svg: requirements.pi.svg,
     requirements: [requirements.pi],
-    mcpFile: ".mcp.json",
+    mcpFile: ".pi/mcp.json",
     mcp: {
       mcpServers: {
-        // requestTimeoutMs is ms (20 min for long research calls); no idleTimeout:
-        // lifecycle "eager" keeps the server connected per pi-mcp-adapter docs.
+        // Pi 1.0 ships built-in MCP: `timeout` is seconds (20 min covers long
+        // research calls; the default is 60), and `direct` declares the tools
+        // to the model without codemode indirection.
         ChunkHound: {
           command: "chunkhound",
           args: ["mcp"],
-          directTools: true,
-          lifecycle: "eager",
-          requestTimeoutMs: 1200000,
+          timeout: 1200,
+          exposure: "direct",
         },
       },
-      settings: {
-        outputGuard: false,
-      },
     },
-    installCommand: "pi install npm:pi-mcp-adapter",
-    gitignoreEntries: [".mcp.json"],
+    gitignoreEntries: [".pi/mcp.json"],
   },
   {
     id: "cursor",

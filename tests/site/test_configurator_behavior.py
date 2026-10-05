@@ -188,7 +188,7 @@ console.log(JSON.stringify({ initialHidden, afterEmbed, afterExternalConfig, aft
         )
     ]
     assert after_embed["agentLinks"] == [
-        link_contract("https://pi.dev/packages/pi-mcp-adapter", "pi-mcp-adapter")
+        link_contract("https://pi.dev", "Pi 1.0+")
     ]
     assert (
         '"rerank_url": "https://tei.example.com/rerank"'
@@ -663,7 +663,7 @@ def test_a_pick_lands_in_the_terminal_and_the_copy_at_once(
 const picksFor = (retrieval, research, agent) => [
   ['retrieval', retrieval[0], retrieval[1], 'voyage-4-lite'],
   ['research', research[0], research[1], 'poolside/laguna-s-2.1'],
-  ['agent', agent[0], agent[1], 'pi install npm:pi-mcp-adapter'],
+  ['agent', agent[0], agent[1], '.pi/mcp.json'],
 ];
 const snapshot = (role) => ({
   terminal: q('#config-output').textContent,

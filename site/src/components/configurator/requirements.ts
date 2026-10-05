@@ -23,8 +23,8 @@ import {
 export const requirements = {
   pi: {
     id: "pi",
-    label: "pi-mcp-adapter",
-    url: "https://pi.dev/packages/pi-mcp-adapter",
+    label: "Pi 1.0+",
+    url: "https://pi.dev",
     svg: PI_SVG,
   },
   cursor: {

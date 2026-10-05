@@ -194,15 +194,13 @@ function buildEditorCommand(
   editor: ConfiguratorEditor,
   platform: ConfiguratorPlatform,
 ): string {
-  const configCommand =
-    editor.rawCmd ??
+  return editor.rawCmd ??
     writeBlockCommand(
       getEditorFilePath(editor, platform),
       editor.mcp ?? {},
       platform,
       true,
     );
-  return joinSetupCommands([editor.installCommand, configCommand]);
 }
 
 export function buildEditorCommands(
@@ -218,21 +216,22 @@ export function buildPrettyEditorCommand(
   platform: ConfiguratorPlatform = DEFAULT_PLATFORM,
 ): { htmlHighlighted: string; plainCopy: string } {
   if (editor.rawCmd) {
-    const shell = joinSetupCommands([editor.installCommand, editor.rawCmd]);
     return {
-      htmlHighlighted: highlightInlineShellBlock(shell),
-      plainCopy: shell,
+      htmlHighlighted: highlightInlineShellBlock(editor.rawCmd),
+      plainCopy: editor.rawCmd,
     };
   }
   const { plain, html } = prettifyJsonBlock(editor.mcp ?? {});
   const editorFilePath = getEditorFilePath(editor, platform);
   const configShell = buildJsonWriteCommand(editorFilePath, plain, platform, true);
-  const shell = joinSetupCommands([editor.installCommand, configShell]);
-  const htmlOut = joinSetupCommands([
-    editor.installCommand && highlightInlineShellBlock(editor.installCommand),
-    renderMixedGuardedJsonWriteBlock(editorFilePath, html.split("\n"), platform),
-  ]);
-  return { htmlHighlighted: htmlOut, plainCopy: shell };
+  return {
+    htmlHighlighted: renderMixedGuardedJsonWriteBlock(
+      editorFilePath,
+      html.split("\n"),
+      platform,
+    ),
+    plainCopy: configShell,
+  };
 }
 
 export function buildPrettyConfigJson(

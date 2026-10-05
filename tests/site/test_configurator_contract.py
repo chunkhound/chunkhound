@@ -149,11 +149,11 @@ console.log(JSON.stringify({ stages }));
             ],
         },
         {"role": "research", "links": ["Vercel AI Gateway API key"]},
-        {"role": "agent", "links": ["pi-mcp-adapter"]},
+        {"role": "agent", "links": ["Pi 1.0+"]},
     ]
 
 
-def test_pi_editor_has_the_recommended_local_mcp_contract() -> None:
+def test_pi_editor_uses_builtin_mcp_with_project_config() -> None:
     script = """
 import { editors } from './site/src/components/configurator/index.ts';
 
@@ -164,20 +164,19 @@ console.log(JSON.stringify(pi));
     pi = run_tsx_json(script)
 
     assert pi["name"] == "Pi"
-    assert pi["mcpFile"] == ".mcp.json"
-    assert pi["installCommand"] == "pi install npm:pi-mcp-adapter"
-    assert pi["gitignoreEntries"] == [".mcp.json"]
+    assert pi["mcpFile"] == ".pi/mcp.json"
+    assert pi["gitignoreEntries"] == [".pi/mcp.json"]
+    # Pi 1.0+ ships built-in MCP, so there is nothing to install.
+    assert "installCommand" not in pi
     assert pi["mcp"] == {
         "mcpServers": {
             "ChunkHound": {
                 "command": "chunkhound",
                 "args": ["mcp"],
-                "directTools": True,
-                "lifecycle": "eager",
-                "requestTimeoutMs": 1200000,
+                "timeout": 1200,
+                "exposure": "direct",
             }
         },
-        "settings": {"outputGuard": False},
     }
 
 
