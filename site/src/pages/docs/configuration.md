@@ -514,7 +514,7 @@ When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound
 
 `provider: "claude-code-cli"` runs the local `claude` program in print mode. ChunkHound does not pass `--append-system-prompt` or `--append-system-prompt-file`. Research instructions are written to stdin, followed by a blank line and the user request. The last arguments ChunkHound adds are `--tools` and an empty value, which disables Claude's built-in tools.
 
-`--append-system-prompt` and `--append-system-prompt-file` share one slot. Claude Code uses both together starting in 2.1.283. Older builds keep only one. A corporate wrapper often appends one of those flags. ChunkHound leaves the slot free so the wrapper's flag is the one Claude sees.
+`--append-system-prompt` and `--append-system-prompt-file` share one slot. Claude Code uses both together starting in 2.1.283. Older builds keep only one, or fail. A corporate wrapper often appends one of those flags. ChunkHound leaves the slot free so the wrapper's flag is the one Claude sees.
 
 That works when the wrapper forwards stdin to `claude` and forwards ChunkHound's arguments unchanged, including the empty `--tools` value. A wrapper that replaces stdin with its own prompt argument, or that drops empty arguments, does not.
 
