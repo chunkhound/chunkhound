@@ -75,7 +75,10 @@ before entering `.run()`; each thread re-acquires the GIL independently via
 `Python::with_gil()`. The store thread reuses the existing HNSW "bulk mode"
 bracket (`drop_all_hnsw_indexes()` → N incremental writes →
 `ensure_all_hnsw_indexes()`) that the Python path already used, so no new
-DB-layer mechanism was needed for this.
+DB-layer mechanism was needed for runs that write, delete orphans, or compact.
+An incremental diff with nothing to write, nothing to delete, and no compaction
+skips that bracket and leaves the existing index in place. `open()` already
+restores an index a crashed run left missing, before the store thread decides.
 
 **Error handling**: `DbError`/`ScanError` (`error.rs`) always convert to
 `PyRuntimeError`. On the Python side, `chunkhound/pipeline_bridge.py` wraps any

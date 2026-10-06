@@ -109,7 +109,11 @@ impl IndexingPipeline {
     /// ``"write-compact"``, ``"write-done"``, ``"done"``. Only one of
     /// ``"write-index"``/``"write-compact"`` fires per run — compaction
     /// rebuilds indexes as part of its own rewrite, so the two never both
-    /// run.
+    /// run. ``"write-index"`` is ``(1, 1)`` when an empty diff left the
+    /// existing HNSW index in place, and ``(0, 1)`` when a rebuild is about
+    /// to start. The CLI progress handler only needs the phase name so its
+    /// bars resolve; the numbers are the contract for which of those two
+    /// happened.
     #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false, analytics_recorder=None, analytics_handle=0))]
     #[allow(clippy::too_many_arguments)] // Mirrors run()'s existing shape; analytics is two more optional, orthogonal params.
     fn run(
@@ -457,11 +461,15 @@ impl IndexingPipeline {
     /// hold source text, and embedded batches additionally hold float
     /// vectors — both are memory-heavy.
     ///
-    /// The store thread owns the single DB connection for the whole run,
-    /// using the same HNSW "bulk mode" bracket
-    /// (`drop_all_hnsw_indexes()` → N incremental writes →
-    /// `ensure_all_hnsw_indexes()`) that the Python path already uses for
-    /// bulk indexing, so no new DB-layer mechanism is required.
+    /// The store thread owns the single DB connection for the whole run.
+    /// A run that writes, deletes orphans, or compacts uses the HNSW
+    /// "bulk mode" bracket (`drop_all_hnsw_indexes()` → N incremental
+    /// writes → `ensure_all_hnsw_indexes()`, or compaction's own rebuild
+    /// in place of that ensure). An incremental diff with no changed
+    /// files, no orphan deletes, and no compaction skips the bracket:
+    /// `open()` has already restored an index a crashed run left missing,
+    /// and dropping it here would rebuild and checkpoint the database for
+    /// no change.
     ///
     /// **Caller must release the GIL** before entering this method.
     /// Each thread re-acquires the GIL independently via ``Python::with_gil()``.
@@ -624,13 +632,14 @@ impl IndexingPipeline {
         };
 
         // ── Store thread ───────────────────────────────────────
-        // Owns the single DB connection for the whole run. Uses the same
-        // HNSW bulk-mode bracket the Python path already relies on for bulk
-        // indexing: drop all HNSW indexes once, write each streamed batch
-        // incrementally (prepare_write's own HNSW-drop step is a no-op
-        // while bulk mode is on), then either compact (which rebuilds
-        // indexes as part of its own rewrite) or rebuild indexes directly
-        // once at the very end — never both, see the comment below.
+        // Owns the single DB connection for the whole run. When this run
+        // writes, deletes orphans, or compacts, drop all HNSW indexes once
+        // (prepare_write's own HNSW-drop step is a no-op while bulk mode is
+        // on), write each streamed batch, then either compact or rebuild
+        // indexes once at the end — never both, see the comment below.
+        // Compaction must still drop first: its rewrite rebuilds indexes
+        // from the metrics only `drop_all_hnsw_indexes` records, and a
+        // missing snapshot rebuilds a non-cosine index as cosine.
         let store_handle: std::thread::JoinHandle<Result<StoreOutcome, String>> = {
             std::thread::spawn(move || {
                 // Captured before `db_config` is moved into the backend —
@@ -640,17 +649,31 @@ impl IndexingPipeline {
                 let mut backend: Box<dyn DbBackend> = create_backend(db_config);
                 let open_result = backend.open();
                 Self::close_backend_on_err(backend.as_mut(), open_result)?;
-                // Dropping HNSW indexes is a catalog-only DDL operation (no
-                // data scan), so it's always sub-10ms in practice — not
-                // worth a dedicated progress bar (it would flash past
-                // unnoticed). Log it instead for the rare case it's slow.
-                let t_hnsw_drop = Instant::now();
-                let drop_hnsw_result = backend.drop_all_hnsw_indexes();
-                Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
-                log::info!(
-                    "[hnsw-drop] done in {:.3}s",
-                    t_hnsw_drop.elapsed().as_secs_f64()
-                );
+                // Empty diff: nothing to write and nothing to delete. Ask
+                // before the drop. A failure here closes the connection the
+                // same way a failed open does, instead of continuing with
+                // the index already dropped. `open()` has already recreated
+                // an index a killed run left missing, so skipping leaves
+                // that restored index in place.
+                let skip_hnsw = if batch_count == 0 && delete_paths.is_empty() {
+                    let compaction_check = backend.needs_compaction();
+                    !Self::close_backend_on_err(backend.as_mut(), compaction_check)?
+                } else {
+                    false
+                };
+                if !skip_hnsw {
+                    // Dropping HNSW indexes is a catalog-only DDL operation (no
+                    // data scan), so it's always sub-10ms in practice — not
+                    // worth a dedicated progress bar (it would flash past
+                    // unnoticed). Log it instead for the rare case it's slow.
+                    let t_hnsw_drop = Instant::now();
+                    let drop_hnsw_result = backend.drop_all_hnsw_indexes();
+                    Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
+                    log::info!(
+                        "[hnsw-drop] done in {:.3}s",
+                        t_hnsw_drop.elapsed().as_secs_f64()
+                    );
+                }
                 // Orphan deletes free space and must run even when the DB is
                 // already over disk_usage_limit_mb — that guard exists to
                 // stop inserts (growth), not cleanup. Applied here, before
@@ -841,11 +864,23 @@ impl IndexingPipeline {
                 // instead of returning early with the connection left open
                 // and HNSW indexes un-restored (Invariant 14).
                 let post_write_result: Result<(), String> = write_result.and_then(|()| {
-                    let needs_compaction = disk_limit_hit.is_none()
+                    // `skip_hnsw` already observed that compaction was not
+                    // needed, and this run wrote nothing, so that answer
+                    // cannot flip. Re-querying could also let a late `true`
+                    // compact without the drop that captured the index metric.
+                    let needs_compaction = !skip_hnsw
+                        && disk_limit_hit.is_none()
                         && backend.needs_compaction().map_err(|e| e.to_string())?;
                     if needs_compaction {
                         emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
                         backend.run_compaction().map_err(|e| e.to_string())?;
+                    } else if skip_hnsw {
+                        // (1, 1): the existing index stays. (0, 1) below means
+                        // a rebuild is starting. `ensure_all_hnsw_indexes`
+                        // checkpoints whenever an embedding table exists, so
+                        // calling it here would still rewrite the database
+                        // file after a no-op diff.
+                        emit_progress_gil(&store_progress_cb, "write-index", 1, 1);
                     } else {
                         if disk_limit_hit.is_some() {
                             log::info!(

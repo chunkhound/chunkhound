@@ -175,8 +175,12 @@ class RustProgressBridge:
             else:
                 _pr.update(self._data_task, info="writing...")
         elif phase == "write-index":
-            # Data write done; compaction wasn't needed — build the HNSW
-            # index directly. The compact bar never runs on this path —
+            # Data write done; compaction wasn't needed. Rust emits this
+            # both when a rebuild is starting (0, 1) and when an empty diff
+            # left the existing HNSW index in place (1, 1). The bar only
+            # needs the phase name — current/total are ignored here — so
+            # the skip path must still emit it or this bar stays unresolved.
+            # The compact bar never runs on this path —
             # resolve it to "not needed" right away (reset+finish
             # together) so it doesn't sit unstarted and then get stamped
             # "done" by write-done/done below, which used to render as a
