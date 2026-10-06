@@ -63,6 +63,18 @@ _CHROME_PATHS = [
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 ]
 
+# Browser launch reliability knobs — single source of truth for production
+# (_managed_browser) and the integration test fixture. zendriver's defaults
+# (browser_connection_timeout=0.25, browser_connection_max_tries=10 -> ~2.5s)
+# are too tight for a cold first Chrome launch on CI runners, where the browser
+# can take several seconds to expose its DevTools endpoint; zendriver then kills
+# Chrome and raises a generic "Failed to connect" error. Budget ~15s per attempt
+# and retry once so a cold or transient miss does not force the urllib fallback.
+_BROWSER_CONNECT_TIMEOUT_S = 0.5
+_BROWSER_CONNECT_MAX_TRIES = 30
+_BROWSER_LAUNCH_ATTEMPTS = 2
+_BROWSER_LAUNCH_BACKOFF_S = 1.0
+
 
 _late_completion_guard_installed = False
 
@@ -211,6 +223,46 @@ def _resolve_chrome_path(
     return None
 
 
+async def _start_chrome(chrome_path: str) -> zd.Browser:
+    """One zendriver launch with a cold-start-tolerant connect budget."""
+    import zendriver as zd
+
+    # Must run before any tab.send() creates a Transaction.
+    _install_late_completion_guard()
+    return await zd.start(
+        headless=True,
+        browser_args=[
+            # New headless is required for the PDF path: legacy headless hands
+            # PDFs to Chrome's internal viewer and never exposes the response
+            # to _fetch_page.
+            "--headless=new",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+        ],
+        browser_executable_path=chrome_path,
+        browser_connection_timeout=_BROWSER_CONNECT_TIMEOUT_S,
+        browser_connection_max_tries=_BROWSER_CONNECT_MAX_TRIES,
+    )
+
+
+async def _launch_chrome(chrome_path: str) -> zd.Browser:
+    """Launch Chrome, retrying once to absorb a cold first-launch miss.
+
+    Raises the last zendriver exception when every attempt fails; callers
+    decide whether to fall back to urllib.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_BROWSER_LAUNCH_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_BROWSER_LAUNCH_BACKOFF_S)
+        try:
+            return await _start_chrome(chrome_path)
+        except Exception as e:
+            last_exc = e
+    assert last_exc is not None
+    raise last_exc
+
+
 @asynccontextmanager
 async def _managed_browser(
     warning_callback: Callable[[str], None] | None = None,
@@ -222,13 +274,6 @@ async def _managed_browser(
     tolerate ``None`` — ``fetch_url_to_content`` and ``_fetch_page`` already
     dispatch to the urllib fallback when ``browser is None``.
     """
-    # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
-    # for CLI commands that never touch websearch (e.g. `chunkhound index`).
-    import zendriver as zd
-
-    # Must run before any tab.send() creates a Transaction.
-    _install_late_completion_guard()
-
     # _resolve_chrome_path returns None for every "no usable Chrome >=124"
     # case (not installed, too old, --version probe failed) and emits its
     # own warning describing the cause. urllib is the unified fallback —
@@ -237,32 +282,16 @@ async def _managed_browser(
     chrome_path = _resolve_chrome_path(warning_callback)
     browser: zd.Browser | None = None
     if chrome_path is not None:
-        # --headless=new is required for the PDF path: legacy --headless hands
-        # PDFs to Chrome's internal viewer and never exposes the response to
-        # _fetch_page. Pass both headless=True and the explicit flag — the
-        # relationship between zendriver's Config flag and the explicit arg is
-        # undocumented; belt-and-braces.
-        # --disable-dev-shm-usage: containers default /dev/shm to 64MB, which
-        # 5-way concurrent navigation of JS-heavy SPAs exhausts — Chrome dies
-        # and every in-flight tab raises ConnectionClosedError on its CDP
-        # WebSocket. --disable-gpu drops the unused GPU process to free RAM.
+        # _launch_chrome owns the launch flags, connect budget, retry, and the
+        # late-completion guard; --disable-dev-shm-usage keeps 5-way concurrent
+        # navigation of JS-heavy SPAs from exhausting the container /dev/shm and
+        # killing every in-flight CDP tab. --disable-gpu drops the unused GPU
+        # process to free RAM.
         try:
-            browser = await zd.start(
-                headless=True,
-                browser_args=[
-                    "--headless=new",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-                browser_executable_path=chrome_path,
-            )
+            browser = await _launch_chrome(chrome_path)
         except Exception as e:
             if warning_callback:
-                warning_callback(
-                    f"Browser launch failed: {e}. Falling back to urllib."
-                    " (If Google Chrome is not installed, install it to"
-                    " enable rich page fetches.)"
-                )
+                warning_callback(f"Browser launch failed: {e}. Falling back to urllib.")
             browser = None
 
     try:
