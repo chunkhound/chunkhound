@@ -280,13 +280,13 @@ export const llmProviders: ConfiguratorProviderOption[] = [
     id: "requesty",
     name: "Requesty",
     svg: REQUESTY_SVG,
-    description: "Claude Sonnet 5 via Requesty",
-    config: { provider: "requesty", model: "anthropic/claude-sonnet-5" },
+    description: "DeepSeek V4.1 Flash via Requesty",
+    config: { provider: "requesty", model: "deepseek/deepseek-v4.1-flash" },
     apiKeyPlaceholder: "<YOUR_REQUESTY_API_KEY>",
     group: "cloud",
     requirements: [requirements.requestyApiKey],
     recommendation:
-      "<strong>Claude Sonnet 5</strong> — Anthropic's balanced model routed through Requesty.",
+      "<strong>DeepSeek V4.1 Flash</strong> — a fast, cost-efficient model routed through Requesty.",
   },
   {
     id: "anthropic",

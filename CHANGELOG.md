@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Site configurator: the Ollama-embed preset no longer bundles a reranker.** Generated configs for Ollama embedding now contain only embedding settings; add a reranker explicitly if you want one.
 - **Site configurator default selections changed.** New visitors now start with Pi as the default agent and Vercel AI Gateway (Poolside Laguna S 2.1) as the default research provider (previously Cursor and Anthropic).
 - **Site configurator's OpenRouter research preset now ships `poolside/laguna-s-2.1`.** The OpenRouter preset uses the same Poolside Laguna S 2.1 model as the default Vercel AI Gateway route.
+- **Site configurator's Requesty preset now ships `deepseek/deepseek-v4.1-flash`.** The preset replaces `anthropic/claude-sonnet-5` with a fast, cost-efficient DeepSeek model for a lower-cost default route.
 - **Site configurator adds a validated reranker editor.** The rebuilt configurator lets you set the reranker URL, format, and model, and validates them client-side against the backend rule (`rerank_model` or `rerank_format` requires `base_url` or an explicit `rerank_url`), flagging the URL field so the emitted config passes backend validation.
 - **Documentation site upgraded to Astro 7** with a refreshed homepage, architecture page, and a rebuilt configurator/nav/hero experience.
 

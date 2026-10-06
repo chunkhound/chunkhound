@@ -613,7 +613,7 @@ def test_requesty_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "requesty")
 
     assert config["provider"] == "requesty"
-    assert config["model"] == "anthropic/claude-sonnet-5"
+    assert config["model"] == "deepseek/deepseek-v4.1-flash"
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
@@ -643,6 +643,15 @@ def test_grok_config_passes_research_validation(tmp_path, clean_environment) -> 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_config_passes_research_validation(tmp_path, clean_environment) -> None:
     errors = _validated_config_errors(tmp_path, "research", "voyageai", "gemini")
+
+    assert errors == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_requesty_config_passes_research_validation(
+    tmp_path, clean_environment
+) -> None:
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "requesty")
 
     assert errors == []
 
@@ -827,6 +836,7 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
         "gemini": "gemini-3.5-flash",
         "grok": "grok-4.3",
         "deepseek": "deepseek-v4-flash",
+        "requesty": "deepseek/deepseek-v4.1-flash",
         "ollama-llm": "qwen3-coder:30b",
         "vllm-llm": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         "opencode-cli": "opencode/deepseek-v4.1-flash",

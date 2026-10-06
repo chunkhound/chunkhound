@@ -519,7 +519,7 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | OpenRouter API. Registry providers require explicit `model`. |
 | Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
-| Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `anthropic/claude-sonnet-5`) | Must be set explicitly (configurator defaults to `anthropic/claude-sonnet-5`) | Requesty API. Registry providers require explicit `model`. |
+| Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Requesty API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
