@@ -109,7 +109,9 @@ impl IndexingPipeline {
     /// ``"write-compact"``, ``"write-done"``, ``"done"``. Only one of
     /// ``"write-index"``/``"write-compact"`` fires per run — compaction
     /// rebuilds indexes as part of its own rewrite, so the two never both
-    /// run.
+    /// run. ``"write-index"`` arrives as ``(0, 1)`` when the indexes are
+    /// about to be rebuilt and as ``(1, 1)`` when the run changed no rows
+    /// and they were left in place.
     #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false, analytics_recorder=None, analytics_handle=0))]
     #[allow(clippy::too_many_arguments)] // Mirrors run()'s existing shape; analytics is two more optional, orthogonal params.
     fn run(
@@ -631,6 +633,14 @@ impl IndexingPipeline {
         // while bulk mode is on), then either compact (which rebuilds
         // indexes as part of its own rewrite) or rebuild indexes directly
         // once at the very end — never both, see the comment below.
+        //
+        // A run with nothing to write, nothing to delete and no compaction
+        // due skips the bracket altogether: dropping the indexes only to
+        // rebuild them over the same rows costs a full HNSW build (plus the
+        // checkpoint behind it) for no change. `backend.open()` has already
+        // recreated any index a crashed earlier run left missing, so there
+        // is nothing for the end of this run to restore either.
+        let nothing_to_write = batch_count == 0 && delete_paths.is_empty();
         let store_handle: std::thread::JoinHandle<Result<StoreOutcome, String>> = {
             std::thread::spawn(move || {
                 // Captured before `db_config` is moved into the backend —
@@ -644,13 +654,25 @@ impl IndexingPipeline {
                 // data scan), so it's always sub-10ms in practice — not
                 // worth a dedicated progress bar (it would flash past
                 // unnoticed). Log it instead for the rare case it's slow.
-                let t_hnsw_drop = Instant::now();
-                let drop_hnsw_result = backend.drop_all_hnsw_indexes();
-                Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
-                log::info!(
-                    "[hnsw-drop] done in {:.3}s",
-                    t_hnsw_drop.elapsed().as_secs_f64()
-                );
+                // Compaction must keep the bracket even on an otherwise
+                // empty run: it rebuilds the indexes through `reopen()`, with
+                // the metrics `drop_all_hnsw_indexes()` captures. Nothing is
+                // written before the post-write check below, so asking here
+                // gives the same answer it will get.
+                let skip_decision = Self::can_skip_hnsw_bracket(backend.as_ref(), nothing_to_write);
+                let skip_hnsw_bracket =
+                    Self::close_backend_on_err(backend.as_mut(), skip_decision)?;
+                if skip_hnsw_bracket {
+                    log::info!("[hnsw-drop] skipped: nothing to write, delete or compact");
+                } else {
+                    let t_hnsw_drop = Instant::now();
+                    let drop_hnsw_result = backend.drop_all_hnsw_indexes();
+                    Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
+                    log::info!(
+                        "[hnsw-drop] done in {:.3}s",
+                        t_hnsw_drop.elapsed().as_secs_f64()
+                    );
+                }
                 // Orphan deletes free space and must run even when the DB is
                 // already over disk_usage_limit_mb — that guard exists to
                 // stop inserts (growth), not cleanup. Applied here, before
@@ -853,10 +875,17 @@ impl IndexingPipeline {
                                  rebuilding HNSW indexes only"
                             );
                         }
-                        emit_progress_gil(&store_progress_cb, "write-index", 0, 1);
-                        backend
-                            .ensure_all_hnsw_indexes()
-                            .map_err(|e| e.to_string())?;
+                        // Still emitted when there is nothing to rebuild:
+                        // the progress consumer resolves its index and
+                        // compact bars on whichever of these two phases
+                        // fires. A skipped build reports itself complete.
+                        let index_done = u64::from(skip_hnsw_bracket);
+                        emit_progress_gil(&store_progress_cb, "write-index", index_done, 1);
+                        if !skip_hnsw_bracket {
+                            backend
+                                .ensure_all_hnsw_indexes()
+                                .map_err(|e| e.to_string())?;
+                        }
                     }
                     Ok(())
                 });
@@ -1112,6 +1141,20 @@ impl IndexingPipeline {
             Ok(Err(e)) => Err(e),
             Err(_) => Err("pipeline store thread panicked".to_string()),
         }
+    }
+
+    /// Whether the store thread can leave the HNSW indexes exactly as
+    /// `open()` left them, instead of dropping them and building them again.
+    ///
+    /// True only when the run changes no rows (`nothing_to_write`: no batch
+    /// to insert, no orphan to delete) and no compaction is due. Compaction
+    /// is excluded because it rebuilds the indexes itself, through
+    /// `reopen()`, with the metrics `drop_all_hnsw_indexes()` captures.
+    fn can_skip_hnsw_bracket(
+        backend: &dyn DbBackend,
+        nothing_to_write: bool,
+    ) -> Result<bool, DbError> {
+        Ok(nothing_to_write && !backend.needs_compaction()?)
     }
 
     /// Run a fallible backend setup step (`open`/`drop_all_hnsw_indexes`),
@@ -1624,6 +1667,8 @@ mod tests {
         fail_open: bool,
         fail_drop_hnsw: bool,
         close_called: Cell<bool>,
+        /// `None` makes `needs_compaction()` fail.
+        compaction_due: Option<bool>,
     }
 
     impl DbBackend for FakeBackend {
@@ -1645,7 +1690,8 @@ mod tests {
         }
 
         fn needs_compaction(&self) -> Result<bool, DbError> {
-            Ok(false)
+            self.compaction_due
+                .ok_or_else(|| DbError::Other("simulated needs_compaction failure".into()))
         }
 
         fn run_compaction(&mut self) -> Result<(), DbError> {
@@ -1669,6 +1715,7 @@ mod tests {
             fail_open: true,
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
+            compaction_due: Some(false),
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1685,6 +1732,7 @@ mod tests {
             fail_open: false,
             fail_drop_hnsw: true,
             close_called: Cell::new(false),
+            compaction_due: Some(false),
         };
         let drop_result = backend.drop_all_hnsw_indexes();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, drop_result);
@@ -1701,6 +1749,7 @@ mod tests {
             fail_open: false,
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
+            compaction_due: Some(false),
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1711,5 +1760,56 @@ mod tests {
              explicitly later, and closing here would wrongly trigger a premature \
              ensure_all_hnsw_indexes() before any batches are written"
         );
+    }
+
+    fn backend_with_compaction(compaction_due: Option<bool>) -> FakeBackend {
+        FakeBackend {
+            fail_open: false,
+            fail_drop_hnsw: false,
+            close_called: Cell::new(false),
+            compaction_due,
+        }
+    }
+
+    #[test]
+    fn test_hnsw_bracket_skipped_only_for_a_run_that_changes_nothing() {
+        let idle = backend_with_compaction(Some(false));
+        assert!(
+            IndexingPipeline::can_skip_hnsw_bracket(&idle, true).unwrap(),
+            "no rows to write or delete and no compaction due: leave the indexes alone"
+        );
+        assert!(
+            !IndexingPipeline::can_skip_hnsw_bracket(&idle, false).unwrap(),
+            "a run that writes or deletes rows must drop and rebuild"
+        );
+    }
+
+    #[test]
+    fn test_hnsw_bracket_kept_when_compaction_is_due() {
+        // Compaction rebuilds the indexes through reopen(), using the metrics
+        // drop_all_hnsw_indexes() captures — so the drop must still happen.
+        let compacting = backend_with_compaction(Some(true));
+        assert!(!IndexingPipeline::can_skip_hnsw_bracket(&compacting, true).unwrap());
+        assert!(!IndexingPipeline::can_skip_hnsw_bracket(&compacting, false).unwrap());
+    }
+
+    #[test]
+    fn test_hnsw_bracket_decision_failure_still_closes_backend() {
+        let mut backend = backend_with_compaction(None);
+        let decision = IndexingPipeline::can_skip_hnsw_bracket(&backend, true);
+        let result = IndexingPipeline::close_backend_on_err(&mut backend, decision);
+        assert!(result.is_err());
+        assert!(
+            backend.close_called.get(),
+            "close() must run even when the compaction check fails (Invariant 14)"
+        );
+    }
+
+    #[test]
+    fn test_hnsw_bracket_decision_does_not_ask_about_compaction_when_writing() {
+        // A failing compaction check must not turn an ordinary writing run
+        // into an error at this point; the post-write check reports it.
+        let backend = backend_with_compaction(None);
+        assert!(!IndexingPipeline::can_skip_hnsw_bracket(&backend, false).unwrap());
     }
 }
