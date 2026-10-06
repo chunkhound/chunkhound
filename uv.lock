@@ -583,7 +583,7 @@ requires-dist = [
     { name = "lark", specifier = ">=1.1.0" },
     { name = "loguru", specifier = ">=0.6.0" },
     { name = "markdownify", specifier = ">=1.0" },
-    { name = "mcp", specifier = ">=1.16.0" },
+    { name = "mcp", specifier = ">=1.16.0,<2" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.6.0" },
     { name = "numpy", specifier = ">=1.24.0" },
