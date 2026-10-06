@@ -290,14 +290,16 @@ class TestMissingEmbeddingsTargetedQuery:
                 "(1, 'src/app.py', 'app.py', 'aaa'), "
                 "(2, 'vendor/lib.py', 'lib.py', 'bbb')"
             )
-            for cid, fid in [(1, 1), (2, 1), (3, 2), (4, 2)]:
-                provider.connection.execute(
-                    "INSERT INTO chunks "
-                    "(id, file_id, code, symbol, chunk_type, "
-                    "start_line, end_line) "
-                    "VALUES (?, ?, ?, ?, 'function', 1, 1)",
-                    [cid, fid, f"def f{cid}(): pass", f"f{cid}"],
-                )
+            provider.connection.executemany(
+                "INSERT INTO chunks "
+                "(id, file_id, code, symbol, chunk_type, "
+                "start_line, end_line) "
+                "VALUES (?, ?, ?, ?, 'function', 1, 1)",
+                [
+                    (cid, fid, f"def f{cid}(): pass", f"f{cid}")
+                    for cid, fid in [(1, 1), (2, 1), (3, 2), (4, 2)]
+                ],
+            )
 
             mock_embed = MockEmbeddingProvider()
             provider._ensure_embedding_table_exists(mock_embed.dims)
