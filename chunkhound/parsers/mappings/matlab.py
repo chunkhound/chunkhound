@@ -6,12 +6,15 @@ for mapping MATLAB AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
+
+if TYPE_CHECKING:
+    from chunkhound.parsers.universal_engine import UniversalConcept
 
 
 class MatlabMapping(BaseMapping):
