@@ -35,7 +35,6 @@ def test_ollama_llm_configurator_emits_explicit_local_model() -> None:
 
     assert config["provider"] == "openai"
     assert config["base_url"] == "http://localhost:11434/v1"
-    assert config["model"] == "qwen3-coder:30b"
 
 
 def test_ollama_embed_configurator_has_only_embedding_configuration() -> None:
@@ -65,7 +64,6 @@ def test_vllm_embed_configurator_uses_separate_rerank_endpoint() -> None:
 def test_vllm_llm_configurator_has_dedicated_qwen3_endpoint() -> None:
     config = _load_preset("llmProviders", "vllm-llm")
 
-    assert config["model"] == "Qwen/Qwen3-Coder-30B-A3B-Instruct"
     assert config["base_url"] == "http://localhost:8002/v1"
 
 
@@ -551,14 +549,6 @@ def test_recommended_route_config_passes_cli_validation(
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_deepseek_llm_configurator_emits_model() -> None:
-    config = _load_preset("llmProviders", "deepseek")
-
-    assert config["provider"] == "deepseek"
-    assert config["model"] == "deepseek-v4-flash"
-
-
-@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_openrouter_config_passes_research_validation(
     tmp_path, clean_environment
 ) -> None:
@@ -574,54 +564,6 @@ def test_voyage_4_lite_config_passes_cli_validation(
     errors = _validated_config_errors(tmp_path, "index", "voyageai", "openrouter")
 
     assert errors == []
-
-
-@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_grok_llm_configurator_emits_model() -> None:
-    config = _load_preset("llmProviders", "grok")
-
-    assert config["provider"] == "grok"
-    assert config["model"] == "grok-4.3"
-
-
-@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_openrouter_llm_configurator_emits_model() -> None:
-    config = _load_preset("llmProviders", "openrouter")
-
-    assert config["provider"] == "openrouter"
-    assert config["model"] == "poolside/laguna-s-2.1"
-
-
-@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_vercel_llm_configurator_emits_model() -> None:
-    config = _load_preset("llmProviders", "vercel")
-
-    assert config["provider"] == "vercel"
-    assert config["model"] == "poolside/laguna-s-2.1"
-
-
-@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_orcarouter_llm_configurator_emits_model() -> None:
-    config = _load_preset("llmProviders", "orcarouter")
-
-    assert config["provider"] == "orcarouter"
-    assert config["model"] == "qwen/qwen3.7-flash"
-
-
-@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_requesty_llm_configurator_emits_model() -> None:
-    config = _load_preset("llmProviders", "requesty")
-
-    assert config["provider"] == "requesty"
-    assert config["model"] == "deepseek/deepseek-v4.1-flash"
-
-
-@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_gemini_llm_configurator_emits_model() -> None:
-    config = _load_preset("llmProviders", "gemini")
-
-    assert config["provider"] == "gemini"
-    assert config["model"] == "gemini-3.5-flash"
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")

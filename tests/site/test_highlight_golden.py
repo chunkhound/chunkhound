@@ -75,7 +75,9 @@ const shellAssignments = {
     'vllm-llm', 'opencode-cli', 'vercel', 'openrouter'),
   'powershell/vscode': assignments(
     'opencode-cli', 'vercel', 'openrouter', 'orcarouter'),
-  'powershell/opencode': assignments('vercel', 'openrouter', 'orcarouter', 'anthropic'),
+  // Duplicate of posix/pi, so its four pairs stay covered when all four slots
+  // switch to requesty: this closes the catalog-coverage gap with one shard.
+  'powershell/opencode': assignments('requesty', 'requesty', 'requesty', 'requesty'),
   'powershell/codex': assignments(
     'openrouter', 'orcarouter', 'anthropic', 'openai-llm'),
   'powershell/windsurf': assignments(
@@ -198,6 +200,29 @@ def test_highlight_corpus_covers_every_embedding_llm_pair() -> None:
     assert len(pairs) == len(embeddings) * len(llms), (
         "sampled golden corpus misses an (embedding, llm) pair: "
         f"{len(pairs)} for {len(embeddings)}x{len(llms)} providers"
+    )
+    # The square check above stays green when a provider disappears from the
+    # corpus and the catalog together, so pin the catalog itself. Mirrors the
+    # TS `requireAssignedProviders` guard; drift here means lost rendering paths.
+    llm_catalog = {
+        "anthropic",
+        "claude-code-cli",
+        "codex-cli",
+        "deepseek",
+        "gemini",
+        "grok",
+        "ollama-llm",
+        "openai-llm",
+        "opencode-cli",
+        "openrouter",
+        "orcarouter",
+        "requesty",
+        "vercel",
+        "vllm-llm",
+    }
+    assert llms == llm_catalog, (
+        "golden corpus LLM set diverged from the catalog: "
+        f"missing {sorted(llm_catalog - llms)}, unexpected {sorted(llms - llm_catalog)}"
     )
 
 
