@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **Claude Code CLI instructions go on stdin** — `claude-code-cli` no longer passes `--append-system-prompt` or `--append-system-prompt-file`. Research instructions are prepended to the prompt on stdin so a wrapper can append either flag. The wrapper must forward stdin and ChunkHound's arguments, including the empty `--tools` value. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
+- **Claude Code CLI prompt delivery is configurable** — One mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses `file` (default, every OS) or `inline`. `file` uses `--append-system-prompt-file`: instructions stay in the system prompt, off the Windows command line, and beside a wrapper's `--append-system-prompt`. `inline` is for a wrapper that uses the file flag, or Claude Code older than 2.0.34. Those files use the system temp directory. `llm.claude_temp_dir` overrides it for a special case such as Docker or a limited user. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
 
 ## [6.0.0] - 2026-09-14
 

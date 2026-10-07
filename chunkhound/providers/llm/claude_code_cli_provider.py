@@ -7,9 +7,9 @@ Note: This provider is configured for vanilla LLM behavior:
 - All tools disabled via ``--tools ""``
 - MCP servers disabled via empty --mcp-config (temp JSON file on disk so
   Windows ``claude.cmd`` shims do not garble inline JSON quotes)
-- System instructions travel on stdin. A wrapper may append
-  ``--append-system-prompt`` or ``--append-system-prompt-file``; passing
-  either flag ourselves collides with that wrapper.
+- System instructions use ``--append-system-prompt-file`` by default.
+  ``append_system_prompt="inline"`` sends ``--append-system-prompt`` instead.
+  The user request stays on stdin.
 - Workspace isolation (runs from temp directory to prevent context gathering)
 - Clean API access without workspace overhead
 """
@@ -44,11 +44,12 @@ from chunkhound.utils.text_sanitization import sanitize_error_text
 _EMPTY_MCP_CONFIG_JSON = b'{"mcpServers":{}}\n'
 
 
-def _write_empty_mcp_config_file() -> Path:
+def _write_empty_mcp_config_file(directory: str | None = None) -> Path:
     """Write a unique empty MCP config JSON file; caller must unlink it."""
     fd, name = tempfile.mkstemp(
         prefix="chunkhound_claude_mcp_",
         suffix=".json",
+        dir=directory,
         text=False,
     )
     path = Path(name)
@@ -64,15 +65,25 @@ def _write_empty_mcp_config_file() -> Path:
     return path.resolve()
 
 
-def _stdin_prompt(prompt: str, system: str | None) -> str:
-    """Join instructions and the request on stdin.
-
-    Wrappers append ``--append-system-prompt`` or its file form. Claude
-    treats those as the same slot, so ChunkHound must not pass either one.
-    """
-    if system is None or not system.strip():
-        return prompt
-    return f"{system.rstrip()}\n\n{prompt}"
+def _write_system_prompt_file(system: str, directory: str | None = None) -> Path:
+    """Write instructions to a temp file; caller must unlink it."""
+    fd, name = tempfile.mkstemp(
+        prefix="chunkhound_claude_system_",
+        suffix=".txt",
+        dir=directory,
+        text=False,
+    )
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(system.encode("utf-8"))
+        return path.resolve()
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 class ClaudeCodeCLIProvider(BaseCLIProvider):
@@ -85,6 +96,8 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         base_url: str | None = None,
         timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
+        append_system_prompt: str = "file",
+        temp_dir: str | None = None,
     ):
         """Initialize Claude Code CLI provider.
 
@@ -104,13 +117,32 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             base_url: Not used (CLI uses default endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
+            append_system_prompt: ``file`` passes ``--append-system-prompt-file``.
+                ``inline`` passes ``--append-system-prompt``.
+            temp_dir: Directory for the instruction file and MCP config file.
+                ``None`` uses the system temp directory.
         """
+        if append_system_prompt not in ("file", "inline"):
+            raise ValueError("append_system_prompt must be 'file' or 'inline'")
         super().__init__(api_key, model, base_url, timeout, max_retries)
         self._model = resolve_claude_cli_model(model)
+        self._append_system_prompt = append_system_prompt
+        self._temp_dir = temp_dir.strip() if temp_dir and temp_dir.strip() else None
 
     def _get_provider_name(self) -> str:
         """Get the provider name."""
         return "claude-code-cli"
+
+    def _resolve_temp_dir(self) -> str:
+        """Directory for the instruction file and the MCP config file."""
+        if self._temp_dir is None:
+            return tempfile.gettempdir()
+        path = Path(self._temp_dir)
+        if not path.is_dir():
+            raise RuntimeError(
+                f"llm.claude_temp_dir is not a directory: {self._temp_dir}"
+            )
+        return str(path)
 
     def _map_model_to_cli_arg(self, model: str) -> str:
         """Map ChunkHound sentinel to CLI bare alias.
@@ -145,7 +177,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
 
         Args:
             prompt: User prompt
-            system: Optional instructions sent on stdin ahead of the prompt
+            system: Optional instructions sent with the configured append flag
             max_completion_tokens: Maximum tokens to generate
             timeout: Optional timeout override
 
@@ -163,13 +195,15 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             raise RuntimeError(str(e)) from e
 
         model_arg = self._map_model_to_cli_arg(self._model)
+        file_dir = self._resolve_temp_dir()
 
         # Inline JSON on --mcp-config is mangled by Windows cmd.exe / .cmd
         # batch reparse (nested quotes). CLI accepts a file path instead.
         try:
-            mcp_config_path = _write_empty_mcp_config_file()
+            mcp_config_path = _write_empty_mcp_config_file(file_dir)
         except OSError as e:
             raise RuntimeError(f"Failed to write Claude MCP config: {e}") from e
+        system_prompt_path: Path | None = None
         try:
             # Prompt is passed via stdin, not CLI args (avoids ARG_MAX limit).
             cli_args = [
@@ -185,6 +219,21 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 # Prevent session persistence (avoid context bleed between calls).
                 "--no-session-persistence",
             ]
+            if system is not None and system.strip():
+                if self._append_system_prompt == "inline":
+                    cli_args.extend(["--append-system-prompt", system])
+                else:
+                    try:
+                        system_prompt_path = _write_system_prompt_file(
+                            system, file_dir
+                        )
+                    except OSError as e:
+                        raise RuntimeError(
+                            f"Failed to write Claude system prompt: {e}"
+                        ) from e
+                    cli_args.extend(
+                        ["--append-system-prompt-file", str(system_prompt_path)]
+                    )
             # Disable every built-in tool. The empty string is its own argv
             # token, so a .cmd shim keeps it, and it stays last. --tools
             # consumes the next token, so a wrapper flag after a bare --tools
@@ -218,15 +267,13 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         env=env,
-                        cwd=tempfile.gettempdir(),  # Cross-platform temp directory
+                        cwd=tempfile.gettempdir(),  # Outside the workspace
                     )
 
                     # Wrap communicate() with timeout (this is the long-running part)
                     # Pass prompt via stdin to avoid OS ARG_MAX limits (~256KB on macOS)
                     stdout, stderr = await asyncio.wait_for(
-                        process.communicate(
-                            input=_stdin_prompt(prompt, system).encode("utf-8")
-                        ),
+                        process.communicate(input=prompt.encode("utf-8")),
                         timeout=request_timeout,
                     )
 
@@ -288,9 +335,12 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             # Should not reach here, but just in case
             raise last_error or RuntimeError("CLI command failed after retries")
         finally:
-            try:
-                mcp_config_path.unlink(missing_ok=True)
-            except OSError as e:
-                logger.debug(
-                    "Failed to remove temp CLI file {}: {}", mcp_config_path, e
-                )
+            for temp_path in (mcp_config_path, system_prompt_path):
+                if temp_path is None:
+                    continue
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as e:
+                    logger.debug(
+                        "Failed to remove temp CLI file {}: {}", temp_path, e
+                    )

@@ -512,15 +512,26 @@ When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound
 
 ### Claude Code CLI
 
-`provider: "claude-code-cli"` runs the local `claude` program in print mode. ChunkHound does not pass `--append-system-prompt` or `--append-system-prompt-file`. Research instructions are written to stdin, followed by a blank line and the user request. The last arguments ChunkHound adds are `--tools` and an empty value, which disables Claude's built-in tools.
+`provider: "claude-code-cli"` runs local `claude` in print mode. The user request goes to stdin. Research instructions go to the system prompt. `--tools` and an empty value stay last and disable Claude's built-in tools.
 
-`--append-system-prompt` and `--append-system-prompt-file` share one slot. Claude Code uses both together starting in 2.1.283. Older builds keep only one, or fail. A corporate wrapper often appends one of those flags. ChunkHound leaves the slot free so the wrapper's flag is the one Claude sees.
+One delivery mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses it. The default is `file` on every operating system: the instructions are written to a temp file and passed with `--append-system-prompt-file`. That keeps them in the system prompt, off the `cmd.exe` command line, and beside a wrapper that adds `--append-system-prompt` on Claude Code 2.1.283 or newer. The file flag alone works from 2.0.34.
 
-That works when the wrapper forwards stdin to `claude` and forwards ChunkHound's arguments unchanged, including the empty `--tools` value. A wrapper that replaces stdin with its own prompt argument, or that drops empty arguments, does not.
+Set it to `inline` to pass `--append-system-prompt` when the wrapper uses the file flag, when it merges that inline text, or when Claude Code is older than 2.0.34. On a `.cmd` shim, `inline` still puts the text through `cmd.exe`, so quotes, percent signs, newlines, and a very long instruction fail that launch.
 
-ChunkHound's instructions are part of the prompt body. A wrapper's `--append-system-prompt` is still appended to the system prompt. When the two disagree, the wrapper text is the one in the system channel.
+A wrapper that uses the same form can drop ChunkHound's instructions. A wrapper that replaces stdin, or drops the empty `--tools` value, still breaks the call.
 
-Stdin also keeps quotes, percent signs, and newlines intact when Windows launches `claude` through `cmd.exe`. Those characters are not safe on that command line.
+Those files go in the system temp directory. `llm.claude_temp_dir` overrides that directory for a special case such as Docker or a limited user.
+
+```json
+{
+  "llm": {
+    "provider": "claude-code-cli",
+    "claude_append_system_prompt": "file"
+  }
+}
+```
+
+The environment variables are `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` and `CHUNKHOUND_LLM_CLAUDE_TEMP_DIR`. Both apply only when the provider is `claude-code-cli`.
 
 ### LLM Options
 
@@ -532,6 +543,8 @@ Stdin also keeps quotes, percent signs, and newlines intact when Windows launche
 | `max_retries` | `number` | `3` | Max retry attempts |
 | `output_limits_enabled` | `boolean` | `false` | Restore the exact legacy numeric output limits for research synthesis instead of provider-managed limits. |
 | `output_limit_fallback` | `number` | `64000` | Positive output-token fallback used when a synthesis provider cannot authoritatively omit a limit or declare one. |
+| `claude_append_system_prompt` | `string` | `file` | `file` or `inline`. One mode cannot fit every machine: `file` stays off `cmd.exe` and beside a wrapper's `--append-system-prompt`; `inline` is for a file-flag wrapper or Claude Code older than 2.0.34. |
+| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file and MCP config file, such as Docker or a limited user. |
 | `codex_reasoning_effort` | `string` | `null` | Default reasoning effort for Codex/OpenAI: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex_reasoning_effort_utility` | `string` | `null` | Reasoning effort override for utility stage |
 | `codex_reasoning_effort_synthesis` | `string` | `null` | Reasoning effort override for synthesis stage |
@@ -729,6 +742,8 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_LLM_MAX_RETRIES` | Max retry attempts (default: 3) |
 | `CHUNKHOUND_LLM_OUTPUT_LIMITS_ENABLED` | Restore exact legacy research synthesis output limits (`true`/`false`; default: `false`) |
 | `CHUNKHOUND_LLM_OUTPUT_LIMIT_FALLBACK` | Positive provider-managed synthesis fallback in output tokens (default: `64000`) |
+| `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` | `file` (default) or `inline`. See [Claude Code CLI](#claude-code-cli) |
+| `CHUNKHOUND_LLM_CLAUDE_TEMP_DIR` | Optional override for the Claude CLI temp directory. The default is the system temp directory |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` | Reasoning effort for Codex models (`minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY` | Reasoning effort override for utility stage |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS` | Reasoning effort override for synthesis stage |

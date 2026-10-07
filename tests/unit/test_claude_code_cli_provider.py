@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -194,38 +195,65 @@ class TestClaudeCodeCLIProvider:
         # mock_subprocess fixture uses a .exe path → multi-token argv
         assert list(cmd[-2:]) == ["--tools", ""]
         assert "--disallowedTools" not in cmd
+        assert "--append-system-prompt" not in cmd
+        assert "--append-system-prompt-file" not in cmd
+        assert mock_process.communicate.await_args.kwargs["input"] == b"Test prompt"
 
     @pytest.mark.asyncio
-    async def test_complete_sends_system_prompt_on_stdin(
+    async def test_default_sends_system_prompt_as_file(
         self, provider, mock_subprocess
     ):
-        """Instructions stay off argv so a wrapper can append its own flag."""
+        """The default puts instructions in a file and the request on stdin."""
+        from pathlib import Path
+
+        written: dict[str, object] = {}
+
+        async def read_file(input=None):
+            cmd = mock_subprocess.call_args.args
+            path = Path(cmd[cmd.index("--append-system-prompt-file") + 1])
+            written["text"] = path.read_text(encoding="utf-8")
+            written["stdin"] = input
+            return (b"ok", b"")
+
         mock_process = AsyncMock()
         mock_process.returncode = 0
-        mock_process.communicate.return_value = (b"ok", b"")
+        mock_process.communicate = read_file
         mock_subprocess.return_value = mock_process
 
         await provider.complete("User prompt", system="System instructions")
 
         cmd = mock_subprocess.call_args.args
         assert "--append-system-prompt" not in cmd
-        assert "--append-system-prompt-file" not in cmd
+        flag_at = cmd.index("--append-system-prompt-file")
+        assert flag_at < cmd.index("--tools")
         assert list(cmd[-2:]) == ["--tools", ""]
-        assert mock_process.communicate.await_args.kwargs["input"] == (
-            b"System instructions\n\nUser prompt"
-        )
+        assert written["text"] == "System instructions"
+        assert "System instructions" not in cmd
+        assert written["stdin"] == b"User prompt"
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        path = Path(cmd[flag_at + 1])
+        mcp_path = Path(cmd[cmd.index("--mcp-config") + 1])
+        assert path.resolve().parent == temp_root
+        assert mcp_path.resolve().parent == temp_root
+        assert mock_subprocess.call_args.kwargs["cwd"] == tempfile.gettempdir()
+        assert not path.exists()
 
     @pytest.mark.asyncio
-    async def test_batch_shim_sends_system_prompt_on_stdin(self, monkeypatch):
-        """A .cmd shim must not receive newlines, quotes, or % on argv."""
+    async def test_batch_shim_sends_system_prompt_as_file(self, monkeypatch):
+        """A .cmd shim receives the instruction text in a file, not on argv."""
+        from pathlib import Path
+
         captured: dict[str, object] = {}
 
         async def fake_exec(*args, **kwargs):
-            captured["cmd"] = [str(part) for part in args]
+            cmd = [str(part) for part in args]
+            captured["cmd"] = cmd
             process = AsyncMock()
             process.returncode = 0
 
             async def fake_communicate(input=None):
+                path = Path(cmd[cmd.index("--append-system-prompt-file") + 1])
+                captured["file"] = path.read_text(encoding="utf-8")
                 captured["stdin"] = input
                 return (b"ok", b"")
 
@@ -253,16 +281,35 @@ class TestClaudeCodeCLIProvider:
         assert isinstance(cmd, list)
         assert response.content == "ok"
         assert "--append-system-prompt" not in cmd
-        assert "--append-system-prompt-file" not in cmd
+        assert "--append-system-prompt-file" in cmd
         assert list(cmd[-2:]) == ["--tools", ""]
         assert "--disallowedTools" not in cmd
         rendered = " ".join(cmd)
         assert "\n" not in rendered
         assert "%" not in rendered
         assert '"' not in rendered
-        assert captured["stdin"] == (
-            b'You are "helpful".\nFact: 100% done.\n\nUser prompt'
+        assert captured["file"] == system
+        assert captured["stdin"] == b"User prompt"
+
+    @pytest.mark.asyncio
+    async def test_inline_on_batch_shim_rejects_cmd_unsafe_text(self, monkeypatch):
+        """Inline mode on a .cmd shim refuses text cmd.exe would rewrite."""
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.base_cli_provider.sys.platform",
+            "win32",
         )
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.claude_code_cli_provider.resolve_cli_binary",
+            lambda name: r"C:\npm\claude.cmd",
+        )
+
+        provider = ClaudeCodeCLIProvider(
+            model="claude-sonnet-4-5-20250929",
+            max_retries=1,
+            append_system_prompt="inline",
+        )
+        with pytest.raises(RuntimeError, match="quote"):
+            await provider.complete("User prompt", system='Say "hello"')
 
     @pytest.mark.asyncio
     async def test_mcp_config_temp_file_removed_after_cli_error(
@@ -289,7 +336,7 @@ class TestClaudeCodeCLIProvider:
     async def test_mcp_config_write_error_is_runtime_error(self, provider, monkeypatch):
         """A failed MCP config write stays inside the RuntimeError contract."""
 
-        def _boom():
+        def _boom(directory=None):
             raise OSError("disk full")
 
         monkeypatch.setattr(
@@ -360,10 +407,103 @@ class TestClaudeCodeCLIProvider:
         response = await provider.complete("User prompt", system="System instructions")
 
         assert response.content == "Response with system"
-        assert "--append-system-prompt" not in mock_subprocess.call_args.args
-        assert mock_process.communicate.await_args.kwargs["input"] == (
-            b"System instructions\n\nUser prompt"
+        cmd = mock_subprocess.call_args.args
+        assert "--append-system-prompt-file" in cmd
+        assert "--append-system-prompt" not in cmd
+        assert mock_process.communicate.await_args.kwargs["input"] == b"User prompt"
+
+    @pytest.mark.asyncio
+    async def test_inline_sends_system_prompt_as_argument(
+        self, mock_subprocess
+    ):
+        """inline puts the instruction text on --append-system-prompt."""
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"ok", b"")
+        mock_subprocess.return_value = mock_process
+
+        provider = ClaudeCodeCLIProvider(
+            model="claude-sonnet-4-5-20250929",
+            max_retries=1,
+            append_system_prompt="inline",
         )
+        await provider.complete("User prompt", system="System instructions")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--append-system-prompt") + 1] == "System instructions"
+        assert "--append-system-prompt-file" not in cmd
+        assert list(cmd[-2:]) == ["--tools", ""]
+        assert mock_process.communicate.await_args.kwargs["input"] == b"User prompt"
+
+    @pytest.mark.asyncio
+    async def test_llm_config_inline_reaches_the_cli(self, mock_subprocess):
+        """llm.claude_append_system_prompt=inline changes the flag Claude gets."""
+        from chunkhound.core.config.llm_config import LLMConfig
+        from chunkhound.llm_manager import LLMManager
+
+        cfg = LLMConfig(
+            provider="claude-code-cli",
+            utility_model="claude-sonnet-4-5-20250929",
+            synthesis_model="claude-sonnet-4-5-20250929",
+            claude_append_system_prompt="inline",
+        )
+        utility, synthesis = cfg.get_provider_configs()
+        manager = LLMManager(utility, synthesis)
+        provider = manager.get_utility_provider()
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = (b"ok", b"")
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("User prompt", system="Rules")
+
+        cmd = mock_subprocess.call_args.args
+        assert cmd[cmd.index("--append-system-prompt") + 1] == "Rules"
+        assert "--append-system-prompt-file" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_temp_dir_holds_claude_files(self, tmp_path, mock_subprocess):
+        """claude_temp_dir is where the instruction file and MCP file are written."""
+        from pathlib import Path
+
+        captured: dict[str, Path] = {}
+
+        async def read_files(input=None):
+            cmd = mock_subprocess.call_args.args
+            for flag in ("--mcp-config", "--append-system-prompt-file"):
+                captured[flag] = Path(cmd[cmd.index(flag) + 1])
+            return (b"ok", b"")
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = read_files
+        mock_subprocess.return_value = mock_process
+
+        provider = ClaudeCodeCLIProvider(
+            model="claude-sonnet-4-5-20250929",
+            max_retries=1,
+            temp_dir=str(tmp_path),
+        )
+        await provider.complete("User prompt", system="Rules")
+
+        assert captured["--append-system-prompt-file"].parent == tmp_path
+        assert captured["--mcp-config"].parent == tmp_path
+        assert mock_subprocess.call_args.kwargs["cwd"] == tempfile.gettempdir()
+        assert not captured["--append-system-prompt-file"].exists()
+        assert not captured["--mcp-config"].exists()
+
+    @pytest.mark.asyncio
+    async def test_missing_temp_dir_is_runtime_error(self, tmp_path, mock_subprocess):
+        """A temp directory that is not a directory fails before launch."""
+        provider = ClaudeCodeCLIProvider(
+            model="claude-sonnet-4-5-20250929",
+            max_retries=1,
+            temp_dir=str(tmp_path / "missing"),
+        )
+        with pytest.raises(RuntimeError, match="llm.claude_temp_dir is not a directory"):
+            await provider.complete("User prompt", system="Rules")
+        mock_subprocess.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_complete_timeout(self, provider, mock_subprocess):
