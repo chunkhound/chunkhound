@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Windows `.cmd` and `.bat` CLIs launch through `cmd.exe`** — An npm-only Claude Code, Codex, or OpenCode install can run research. A spaced shim path that cannot be shortened is rejected. Newlines, percent signs, quotes, and a command operator in an argument with no spaces are rejected. Addresses #118. The database `WinError 183` in that issue is unchanged.
+
 ### Changed
 - **Claude Code CLI prompt delivery is configurable** — One mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses `file` (default, every OS) or `inline`. `file` uses `--append-system-prompt-file`: instructions stay in the system prompt, off the Windows command line, and beside a wrapper's `--append-system-prompt`. `inline` is for a wrapper that uses the file flag, or Claude Code older than 2.0.34. Those files use the system temp directory. `llm.claude_temp_dir` overrides it for a special case such as Docker or a limited user. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
 

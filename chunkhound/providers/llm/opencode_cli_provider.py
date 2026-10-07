@@ -28,6 +28,7 @@ from chunkhound.providers.llm.base_cli_provider import (
     BaseCLIProvider,
     build_cli_argv,
     resolve_cli_binary,
+    terminate_cli_process,
 )
 
 VALID_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
@@ -137,7 +138,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 check=False,
             )
             return result.returncode == 0
-        except (subprocess.SubprocessError, FileNotFoundError):
+        except (subprocess.SubprocessError, FileNotFoundError, RuntimeError):
             return False
 
     def _validate_model_format(self, model: str) -> None:
@@ -430,19 +431,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
     ) -> None:
         """Terminate an opencode subprocess and its descendants."""
         if sys.platform == "win32":
-            try:
-                await asyncio.to_thread(
-                    subprocess.run,
-                    ["taskkill", "/T", "/PID", str(process.pid), "/F"],
-                    check=False,
-                    timeout=10,
-                )
-            except (FileNotFoundError, subprocess.SubprocessError, OSError):
-                logger.debug("Windows taskkill failed during OpenCode cleanup")
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                pass
+            await terminate_cli_process(process)
             return
 
         process_group_id = pgid if pgid is not None else process.pid

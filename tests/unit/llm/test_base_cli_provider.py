@@ -184,8 +184,8 @@ def test_build_cli_argv_wraps_cmd_on_windows(monkeypatch):
     binary = r"C:\Users\me\AppData\Roaming\npm\claude.cmd"
     argv = build_cli_argv(binary, "--print")
     assert argv[0] == "cmd.exe"
-    assert argv[1:4] == ["/d", "/s", "/c"]
-    assert argv[4:] == [binary, "--print"]
+    assert argv[1:5] == ["/d", "/v:off", "/s", "/c"]
+    assert argv[5:] == [binary, "--print"]
 
 
 def test_build_cli_argv_wraps_bat_on_windows(monkeypatch):
@@ -196,8 +196,8 @@ def test_build_cli_argv_wraps_bat_on_windows(monkeypatch):
     binary = r"D:\tools\tool.bat"
     argv = build_cli_argv(binary, "run")
     assert argv[0] == r"C:\Windows\System32\cmd.exe"
-    assert argv[1:4] == ["/d", "/s", "/c"]
-    assert argv[4:] == [binary, "run"]
+    assert argv[1:5] == ["/d", "/v:off", "/s", "/c"]
+    assert argv[5:] == [binary, "run"]
 
 
 def test_build_cli_argv_quotes_metacharacters_for_cmd(monkeypatch):
@@ -212,7 +212,7 @@ def test_build_cli_argv_quotes_metacharacters_for_cmd(monkeypatch):
         "--append-system-prompt",
         dangerous,
     )
-    assert argv[4:] == [r"C:\npm\claude.cmd", "--append-system-prompt", dangerous]
+    assert argv[5:] == [r"C:\npm\claude.cmd", "--append-system-prompt", dangerous]
     rendered = subprocess.list2cmdline(argv)
     assert '"hello & calc.exe"' in rendered
     assert " --append-system-prompt hello & " not in f" {rendered} "
@@ -257,15 +257,14 @@ def test_build_cli_argv_exe_keeps_freeform_text(monkeypatch):
     assert argv == [r"C:\tools\claude.exe", 'say "hi"', "%PATH%", "a\nb"]
 
 
-def test_build_cli_argv_quotes_spaceless_cmd_operator(monkeypatch):
-    """An operator with no space must still be quoted, or cmd runs it."""
+def test_build_cli_argv_rejects_spaceless_cmd_operator(monkeypatch):
+    """A spaceless operator is rejected. A trailing space would change the value."""
     monkeypatch.setattr(
         "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
     )
     monkeypatch.delenv("COMSPEC", raising=False)
-    argv = build_cli_argv(r"C:\npm\claude.cmd", "--x", "a&whoami")
-    assert argv[-1] == "a&whoami "
-    assert '"a&whoami "' in subprocess.list2cmdline(argv)
+    with pytest.raises(RuntimeError, match="command operator"):
+        build_cli_argv(r"C:\npm\claude.cmd", "--x", "a&whoami")
 
 
 def test_build_cli_argv_8dot3_short_path_stays_its_own_unquoted_token(
@@ -281,8 +280,8 @@ def test_build_cli_argv_8dot3_short_path_stays_its_own_unquoted_token(
     monkeypatch.delenv("COMSPEC", raising=False)
     short = r"C:\Users\USER~1\AppData\Roaming\npm\claude.cmd"
     argv = build_cli_argv(short, "--print", "--model", "haiku")
-    assert argv[1:4] == ["/d", "/s", "/c"]
-    assert argv[4:] == [short, "--print", "--model", "haiku"]
+    assert argv[1:5] == ["/d", "/v:off", "/s", "/c"]
+    assert argv[5:] == [short, "--print", "--model", "haiku"]
     rendered = subprocess.list2cmdline(argv)
     assert f"/c {short} --print" in rendered
 
@@ -295,18 +294,20 @@ def test_build_cli_argv_no_wrap_for_exe(monkeypatch):
     assert argv == [r"C:\tools\claude.exe", "--print"]
 
 
-def test_resolve_cli_binary_env_missing_falls_back_to_which(
+def test_resolve_cli_binary_env_missing_does_not_fall_back(
     monkeypatch, tmp_path: Path
 ):
+    """A set override that does not exist must not run the PATH binary."""
     fake = tmp_path / "claude.cmd"
     fake.write_text("@echo off\n", encoding="utf-8")
-    monkeypatch.setenv("CHUNKHOUND_TEST_BIN", str(tmp_path / "missing.exe"))
+    missing = str(tmp_path / "missing.exe")
+    monkeypatch.setenv("CHUNKHOUND_TEST_BIN", missing)
     monkeypatch.setattr(
         "chunkhound.providers.llm.base_cli_provider.shutil.which",
         lambda name: str(fake) if name == "claude" else None,
     )
-    # A missing override path is not used, so resolution continues with the name.
-    assert resolve_cli_binary("claude", env_var="CHUNKHOUND_TEST_BIN") == str(fake)
+    with pytest.raises(FileNotFoundError, match="CHUNKHOUND_TEST_BIN"):
+        resolve_cli_binary("claude", env_var="CHUNKHOUND_TEST_BIN")
 
 
 def test_resolve_cli_binary_ignores_cwd_file_named_like_binary(

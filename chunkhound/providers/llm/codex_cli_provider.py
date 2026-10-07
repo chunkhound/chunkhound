@@ -24,6 +24,7 @@ from chunkhound.providers.llm.base_cli_provider import (
     BaseCLIProvider,
     build_cli_argv,
     is_windows_batch_shim,
+    kill_windows_process_tree,
     resolve_cli_binary,
     terminate_cli_process,
 )
@@ -281,7 +282,8 @@ class CodexCLIProvider(BaseCLIProvider):
             ]
             config_path.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
         except Exception as e:
-            logger.warning(f"Failed to build Codex overlay home: {e}")
+            shutil.rmtree(overlay, ignore_errors=True)
+            raise RuntimeError(f"Failed to write Codex overlay config: {e}") from e
         return str(overlay)
 
     def _merge_batch_overlay_config(
@@ -333,7 +335,7 @@ class CodexCLIProvider(BaseCLIProvider):
             return "ok" if res.returncode == 0 else "broken"
         except FileNotFoundError:
             return "not_installed"
-        except subprocess.SubprocessError:
+        except (subprocess.SubprocessError, RuntimeError):
             return "broken"
 
     @staticmethod
@@ -351,17 +353,30 @@ class CodexCLIProvider(BaseCLIProvider):
         """
         try:
             codex_bin = resolve_cli_binary("codex", env_var="CHUNKHOUND_CODEX_BIN")
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 build_cli_argv(codex_bin, "debug", "models"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                timeout=10,
-                check=False,
             )
-            if result.returncode != 0:
+            try:
+                stdout, _stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # subprocess kills only cmd.exe. Node from a .cmd shim would survive.
+                if is_windows_batch_shim(codex_bin):
+                    kill_windows_process_tree(proc.pid)
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise
+            if proc.returncode != 0:
                 return None
 
-            output = result.stdout.decode("utf-8", errors="ignore")
+            output = (stdout or b"").decode("utf-8", errors="ignore")
             # Parse as NDJSON: try each non-empty line as a JSON object.
             # This is more robust than brace-counting when the CLI prints
             # log lines or multiple JSON objects.
@@ -392,6 +407,7 @@ class CodexCLIProvider(BaseCLIProvider):
             subprocess.SubprocessError,
             FileNotFoundError,
             json.JSONDecodeError,
+            RuntimeError,
         ) as e:
             logger.debug(f"Model discovery via 'codex debug models' failed: {e}")
         return None

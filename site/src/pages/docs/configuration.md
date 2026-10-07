@@ -510,6 +510,8 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 
 When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, and Requesty) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
+On Windows, a `.cmd` or `.bat` install of Claude Code, Codex, or OpenCode runs through `cmd.exe`. A shim path that still has a space after the 8.3 short name is rejected. Arguments there cannot contain a newline, a percent sign, or a quote, and a value with no spaces cannot contain `&`, `|`, `<`, `>`, `^`, `(`, or `)`.
+
 ### Claude Code CLI
 
 `provider: "claude-code-cli"` runs local `claude` in print mode. The user request goes to stdin. Research instructions go to the system prompt. `--tools` and an empty value stay last and disable Claude's built-in tools.

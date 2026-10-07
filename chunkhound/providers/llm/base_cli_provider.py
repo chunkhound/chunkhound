@@ -51,36 +51,47 @@ def resolve_cli_binary(
         name: Default command name (e.g. ``claude``).
         env_var: Optional env var override (absolute path or name on PATH).
 
+    A non-empty env override is resolved on its own. If that path or name
+    does not exist, this raises instead of searching PATH for ``name``.
+
     Returns:
         Absolute path to the executable (or override path that exists / which found).
 
     Raises:
         FileNotFoundError: If no matching binary is found.
     """
-    candidates: list[str] = []
     if env_var:
         env_val = os.environ.get(env_var)
         if env_val and env_val.strip():
-            candidates.append(env_val.strip())
-    candidates.append(name)
-
-    for cand in candidates:
-        path = Path(cand)
-        # Only treat as an explicit filesystem path when it has a directory
-        # component (or is absolute). Bare names always go through which/PATH.
-        if (path.is_absolute() or os.path.dirname(cand)) and path.is_file():
-            return str(path.resolve())
-        found = shutil.which(cand)
-        if found:
+            override = env_val.strip()
+            found = _resolve_one_cli(override)
+            if found is None:
+                raise FileNotFoundError(
+                    f"CLI binary {name!r} not found "
+                    f"(checked env {env_var}={override!r}). "
+                    f"Install it or correct {env_var}."
+                )
             return found
 
-    hint = f" (checked env {env_var} and PATH)" if env_var else " (checked PATH)"
-    raise FileNotFoundError(
-        f"CLI binary {name!r} not found{hint}. "
-        f"Install it or ensure it is on PATH. On Windows npm shims are often "
-        f"{name}.cmd — use a shell or this resolver, not a bare name with "
-        f"CreateProcess."
-    )
+    found = _resolve_one_cli(name)
+    if found is None:
+        raise FileNotFoundError(
+            f"CLI binary {name!r} not found (checked PATH). "
+            f"Install it or ensure it is on PATH. On Windows npm shims are often "
+            f"{name}.cmd — use a shell or this resolver, not a bare name with "
+            f"CreateProcess."
+        )
+    return found
+
+
+def _resolve_one_cli(cand: str) -> str | None:
+    """Resolve one path or PATH name. None when it does not exist."""
+    path = Path(cand)
+    # Only treat as an explicit filesystem path when it has a directory
+    # component (or is absolute). Bare names always go through which/PATH.
+    if (path.is_absolute() or os.path.dirname(cand)) and path.is_file():
+        return str(path.resolve())
+    return shutil.which(cand)
 
 
 def is_windows_batch_shim(binary: str) -> bool:
@@ -114,9 +125,10 @@ def _cmd_argv_blocker(arg: str) -> str | None:
 def _prepare_cmd_token(arg: str) -> str:
     """One argv token for ``cmd /c``.
 
-    ``list2cmdline`` quotes whitespace. A bare ``&`` would start another
-    command, so those tokens gain a trailing space and the child keeps it.
-    Newlines, ``%``, and quotes are rejected: cmd rewrites them.
+    ``list2cmdline`` quotes whitespace, so an operator inside a spaced token
+    stays quoted. A token with no whitespace and a cmd operator would run as
+    syntax, and appending a space would change the value the child receives.
+    Newlines, ``%``, and quotes are rejected because cmd rewrites them.
     """
     blocked = _cmd_argv_blocker(arg)
     if blocked is not None:
@@ -124,10 +136,15 @@ def _prepare_cmd_token(arg: str) -> str:
             f"Windows batch CLI arguments cannot contain {blocked}. "
             "Pass that text via stdin or a file."
         )
-    if arg == "" or any(char in arg for char in " \t"):
-        return arg
-    if any(char in arg for char in _CMD_OPERATORS):
-        return arg + " "
+    if (
+        arg
+        and not any(char in arg for char in " \t")
+        and any(char in arg for char in _CMD_OPERATORS)
+    ):
+        raise RuntimeError(
+            "Windows batch CLI arguments cannot contain a command operator. "
+            "Pass that text via stdin or a file."
+        )
     return arg
 
 
@@ -155,7 +172,8 @@ def build_cli_argv(binary: str, *args: str) -> list[str]:
     """Argv for ``create_subprocess_exec``.
 
     A bare ``.cmd`` name raises WinError 2, and a direct ``.cmd`` path can
-    raise WinError 193. Those shims run as tokens after ``cmd /d /s /c``.
+    raise WinError 193. Those shims run as tokens after ``cmd /d /v:off /s /c``.
+    ``/v:off`` keeps ``!`` literal when delayed expansion is enabled.
     """
     if is_windows_batch_shim(binary):
         comspec = os.environ.get("COMSPEC") or "cmd.exe"
@@ -163,8 +181,23 @@ def build_cli_argv(binary: str, *args: str) -> list[str]:
             _batch_binary_token(binary),
             *(_prepare_cmd_token(arg) for arg in args),
         ]
-        return [comspec, "/d", "/s", "/c", *tokens]
+        return [comspec, "/d", "/v:off", "/s", "/c", *tokens]
     return [binary, *args]
+
+
+def kill_windows_process_tree(pid: int) -> bool:
+    """Stop a Windows process tree. taskkill output stays off stdio."""
+    try:
+        result = subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(pid)],
+            check=False,
+            timeout=10,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False
 
 
 async def terminate_cli_process(process: asyncio.subprocess.Process) -> None:
@@ -176,19 +209,7 @@ async def terminate_cli_process(process: asyncio.subprocess.Process) -> None:
     if process.returncode is not None:
         return
     if sys.platform == "win32" and process.pid:
-        taskkill_ok = False
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                check=False,
-                timeout=10,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            taskkill_ok = result.returncode == 0
-        except (FileNotFoundError, subprocess.SubprocessError, OSError):
-            taskkill_ok = False
+        taskkill_ok = await asyncio.to_thread(kill_windows_process_tree, process.pid)
         if not taskkill_ok:
             try:
                 process.kill()

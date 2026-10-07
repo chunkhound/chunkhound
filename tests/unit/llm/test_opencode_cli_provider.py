@@ -19,6 +19,19 @@ def test_default_timeout():
     assert p.timeout == DEFAULT_LLM_TIMEOUT
 
 
+def test_unshortenable_shim_does_not_crash_availability(monkeypatch: pytest.MonkeyPatch):
+    """A spaced .cmd that cannot be shortened reports the CLI unavailable."""
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+        lambda name: r"C:\Program Files\npm\opencode.cmd",
+    )
+    provider = OpenCodeCLIProvider(model="")
+    assert provider._opencode_available() is False
+
+
 class TestOpenCodeCLIProvider:
     """Test cases for OpenCode CLI provider."""
 
@@ -456,11 +469,22 @@ class TestOpenCodeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_run_single_attempt_windows_uses_taskkill(self, provider):
-        """Windows cleanup routes to taskkill /T without blocking the event loop."""
+        """Windows cleanup tree-kills with taskkill output discarded."""
+        recorded: dict[str, object] = {}
+
+        def fake_run(args, **kwargs):
+            recorded["args"] = args
+            recorded["stdout"] = kwargs.get("stdout")
+            recorded["stderr"] = kwargs.get("stderr")
+            return subprocess.CompletedProcess(args, 1)
+
         with (
             patch("sys.platform", "win32"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+            patch(
+                "chunkhound.providers.llm.base_cli_provider.subprocess.run",
+                fake_run,
+            ),
             patch("subprocess.CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
             patch("os.killpg", create=True) as mock_killpg,
         ):
@@ -482,12 +506,10 @@ class TestOpenCodeCLIProvider:
             assert result.action == "timeout"
             assert "start_new_session" not in mock_subprocess.call_args.kwargs
             assert mock_subprocess.call_args.kwargs["creationflags"] == 0x00000200
-            mock_to_thread.assert_awaited_once_with(
-                subprocess.run,
-                ["taskkill", "/T", "/PID", "2468", "/F"],
-                check=False,
-                timeout=10,
-            )
+            assert recorded["args"] == ["taskkill", "/T", "/F", "/PID", "2468"]
+            assert recorded["stdout"] is subprocess.DEVNULL
+            assert recorded["stderr"] is subprocess.DEVNULL
+            mock_process.kill.assert_called_once()
             mock_killpg.assert_not_called()
 
     @pytest.mark.asyncio
