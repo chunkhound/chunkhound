@@ -7,12 +7,15 @@ Every test iterates over ``OPENAI_COMPATIBLE_PROVIDERS`` to verify:
 - Shared behaviours (config override precedence, missing-model errors)
 """
 
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
 
 from chunkhound.core.config.llm_config import LLMProviderLiteral
-from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
+from chunkhound.core.config.provider_registry import (
+    OPENAI_COMPATIBLE_PROVIDERS,
+    OpenAICompatibleSpec,
+)
 from chunkhound.interfaces.llm_provider import OutputLimitCapability
 
 # ── Registry integrity ──────────────────────────────────────────────────────
@@ -47,6 +50,29 @@ def test_canonical_registry_specs_support_output_cap_omission():
             OPENAI_COMPATIBLE_PROVIDERS[name].output_limit_omission
             is OutputLimitCapability.SUPPORTED
         )
+
+
+def test_structured_reasoning_disable_payload_is_openrouter_only():
+    """Only canonical OpenRouter declares its structured-call payload."""
+    expected = {"reasoning": {"enabled": False}}
+
+    assert (
+        OPENAI_COMPATIBLE_PROVIDERS[
+            "openrouter"
+        ].structured_reasoning_disable_extra_body
+        == expected
+    )
+    for name in ("deepseek", "grok", "orcarouter"):
+        assert (
+            OPENAI_COMPATIBLE_PROVIDERS[name].structured_reasoning_disable_extra_body
+            is None
+        )
+
+    default_spec = OpenAICompatibleSpec(
+        name="compatible",
+        default_base_url="https://compatible.example/v1",
+    )
+    assert default_spec.structured_reasoning_disable_extra_body is None
 
 
 # ── Spec well-formedness ────────────────────────────────────────────────────
@@ -90,7 +116,8 @@ def test_spec_has_valid_max_tokens_param_name(name, spec):
 )
 def test_spec_synthesis_concurrency_positive(name, spec):
     assert spec.synthesis_concurrency > 0, (
-        f"{name}: synthesis_concurrency must be positive, got {spec.synthesis_concurrency}"
+        f"{name}: synthesis_concurrency must be positive, "
+        f"got {spec.synthesis_concurrency}"
     )
 
 
@@ -178,6 +205,64 @@ def test_spec_constructs_provider_with_base_url_override(name, spec):
     assert provider.output_limit_metadata.omission is OutputLimitCapability.UNKNOWN
 
 
+def test_manager_forwards_reasoning_disable_payload_only_for_canonical_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A custom base URL downgrades canonical OpenRouter request metadata."""
+    from chunkhound import llm_manager
+
+    class RecordingProvider:
+        def __init__(self, **kwargs: Any):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(llm_manager, "OpenAICompatibleProvider", RecordingProvider)
+    manager = object.__new__(llm_manager.LLMManager)
+
+    canonical = manager._create_openai_compatible_provider(
+        "openrouter",
+        {"model": "test-model", "api_key": "sk-test"},
+    )
+    custom = manager._create_openai_compatible_provider(
+        "openrouter",
+        {
+            "model": "test-model",
+            "api_key": "sk-test",
+            "base_url": "https://compatible.example/v1",
+        },
+    )
+
+    field = "structured_reasoning_disable_extra_body"
+    assert canonical.kwargs[field] == {"reasoning": {"enabled": False}}
+    assert field in custom.kwargs
+    assert custom.kwargs[field] is None
+
+
+def test_explicit_canonical_url_suppresses_reasoning_disable_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supplying the canonical URL explicitly is still a custom base_url."""
+    from chunkhound import llm_manager
+
+    class RecordingProvider:
+        def __init__(self, **kwargs: Any):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(llm_manager, "OpenAICompatibleProvider", RecordingProvider)
+    manager = object.__new__(llm_manager.LLMManager)
+    canonical_url = OPENAI_COMPATIBLE_PROVIDERS["openrouter"].default_base_url
+
+    provider = manager._create_openai_compatible_provider(
+        "openrouter",
+        {
+            "model": "test-model",
+            "api_key": "sk-test",
+            "base_url": canonical_url,
+        },
+    )
+
+    assert provider.kwargs["structured_reasoning_disable_extra_body"] is None
+
+
 # ── Missing-model error ─────────────────────────────────────────────────────
 
 
@@ -241,7 +326,8 @@ def test_spec_default_supports_structured_outputs(name, spec):
         {"model": "test-model", "api_key": "sk-test"},
     )
     assert provider._supports_structured_outputs is spec.supports_structured_outputs, (
-        f"{name}: expected spec.supports_structured_outputs={spec.supports_structured_outputs}, "
+        f"{name}: expected spec.supports_structured_outputs="
+        f"{spec.supports_structured_outputs}, "
         f"got {provider._supports_structured_outputs}"
     )
 
