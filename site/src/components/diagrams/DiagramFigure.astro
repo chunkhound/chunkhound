@@ -1,0 +1,21 @@
+---
+/**
+ * Static diagram wrapper: caption + a screen-reader text equivalent.
+ *
+ * The `description` is the diagram's accessibility contract AND its AI-legible
+ * text form — it must state the relationships, not just the labels.
+ */
+interface Props {
+  caption: string;
+  label: string;
+  description: string;
+}
+
+const { caption, label, description } = Astro.props;
+---
+
+<figure class="d-figure" role="group" aria-label={label}>
+  <figcaption>{caption}</figcaption>
+  <span class="sr-only">{description}</span>
+  <slot />
+</figure>

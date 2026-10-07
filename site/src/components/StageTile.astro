@@ -1,0 +1,47 @@
+---
+interface Props {
+  number: string;
+  role: string;
+  heading: string;
+  active: boolean;
+}
+
+const { number, role, heading, active } = Astro.props;
+---
+
+<!-- A tab in the config card's header strip. It carries only the layer's
+     number + name: the description moved into the panel it opens, so nothing
+     here repeats what the panel already says. -->
+<button
+  type="button"
+  class="setup-stage"
+  role="tab"
+  id={`tab-${role}`}
+  data-stage-tab={role}
+  aria-selected={active ? "true" : "false"}
+  aria-controls={`panel-${role}`}
+  tabindex={active ? "0" : "-1"}
+>
+  <span class="stage-number" aria-hidden="true">{number}</span>
+  <span class="stage-title">{heading}</span>
+</button>
+
+<style>
+  .setup-stage { display: flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-5); border: 0; background: transparent; color: var(--text-secondary); font: inherit; white-space: nowrap; cursor: pointer; transition: color 0.2s; }
+  .setup-stage:hover { color: var(--text-primary); }
+  /* The active tab is the only one whose surface meets the panel below (both
+     --bg-surface), and its underline is the accent rail — the same
+     --border-w-accent indicator the design system gives active nav. The rail is
+     an inset shadow, not a border: a border would shift the tab's content 3px
+     and break the baseline it shares with the output header beside it. */
+  .setup-stage[aria-selected="true"] { box-shadow: inset 0 calc(-1 * var(--border-w-accent)) 0 var(--primary); color: var(--text-primary); }
+  .stage-number { color: var(--text-tertiary); font: 600 var(--text-xs)/var(--lh-xs) "JetBrains Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+  .stage-title { font-size: var(--text-lg); font-weight: 600; }
+  /* The card clips at its rounded corner, so the focus ring sits inside. */
+  .setup-stage:focus-visible { outline: var(--border-w-emphasis) solid var(--primary); outline-offset: -2px; }
+
+  @media (max-width: 640px) {
+    .setup-stage { padding: 0 var(--space-3); gap: var(--space-1); }
+    .stage-title { font-size: var(--text-sm); }
+  }
+</style>

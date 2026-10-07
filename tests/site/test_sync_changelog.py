@@ -9,7 +9,8 @@ import pathlib
 import subprocess
 import tempfile
 
-from tests.site.tsx_runner import ROOT, NPM, sanitized_subprocess_env
+from tests.site.process_runner import run_text_process
+from tests.site.tsx_runner import NPM, ROOT, isolated_subprocess_env
 
 SYNC_SCRIPT = ROOT / "site" / "scripts" / "sync-changelog.mjs"
 
@@ -26,22 +27,17 @@ CHANGELOG_CONTENT = """# Changelog
 EXPECTED_FRONTMATTER_LINES = (
     'layout: ../../layouts/DocsLayout.astro',
     'title: "Changelog"',
-    'description: "Release history and breaking changes for ChunkHound."',
-    'order: 4',
-    'section: "manual"',
 )
 
 
 def _run_sync(repo_root: pathlib.Path) -> subprocess.CompletedProcess:
     """Run sync-changelog.mjs against a fake repo directory."""
-    env = sanitized_subprocess_env(CHUNKHOUND_ROOT=str(repo_root))
-    return subprocess.run(
-        [NPM, "exec", "--prefix", "site", "--", "node", str(SYNC_SCRIPT)],
-        capture_output=True,
-        text=True,
-        cwd=ROOT,
-        env=env,
-    )
+    with isolated_subprocess_env(CHUNKHOUND_ROOT=str(repo_root)) as env:
+        return run_text_process(
+            [NPM, "exec", "--prefix", "site", "--", "node", str(SYNC_SCRIPT)],
+            cwd=ROOT,
+            env=env,
+        )
 
 
 def test_sync_prepends_frontmatter() -> None:
@@ -65,6 +61,14 @@ def test_sync_prepends_frontmatter() -> None:
         assert output_text.count("---\n") >= 2
         for line in EXPECTED_FRONTMATTER_LINES:
             assert line in output_text
+        # Scope to the frontmatter: its absence there is the contract, and
+        # changelog prose later in the file may legitimately contain it.
+        frontmatter = output_text.split("---", 2)[1]
+        assert "description:" not in frontmatter
+        # Dead nav keys: nav.ts is the ordering SSOT, so the generator must
+        # never reintroduce frontmatter that pretends to own order/section.
+        assert "order:" not in frontmatter
+        assert "section:" not in frontmatter
         assert output_text.endswith(CHANGELOG_CONTENT)
 
 

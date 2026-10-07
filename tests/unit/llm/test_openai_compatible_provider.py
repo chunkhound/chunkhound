@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.interfaces.llm_provider import (
     PROVIDER_MANAGED_OUTPUT,
     OutputLimitCapability,
@@ -96,6 +97,21 @@ SPECS = [
             ),
         },
         id="orcarouter",
+    ),
+    pytest.param(
+        {
+            "provider": "vercel",
+            "model": "poolside/laguna-s-2.1",
+            "expected_name": "vercel",
+            "expected_base_url": "https://ai-gateway.vercel.sh/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'vercel'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="vercel",
     ),
     pytest.param(
         {
@@ -265,6 +281,7 @@ class TestFactoryPipeline:
             "grok": 5,
             "openrouter": 10,
             "orcarouter": 10,
+            "vercel": 10,
             "requesty": 10,
             "openai": 3,
         }[spec["provider"]]
@@ -655,6 +672,75 @@ class TestStructuredOutputContract:
         call = mock_openai.call_args[1]
         assert call["response_format"]["type"] == "json_schema"
         assert call["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True], ids=["text", "structured"])
+async def test_vercel_default_synthesis_wire_contract(structured):
+    marker = "vercel-default-synthesis"
+    script = ChatCompletionScript(
+        name=marker, marker=marker, content='{"answer": "42"}'
+    )
+    with OpenAICompatibleTestServer([script]) as server:
+        async with _vercel_synthesis_provider(server) as provider:
+            await _complete_vercel(provider, marker, structured)
+        _assert_vercel_wire_contract(server, structured)
+
+
+async def _complete_vercel(provider, marker, structured):
+    if structured:
+        result = await provider.complete_structured(
+            marker,
+            json_schema=TestStructuredOutputContract.SCHEMA,
+            max_completion_tokens=PROVIDER_MANAGED_OUTPUT,
+        )
+        assert result == {"answer": "42"}
+    else:
+        response = await provider.complete(
+            marker, max_completion_tokens=PROVIDER_MANAGED_OUTPUT
+        )
+        assert response.content == '{"answer": "42"}'
+
+
+def _vercel_synthesis_config() -> LLMConfig:
+    return LLMConfig(
+        provider="vercel",
+        model="poolside/laguna-s-2.1",
+        api_key="sk-local-fixture-not-a-real-credential",
+        max_retries=0,
+    )
+
+
+def _assert_vercel_wire_contract(server, structured):
+    server.assert_all_scripts_consumed()
+    assert len(server.requests) == 1
+    body = server.requests[0]["json"]
+    assert body["model"] == "poolside/laguna-s-2.1"
+    # Derive the expected cap from the config default, not a copied literal.
+    assert body["max_tokens"] == _vercel_synthesis_config().output_limit_fallback
+    assert "max_completion_tokens" not in body
+    if structured:
+        assert body["response_format"] == {"type": "json_object"}
+        system = body["messages"][0]
+        assert system["role"] == "system"
+        assert '"answer"' in system["content"]
+        assert '"required"' in system["content"]
+
+
+@asynccontextmanager
+async def _vercel_synthesis_provider(server):
+    config = _vercel_synthesis_config()
+    manager = LLMManager(*config.get_provider_configs())
+    provider = manager.get_synthesis_provider()
+    try:
+        assert str(provider.base_url).rstrip("/") == "https://ai-gateway.vercel.sh/v1"
+        server.assert_loopback_url(server.base_url)
+        # Redirect only SDK transport: custom config endpoints change cap policy.
+        provider._client.base_url = server.base_url
+        yield provider
+    finally:
+        await provider._client.close()
+        await manager.get_utility_provider()._client.close()
 
 
 # =============================================================================

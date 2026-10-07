@@ -71,7 +71,7 @@ dev-release:
 	uv run --no-sync pytest tests/test_smoke.py -v -n auto
 
 lint:
-	uv run ruff check chunkhound
+	uv run ruff check chunkhound brand
 
 typecheck:
 	uv run mypy chunkhound

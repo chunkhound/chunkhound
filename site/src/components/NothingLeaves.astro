@@ -1,0 +1,117 @@
+---
+import PhosphorIcon from "./PhosphorIcon.astro";
+import FlowArrow from "./FlowArrow.astro";
+
+// The local-vs-cloud tradeoff, told as a promise trio: the cloud-vs-house
+// contrast plus a supporting cost tile. Icons carry the metaphor: cloud-arrow-up
+// (code uploaded = exposure) vs house (the hound lives where your code lives).
+// Registered in the script below, like siblings. All three share one .card-grid
+// peer entrance (default fade-up, staggered) — see global.css.
+// "Nothing leaves" describes custody of the local index, not zero network egress.
+// Preserve the remote-provider boundary below; docs/configuration.md explains it.
+const tradeoff = [
+  {
+    icon: "ph-cloud-arrow-up",
+    title: "The cloud tradeoff",
+    detail:
+      "Understanding <em>or</em> exposure. The deeper the agent reads, the more your code travels — so teams hold back, and the agent stays shallow.",
+  },
+  {
+    icon: "ph-house",
+    title: "The house-trained hound",
+    detail:
+      "ChunkHound lives where your code lives. The agent gets the whole territory — every module, every commit — while <em>the index stays on your machine</em>. A hound that phones home isn&rsquo;t yours.",
+  },
+];
+---
+
+<script>
+  import "@phosphor-icons/webcomponents/PhCloudArrowUp";
+  import "@phosphor-icons/webcomponents/PhHouse";
+  import "@phosphor-icons/webcomponents/PhPiggyBank";
+</script>
+
+<section id="nothing-leaves" class="nothing-leaves" aria-labelledby="nothing-leaves-heading">
+  <div class="container">
+    <header class="intro" data-reveal>
+      <p class="eyebrow">NOTHING LEAVES</p>
+      <h2 id="nothing-leaves-heading">Cloud coding assistants make you choose: a smart agent, or private code.</h2>
+      <p>Send your codebase to a cloud service and it builds the index that makes the agent smart — but your code has left the building. Keep it home and the agent sees only what fits in the context. ChunkHound dissolves the tradeoff: the index lives on your machine, so your agent may read <em>everything</em> precisely because <em>nothing</em> leaves.</p>
+    </header>
+
+    <div class="card-grid contrast-grid">
+      {tradeoff.map((card, index) => (
+        <article
+          class="card-tile"
+          data-reveal
+          data-local={index === 1 ? "true" : undefined}
+        >
+          <span class="icon-chip" aria-hidden="true">
+            <PhosphorIcon name={card.icon} size="24" weight="duotone" />
+          </span>
+          <h3>{card.title}</h3>
+          <p set:html={card.detail} />
+        </article>
+      ))}
+
+      <!-- Supporting cost tile: the same "dissolve the tradeoff" logic applied
+           to spend. Cheap embeddings + a cheap reranker make affordable models
+           sufficient, so the money icon supports the privacy promise instead of
+           competing with it. Sits in the same row, completing the promise trio. -->
+      <article class="card-tile cost-support" data-reveal>
+        <span class="icon-chip" aria-hidden="true">
+          <PhosphorIcon name="ph-piggy-bank" size="24" weight="duotone" />
+        </span>
+        <h3>Cheap and accurate — pick both</h3>
+        <p>Cheap embeddings and a cheap reranker narrow every question to high-signal context, so affordable models carry the research. You pay your providers at cost; ChunkHound takes no markup.</p>
+      </article>
+    </div>
+
+    <p id="cost" class="cost-result flow-bar" data-reveal>
+      <PhosphorIcon name="ph-piggy-bank" size="20" weight="duotone" aria-hidden="true" />
+      <span>Own the stack.</span>
+      <FlowArrow />
+      <strong>Your models. Your bill. Deep research at cost.</strong>
+    </p>
+
+    <p class="boundary" data-reveal>You draw the trust boundary: choose local providers (Ollama, vLLM) for local model processing, or remote embedding and LLM providers when their data boundary fits. Remote providers receive request content — ChunkHound never sends anything on its own.</p>
+  </div>
+</section>
+
+<script>
+  import "../scripts/count-reveal.ts";
+</script>
+
+<style>
+  /* Token contract: marketing-surface tokens only (no --code-*); tiles
+     --bg-surface + border, local tile --border-accent ring, boundary
+     --text-tertiary — same vocabulary as ProvenAtScale / EnterpriseTeaser. */
+  .nothing-leaves { padding: var(--space-10) 0; }
+  .intro em { color: var(--text-primary); font-style: normal; font-weight: 600; }
+
+  /* The promise trio: the two opposing tiles plus the supporting cost tile all
+     share one .card-grid row, so they enter as one peer group (default fade-up
+     + shared stagger from global.css). The house-trained side and the cost tile
+     wear the --border-accent ring (ProvenAtScale's .featured treatment). */
+  .contrast-grid { margin: 0; }
+  .contrast-grid article[data-local="true"] { border-color: var(--border-accent); }
+  .contrast-grid h3 { margin: var(--space-4) 0 var(--space-2); }
+  .contrast-grid em { color: var(--text-primary); font-style: normal; font-weight: 600; }
+
+  /* Supporting cost tile: wears the same --border-accent ring as the
+     house-trained-hound tile; otherwise shares the tile recipe above. */
+  .cost-support { border-color: var(--border-accent); }
+
+  /* Cost outcome bar: the shared .flow-bar recipe (global.css) plus the icon
+     alignment it alone needs. Centered with a measure: DESIGN_SYSTEM permits
+     centering short, isolated accent bars. Stacking is a vertical flow, so the
+     same rule flips the arrow down. */
+  .cost-result ph-piggy-bank { display: block; flex-shrink: 0; }
+
+  /* Trust-boundary honesty clause: tertiary footnote, same pattern as
+     ProvenAtScale's .disclaimer / ResearchStory's .boundary. Centered to the
+     outcome bar above and matched to its measure. */
+  .boundary { margin: var(--space-5) auto 0; max-width: var(--accent-measure); text-align: center; }
+
+  @media (max-width: 600px) { .cost-result { --flow-glyph: "\2193"; flex-direction: column; } }
+</style>

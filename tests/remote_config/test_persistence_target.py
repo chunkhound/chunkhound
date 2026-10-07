@@ -65,6 +65,16 @@ def test_env_pinned_missing_does_not_fall_back_to_candidates(
     assert cfg.global_config_file is None
 
 
+def test_read_target_accepts_utf8_bom(_isolate: Path) -> None:
+    # Windows tools emit a UTF-8 BOM; the loader tolerates it (utf-8-sig), so
+    # the pipeline's on-disk read must agree — otherwise rule application
+    # silently skips for a global config the loader handles fine.
+    target = _isolate / ".chunkhound.json"
+    target.write_bytes(b'\xef\xbb\xbf{"embedding": {"provider": "voyageai"}}')
+
+    assert persistence.read_target(target) == {"embedding": {"provider": "voyageai"}}
+
+
 def test_reader_treats_missing_env_target_as_empty_base(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

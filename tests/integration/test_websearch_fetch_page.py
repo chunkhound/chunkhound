@@ -33,6 +33,7 @@ import pytest_asyncio
 from chunkhound.utils.websearch_core import (
     _CHROME_PATHS,
     _fetch_page,
+    _launch_chrome,
     _resolve_chrome_path,
 )
 
@@ -81,27 +82,17 @@ async def _wait_for_target_count(
 async def chrome_browser() -> AsyncIterator[zd.Browser]:
     """Per-test Chrome. Function-scoped so target counts start clean.
 
-    Uses the production ``_resolve_chrome_path`` so the explicit-path
-    probe + version check that ``fetch_and_save`` relies on is exercised
-    here — a Chrome <124 or otherwise unverifiable binary returns ``None``
-    and skips the test instead of letting it hit the silent-event-drop
-    loop in zendriver's listener.
+    Uses the production ``_resolve_chrome_path`` + ``_launch_chrome`` so the
+    explicit-path probe, version check, and cold-start-tolerant launch budget
+    that ``fetch_and_save`` relies on are exercised here — a Chrome <124 or
+    otherwise unverifiable binary returns ``None`` and skips the test instead
+    of letting it hit the silent-event-drop loop in zendriver's listener.
     """
-    import zendriver as zd
-
     chrome_path = _resolve_chrome_path()
     if chrome_path is None:
         pytest.skip("No Chrome resolvable via _resolve_chrome_path")
 
-    browser = await zd.start(
-        headless=True,
-        browser_args=[
-            "--headless=new",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-        ],
-        browser_executable_path=chrome_path,
-    )
+    browser = await _launch_chrome(chrome_path)
     try:
         yield browser
     finally:

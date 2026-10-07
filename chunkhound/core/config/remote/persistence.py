@@ -16,13 +16,13 @@ Contract:
   the "did this apply?" signal at exactly the moment they need it most.
 """
 
-import json
 import os
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
+from chunkhound.core.config._utils import read_json_file
 from chunkhound.core.config.config import Config
 from chunkhound.utils.atomic_write import write_json_atomically
 
@@ -56,8 +56,10 @@ def read_target(target: Path) -> dict[str, Any]:
     """Read the on-disk global JSON, or return an empty dict if absent."""
     if not target.exists():
         return {}
-    with open(target) as f:
-        data = json.load(f)
+    # read_json_file, not bare json.load: the loader accepts BOM-prefixed
+    # global configs, so this read must agree or the pipeline would skip
+    # rule application for files the loader handles fine.
+    data = read_json_file(target)
     if not isinstance(data, dict):
         return {}
     return data

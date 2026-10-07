@@ -499,7 +499,7 @@ class EmbeddingConfig(BaseSettings):
         parser.add_argument(
             "--model",
             "--embedding-model",
-            help="Embedding model (default: text-embedding-3-small)",
+            help="Embedding model (default: per provider)",
         )
 
         parser.add_argument(

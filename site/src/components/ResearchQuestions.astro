@@ -1,0 +1,71 @@
+---
+import PhosphorIcon from "./PhosphorIcon.astro";
+
+// The questions the repo-and-web research actually answers (ResearchStory):
+// real engineering moments, each one demanding both halves of the knowledge
+// base. The `evidence` line names those halves per question.
+const questions = [
+  {
+    icon: "ph-bug",
+    title: "Why is this breaking?",
+    description: "Follow the failure through your code, find the commit that changed the behavior, then connect it to upstream issues, release notes, and known fixes.",
+    evidence: "Stack trace + code + git + upstream issues",
+  },
+  {
+    icon: "ph-wrench",
+    title: "How should we build this?",
+    description: "Start with your architecture and constraints, compare real solutions, read the docs and tutorials, and see how the options perform in practice.",
+    evidence: "Architecture + docs + tutorials + benchmarks",
+  },
+  {
+    icon: "ph-git-pull-request",
+    title: "Is this PR actually good?",
+    description: "Check the diff against the surrounding system and its history, then compare its APIs, tests, and security choices with current guidance.",
+    evidence: "Diff + project history + current best practices",
+  },
+];
+---
+
+<script>
+  import "@phosphor-icons/webcomponents/PhBug";
+  import "@phosphor-icons/webcomponents/PhGitPullRequest";
+  import "@phosphor-icons/webcomponents/PhWrench";
+</script>
+
+<section id="questions" class="research-questions" aria-labelledby="questions-heading">
+  <div class="container">
+    <header class="intro" data-reveal>
+      <p class="eyebrow">THE QUESTIONS THAT NEED BOTH</p>
+      <h2 id="questions-heading">Research the problem without bouncing between tools.</h2>
+    </header>
+
+    <ol class="card-grid question-grid" aria-label="Research questions">
+      {questions.map((question) => (
+        <li class="card-tile" data-reveal>
+          <span class="icon-chip question-icon" aria-hidden="true"><PhosphorIcon name={question.icon} size="24" weight="duotone" /></span>
+          <p class="evidence">{question.evidence}</p>
+          <h3>{question.title}</h3>
+          <p>{question.description}</p>
+        </li>
+      ))}
+    </ol>
+
+    <div class="disclaimer" data-reveal role="note">
+      <p class="eyebrow">Privacy</p>
+      <p class="disclaimer-text">Web discovery and fetching contact DuckDuckGo and source websites. Full model-processing privacy requires local embedding, reranking, and LLM providers.</p>
+    </div>
+  </div>
+</section>
+
+<script>
+  import "../scripts/count-reveal.ts";
+</script>
+
+<style>
+  .research-questions { padding: var(--space-10) 0; }
+  /* Evidence line: the mixed-source label above each question title. */
+  .evidence { color: var(--text-tertiary); font-size: var(--text-xs); font-weight: 600; letter-spacing: .12em; line-height: var(--lh-xs); margin-bottom: var(--space-2); text-transform: uppercase; }
+  .question-grid { list-style: none; }
+  .question-icon { margin-bottom: var(--space-4); }
+  .question-grid h3 { margin-bottom: var(--space-2); }
+</style>

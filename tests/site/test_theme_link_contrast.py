@@ -3,58 +3,36 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.site.contrast_helpers import (
+    GLOBAL_CSS,
+    HERO_CSS,
+    contrast_ratio,
+    extract_block,
+    extract_tokens,
+    theme_tokens,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
-GLOBAL_CSS = ROOT / "site" / "src" / "styles" / "global.css"
 
+def _extract_shiki_dark_token(html: str) -> str:
+    """Color of the first rendered shell-comment token (text starts with '#').
 
-def _extract_block(css: str, selector: str) -> str:
-    pattern = rf"{re.escape(selector)}\s*\{{(.*?)\n\}}"
-    match = re.search(pattern, css, re.DOTALL)
-    assert match, f"Missing CSS block for {selector}"
-    return match.group(1)
-
-
-def _extract_tokens(block: str) -> dict[str, str]:
-    return {
-        name: value
-        for name, value in re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})\s*;", block)
-    }
-
-
-def _extract_shiki_dark_token(html: str, rendered_text: str) -> str:
+    Matched by comment grammar, not by pinned copy, so docs edits cannot break
+    the probe; the token's own hex comes from the Shiki theme via --shiki-dark.
+    """
     match = re.search(
-        rf'<span style="[^"]*--shiki-dark:(#[0-9a-fA-F]{{6}})[^"]*">'
-        rf"{re.escape(rendered_text)}</span>",
+        r'<span style="[^"]*--shiki-dark:(#[0-9a-fA-F]{6})[^"]*">#[^<]*</span>',
         html,
     )
-    assert match, f"Missing rendered Shiki token for {rendered_text!r}"
+    assert match, "No rendered Shiki comment token found in the docs page"
     return match.group(1)
-
-
-def _srgb_to_linear(channel: float) -> float:
-    return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
-
-
-def _relative_luminance(hex_color: str) -> float:
-    channels = [int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
-    red, green, blue = (_srgb_to_linear(channel) for channel in channels)
-    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
-
-
-def _contrast_ratio(foreground: str, background: str) -> float:
-    foreground_luminance = _relative_luminance(foreground)
-    background_luminance = _relative_luminance(background)
-    lighter = max(foreground_luminance, background_luminance)
-    darker = min(foreground_luminance, background_luminance)
-    return (lighter + 0.05) / (darker + 0.05)
 
 
 def test_link_tokens_meet_aa_contrast_in_light_and_dark_themes() -> None:
-    css = GLOBAL_CSS.read_text(encoding="utf-8")
-    dark_tokens = _extract_tokens(_extract_block(css, ":root"))
-    light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
+    tokens = theme_tokens()
+    dark_tokens = tokens["dark"]
+    light_tokens = tokens["light"]
 
     token_pairs = [
         (light_tokens["--link"], light_tokens["--bg-surface"]),
@@ -72,13 +50,55 @@ def test_link_tokens_meet_aa_contrast_in_light_and_dark_themes() -> None:
     ]
 
     for foreground, background in token_pairs:
-        assert _contrast_ratio(foreground, background) >= 4.5
+        assert contrast_ratio(foreground, background) >= 4.5
+
+
+def _hero_surface_tokens() -> dict[str, dict[str, str]]:
+    """Page theme tokens overlaid with the hero scope's local re-points.
+
+    One alias level, like theme_tokens(): a surface re-points the link family to
+    code tones, and those aliases must resolve to the hex the browser paints.
+    """
+    local = extract_tokens(extract_block(HERO_CSS.read_text(encoding="utf-8"), ".hero"))
+
+    scoped_by_theme: dict[str, dict[str, str]] = {}
+    for theme, page in theme_tokens().items():
+        scoped = dict(page)
+        for name, value in local.items():
+            scoped[name] = page[value[4:-1]] if value.startswith("var(") else value
+        scoped_by_theme[theme] = scoped
+    return scoped_by_theme
+
+
+def test_hero_cta_link_recipe_carries_the_code_surface_highlight() -> None:
+    """The hero's main CTA must carry the code surface's highlight, not body text.
+
+    DESIGN_SYSTEM (Code Surface Accent): on --code-bg use --code-accent, never
+    the theme-adaptive --primary. The prose-link rules (`a`, `a:visited`,
+    `a:hover` — element + pseudo, 0,1,1) outrank the CTA's lone class (0,1,0), so
+    the surface — not the control — re-points the family; otherwise a visited
+    CTA takes light theme's ink --link-visited (1.55:1 on --code-bg) and the
+    page's one action disappears.
+    """
+    for theme, scoped in _hero_surface_tokens().items():
+        highlight = scoped["--code-accent"]
+        surface = scoped["--code-bg"]
+        for state in ("--link", "--link-hover", "--link-visited"):
+            assert scoped[state] == highlight, (
+                f"{theme}: {state} must resolve to the code-surface highlight "
+                f"(--code-accent), got {scoped[state]}"
+            )
+            ratio = contrast_ratio(scoped[state], surface)
+            assert ratio >= 4.5, f"{theme}: {state} on --code-bg = {ratio:.2f}:1"
+        # Non-text contrast: the focus ring must clear the surface behind it.
+        ring = contrast_ratio(scoped["--link-focus"], surface)
+        assert ring >= 3.0, f"{theme}: --link-focus on --code-bg = {ring:.2f}:1"
 
 
 def test_astro_code_background_uses_shared_code_surface_token() -> None:
     css = GLOBAL_CSS.read_text(encoding="utf-8")
 
-    default_block = _extract_block(css, "pre.astro-code")
+    default_block = extract_block(css, "pre.astro-code")
 
     assert "background-color: var(--code-bg) !important;" in default_block
     assert "color: var(--shiki-dark) !important;" in default_block
@@ -87,19 +107,19 @@ def test_astro_code_background_uses_shared_code_surface_token() -> None:
 def test_astro_code_tokens_are_intentionally_pinned_to_dark_shiki_values() -> None:
     css = GLOBAL_CSS.read_text(encoding="utf-8")
 
-    span_block = _extract_block(css, "pre.astro-code span")
+    span_block = extract_block(css, "pre.astro-code span")
 
     assert "color: var(--shiki-dark) !important;" in span_block
 
 
 def test_rendered_comment_token_meets_aa_contrast_on_shared_code_surfaces() -> None:
-    css = GLOBAL_CSS.read_text(encoding="utf-8")
-    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(encoding="utf-8")
-    dark_tokens = _extract_tokens(_extract_block(css, ":root"))
-    light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
-    comment_token = _extract_shiki_dark_token(
-        getting_started, "# Skip if you already have uv"
+    getting_started = (DIST / "docs" / "getting-started" / "index.html").read_text(
+        encoding="utf-8"
     )
+    tokens = theme_tokens()
+    dark_tokens = tokens["dark"]
+    light_tokens = tokens["light"]
+    comment_token = _extract_shiki_dark_token(getting_started)
 
     token_pairs = [
         (comment_token, dark_tokens["--code-bg"]),
@@ -107,13 +127,13 @@ def test_rendered_comment_token_meets_aa_contrast_on_shared_code_surfaces() -> N
     ]
 
     for foreground, background in token_pairs:
-        assert _contrast_ratio(foreground, background) >= 4.5
+        assert contrast_ratio(foreground, background) >= 4.5
 
 
 def test_code_surface_text_meets_aa_contrast_in_both_site_themes() -> None:
-    css = GLOBAL_CSS.read_text(encoding="utf-8")
-    dark_tokens = _extract_tokens(_extract_block(css, ":root"))
-    light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
+    tokens = theme_tokens()
+    dark_tokens = tokens["dark"]
+    light_tokens = tokens["light"]
 
     token_pairs = [
         (dark_tokens["--code-text"], dark_tokens["--code-bg"]),
@@ -121,13 +141,13 @@ def test_code_surface_text_meets_aa_contrast_in_both_site_themes() -> None:
     ]
 
     for foreground, background in token_pairs:
-        assert _contrast_ratio(foreground, background) >= 4.5
+        assert contrast_ratio(foreground, background) >= 4.5
 
 
 def test_code_surface_accent_tokens_meet_aa_contrast_in_both_site_themes() -> None:
-    css = GLOBAL_CSS.read_text(encoding="utf-8")
-    dark_tokens = _extract_tokens(_extract_block(css, ":root"))
-    light_tokens = _extract_tokens(_extract_block(css, '[data-theme="light"]'))
+    tokens = theme_tokens()
+    dark_tokens = tokens["dark"]
+    light_tokens = tokens["light"]
 
     token_pairs = [
         (dark_tokens["--code-accent"], dark_tokens["--code-bg"]),
@@ -137,4 +157,4 @@ def test_code_surface_accent_tokens_meet_aa_contrast_in_both_site_themes() -> No
     ]
 
     for foreground, background in token_pairs:
-        assert _contrast_ratio(foreground, background) >= 4.5
+        assert contrast_ratio(foreground, background) >= 4.5

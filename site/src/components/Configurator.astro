@@ -1,457 +1,314 @@
 ---
 import {
-    DEFAULT_EDITOR,
-    DEFAULT_EMBEDDING,
-    DEFAULT_LLM,
-    DEFAULT_PLATFORM,
-    buildCompactConfiguratorOutput,
-    buildEditorCommands,
-    buildFullConfiguratorOutput,
-    configWithApiKey,
-    editors,
-    embeddingProviders,
-    llmProviders,
-} from "./configurator-data";
+  DEFAULT_AGENT,
+  DEFAULT_PLATFORM,
+  DEFAULT_RESEARCH,
+  DEFAULT_RETRIEVAL,
+  buildCompactConfiguratorOutput,
+  buildEditorCommands,
+  buildFullConfiguratorOutput,
+  configWithApiKey,
+  editors,
+  embeddingProviders,
+  findEditor,
+  findEmbeddingProvider,
+  findLlmProvider,
+  groupProviders,
+  llmProviders,
+  rerankerState,
+  rerankerStateLabel,
+  rerankerStatus,
+} from "./configurator/index.ts";
 import CodeBlock from "./CodeBlock.astro";
 import PlatformCodeBlock from "./PlatformCodeBlock.astro";
-import { DEMO_CODE_PALETTE } from '../lib/shiki-config.js';
+import StageDetail from "./StageDetail.astro";
+import StageTile from "./StageTile.astro";
+import { DEMO_CODE_PALETTE } from "../lib/shiki-config.js";
 
 interface Props {
-    heading?: string;
-    compact?: boolean;
+  heading?: string;
+  compact?: boolean;
+  /** Homepage-only: container-level entrance choreography via count-reveal.
+      Docs instances stay static — no prop, no reveal hooks, script no-ops. */
+  animated?: boolean;
 }
 
-const { heading = "Connect to your AI agent", compact = true } = Astro.props;
-
-const embeddingConfigs = Object.fromEntries(
-    embeddingProviders.map((e) => [e.id, JSON.stringify(configWithApiKey(e))]),
-);
-const llmConfigs = Object.fromEntries(
-    llmProviders.map((l) => [l.id, JSON.stringify(configWithApiKey(l))]),
-);
-const editorCmds = buildEditorCommands();
-
-const defaultEmbedding = embeddingProviders.find(
-    (e) => e.id === DEFAULT_EMBEDDING,
-)!;
-const defaultLlm = llmProviders.find((l) => l.id === DEFAULT_LLM)!;
-
-// Compact mode (homepage): single-line echo + editor cmd + chunkhound index .
-// Full mode (docs): multi-line annotated heredoc + multi-line editor heredoc,
-// no index command
-let defaultCopy: string;
-let defaultHighlighted: string;
-if (compact) {
-    const defaultOutput = buildCompactConfiguratorOutput(
-        defaultEmbedding,
-        defaultLlm,
-        DEFAULT_EDITOR,
-        DEFAULT_PLATFORM,
-    );
-    defaultCopy = defaultOutput.copy;
-    defaultHighlighted = defaultOutput.html;
-} else {
-    const defaultOutput = buildFullConfiguratorOutput(
-        defaultEmbedding,
-        defaultLlm,
-        DEFAULT_EDITOR,
-        DEFAULT_PLATFORM,
-    );
-    defaultCopy = defaultOutput.copy;
-    defaultHighlighted = defaultOutput.html;
-}
-
+const { heading = "Build your ChunkHound setup", compact = true, animated = false } = Astro.props;
+const defaultAgent = findEditor(DEFAULT_AGENT);
+const defaultRetrieval = findEmbeddingProvider(DEFAULT_RETRIEVAL);
+const defaultResearch = findLlmProvider(DEFAULT_RESEARCH);
+const defaultOutput = compact
+  ? buildCompactConfiguratorOutput(defaultRetrieval, defaultResearch, DEFAULT_AGENT, DEFAULT_PLATFORM)
+  : buildFullConfiguratorOutput(defaultRetrieval, defaultResearch, DEFAULT_AGENT, DEFAULT_PLATFORM);
+const editorCommands = buildEditorCommands();
+const groupedRetrieval = groupProviders(embeddingProviders);
+const groupedResearch = groupProviders(llmProviders);
+// Pre-JS paint must match the runtime literals single-sourced here — the
+// script (configurator.ts) derives the same values on state changes.
+const defaultRerankerState = rerankerState(defaultRetrieval);
+const defaultRerankerStateLabel = rerankerStateLabel(defaultRerankerState);
+const defaultRerankerStatus = rerankerStatus(defaultRetrieval);
 ---
 
 <section
-    class={`configurator ${compact ? "configurator-compact" : ""}`}
-    data-mode={compact ? "compact" : "full"}
-    aria-label="Setup configurator"
+  id={compact ? "configurator" : undefined}
+  class:list={["configurator", compact && "configurator-compact"]}
+  data-mode={compact ? "compact" : "full"}
+  aria-label="Setup configurator"
 >
-    <div class="container">
-        {heading && <h2 class="section-heading">{heading}</h2>}
-        <!-- Editor selector -->
-        <fieldset
-            class="pill-group"
-            role="radiogroup"
-            aria-label="Choose your editor"
-        >
-            <legend class="sr-only">Works with your agent</legend>
-            <div class="group-label" aria-hidden="true">Works with your agent</div>
-            <div class="pills">
-                {
-                    editors.map((e) => (
-                        <button
-                            role="radio"
-                            aria-checked={
-                                e.id === DEFAULT_EDITOR ? "true" : "false"
-                            }
-                            data-editor={e.id}
-                            data-cmd={editorCmds[e.id]}
-                            class={`pill ${e.id === DEFAULT_EDITOR ? "selected" : ""}`}
-                        >
-                            <Fragment set:html={e.svg} />
-                            <span>{e.name}</span>
-                        </button>
-                    ))
-                }
-                <span class="more">+ any MCP-compatible</span>
-            </div>
-        </fieldset>
+  <div class="container">
+    {heading && <h2 class="section-heading">{heading}</h2>}
+    <p class="setup-lead">Each layer is independent — pick any embedding, research model, and agent.</p>
 
-        <!-- Embedding provider selector -->
-        <fieldset
-            class="pill-group"
-            role="radiogroup"
-            aria-label="Choose your embedding provider"
-        >
-            <legend class="sr-only">Embedding provider</legend>
-            <div class="group-label" aria-hidden="true">Embedding provider</div>
-            <div class="pills">
-                {
-                    embeddingProviders.map((e) => (
-                        <button
-                            role="radio"
-                            aria-checked={
-                                e.id === DEFAULT_EMBEDDING ? "true" : "false"
-                            }
-                            data-embedding={e.id}
-                            data-config={embeddingConfigs[e.id]}
-                            data-setup-hint={e.setupHint || ""}
-                            class={`pill ${e.id === DEFAULT_EMBEDDING ? "selected" : ""}`}
-                        >
-                            <Fragment set:html={e.svg} />
-                            <span>{e.name}</span>
-                        </button>
-                    ))
-                }
-                <span class="more">+ any OpenAI-compatible</span>
-            </div>
-        </fieldset>
+    <!-- Section-level content hook: the Configurator generates provider setup
+         and owns no caller-specific content. The homepage fills this with the
+         install step; the docs instance passes nothing, so it renders empty. -->
+    <slot name="preamble" />
 
-        <!-- LLM provider selector -->
-        <fieldset
-            class="pill-group"
-            role="radiogroup"
-            aria-label="Choose your LLM provider"
-        >
-            <legend class="sr-only">LLM provider</legend>
-            <div class="group-label" aria-hidden="true">LLM provider</div>
-            <div class="pills">
-                {
-                    llmProviders.map((l) => (
-                        <button
-                            role="radio"
-                            aria-checked={
-                                l.id === DEFAULT_LLM ? "true" : "false"
-                            }
-                            data-llm={l.id}
-                            data-config={llmConfigs[l.id]}
-                            data-setup-hint={l.setupHint || ""}
-                            class={`pill ${l.id === DEFAULT_LLM ? "selected" : ""}`}
-                        >
-                            <Fragment set:html={l.svg} />
-                            <span>{l.name}</span>
-                        </button>
-                    ))
-                }
-            </div>
-        </fieldset>
-
-        <!-- Single combined code block -->
-        <PlatformCodeBlock class="code-panel" copyBtnId="config-copy-btn" ariaLabel="Copy all commands" dataCopy={defaultCopy}>
-            <pre><code id="config-output" set:html={defaultHighlighted} /></pre>
-        </PlatformCodeBlock>
-
-        <!-- Local setup callout — shown when selected providers need local models -->
-        <div id="rerank-callout" class="rerank-callout" hidden>
-            <p class="rerank-title">Local setup</p>
-            <p class="rerank-body">Set up the models before running ChunkHound:</p>
-            <CodeBlock copyBtnId="rerank-copy-btn" ariaLabel="Copy setup commands">
-                <pre class="rerank-cmd"><code></code></pre>
-            </CodeBlock>
+    <div class="setup-builder" data-reveal={animated ? "" : undefined}>
+      <!-- One instance per page: the script binds page-global IDs
+           (config-output, config-copy-btn, rerank-url-error,
+           prerequisite-callout), so a second instance on the same page
+           would duplicate IDs and fight over one output. (Homepage and
+           docs each render one — never two on one page.) -->
+      <!-- The tab strip is this card's header and the active stage is its body,
+           so the tabs visibly own only this card. The output is a separate card
+           beside it, not a fourth step. -->
+      <section class="setup-config">
+        <div class="setup-stages" role="tablist" aria-label="Setup choices">
+          <StageTile number="01" role="retrieval" heading="Retrieval" active={true} />
+          <StageTile number="02" role="research" heading="Research" active={false} />
+          <StageTile number="03" role="agent" heading="Agent" active={false} />
         </div>
 
-        <div class="secrets-callout" role="note">
-            <p class="secrets-title">.chunkhound.json holds your API keys</p>
-            <p class="secrets-body">
-                The first command adds it to <code>.gitignore</code> so you
-                don't commit secrets. Replace the <code
-                    >&lt;YOUR_*_API_KEY&gt;</code
-                > placeholders with real keys before running. Local
-                OpenAI-compatible backends still need an explicit
-                <code>model</code>. Need <a
-                    href="/docs/configuration/#advanced-routing"
-                    >Azure OpenAI, a self-hosted endpoint, or a proxy</a
-                >?
-            </p>
+        <div class="setup-panels">
+        <StageDetail
+          role="retrieval"
+          description="Choose the embeddings that index and find your code."
+          defaultOption={defaultRetrieval}
+          groups={groupedRetrieval}
+          searchPlaceholder="retrieval providers"
+          active={true}
+        >
+          <section class="rerank-endpoint" data-rerank-endpoint data-rerank-state={defaultRerankerState} aria-labelledby="reranking-heading">
+            <div class="rerank-heading">
+              <h4 id="reranking-heading">Reranking</h4>
+              <p class="rerank-state-label" data-rerank-state-label>{defaultRerankerStateLabel}</p>
+            </div>
+            <p class="rerank-status" data-rerank-status role="status">{defaultRerankerStatus}</p>
+            <details data-rerank-details>
+              <summary data-rerank-details-summary>Customize reranker</summary>
+              <div class="rerank-fields">
+                <label>
+                  <span>Reranker endpoint URL</span>
+                  <input data-rerank-url type="text" inputmode="url" placeholder="https://reranker.example.com/rerank" autocomplete="url" />
+                </label>
+                <p data-rerank-url-hint>Use an absolute HTTP(S) URL for this preset.</p>
+                <label>
+                  <span>Reranker API format</span>
+                  <span class="rerank-select">
+                    <select data-rerank-format>
+                      <option value="">Choose a format</option>
+                      <option value="tei">TEI</option>
+                      <option value="cohere">Cohere</option>
+                      <option value="voyage">Voyage</option>
+                    </select>
+                  </span>
+                </label>
+                <label>
+                  <span>Reranker model</span>
+                  <input data-rerank-model type="text" placeholder="Required for Cohere / Voyage" autocomplete="off" />
+                </label>
+                <p>TEI uses the model configured on its server. Cohere and Voyage require a model. Voyage is for native Voyage-compatible endpoints such as MongoDB Atlas (uses <code>top_k</code> and returns a <code>data</code> array).</p>
+                <p data-rerank-url-error id="rerank-url-error" role="alert" hidden></p>
+              </div>
+            </details>
+          </section>
+        </StageDetail>
+        <StageDetail
+          role="research"
+          description="The model for deep research — configured separately from retrieval."
+          defaultOption={defaultResearch}
+          groups={groupedResearch}
+          searchPlaceholder="research providers"
+          active={false}
+        />
+        <StageDetail
+          role="agent"
+          description="Connect the MCP tools to the coding agent you use."
+          defaultOption={defaultAgent}
+          groups={[{ options: editors }]}
+          searchPlaceholder="agents"
+          active={false}
+        />
         </div>
+      </section>
 
-        {/* Hidden data for crawlers: all configs in DOM */}
-        <div hidden aria-hidden="true">
-            {
-                embeddingProviders.map((e) => (
-                    <pre data-seo-embedding={e.id}>
-                        {JSON.stringify(configWithApiKey(e))}
-                    </pre>
-                ))
-            }
-            {
-                llmProviders.map((l) => (
-                    <pre data-seo-llm={l.id}>
-                        {JSON.stringify(configWithApiKey(l))}
-                    </pre>
-                ))
-            }
-            {
-                editors.map((e) => (
-                    <pre data-seo-editor={e.id}>{editorCmds[e.id]}</pre>
-                ))
-            }
+      <section class="setup-output" aria-labelledby="setup-output-heading">
+        <div class="output-header">
+          <h3 id="setup-output-heading">Generated setup</h3>
         </div>
+        <div class="output-body">
+          <p class="output-note">Review the generated commands, choose a shell, then copy them.</p>
+          <PlatformCodeBlock class="code-panel" copyBtnId="config-copy-btn" ariaLabel="Copy setup commands" dataCopy={defaultOutput.copy}>
+            <pre tabindex="0"><code id="config-output" set:html={defaultOutput.html} /></pre>
+          </PlatformCodeBlock>
+        </div>
+      </section>
+
+      <div id="prerequisite-callout" class="setup-callout" hidden>
+        <p>Run these local model commands first.</p>
+        <CodeBlock copyBtnId="prerequisite-copy-btn" ariaLabel="Copy prerequisite commands">
+          <pre><code /></pre>
+        </CodeBlock>
+      </div>
+
+      <aside class="setup-notes">
+        <div class="disclaimer" role="note">
+          <p class="eyebrow">Provider boundary</p>
+          <p class="disclaimer-text">ChunkHound runs its CLI, database, indexing, and research pipeline locally. Remote embedding, reranking, and research providers receive the content needed to process your request.</p>
+        </div>
+        <div class="disclaimer" role="note">
+          <p class="eyebrow">Privacy</p>
+          <p class="disclaimer-text">Default retrieval uses VoyageAI: the runtime and index stay local while relevant content is sent for embeddings and reranking. For sensitive content, <a href="https://dashboard.voyageai.com/organization/tos">opt out under VoyageAI&rsquo;s Terms</a> before setup; the opt-out applies to future submissions and requires a payment method. Choose Ollama or vLLM for local/on-prem processing.</p>
+        </div>
+        <div class="disclaimer" role="note">
+          <p class="eyebrow">Before you run</p>
+          <p class="disclaimer-text">The generated setup adds <code>.chunkhound.json</code> to <code>.gitignore</code>. Replace API-key placeholders before running.</p>
+        </div>
+      </aside>
     </div>
+
+    <div hidden aria-hidden="true">
+      {embeddingProviders.map((provider) => <pre data-seo-embedding={provider.id}>{JSON.stringify(configWithApiKey(provider))}</pre>)}
+      {llmProviders.map((provider) => <pre data-seo-llm={provider.id}>{JSON.stringify(configWithApiKey(provider))}</pre>)}
+      {Object.entries(editorCommands).map(([id, command]) => <pre data-seo-agent={id}>{command}</pre>)}
+    </div>
+  </div>
 </section>
 
 <script>
-    import "../scripts/configurator.ts";
+  import "../scripts/configurator.ts";
+  // No-op when the page has no reveal hooks (e.g. docs instances).
+  import "../scripts/count-reveal.ts";
 </script>
 
 <style define:vars={{ themeCmd: DEMO_CODE_PALETTE.cmd, themeString: DEMO_CODE_PALETTE.string, themeOp: DEMO_CODE_PALETTE.op, themeJsonKey: DEMO_CODE_PALETTE.jsonKey, themeComment: DEMO_CODE_PALETTE.comment, themeText: DEMO_CODE_PALETTE.text }}>
-    .configurator {
-        padding: var(--space-8) 0;
-    }
-
-    .configurator-compact {
-        padding: var(--space-5) 0;
-    }
-
-    .section-heading {
-        font-size: var(--text-2xl);
-        line-height: var(--lh-2xl);
-        font-weight: 600;
-        color: var(--text-primary);
-        text-align: center;
-        margin-bottom: var(--space-6);
-    }
-
-    .container {
-        max-width: 1120px;
-        margin: 0 auto;
-        padding: 0 var(--space-6);
-    }
-
-    .configurator-compact .container {
-        max-width: none;
-        padding: 0;
-    }
-
-    .pill-group {
-        border: none;
-        padding: 0;
-        margin: 0 0 var(--space-4);
-    }
-
-    .sr-only {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        padding: 0;
-        margin: -1px;
-        overflow: hidden;
-        clip: rect(0 0 0 0);
-        clip-path: inset(50%);
-        white-space: nowrap;
-        border: 0;
-    }
-
-    .group-label {
-        text-transform: uppercase;
-        font-size: var(--text-xs);
-        font-weight: 600;
-        letter-spacing: 0.12em;
-        color: var(--text-muted);
-        margin-bottom: var(--space-3);
-        text-align: center;
-    }
-
-    .pills {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        gap: var(--space-2);
-        flex-wrap: wrap;
-    }
-
-    .pill {
-        display: inline-flex;
-        align-items: center;
-        gap: var(--space-1);
-        height: 32px;
-        padding: 0 var(--space-3);
-        border-radius: var(--radius-full);
-        border: 1px solid var(--border-color);
-        background: transparent;
-        color: var(--text-tertiary);
-        font-family: inherit;
-        font-size: var(--text-xs);
-        font-weight: 600;
-        cursor: pointer;
-        transition:
-            color 0.2s,
-            background 0.2s,
-            border-color 0.2s;
-    }
-
-    .pill:hover {
-        color: var(--text-secondary);
-        border-color: var(--text-tertiary);
-    }
-
-    .pill.selected {
-        background: var(--primary-bg);
-        color: var(--on-primary-bg);
-        border-color: var(--primary);
-    }
-
-    .pill :global(svg) {
-        width: 16px;
-        height: 16px;
-    }
-
-    .more {
-        font-size: var(--text-sm);
-        color: var(--text-tertiary);
-        font-style: italic;
-    }
-
-    .rerank-callout {
-        max-width: 640px;
-        margin: var(--space-5) auto 0;
-        padding: var(--space-3) var(--space-4);
-        border: var(--border-w-default) solid var(--border-accent);
-        border-radius: var(--radius-lg);
-        background: var(--primary-bg);
-    }
-
-    .rerank-callout[hidden] {
-        display: none;
-    }
-
-    .rerank-title {
-        margin: 0 0 var(--space-1);
-        font-size: var(--text-sm);
-        font-weight: 600;
-        color: var(--text-primary);
-    }
-
-    .rerank-body {
-        margin: 0 0 var(--space-2);
-        font-size: var(--text-sm);
-        color: var(--text-secondary);
-        line-height: 1.5;
-    }
-
-    .rerank-cmd {
-        margin: 0;
-        padding: var(--space-2) var(--space-3);
-        background: var(--code-bg);
-        border-radius: var(--radius-md);
-        overflow-x: auto;
-    }
-
-    .rerank-cmd code {
-        font-family: "JetBrains Mono", monospace;
-        font-size: 14px;
-        line-height: 1.4;
-        color: var(--code-text);
-        white-space: pre;
-    }
-
-    .secrets-callout {
-        max-width: 640px;
-        margin: var(--space-4) auto 0;
-        padding: var(--space-3) var(--space-4);
-        border: var(--border-w-default) solid var(--border-accent);
-        border-radius: var(--radius-lg);
-        background: var(--primary-bg);
-    }
-
-    .secrets-title {
-        margin: 0 0 var(--space-1);
-        font-size: var(--text-sm);
-        font-weight: 600;
-        color: var(--text-primary);
-    }
-
-    .secrets-body {
-        margin: 0;
-        font-size: var(--text-sm);
-        color: var(--text-secondary);
-        line-height: 1.5;
-    }
-
-    .secrets-body code {
-        font-family: "JetBrains Mono", monospace;
-        font-size: 0.8em;
-        color: var(--text-primary);
-    }
-
-    .secrets-body a {
-        color: var(--link-on-primary-bg);
-        text-decoration: none;
-        font-weight: 600;
-    }
-
-    .secrets-body a:visited {
-        color: var(--link-on-primary-bg-visited);
-    }
-
-    .secrets-body a:hover {
-        color: var(--link-on-primary-bg-hover);
-        text-decoration: underline;
-    }
-
-    .secrets-body a:focus-visible {
-        outline-color: var(--link-on-primary-bg-focus);
-    }
-
-    :global(.code-panel) {
-        max-width: 640px;
-        margin: var(--space-5) auto 0;
-    }
-
-    /* Bash syntax highlighting — GitHub dark-dimmed token colors */
-    :global(.code-panel .sh-cmd), :global(.rerank-cmd .sh-cmd) { color: var(--themeCmd); }
-    :global(.code-panel .sh-str), :global(.rerank-cmd .sh-str) { color: var(--themeString); }
-    :global(.code-panel .sh-op),  :global(.rerank-cmd .sh-op)  { color: var(--themeOp); }
-    :global(.code-panel .sh-file), :global(.rerank-cmd .sh-file) { color: var(--themeText); }
-
-    /* JSON syntax highlighting — full-mode annotated renderer */
-    :global(.code-panel .json-key)    { color: var(--themeJsonKey); }
-    :global(.code-panel .json-string) { color: var(--themeString); }
-    :global(.code-panel .json-punct)  { color: var(--themeText); }
-    :global(.code-panel .json-comment) {
-        color: var(--themeComment);
-        font-style: italic;
-    }
-
-    @media (max-width: 768px) {
-        .rerank-callout {
-            max-width: none;
-        }
-
-        .secrets-callout {
-            max-width: none;
-        }
-
-        :global(.code-panel) {
-            max-width: none;
-        }
-    }
-
-    @media (max-width: 640px) {
-        :global(.code-panel .json-comment) {
-            display: none;
-        }
-    }
+  .configurator { padding: var(--space-10) 0; }
+  .configurator-compact { padding: var(--space-5) 0; }
+  /* Scale + weight come from the global section-heading recipe; only the
+     spacing belongs to this card. */
+  .section-heading { margin-bottom: var(--space-5); }
+  .setup-lead { margin: calc(-1 * var(--space-3)) 0 var(--space-5); color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  /* The card's two columns share one height token: the provider list is locked to
+     it, and on the homepage the terminal's code area matches it so the joined
+     columns line up without either one stretching the card. The phone value is a
+     fraction of the live viewport (`dvh` = the space actually available), capped
+     at the tablet token: the whole card stays on screen, and the list — not the
+     page — absorbs the overflow. */
+  .setup-builder { --stage-list-h: clamp(14rem, 62dvh, 36rem); --config-header-h: var(--target-xl); width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-7); }
+  /* Joined card: the tab strip is its header, the active stage its body. */
+  .setup-config { min-width: 0; display: grid; grid-template-rows: auto 1fr; border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-surface); overflow: hidden; }
+  .setup-stages { display: flex; flex-wrap: wrap; align-items: stretch; min-height: var(--config-header-h); border-bottom: var(--border-w-default) solid var(--border-color); background: var(--bg-surface); }
+  .setup-panels { min-width: 0; min-height: 0; padding: var(--space-5); }
+  .output-note { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .setup-callout[hidden] { display: none; }
+  .setup-callout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); padding: var(--space-4) var(--space-5); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-surface); }
+  /* A prerequisite command can carry a machine-generated line far wider than
+     the card (vLLM's `--hf-overrides`). The grid tracks above are pinned to the
+     container, so the overflow scrolls here instead of stretching the card —
+     and with it every provider row. */
+  .setup-callout :global(pre) { overflow-x: auto; }
+  /* The block renders inside the picked row's reveal (configurator.ts relocates
+     the single element), so it is a stage override styled like the requirement
+     chips: a flat raised-surface tile whose rail is solid when a reranker is
+     required and dashed when the preset already includes one. */
+  .rerank-endpoint { display: grid; gap: var(--space-2); min-width: 0; padding: var(--space-2) var(--space-3); border: 0; border-left: var(--border-w-accent) solid var(--primary); background: var(--bg-surface); }
+  /* Same flat-tile rhythm as the requirement chips: 8px/12px padding, 8px gaps,
+     no reserved rows. The block lives inside the picked row's scrollable reveal,
+     so its height cannot move the card and needs no min-height reservations. */
+  .rerank-heading { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+  .rerank-endpoint h4 { margin: 0; color: var(--text-primary); font-size: var(--text-sm); }
+  .rerank-state-label { margin: 0; padding: var(--space-1) var(--space-2); border: var(--border-w-default) solid var(--border-accent); border-radius: var(--radius-full); font: 600 var(--text-xs)/var(--lh-xs) "JetBrains Mono", monospace; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+  .rerank-endpoint .rerank-state-label { color: var(--primary); }
+  .rerank-endpoint details { display: grid; }
+  .rerank-fields { display: grid; gap: var(--space-2); }
+  .rerank-endpoint summary { display: flex; box-sizing: border-box; align-items: center; color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
+  .rerank-endpoint summary::before { flex: 0 0 auto; width: .45em; height: .45em; margin-right: var(--space-1); border-right: var(--border-w-default) solid currentColor; border-bottom: var(--border-w-default) solid currentColor; content: ""; transform: rotate(-45deg); }
+  .rerank-endpoint details[open] summary::before { transform: rotate(45deg); }
+  .rerank-endpoint label { display: grid; gap: var(--space-1); color: var(--text-primary); font-size: var(--text-sm); }
+  .rerank-endpoint input, .rerank-endpoint select { width: 100%; min-height: var(--target-md); padding: 0 var(--space-3); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-control); background: var(--bg-page); color: var(--text-primary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .rerank-select { position: relative; display: block; color: var(--text-primary); }
+  .rerank-select::after { position: absolute; top: 50%; right: var(--space-4); width: 7px; height: 7px; border-right: var(--border-w-default) solid currentColor; border-bottom: var(--border-w-default) solid currentColor; content: ""; pointer-events: none; transform: translateY(-75%) rotate(45deg); }
+  .rerank-select select { appearance: none; padding-right: var(--space-8); }
+  .rerank-endpoint input[aria-invalid="true"], .rerank-endpoint select[aria-invalid="true"] { border-color: var(--danger); }
+  .rerank-endpoint p { margin: 0; color: var(--text-secondary); font-size: var(--text-xs); line-height: var(--lh-xs); }
+  .rerank-endpoint [role="alert"] { color: var(--danger); }
+  .rerank-endpoint[data-rerank-state="included"] .rerank-state-label { display: none; }
+  .rerank-endpoint[data-rerank-state="included"] { border-left-style: dashed; }
+  .rerank-endpoint[data-rerank-state="included"] .rerank-status { color: var(--text-tertiary); }
+  .rerank-endpoint[data-rerank-state="included"] summary { color: var(--text-secondary); }
+  .rerank-endpoint[data-rerank-state="required"] details { gap: var(--space-2); }
+  /* A required reranker is the pick's own field, not an option to reveal, so its
+     form has nothing to collapse: the summary — the only thing that could
+     toggle it — is removed (configurator.ts opens the details for this state). */
+  .rerank-endpoint[data-rerank-state="required"] summary { display: none; }
+  .rerank-endpoint[data-rerank-state="required"] .rerank-status { font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .rerank-endpoint[data-rerank-state="required"] [role="alert"] { color: var(--danger); font-weight: 600; }
+  .setup-callout > p { margin: 0 0 var(--space-2); color: var(--text-secondary); font-size: var(--text-sm); }
+  /* Detached output: its own card, one header row that shares the strip's
+     height so the two card titles sit on one baseline. */
+  .setup-output { min-width: 0; display: grid; grid-template-rows: auto 1fr; border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-surface); overflow: hidden; }
+  .output-header { display: flex; align-items: center; min-height: var(--config-header-h); padding: 0 var(--space-5); border-bottom: var(--border-w-default) solid var(--border-color); }
+  .output-header h3 { margin: 0; color: var(--text-primary); font-size: var(--text-lg); }
+  .output-body { display: grid; grid-template-rows: auto 1fr; gap: var(--space-3); min-height: 0; padding: var(--space-5); }
+  .setup-output :global(.code-panel) { margin: 0; }
+  .setup-output :global(.code-panel pre) { max-height: min(440px, 55vh); overflow-y: auto; }
+  /* Homepage desktop: the joined config card and the detached output card sit
+     side by side and stretch to one height, so the output never floats shorter
+     than the list. The callout and the notes span both columns below them. */
+  @media (min-width: 1024px) {
+    .configurator-compact .setup-builder { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: var(--space-6); }
+    .configurator-compact .setup-builder > .setup-callout,
+    .configurator-compact .setup-builder > .setup-notes { grid-column: 1 / -1; }
+    /* The code area keeps the same --stage-list-h bound as the provider pane,
+       so neither card's content can stretch the section; the code scrolls. */
+    .configurator-compact .setup-output :global(.code-panel) { display: flex; flex-direction: column; min-height: 0; }
+    .configurator-compact .setup-output :global(.code-panel pre) { flex: 1; min-height: 0; max-height: var(--stage-list-h); overflow-y: auto; }
+  }
+  /* Footnote rail: labelled notices (global.css .disclaimer) separated by
+     spacing alone — never boxes, so the two real cards stay this section's only
+     bordered objects. The rail owns the item spacing, so the recipe's own
+     margin is turned off. */
+  .setup-notes { display: grid; gap: var(--space-5); }
+  .setup-notes .disclaimer { margin: 0; }
+  /* Scoped so they keep winning over docs' .docs-content a / code when this
+     component renders inside the docs article. */
+  .setup-notes a { color: var(--text-primary); text-decoration: underline; }
+  .setup-notes code { color: var(--text-primary); }
+  :global(.code-panel .sh-cmd), :global(.setup-callout .sh-cmd) { color: var(--themeCmd); }
+  :global(.code-panel .sh-str), :global(.setup-callout .sh-str) { color: var(--themeString); }
+  :global(.code-panel .sh-op), :global(.setup-callout .sh-op) { color: var(--themeOp); }
+  :global(.code-panel .sh-comment), :global(.setup-callout .sh-comment) { color: var(--themeComment); }
+  :global(.code-panel .json-key) { color: var(--themeJsonKey); }
+  :global(.code-panel .json-string) { color: var(--themeString); }
+  :where(button, input, summary, pre):focus-visible { outline: var(--border-w-emphasis) solid var(--primary); outline-offset: 3px; }
+  @media (min-width: 640px) { .setup-builder { --stage-list-h: 36rem; } }
+  /* The pane height, not a list height: the same box holds the provider filter
+     and has to fit the tallest expanded required-reranker form (measured 533px
+     at the narrowest split column, 517px in the stacked layout), because a pick
+     may never resize the card. The `max(36rem, ...)` floor is what makes the
+     checked row reachable at every scroll position: a pure viewport cap
+     (formerly `min(40rem, 72svh)`) dropped the pane under the row on short
+     viewports, and no list scroll could then reveal the form's bottom. On tall
+     viewports the token is still 40rem; when the viewport cannot hold that, the
+     card overflows the viewport and the page scrolls instead of clipping. */
+  @media (min-width: 1024px) { .setup-builder { --stage-list-h: max(36rem, min(40rem, 72svh)); } }
+  @media (max-width: 640px) {
+    .configurator-compact .container { padding-inline: var(--space-4); }
+    .setup-panels, .output-body { padding: var(--space-4); }
+    .output-header { padding: 0 var(--space-4); }
+    /* Touch: the disclosure is the panel's only control, so it gets a full target. */
+    .rerank-endpoint summary { min-height: var(--target-md); }
+  }
 </style>
