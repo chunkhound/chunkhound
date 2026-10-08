@@ -562,8 +562,12 @@ def _resolve_commit_range(
     if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
         raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
     if commit_hash is not None:
+        if not commit_hash.strip():
+            raise ValueError("commit_hash must not be empty.")
         return f"{commit_hash}^..{commit_hash}"
     if last_n_commits is not None:
+        if last_n_commits <= 0:
+            raise ValueError("last_n_commits must be a positive integer.")
         return f"HEAD~{last_n_commits}..HEAD"
     return commit_range
 
