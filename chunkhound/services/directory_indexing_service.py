@@ -1,6 +1,5 @@
 """Directory indexing service - extracted from CLI indexer for shared use."""
 
-import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -179,7 +178,7 @@ class DirectoryIndexingService:
         if self.indexing_coordinator.resolve_rust_pipeline_decision(log_reason=False):
             return
         db = getattr(self.indexing_coordinator, "_db", None)
-        if db is not None and hasattr(db, "drop_all_hnsw_indexes"):
+        if db is not None and hasattr(db, "drop_all_hnsw_indexes_async"):
             task = (
                 self.progress.add_task(
                     "  └─ Dropping HNSW indexes", total=None, speed="", info=""
@@ -188,7 +187,9 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            await self._run_hnsw_database_operation(db.drop_all_hnsw_indexes)
+            # Cancellation stops waiting for the operation. Already-running DDL
+            # stays on the serial executor, ahead of queued provider disconnect.
+            await db.drop_all_hnsw_indexes_async()
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")
@@ -209,7 +210,7 @@ class DirectoryIndexingService:
         if used_rust_pipeline:
             return
         db = getattr(self.indexing_coordinator, "_db", None)
-        if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
+        if db is not None and hasattr(db, "ensure_all_hnsw_indexes_async"):
             task = (
                 self.progress.add_task(
                     "  └─ Rebuilding HNSW indexes", total=None, speed="", info=""
@@ -218,40 +219,11 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            await self._run_hnsw_database_operation(db.ensure_all_hnsw_indexes)
+            await db.ensure_all_hnsw_indexes_async()
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")
             logger.info(f"Rebuilt HNSW indexes in {elapsed_ms:.0f}ms")
-
-    async def _run_hnsw_database_operation(
-        self, operation: Callable[[], None]
-    ) -> None:
-        """Offload HNSW work and drain it before propagating cancellation.
-
-        Cancelling ``asyncio.to_thread`` does not stop its synchronous callable.
-        Waiting for the worker here ensures MCP shutdown cannot proceed to close
-        the database while an indexing task still has HNSW work in flight.
-        """
-        worker = asyncio.create_task(asyncio.to_thread(operation))
-        try:
-            await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
-            if worker.done():
-                try:
-                    worker.result()
-                except Exception:
-                    logger.exception(
-                        "HNSW operation failed while draining cancelled indexing work"
-                    )
-            raise
 
     def _resolve_file_patterns(self) -> tuple[list[str], list[str]]:
         """Extracted from run.py:152-175 - file pattern resolution logic."""

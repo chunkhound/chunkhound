@@ -145,6 +145,14 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    async def drop_all_hnsw_indexes_async(self) -> None:
+        """Drop provider-managed HNSW indexes without blocking the event loop."""
+        ...
+
+    async def ensure_all_hnsw_indexes_async(self) -> None:
+        """Rebuild provider-managed HNSW indexes without blocking the event loop."""
+        ...
+
     # File Operations
     def insert_file(self, file: File) -> int:
         """Insert file record and return file ID."""
