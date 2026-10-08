@@ -345,6 +345,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         return True
 
     @property
+    def supports_embedding_sql_queries(self) -> bool:
+        """DuckDB supports targeted joins over chunks, files, and embeddings."""
+        return True
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active - delegate to connection manager."""
         return self._connection_manager.is_connected
@@ -757,14 +762,17 @@ class DuckDBProvider(SerialDatabaseProvider):
         current_value = current_value_result[0] if current_value_result else None
         if current_value is None:
             current_value = conn.execute(
-                f"SELECT nextval('{sequence_name}')"
+                "SELECT nextval(?)", [sequence_name]
             ).fetchone()[0]
 
         advance_by = max_id - int(current_value)
         if advance_by <= 0:
             return
 
-        conn.execute(f"SELECT nextval('{sequence_name}') FROM range({advance_by})")
+        conn.execute(
+            f"SELECT nextval(?) FROM range({advance_by})",
+            [sequence_name],
+        )
 
     def _executor_recreate_sequence(
         self, conn: Any, sequence_name: str, next_value: int

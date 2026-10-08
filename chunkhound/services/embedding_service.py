@@ -238,9 +238,8 @@ class EmbeddingService(BaseService):
             target_provider = provider_name or self._embedding_provider.name
             target_model = model_name or self._embedding_provider.model
 
-            # First, just get the count and IDs of chunks without embeddings (fast query)
-            chunk_ids_without_embeddings = self._get_chunk_ids_without_embeddings(
-                target_provider, target_model, exclude_patterns
+            chunk_ids_without_embeddings = await asyncio.to_thread(
+                self._get_chunk_ids_without_embeddings, target_provider, target_model, exclude_patterns,
             )
 
             if not chunk_ids_without_embeddings:
@@ -250,8 +249,9 @@ class EmbeddingService(BaseService):
                     "message": "All chunks have embeddings",
                 }
 
-            # Load chunk content and generate embeddings
-            chunks_data = self._get_chunks_by_ids(chunk_ids_without_embeddings)
+            chunks_data = await asyncio.to_thread(
+                self._get_chunks_by_ids, chunk_ids_without_embeddings,
+            )
             chunk_id_list = [chunk["id"] for chunk in chunks_data]
             chunk_texts = [chunk["code"] for chunk in chunks_data]
 
@@ -291,11 +291,14 @@ class EmbeddingService(BaseService):
                     "regenerated": 0,
                 }
 
-            # Determine which chunks to regenerate
             if chunk_ids:
-                chunks_to_regenerate = self._get_chunks_by_ids(chunk_ids)
+                chunks_to_regenerate = await asyncio.to_thread(
+                    self._get_chunks_by_ids, chunk_ids,
+                )
             elif file_path:
-                chunks_to_regenerate = self._get_chunks_by_file_path(file_path)
+                chunks_to_regenerate = await asyncio.to_thread(
+                    self._get_chunks_by_file_path, file_path,
+                )
             else:
                 return {
                     "status": "error",
@@ -805,136 +808,198 @@ class EmbeddingService(BaseService):
     def _get_chunk_ids_without_embeddings(
         self, provider: str, model: str, exclude_patterns: list[str] | None = None
     ) -> list[ChunkId]:
-        """Get just the IDs of chunks that don't have embeddings (provider-agnostic)."""
-        # Get all chunks with metadata using provider-agnostic method
+        """Get just the IDs of chunks that don't have embeddings."""
+        if getattr(self._db, "supports_embedding_sql_queries", False):
+            embedding_tables = self._get_all_embedding_tables()
+            return self._get_chunk_ids_without_embeddings_sql(
+                provider, model, exclude_patterns, embedding_tables
+            )
+
+        return self._get_chunk_ids_without_embeddings_fallback(
+            provider, model, exclude_patterns
+        )
+
+    def _get_chunk_ids_without_embeddings_sql(
+        self,
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None,
+        embedding_tables: list[str],
+    ) -> list[ChunkId]:
+        """SQL anti-join path (DuckDB). Returns only chunk IDs, no text."""
+        absent_clauses, embedding_params = self._build_embedding_absence_clauses(
+            embedding_tables, provider, model
+        )
+        sql_patterns, python_patterns = self._partition_exclude_patterns(
+            exclude_patterns
+        )
+        query, params = self._build_missing_embedding_query(
+            absent_clauses, embedding_params, sql_patterns, python_patterns
+        )
+        rows = self._db.execute_query(query, params)
+        rows = self._filter_excluded_pattern_rows(rows, python_patterns)
+        return [ChunkId(row["id"]) for row in rows]
+
+    @staticmethod
+    def _build_embedding_absence_clauses(
+        embedding_tables: list[str], provider: str, model: str
+    ) -> tuple[list[str], list[Any]]:
+        clauses = [
+            f"NOT EXISTS (SELECT 1 FROM {table} e "
+            "WHERE e.chunk_id = c.id AND e.provider = ? AND e.model = ?)"
+            for table in embedding_tables
+        ]
+        return clauses, [value for _ in embedding_tables for value in (provider, model)]
+
+    @staticmethod
+    def _partition_exclude_patterns(
+        exclude_patterns: list[str] | None,
+    ) -> tuple[list[str], list[str]]:
+        sql_patterns: list[str] = []
+        python_patterns: list[str] = []
+        for pattern in exclude_patterns or []:
+            target = (
+                python_patterns if "[" in pattern or "]" in pattern else sql_patterns
+            )
+            target.append(pattern)
+        return sql_patterns, python_patterns
+
+    def _build_missing_embedding_query(
+        self,
+        absent_clauses: list[str],
+        embedding_params: list[Any],
+        sql_patterns: list[str],
+        python_patterns: list[str],
+    ) -> tuple[str, list[Any]]:
+        where_parts = absent_clauses + [
+            "f.path NOT LIKE ? ESCAPE '\\'" for _ in sql_patterns
+        ]
+        params = embedding_params + [self._fnmatch_to_sql_like(p) for p in sql_patterns]
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        needs_files = bool(sql_patterns or python_patterns)
+        files_join = "JOIN files f ON c.file_id = f.id" if needs_files else ""
+        columns = "c.id, f.path AS file_path" if python_patterns else "c.id"
+        query = (
+            f"SELECT {columns} FROM chunks c {files_join} {where_clause} ORDER BY c.id"
+        )
+        return query, params
+
+    @staticmethod
+    def _filter_excluded_pattern_rows(
+        rows: list[dict[str, Any]], python_patterns: list[str]
+    ) -> list[dict[str, Any]]:
+        if not python_patterns:
+            return rows
+        import fnmatch
+
+        return [
+            row
+            for row in rows
+            if not any(
+                fnmatch.fnmatch(row.get("file_path") or "", pattern)
+                for pattern in python_patterns
+            )
+        ]
+
+    def _get_chunk_ids_without_embeddings_fallback(
+        self,
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None,
+    ) -> list[ChunkId]:
+        """Fallback for backends without SQL (e.g. LanceDB)."""
+        from chunkhound.core.utils.chunk_utils import get_chunk_id
+
         all_chunks = self._db.get_all_chunks_with_metadata()
 
-        # Apply exclude patterns filter using fnmatch (no SQL dependency)
         if exclude_patterns:
             import fnmatch
 
-            filtered_chunks = []
-            for chunk in all_chunks:
-                file_path = chunk.get("file_path", "")
-                should_exclude = False
-                for pattern in exclude_patterns:
-                    if fnmatch.fnmatch(file_path, pattern):
-                        should_exclude = True
-                        break
-                if not should_exclude:
-                    filtered_chunks.append(chunk)
-            all_chunks = filtered_chunks
+            all_chunks = [
+                c for c in all_chunks
+                if not any(
+                    fnmatch.fnmatch(c.get("file_path", ""), p)
+                    for p in exclude_patterns
+                )
+            ]
 
-        # Extract chunk IDs with consistent field handling
-        # DuckDB uses "chunk_id", LanceDB uses "id" - handle both
-        # Import locally to avoid circular import
-        from chunkhound.core.utils.chunk_utils import get_chunk_id
-
-        all_chunk_ids: list[int] = []
-        for chunk in all_chunks:
-            chunk_id = get_chunk_id(chunk)
-            if chunk_id is not None:
-                all_chunk_ids.append(int(chunk_id))
-
+        all_chunk_ids = [
+            int(cid)
+            for c in all_chunks
+            if (cid := get_chunk_id(c)) is not None
+        ]
         if not all_chunk_ids:
             return []
 
-        # Use provider-agnostic get_existing_embeddings to check which chunks already have embeddings
         existing_chunk_ids = self._db.get_existing_embeddings(
             chunk_ids=all_chunk_ids, provider=provider, model=model
         )
-
-        # Return only chunks that don't have embeddings (convert back to ChunkId)
         return [
-            ChunkId(chunk_id)
-            for chunk_id in all_chunk_ids
-            if chunk_id not in existing_chunk_ids
+            ChunkId(cid)
+            for cid in all_chunk_ids
+            if cid not in existing_chunk_ids
         ]
 
-    def _get_chunks_without_embeddings(
-        self, provider: str, model: str
-    ) -> list[dict[str, Any]]:
-        """Get chunks that don't have embeddings for the specified provider/model."""
-        # Get all embedding tables
-        embedding_tables = self._get_all_embedding_tables()
-
-        if not embedding_tables:
-            # No embedding tables exist, return all chunks (but fetch IDs first for progress)
-            query = """
-                SELECT c.id
-                FROM chunks c
-                ORDER BY c.id
-            """
-            chunk_ids_result = self._db.execute_query(query)
-            chunk_ids = [row["id"] for row in chunk_ids_result]
-
-            # Now fetch full data
-            if chunk_ids:
-                return self._get_chunks_by_ids(chunk_ids)
-            return []
-
-        # Build NOT EXISTS clauses for all embedding tables
-        not_exists_clauses = []
-        for table_name in embedding_tables:
-            not_exists_clauses.append(f"""
-                NOT EXISTS (
-                    SELECT 1 FROM {table_name} e
-                    WHERE e.chunk_id = c.id
-                    AND e.provider = ?
-                    AND e.model = ?
-                )
-            """)
-
-        # First get just the IDs (much faster query)
-        query = f"""
-            SELECT c.id
-            FROM chunks c
-            WHERE {" AND ".join(not_exists_clauses)}
-            ORDER BY c.id
-        """
-
-        # Parameters need to be repeated for each table
-        params = [provider, model] * len(embedding_tables)
-        chunk_ids_result = self._db.execute_query(query, params)
-        chunk_ids = [row["id"] for row in chunk_ids_result]
-
-        # Now fetch full data for these chunks
-        if chunk_ids:
-            return self._get_chunks_by_ids(chunk_ids)
-        return []
+    @staticmethod
+    def _fnmatch_to_sql_like(pattern: str) -> str:
+        """Convert an fnmatch glob pattern to a SQL LIKE pattern."""
+        result: list[str] = []
+        for ch in pattern:
+            if ch == "*":
+                result.append("%")
+            elif ch == "?":
+                result.append("_")
+            elif ch in ("%", "_", "\\"):
+                result.append("\\" + ch)
+            else:
+                result.append(ch)
+        return "".join(result)
 
     def _get_chunks_by_ids(self, chunk_ids: list[ChunkId]) -> list[dict[str, Any]]:
-        """Get chunk data for specific chunk IDs."""
+        """Get chunk data (id, code, symbol, path) for specific chunk IDs."""
         if not chunk_ids:
             return []
 
-        # Use provider-agnostic method to get all chunks with metadata
-        all_chunks_data = self._db.get_all_chunks_with_metadata()
+        int_ids = [int(cid) for cid in chunk_ids]
+        if getattr(self._db, "supports_embedding_sql_queries", False):
+            return self._get_chunks_by_ids_sql(int_ids)
+        return self._get_chunks_by_ids_fallback(int_ids)
 
-        # Filter to only the requested chunk IDs
-        chunk_id_set = set(chunk_ids)
-        filtered_chunks = []
+    def _get_chunks_by_ids_sql(self, chunk_ids: list[int]) -> list[dict[str, Any]]:
+        """SQL path: targeted SELECT ... WHERE c.id IN (...)."""
+        batch_size = 5000
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(chunk_ids), batch_size):
+            batch = chunk_ids[start : start + batch_size]
+            placeholders = ", ".join(["?"] * len(batch))
+            query = (
+                "SELECT c.id, c.code, c.symbol, f.path "
+                "FROM chunks c JOIN files f ON c.file_id = f.id "
+                f"WHERE c.id IN ({placeholders}) "
+                "ORDER BY c.id"
+            )
+            rows = self._db.execute_query(query, batch)
+            results.extend(rows)
+        return results
 
-        # Import locally to avoid circular import
+    def _get_chunks_by_ids_fallback(
+        self, chunk_ids: list[int]
+    ) -> list[dict[str, Any]]:
+        """Fallback for backends without SQL (e.g. LanceDB)."""
         from chunkhound.core.utils.chunk_utils import get_chunk_id
 
-        for chunk in all_chunks_data:
-            chunk_id = get_chunk_id(chunk)
-            if chunk_id in chunk_id_set:
-                # Ensure we have the expected fields
-                filtered_chunk = {
-                    "id": chunk_id,
-                    "code": chunk.get(
-                        "content", chunk.get("code", "")
-                    ),  # LanceDB uses 'content'
-                    "symbol": chunk.get(
-                        "name", chunk.get("symbol", "")
-                    ),  # LanceDB uses 'name'
-                    "path": chunk.get("file_path", ""),
-                }
-                filtered_chunks.append(filtered_chunk)
-
-        return filtered_chunks
+        chunk_id_set = set(chunk_ids)
+        all_chunks_data = self._db.get_all_chunks_with_metadata()
+        return [
+            {
+                "id": cid,
+                "code": c.get("content", c.get("code", "")),
+                "symbol": c.get("name", c.get("symbol", "")),
+                "path": c.get("file_path", ""),
+            }
+            for c in all_chunks_data
+            if (cid := get_chunk_id(c)) in chunk_id_set
+        ]
 
     def _get_chunks_by_file_path(self, file_path: str) -> list[dict[str, Any]]:
         """Get all chunks for a specific file path."""
@@ -987,13 +1052,9 @@ class EmbeddingService(BaseService):
 
     def _get_all_embedding_tables(self) -> list[str]:
         """Get list of all embedding tables (dimension-specific)."""
-        try:
-            tables = self._db.execute_query(f"""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'main'
-                  AND table_name SIMILAR TO '{EMBEDDING_TABLE_SIMILAR_PATTERN}'
-            """)
-            return [table["table_name"] for table in tables]
-        except Exception as e:
-            logger.error(f"Failed to get embedding tables: {e}")
-            return []
+        tables = self._db.execute_query(f"""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_name SIMILAR TO '{EMBEDDING_TABLE_SIMILAR_PATTERN}'
+        """)
+        return [table["table_name"] for table in tables]

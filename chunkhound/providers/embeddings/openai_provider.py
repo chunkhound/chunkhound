@@ -1701,6 +1701,50 @@ class OpenAIEmbeddingProvider:
         except ValueError:
             return False
 
+    async def _rerank_batch_with_retry(
+        self,
+        query: str,
+        documents: list[str],
+        top_k: int | None,
+        *,
+        label: str,
+    ) -> list[RerankResult]:
+        """Call _rerank_single_batch with the retry/backoff policy shared by every
+        rerank caller (VoyageAI pattern). Re-raises once attempts are exhausted;
+        callers that want to degrade gracefully instead (the multi-batch path)
+        catch the re-raised error themselves.
+        """
+        for attempt in range(self._retry_attempts):
+            try:
+                return await self._rerank_single_batch(query, documents, top_k)
+            except EmbeddingProviderError:
+                raise
+            except Exception as e:
+                # Classify error as retryable or not
+                error_str = str(e).lower()
+                is_retryable = any(
+                    [
+                        "timeout" in error_str,
+                        "connection" in error_str,
+                        "503" in error_str,  # Service unavailable
+                        "429" in error_str,  # Rate limit
+                    ]
+                )
+
+                if is_retryable and attempt < self._retry_attempts - 1:
+                    # Exponential backoff
+                    delay = self._retry_delay * (2**attempt)
+                    logger.warning(
+                        f"{label} failed (attempt {attempt + 1}), "
+                        f"retrying in {delay}s: {e}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    # Last attempt or non-retryable error
+                    logger.error(f"{label} failed after {attempt + 1} attempts: {e}")
+                    raise
+
     async def rerank(
         self, query: str, documents: list[str], top_k: int | None = None
     ) -> list[RerankResult]:
@@ -1730,7 +1774,9 @@ class OpenAIEmbeddingProvider:
         # Single batch case - use original logic for efficiency
         if len(documents) <= batch_size_limit:
             logger.debug(f"Reranking {len(documents)} documents in single batch")
-            results = await self._rerank_single_batch(query, documents, top_k)
+            results = await self._rerank_batch_with_retry(
+                query, documents, top_k, label="Rerank"
+            )
 
             # Apply client-side top_k for formats without server-side support (TEI)
             # Cohere includes top_n in request, but we apply this uniformly for consistency
@@ -1764,46 +1810,18 @@ class OpenAIEmbeddingProvider:
             )
 
             # Retry logic for this batch (following VoyageAI pattern)
-            batch_results = None
-            for attempt in range(self._retry_attempts):
-                try:
-                    # Rerank this batch without top_k limit (we'll apply globally)
-                    batch_results = await self._rerank_single_batch(
-                        query, batch_documents, top_k=None
-                    )
-                    break  # Success - exit retry loop
-                except EmbeddingProviderError:
-                    raise
-                except Exception as e:
-                    # Classify error as retryable or not
-                    error_str = str(e).lower()
-                    is_retryable = any(
-                        [
-                            "timeout" in error_str,
-                            "connection" in error_str,
-                            "503" in error_str,  # Service unavailable
-                            "429" in error_str,  # Rate limit
-                        ]
-                    )
-
-                    if is_retryable and attempt < self._retry_attempts - 1:
-                        # Exponential backoff
-                        delay = self._retry_delay * (2**attempt)
-                        logger.warning(
-                            f"Batch {batch_idx + 1} failed (attempt {attempt + 1}), "
-                            f"retrying in {delay}s: {e}"
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-                    else:
-                        # Last attempt or non-retryable error
-                        logger.error(
-                            f"Batch {batch_idx + 1} failed after {attempt + 1} attempts: {e}"
-                        )
-                        # Continue to next batch instead of failing entire operation
-                        batch_results = []
-                        failed_batches += 1
-                        break
+            try:
+                # Rerank this batch without top_k limit (we'll apply globally)
+                batch_results = await self._rerank_batch_with_retry(
+                    query, batch_documents, None, label=f"Batch {batch_idx + 1}"
+                )
+            except EmbeddingProviderError:
+                raise
+            except Exception:
+                # Already logged inside _rerank_batch_with_retry. Continue to
+                # next batch instead of failing the entire operation.
+                batch_results = []
+                failed_batches += 1
 
             # Process results if batch succeeded
             if batch_results:

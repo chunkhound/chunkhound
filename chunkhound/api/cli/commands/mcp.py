@@ -114,7 +114,7 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
         # Direct path: run StdioMCPServer in this process (single-client mode)
         from chunkhound.mcp_server.stdio import main
 
-        await main(args=args)
+        await main(args=args, config=config)
     else:
         # Proxy path: find/start daemon, then bridge stdio ↔ socket
         from chunkhound.daemon.client_proxy import ClientProxy
