@@ -39,6 +39,9 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.status import derive_daemon_status
 from chunkhound.services.research.factory import ResearchServiceFactory
+from chunkhound.services.research.shared.validation import (
+    validate_research_prerequisites,
+)
 
 # Response size limits (tokens)
 MAX_RESPONSE_TOKENS = 20000
@@ -559,8 +562,12 @@ def _resolve_commit_range(
     if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
         raise ValueError("Provide at most one of: commit_range, commit_hash, last_n_commits.")
     if commit_hash is not None:
+        if not commit_hash.strip():
+            raise ValueError("commit_hash must not be empty.")
         return f"{commit_hash}^..{commit_hash}"
     if last_n_commits is not None:
+        if last_n_commits <= 0:
+            raise ValueError("last_n_commits must be a positive integer.")
         return f"HEAD~{last_n_commits}..HEAD"
     return commit_range
 
@@ -811,31 +818,9 @@ async def deep_research_impl(
         Dict with answer and metadata
 
     Raises:
-        Exception: If LLM or reranker not configured
+        ValueError: If LLM, embeddings, or reranker are not configured
     """
-    # Validate LLM is configured
-    if not llm_manager:
-        raise Exception(
-            "No LLM provider configured. Code research requires an LLM. "
-            "Configure an llm section in your chunkhound configuration."
-        )
-
-    # Validate reranker is configured
-    if not embedding_manager or not embedding_manager.list_providers():
-        raise Exception(
-            "No embedding providers available. Code research requires reranking "
-            "support."
-        )
-
-    embedding_provider = embedding_manager.get_provider()
-    if not (
-        hasattr(embedding_provider, "supports_reranking")
-        and embedding_provider.supports_reranking()
-    ):
-        raise Exception(
-            "Code research requires a provider with reranking support. "
-            "Configure a rerank_model in your embedding configuration."
-        )
+    validate_research_prerequisites(embedding_manager, llm_manager)
 
     effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
 
