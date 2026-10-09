@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.core.exceptions.core import ConfigurationError
@@ -370,6 +370,10 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(
         "_codex_available",
         lambda self: True,
         raising=True,
+    )
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
     )
 
     captured: dict[str, object] = {"env": None, "config_text": None}
@@ -993,6 +997,94 @@ def test_get_provider_config_for_role_attaches_anthropic_options() -> None:
     assert role_cfg["prompt_caching"] is True
     assert role_cfg["cache_ttl"] == "1h"
     assert role_cfg["task_budget_tokens"] == 20000
+
+
+def test_claude_append_system_prompt_defaults_to_file_for_claude_only() -> None:
+    """The file form is the default, and other providers do not receive it."""
+    claude = LLMConfig(
+        provider="claude-code-cli",
+        utility_model="claude-haiku",
+        synthesis_model="claude-haiku",
+    )
+    assert claude.claude_temp_dir is None
+    utility, synthesis = claude.get_provider_configs()
+    assert utility["append_system_prompt"] == "file"
+    assert synthesis["append_system_prompt"] == "file"
+    assert "temp_dir" not in utility
+    assert "temp_dir" not in synthesis
+
+    other = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+    )
+    utility, synthesis = other.get_provider_configs()
+    assert "append_system_prompt" not in utility
+    assert "append_system_prompt" not in synthesis
+
+
+def test_claude_append_system_prompt_accepts_inline_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config and env select inline. Any other value is rejected."""
+    cfg = LLMConfig(
+        provider="claude-code-cli",
+        utility_model="claude-haiku",
+        synthesis_model="claude-haiku",
+        claude_append_system_prompt="INLINE",
+    )
+    assert cfg.claude_append_system_prompt == "inline"
+    role = cfg.get_provider_config_for_role("utility")
+    assert role["append_system_prompt"] == "inline"
+
+    with pytest.raises(ValidationError):
+        LLMConfig(
+            provider="claude-code-cli",
+            utility_model="claude-haiku",
+            synthesis_model="claude-haiku",
+            claude_append_system_prompt="stdin",
+        )
+
+    monkeypatch.setenv("CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT", "inline")
+    loaded = LLMConfig.load_from_env()
+    assert loaded["claude_append_system_prompt"] == "inline"
+
+
+def test_claude_temp_dir_reaches_only_claude(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A custom temp directory is a Claude CLI setting."""
+    directory = str(tmp_path)
+    cfg = LLMConfig(
+        provider="claude-code-cli",
+        utility_model="claude-haiku",
+        synthesis_model="claude-haiku",
+        claude_temp_dir=f"  {directory}  ",
+    )
+    assert cfg.claude_temp_dir == directory
+    role = cfg.get_provider_config_for_role("utility")
+    assert role["temp_dir"] == directory
+
+    blank = LLMConfig(
+        provider="claude-code-cli",
+        utility_model="claude-haiku",
+        synthesis_model="claude-haiku",
+        claude_temp_dir="   ",
+    )
+    assert blank.claude_temp_dir is None
+    assert "temp_dir" not in blank.get_provider_config_for_role("utility")
+
+    other = LLMConfig(
+        provider="openai",
+        utility_model="gpt-5-nano",
+        synthesis_model="gpt-5",
+        claude_temp_dir=directory,
+    )
+    utility, _synthesis = other.get_provider_configs()
+    assert "temp_dir" not in utility
+
+    monkeypatch.setenv("CHUNKHOUND_LLM_CLAUDE_TEMP_DIR", directory)
+    assert LLMConfig.load_from_env()["claude_temp_dir"] == directory
 
 
 def test_get_provider_config_for_role_unknown_role_raises() -> None:

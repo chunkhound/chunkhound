@@ -17,6 +17,10 @@ async def test_codex_skip_git_required_flag_retry(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(
         CodexCLIProvider, "_codex_available", lambda self: True, raising=True
     )
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     overlay_dir = tmp_path / "overlay-home-required"
     overlay_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +85,10 @@ async def test_codex_skip_git_unknown_flag_fallback(
     monkeypatch.setenv("CHUNKHOUND_CODEX_STDIN_FIRST", "0")
     monkeypatch.setattr(
         CodexCLIProvider, "_codex_available", lambda self: True, raising=True
+    )
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
     )
 
     overlay_dir = tmp_path / "overlay-home"

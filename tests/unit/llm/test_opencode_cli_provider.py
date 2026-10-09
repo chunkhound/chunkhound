@@ -19,6 +19,19 @@ def test_default_timeout():
     assert p.timeout == DEFAULT_LLM_TIMEOUT
 
 
+def test_unshortenable_shim_does_not_crash_availability(monkeypatch: pytest.MonkeyPatch):
+    """A spaced .cmd that cannot be shortened reports the CLI unavailable."""
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
+    )
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+        lambda name: r"C:\Program Files\npm\opencode.cmd",
+    )
+    provider = OpenCodeCLIProvider(model="")
+    assert provider._opencode_available() is False
+
+
 class TestOpenCodeCLIProvider:
     """Test cases for OpenCode CLI provider."""
 
@@ -31,8 +44,14 @@ class TestOpenCodeCLIProvider:
     @pytest.fixture
     def provider(self):
         """Create a provider with a dummy model."""
-        with patch.object(
-            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        with (
+            patch.object(
+                OpenCodeCLIProvider, "_opencode_available", return_value=True
+            ),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             yield OpenCodeCLIProvider(
                 model="test-provider/test-model",
@@ -450,11 +469,22 @@ class TestOpenCodeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_run_single_attempt_windows_uses_taskkill(self, provider):
-        """Windows cleanup routes to taskkill /T without blocking the event loop."""
+        """Windows cleanup tree-kills with taskkill output discarded."""
+        recorded: dict[str, object] = {}
+
+        def fake_run(args, **kwargs):
+            recorded["args"] = args
+            recorded["stdout"] = kwargs.get("stdout")
+            recorded["stderr"] = kwargs.get("stderr")
+            return subprocess.CompletedProcess(args, 1)
+
         with (
             patch("sys.platform", "win32"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
-            patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+            patch(
+                "chunkhound.providers.llm.base_cli_provider.subprocess.run",
+                fake_run,
+            ),
             patch("subprocess.CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
             patch("os.killpg", create=True) as mock_killpg,
         ):
@@ -476,12 +506,10 @@ class TestOpenCodeCLIProvider:
             assert result.action == "timeout"
             assert "start_new_session" not in mock_subprocess.call_args.kwargs
             assert mock_subprocess.call_args.kwargs["creationflags"] == 0x00000200
-            mock_to_thread.assert_awaited_once_with(
-                subprocess.run,
-                ["taskkill", "/T", "/PID", "2468", "/F"],
-                check=False,
-                timeout=10,
-            )
+            assert recorded["args"] == ["taskkill", "/T", "/F", "/PID", "2468"]
+            assert recorded["stdout"] is subprocess.DEVNULL
+            assert recorded["stderr"] is subprocess.DEVNULL
+            mock_process.kill.assert_called_once()
             mock_killpg.assert_not_called()
 
     @pytest.mark.asyncio
@@ -730,12 +758,21 @@ class TestOpenCodeCLIProvider:
             assert mock_subprocess.call_count == provider._max_retries
             self._assert_json_then_plain(mock_subprocess)
 
+    @staticmethod
+    def _argv_blob(call_args: tuple) -> str:
+        """Join create_subprocess_exec argv for assertions (handles cmd /c wrap)."""
+        return " ".join(str(a) for a in call_args)
+
     @pytest.mark.asyncio
     async def test_run_cli_command_json_fallback_respects_single_attempt_budget(self):
         """max_retries=1 leaves no plain-text budget after a JSON probe."""
         status_event = json.dumps({"type": "status", "data": "running"})
-        with patch.object(
-            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        with (
+            patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             provider = OpenCodeCLIProvider(
                 model="test-provider/test-model",
@@ -743,20 +780,21 @@ class TestOpenCodeCLIProvider:
                 max_retries=1,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_first = AsyncMock()
-            mock_first.communicate.return_value = (status_event.encode(), b"")
-            mock_first.returncode = 0
-            mock_subprocess.return_value = mock_first
+            with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+                mock_first = AsyncMock()
+                mock_first.communicate.return_value = (status_event.encode(), b"")
+                mock_first.returncode = 0
+                mock_subprocess.return_value = mock_first
 
-            with pytest.raises(
-                RuntimeError, match="exhausted retry budget before plain-text fallback"
-            ):
-                await provider._run_cli_command("Test prompt")
+                with pytest.raises(
+                    RuntimeError,
+                    match="exhausted retry budget before plain-text fallback",
+                ):
+                    await provider._run_cli_command("Test prompt")
 
-            assert mock_subprocess.call_count == 1
-            first_args = mock_subprocess.call_args_list[0][0]
-            assert "--format" in first_args
+                assert mock_subprocess.call_count == 1
+                first_blob = self._argv_blob(mock_subprocess.call_args_list[0][0])
+                assert "--format" in first_blob
 
     @pytest.mark.asyncio
     async def test_run_cli_command_json_fallback_preserves_remaining_attempt_budget(
@@ -764,8 +802,12 @@ class TestOpenCodeCLIProvider:
     ):
         """JSON fallback should only spend the primary model's remaining attempts."""
         status_event = json.dumps({"type": "status", "data": "running"})
-        with patch.object(
-            OpenCodeCLIProvider, "_opencode_available", return_value=True
+        with (
+            patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             provider = OpenCodeCLIProvider(
                 model="test-provider/test-model",
@@ -773,35 +815,35 @@ class TestOpenCodeCLIProvider:
                 max_retries=3,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
-            mock_json = AsyncMock()
-            mock_json.communicate.return_value = (status_event.encode(), b"")
-            mock_json.returncode = 0
+            with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+                mock_json = AsyncMock()
+                mock_json.communicate.return_value = (status_event.encode(), b"")
+                mock_json.returncode = 0
 
-            mock_plain_fail = AsyncMock()
-            mock_plain_fail.communicate.return_value = (b"", b"")
-            mock_plain_fail.returncode = 0
+                mock_plain_fail = AsyncMock()
+                mock_plain_fail.communicate.return_value = (b"", b"")
+                mock_plain_fail.returncode = 0
 
-            mock_plain_success = AsyncMock()
-            mock_plain_success.communicate.return_value = (b"Success response", b"")
-            mock_plain_success.returncode = 0
+                mock_plain_success = AsyncMock()
+                mock_plain_success.communicate.return_value = (b"Success response", b"")
+                mock_plain_success.returncode = 0
 
-            mock_subprocess.side_effect = [
-                mock_json,
-                mock_plain_fail,
-                mock_plain_success,
-            ]
+                mock_subprocess.side_effect = [
+                    mock_json,
+                    mock_plain_fail,
+                    mock_plain_success,
+                ]
 
-            result = await provider._run_cli_command("Test prompt")
+                result = await provider._run_cli_command("Test prompt")
 
-            assert result == "Success response"
-            assert mock_subprocess.call_count == 3
-            first_args = mock_subprocess.call_args_list[0][0]
-            second_args = mock_subprocess.call_args_list[1][0]
-            third_args = mock_subprocess.call_args_list[2][0]
-            assert "--format" in first_args
-            assert "--format" not in second_args
-            assert "--format" not in third_args
+                assert result == "Success response"
+                assert mock_subprocess.call_count == 3
+                first_blob = self._argv_blob(mock_subprocess.call_args_list[0][0])
+                second_blob = self._argv_blob(mock_subprocess.call_args_list[1][0])
+                third_blob = self._argv_blob(mock_subprocess.call_args_list[2][0])
+                assert "--format" in first_blob
+                assert "--format" not in second_blob
+                assert "--format" not in third_blob
 
     @pytest.mark.asyncio
     async def test_run_cli_command_multiple_text_events(self, provider):
@@ -1266,6 +1308,10 @@ class TestOpenCodeCLIProvider:
             patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
             patch("os.killpg", create=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321
@@ -1305,7 +1351,13 @@ class TestOpenCodeCLIProvider:
                 max_retries=1,
             )
 
-        with patch("asyncio.create_subprocess_exec") as mock_subprocess:
+        with (
+            patch("asyncio.create_subprocess_exec") as mock_subprocess,
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
+        ):
             mock_process = AsyncMock()
             mock_process.communicate.return_value = (b"", b"model not found")
             mock_process.returncode = 1
@@ -1336,6 +1388,10 @@ class TestOpenCodeCLIProvider:
             patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
             patch("os.killpg", create=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321
@@ -1373,6 +1429,10 @@ class TestOpenCodeCLIProvider:
             patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
             patch("os.killpg", create=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321
@@ -1417,6 +1477,10 @@ class TestOpenCodeCLIProvider:
             patch("sys.platform", "linux"),
             patch("asyncio.create_subprocess_exec") as mock_subprocess,
             patch("os.killpg", create=True),
+            patch(
+                "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+                return_value="opencode",
+            ),
         ):
             mock_process_timeout = AsyncMock()
             mock_process_timeout.pid = 4321
