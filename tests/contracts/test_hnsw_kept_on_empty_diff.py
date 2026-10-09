@@ -51,13 +51,13 @@ def _drop_hnsw_indexes(db_dir: Path) -> None:
         conn.close()
 
 
-def _run(work_dir: Path, db_dir: Path, **kwargs):
-    """Incremental Rust run; returns the result and every progress event seen."""
+def _run(work_dir: Path, db_dir: Path, *, incremental: bool = True, **kwargs):
+    """Rust run, incremental by default; returns the result and every progress event."""
     events: list[tuple[str, int, int]] = []
     result = index_with_rust(
         work_dir,
         db_dir,
-        incremental=True,
+        incremental=incremental,
         progress_callback=lambda phase, current, total: events.append(
             (phase, current, total)
         ),
@@ -119,6 +119,17 @@ class TestHnswKeptOnEmptyDiff:
         assert REBUILT in events
         assert LEFT_IN_PLACE not in events
         assert _hnsw_index_names(indexed_db), "the index must exist after a write"
+
+    def test_non_incremental_run_keeps_the_bracket(
+        self, work_dir: Path, indexed_db: Path
+    ):
+        """Unchanged files, but a full run writes every one of them again."""
+        second, events = _run(work_dir, indexed_db, incremental=False)
+
+        assert second.files_processed > 0
+        assert REBUILT in events
+        assert LEFT_IN_PLACE not in events
+        assert _hnsw_index_names(indexed_db)
 
     def test_run_that_only_deletes_keeps_the_bracket(
         self, work_dir: Path, indexed_db: Path

@@ -656,9 +656,9 @@ impl IndexingPipeline {
                 // unnoticed). Log it instead for the rare case it's slow.
                 // Compaction must keep the bracket even on an otherwise
                 // empty run: it rebuilds the indexes through `reopen()`, with
-                // the metrics `drop_all_hnsw_indexes()` captures. Nothing is
-                // written before the post-write check below, so asking here
-                // gives the same answer it will get.
+                // the metrics `drop_all_hnsw_indexes()` captures. So whether
+                // to compact is decided here, with the skip: the post-write
+                // step does not ask again on a run that skipped the bracket.
                 let skip_decision = Self::can_skip_hnsw_bracket(backend.as_ref(), nothing_to_write);
                 let skip_hnsw_bracket =
                     Self::close_backend_on_err(backend.as_mut(), skip_decision)?;
@@ -863,17 +863,25 @@ impl IndexingPipeline {
                 // instead of returning early with the connection left open
                 // and HNSW indexes un-restored (Invariant 14).
                 let post_write_result: Result<(), String> = write_result.and_then(|()| {
-                    let needs_compaction = disk_limit_hit.is_none()
+                    let needs_compaction = !skip_hnsw_bracket
+                        && disk_limit_hit.is_none()
                         && backend.needs_compaction().map_err(|e| e.to_string())?;
                     if needs_compaction {
                         emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
                         backend.run_compaction().map_err(|e| e.to_string())?;
                     } else {
                         if disk_limit_hit.is_some() {
-                            log::info!(
-                                "[store] skipping compaction after disk-limit trip; \
-                                 rebuilding HNSW indexes only"
-                            );
+                            if skip_hnsw_bracket {
+                                log::info!(
+                                    "[store] skipping compaction after disk-limit trip; \
+                                     existing HNSW indexes left in place"
+                                );
+                            } else {
+                                log::info!(
+                                    "[store] skipping compaction after disk-limit trip; \
+                                     rebuilding HNSW indexes only"
+                                );
+                            }
                         }
                         // Still emitted when there is nothing to rebuild:
                         // the progress consumer resolves its index and
