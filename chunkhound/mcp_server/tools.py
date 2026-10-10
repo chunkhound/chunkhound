@@ -1139,7 +1139,19 @@ async def execute_tool(
             search_type = arguments.get("type", "regex")
             results_list = list(result.get("results", []))
             pagination = dict(result.get("pagination", {}))
-            diff_warnings: list[str] = result.get("warnings", [])
+            diff_warnings: list[str] = list(result.get("warnings", []))
+            # Mirror the CLI: regex search ignores git diff inputs, so say so.
+            if search_type == "regex":
+                used = [
+                    p
+                    for p in ("commit_range", "commit_hash", "last_n_commits")
+                    if arguments.get(p) is not None
+                ]
+                if used:
+                    diff_warnings.append(
+                        f"type='regex' ignores git diff params ({', '.join(used)}); "
+                        "diff search requires type='semantic'."
+                    )
             md = format_search_results_markdown(results_list, pagination, search_type)
             # Keep at least 1 result; preserve original page_size so the footer's
             # total-page count stays calibrated to the requested page size.
