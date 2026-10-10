@@ -11,7 +11,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.database_factory import create_services
-from chunkhound.mcp_server.tools import search_impl
+from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 
 # --- Shared test project content (matches old TestSearchCLI fixture) ---
@@ -154,3 +154,30 @@ async def test_result_structure(indexed_project):
         assert required_keys.issubset(r.keys()), (
             f"Missing keys: {required_keys - r.keys()}"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "commit_arg",
+    [
+        {"commit_range": "HEAD~1..HEAD"},
+        {"commit_hash": "HEAD"},
+        {"last_n_commits": 1},
+    ],
+)
+async def test_mcp_regex_warns_that_commit_inputs_are_ignored(
+    indexed_project, commit_arg
+):
+    """Regex search cannot be scoped to a diff; MCP must say so like the CLI does."""
+    tmp_path, services = indexed_project
+    md = await execute_tool(
+        tool_name="search",
+        services=services,
+        embedding_manager=None,
+        arguments={"type": "regex", "query": "calculate_tax", **commit_arg},
+    )
+    assert isinstance(md, str)
+    (param,) = commit_arg
+    assert md.startswith("> **Warning:**"), md[:300]
+    assert f"ignores git diff params ({param})" in md
+    assert "calculator.py" in md
