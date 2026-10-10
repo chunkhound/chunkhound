@@ -452,8 +452,8 @@ impl IndexingPipeline {
     /// batches, embeds them (via its own long-lived rayon pool, built once
     /// for the whole run), converts each embedded batch into a
     /// `DbWriterBatch`, and forwards it to a dedicated store thread —  so
-    /// while the store thread writes batch N to DuckDB (and, on the final
-    /// batch, rebuilds HNSW indexes and compacts), the embed thread is
+    /// while the store thread writes batch N to DuckDB (and, after the
+    /// final batch, rebuilds HNSW indexes or compacts), the embed thread is
     /// already embedding batch N+1, and the parse thread is already
     /// parsing batch N+2. Both bounds provide backpressure: parsed batches
     /// hold source text, and embedded batches additionally hold float
@@ -463,7 +463,9 @@ impl IndexingPipeline {
     /// using the same HNSW "bulk mode" bracket
     /// (`drop_all_hnsw_indexes()` → N incremental writes →
     /// `ensure_all_hnsw_indexes()`) that the Python path already uses for
-    /// bulk indexing, so no new DB-layer mechanism is required.
+    /// bulk indexing, so no new DB-layer mechanism is required. A run with
+    /// nothing to write, delete or compact skips the bracket and leaves
+    /// the indexes in place.
     ///
     /// **Caller must release the GIL** before entering this method.
     /// Each thread re-acquires the GIL independently via ``Python::with_gil()``.
