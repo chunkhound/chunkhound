@@ -211,6 +211,20 @@ def test_requesty_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_api_route_configurator_round_trips_through_llm_config(
+    tmp_path, clean_environment
+) -> None:
+    config = Config(**_build_chunkhound_config("voyageai", "api_route"))
+    assert config.llm is not None
+    utility, synthesis = config.llm.get_provider_configs()
+    for role in (utility, synthesis):
+        assert role["provider"] == "api_route"
+        assert role["model"] == "gpt-6.1-sol"
+
+    assert _validated_config_errors(tmp_path, "research", "voyageai", "api_route") == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 

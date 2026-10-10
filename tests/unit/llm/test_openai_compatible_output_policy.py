@@ -142,3 +142,28 @@ async def test_generic_compatible_endpoint_uses_fallback_cap() -> None:
 
         body = server.requests[0]["json"]
         assert body["max_completion_tokens"] == 64_007
+
+
+@pytest.mark.asyncio
+async def test_api_route_provider_managed_output_uses_conservative_cap() -> None:
+    marker = "api-route-fallback"
+    with _server(marker) as server:
+        provider = _manager_provider("api_route")
+        assert provider.output_limit_metadata.omission is OutputLimitCapability.UNKNOWN
+        await provider._client.close()
+        provider._client = AsyncOpenAI(
+            api_key="sk-test", base_url=server.base_url, max_retries=0
+        )
+        provider.configure_synthesis_output_limit_policy(
+            output_limits_enabled=False, fallback_tokens=64_009
+        )
+        try:
+            await provider.complete(
+                marker, max_completion_tokens=PROVIDER_MANAGED_OUTPUT
+            )
+        finally:
+            await provider._client.close()
+
+        body = server.requests[0]["json"]
+        assert body["max_tokens"] == 64_009
+        assert "max_completion_tokens" not in body
