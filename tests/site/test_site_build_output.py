@@ -241,12 +241,11 @@ def test_homepage_hero_is_one_terminal_surface() -> None:
     # was extracted to site/src/styles/hero-terminal.css (global, no Astro
     # scoping attribute), so match the plain `.hero` rule.
     css = "".join(
-        bundle.read_text(encoding="utf-8")
-        for bundle in (DIST / "_astro").glob("*.css")
+        bundle.read_text(encoding="utf-8") for bundle in (DIST / "_astro").glob("*.css")
     )
-    assert re.search(
-        r"\.hero\{[^}]*background:\s*var\(--code-bg\)", css
-    ), "the hero section must own the full-bleed code surface"
+    assert re.search(r"\.hero\{[^}]*background:\s*var\(--code-bg\)", css), (
+        "the hero section must own the full-bleed code surface"
+    )
 
 
 _BAND_RULE = re.compile(
@@ -279,8 +278,7 @@ def test_homepage_section_banding_alternates_positionally() -> None:
     )
 
     css = "".join(
-        bundle.read_text(encoding="utf-8")
-        for bundle in (DIST / "_astro").glob("*.css")
+        bundle.read_text(encoding="utf-8") for bundle in (DIST / "_astro").glob("*.css")
     )
     assert _BAND_RULE.search(css), (
         "Homepage banding must be positional "
@@ -302,8 +300,7 @@ def test_homepage_closing_section_uses_the_brand_surface() -> None:
     )
 
     css = "".join(
-        bundle.read_text(encoding="utf-8")
-        for bundle in (DIST / "_astro").glob("*.css")
+        bundle.read_text(encoding="utf-8") for bundle in (DIST / "_astro").glob("*.css")
     )
     assert re.search(
         r"\.brand-surface\s*\{[^}]*background:\s*var\(--brand-surface\)", css
@@ -323,7 +320,10 @@ def test_configurator_ui_has_reranker_and_prerequisites() -> None:
     # Install-command copy button announces failures too: it carries a status
     # live region (the hero pill is the page's only copy control).
     assert homepage.count('aria-label="Copy install command"') >= 1
-    assert homepage.count('data-copy-status') >= 2
+    assert homepage.count("data-copy-status") >= 2
+    # Legacy homepage anchors: inbound docs/blog links target these ids.
+    assert 'id="install"' in homepage
+    assert 'id="capabilities"' in homepage
     assert "Reranking" in homepage
     assert 'data-rerank-state="included"' in homepage
     assert "Included by VoyageAI." in homepage

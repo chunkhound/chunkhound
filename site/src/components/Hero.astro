@@ -19,6 +19,10 @@ import PhosphorIcon from "./PhosphorIcon.astro";
      it annotates and indented to the copy column. No second column, no light
      intro band. -->
 <section class="hero">
+    <!-- Legacy homepage anchors: preserve inbound links from docs and blog posts
+         that reference the previous homepage sections. -->
+    <a id="install" class="sr-only" aria-hidden="true"></a>
+    <a id="capabilities" class="sr-only" aria-hidden="true"></a>
     <div class="container">
         <div class="headline-row">
             {/* The trailing space (inside the h1) renders at the display
