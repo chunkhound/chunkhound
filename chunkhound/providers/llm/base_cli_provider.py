@@ -89,8 +89,10 @@ def _resolve_one_cli(cand: str) -> str | None:
     path = Path(cand)
     # Only treat as an explicit filesystem path when it has a directory
     # component (or is absolute). Bare names always go through which/PATH.
+    # abspath does not follow a symlink. resolve() would, and a shim that
+    # picks its runtime from argv[0] would then launch the wrong file.
     if (path.is_absolute() or os.path.dirname(cand)) and path.is_file():
-        return str(path.resolve())
+        return os.path.abspath(cand)
     return shutil.which(cand)
 
 
@@ -217,17 +219,14 @@ async def terminate_cli_process(process: asyncio.subprocess.Process) -> None:
                 pass
         try:
             await asyncio.wait_for(process.wait(), timeout=5)
-        except (asyncio.TimeoutError, ProcessLookupError):
+        except asyncio.TimeoutError:
             pass
         return
     try:
         process.kill()
     except ProcessLookupError:
         pass
-    try:
-        await process.wait()
-    except ProcessLookupError:
-        pass
+    await process.wait()
 
 
 class BaseCLIProvider(LLMProvider):

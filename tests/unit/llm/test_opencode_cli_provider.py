@@ -32,6 +32,24 @@ def test_unshortenable_shim_does_not_crash_availability(monkeypatch: pytest.Monk
     assert provider._opencode_available() is False
 
 
+def test_opencode_available_oserror_is_false(monkeypatch: pytest.MonkeyPatch):
+    """A non-executable binary reports unavailable instead of crashing setup."""
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
+        lambda name: "opencode",
+    )
+
+    def _raise_oserror(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise PermissionError("not executable")
+
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.opencode_cli_provider.subprocess.run",
+        _raise_oserror,
+    )
+    provider = OpenCodeCLIProvider(model="openai/gpt-5-nano")
+    assert provider._opencode_available() is False
+
+
 class TestOpenCodeCLIProvider:
     """Test cases for OpenCode CLI provider."""
 

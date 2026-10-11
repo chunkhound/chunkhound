@@ -206,6 +206,45 @@ def test_unshortenable_shim_reports_broken(monkeypatch: pytest.MonkeyPatch) -> N
     assert provider._codex_available_status() == "broken"
 
 
+def test_codex_available_oserror_is_broken(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-executable override is broken. It does not crash construction."""
+    from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
+
+    def _raise_oserror(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise PermissionError("not executable")
+
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.subprocess.run",
+        _raise_oserror,
+    )
+    provider = CodexCLIProvider(model="gpt-explicit")
+    assert provider._codex_available_status() == "broken"
+
+
+def test_model_discovery_oserror_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-executable Codex binary does not escape model discovery."""
+    from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
+
+    def _raise_oserror(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise PermissionError("not executable")
+
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.subprocess.Popen",
+        _raise_oserror,
+    )
+    assert CodexCLIProvider.get_highest_priority_available_model() is None
+
+
 def test_model_discovery_unshortenable_shim_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

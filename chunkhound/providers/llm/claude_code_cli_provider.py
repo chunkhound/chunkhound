@@ -302,10 +302,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 except asyncio.TimeoutError as e:
                     # Kill cmd.exe + Node/CLI tree when wrapping a .cmd shim
                     if process is not None:
-                        try:
-                            await terminate_cli_process(process)
-                        except ProcessLookupError:
-                            pass
+                        await terminate_cli_process(process)
 
                     last_error = RuntimeError(
                         f"CLI command timed out after {request_timeout}s"
@@ -321,10 +318,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     if isinstance(e, RuntimeError):
                         raise
                     if process is not None:
-                        try:
-                            await terminate_cli_process(process)
-                        except ProcessLookupError:
-                            pass
+                        await terminate_cli_process(process)
 
                     last_error = RuntimeError(f"CLI command failed: {e}")
                     if attempt < self._max_retries - 1:

@@ -506,70 +506,63 @@ class TestClaudeCodeCLIProvider:
         mock_subprocess.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_complete_timeout(self, provider, mock_subprocess):
-        """Test that timeout is handled correctly and process is killed."""
-        # Mock process that will timeout
+    async def test_complete_timeout(self, provider, mock_subprocess, monkeypatch):
+        """A timeout kills the process on the POSIX branch of the helper."""
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.base_cli_provider.sys.platform", "linux"
+        )
         mock_process = AsyncMock()
-        mock_process.returncode = None  # Process still running
+        mock_process.returncode = None
         mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_process.kill = MagicMock()
+        mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        with (
-            patch(
-                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
-                new_callable=AsyncMock,
-            ) as mock_term,
-            pytest.raises(RuntimeError, match="CLI command timed out"),
-        ):
+        with pytest.raises(RuntimeError, match="CLI command timed out"):
             await provider.complete("Test prompt", timeout=1)
 
-        # Tree kill on each of max_retries attempts
-        assert mock_term.await_count == 3
-        assert all(c.args[0] is mock_process for c in mock_term.await_args_list)
+        assert mock_process.kill.call_count == 3
+        assert mock_process.wait.call_count == 3
 
     @pytest.mark.asyncio
     async def test_complete_timeout_ignores_stale_process_lookup_error(
-        self, provider, mock_subprocess
+        self, provider, mock_subprocess, monkeypatch
     ):
-        """Stale process cleanup must not mask the timeout error."""
+        """A process that is already gone must not mask the timeout error."""
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.base_cli_provider.sys.platform", "linux"
+        )
         mock_process = AsyncMock()
         mock_process.returncode = None
         mock_process.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+        mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        async def _term_raises(_proc: object) -> None:
-            raise ProcessLookupError()
-
-        with (
-            patch(
-                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
-                side_effect=_term_raises,
-            ),
-            pytest.raises(RuntimeError, match="CLI command timed out"),
-        ):
+        with pytest.raises(RuntimeError, match="CLI command timed out"):
             await provider.complete("Test prompt", timeout=1)
+
+        assert mock_process.wait.await_count == 3
 
     @pytest.mark.asyncio
     async def test_complete_generic_failure_ignores_stale_process_lookup_error(
-        self, provider, mock_subprocess
+        self, provider, mock_subprocess, monkeypatch
     ):
-        """Unexpected failures must survive stale process cleanup."""
+        """Unexpected failures must survive a process that is already gone."""
+        monkeypatch.setattr(
+            "chunkhound.providers.llm.base_cli_provider.sys.platform", "linux"
+        )
         mock_process = AsyncMock()
         mock_process.returncode = None
         mock_process.communicate = AsyncMock(side_effect=ValueError("boom"))
+        mock_process.kill = MagicMock(side_effect=ProcessLookupError())
+        mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        async def _term_raises(_proc: object) -> None:
-            raise ProcessLookupError()
-
-        with (
-            patch(
-                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
-                side_effect=_term_raises,
-            ),
-            pytest.raises(RuntimeError, match="CLI command failed: boom"),
-        ):
+        with pytest.raises(RuntimeError, match="CLI command failed: boom"):
             await provider.complete("Test prompt")
+
+        assert mock_process.wait.await_count == 3
 
     @pytest.mark.asyncio
     async def test_complete_cli_error(self, provider, mock_subprocess):
@@ -853,15 +846,8 @@ class TestClaudeCodeCLIProvider:
         mock_process.wait = AsyncMock()
         mock_subprocess.return_value = mock_process
 
-        with (
-            patch(
-                "chunkhound.providers.llm.claude_code_cli_provider.terminate_cli_process",
-                new_callable=AsyncMock,
-            ) as mock_term,
-            pytest.raises(RuntimeError, match="CLI command timed out"),
-        ):
+        with pytest.raises(RuntimeError, match="CLI command timed out"):
             await provider.complete("Test prompt", timeout=1)
 
-        # terminate_cli_process is still invoked; it no-ops when returncode is set
-        assert mock_term.await_count == 3
         mock_process.kill.assert_not_called()
+        mock_process.wait.assert_not_called()

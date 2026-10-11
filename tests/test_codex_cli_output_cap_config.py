@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,25 @@ import pytest
 from chunkhound.interfaces.llm_provider import PROVIDER_MANAGED_OUTPUT
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from tests.helpers import DummyPipe, DummyProc
+
+
+@pytest.fixture(autouse=True)
+def _block_codex_version_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The constructor's ``codex --version`` probe must not run a real binary."""
+    real_run = subprocess.run
+
+    def _run(args, **kwargs):  # noqa: ANN001, ANN003
+        if (
+            isinstance(args, (list, tuple))
+            and len(args) >= 2
+            and args[-1] == "--version"
+            and os.path.splitext(os.path.basename(str(args[-2])).lower())[0]
+            == "codex"
+        ):
+            return subprocess.CompletedProcess(args, 0)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _run)
 
 
 @pytest.mark.asyncio

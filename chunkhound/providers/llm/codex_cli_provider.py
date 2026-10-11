@@ -335,7 +335,7 @@ class CodexCLIProvider(BaseCLIProvider):
             return "ok" if res.returncode == 0 else "broken"
         except FileNotFoundError:
             return "not_installed"
-        except (subprocess.SubprocessError, RuntimeError):
+        except (subprocess.SubprocessError, OSError, RuntimeError):
             return "broken"
 
     @staticmethod
@@ -405,7 +405,7 @@ class CodexCLIProvider(BaseCLIProvider):
             return None
         except (
             subprocess.SubprocessError,
-            FileNotFoundError,
+            OSError,
             json.JSONDecodeError,
             RuntimeError,
         ) as e:

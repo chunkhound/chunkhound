@@ -138,7 +138,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 check=False,
             )
             return result.returncode == 0
-        except (subprocess.SubprocessError, FileNotFoundError, RuntimeError):
+        except (subprocess.SubprocessError, OSError, RuntimeError):
             return False
 
     def _validate_model_format(self, model: str) -> None:

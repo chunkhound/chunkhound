@@ -1,5 +1,6 @@
 """Tests for BaseCLIProvider double-wrap guard and CLI binary resolution."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -162,9 +163,31 @@ def test_resolve_cli_binary_prefers_env_path(monkeypatch, tmp_path: Path):
         "chunkhound.providers.llm.base_cli_provider.shutil.which",
         lambda name: pytest.fail("which should not run when env path exists"),
     )
-    assert resolve_cli_binary("claude", env_var="CHUNKHOUND_TEST_BIN") == str(
-        fake.resolve()
+    assert resolve_cli_binary("claude", env_var="CHUNKHOUND_TEST_BIN") == os.path.abspath(
+        fake
     )
+
+
+def test_resolve_cli_binary_does_not_resolve_explicit_path(monkeypatch, tmp_path: Path):
+    """An explicit override is not passed through Path.resolve().
+
+    resolve() follows symlinks. A shim that chooses its runtime from its own
+    path would then launch the target instead.
+    """
+    fake = tmp_path / "shim.exe"
+    fake.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("CHUNKHOUND_TEST_BIN", str(fake))
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.base_cli_provider.shutil.which",
+        lambda name: pytest.fail("which should not run when env path exists"),
+    )
+
+    def _follow_symlink(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        raise AssertionError("resolve() follows symlinks")
+
+    monkeypatch.setattr(Path, "resolve", _follow_symlink)
+    found = resolve_cli_binary("claude", env_var="CHUNKHOUND_TEST_BIN")
+    assert found == os.path.abspath(fake)
 
 
 def test_resolve_cli_binary_missing_raises(monkeypatch):
