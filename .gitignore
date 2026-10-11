@@ -355,3 +355,6 @@ site/test-results/
 
 # Codex CLI
 .codex/
+
+# Isolated development worktrees
+.worktrees/
