@@ -7,10 +7,17 @@ import type {
 export const RERANK_URL_ERROR_ID = "rerank-url-error";
 
 const ABSOLUTE_URL_ERROR = "Use an absolute HTTP(S) URL or a relative path.";
-const PROTOCOL_RELATIVE_ERROR =
+// Exported so tests can assert the rendered error equals this constant.
+export const PROTOCOL_RELATIVE_ERROR =
   "Protocol-relative URLs are not supported — use an absolute HTTP(S) URL or a relative path.";
-const INCOMPLETE_URL_ERROR =
+// Exported so tests can assert the rendered error equals this constant.
+export const INCOMPLETE_URL_ERROR =
   "That URL is incomplete — use a full HTTP(S) URL such as https://reranker.example.com/rerank.";
+// The backend classifies with a case-sensitive startswith, so an uppercase
+// scheme parses in the browser but is not absolute to the backend.
+// Exported for the same test reason as INCOMPLETE_URL_ERROR above.
+export const SCHEME_CASE_ERROR =
+  "Write the scheme in lowercase: http:// or https://.";
 const RELATIVE_NO_BASE_URL_ERROR =
   "A relative reranker URL requires this retrieval preset to have a base URL.";
 
@@ -22,17 +29,38 @@ function incompleteSchemeUrlError(value: string): string | undefined {
   return undefined;
 }
 
+// Returns undefined for canonical HTTP(S) URLs. For scheme forms that parse
+// in the browser but miss the backend's case-sensitive startswith, returns
+// SCHEME_CASE_ERROR for uppercase schemes ("HTTPS://x") or INCOMPLETE_URL_ERROR
+// for structural faults ("http:/x") — so the emitted config always passes.
+function classifySchemeParityError(
+  value: string,
+  protocol: string,
+): string | undefined {
+  if (value.startsWith("http://") || value.startsWith("https://"))
+    return undefined;
+  // "HTTPS://x" is a scheme-case fault; "http:/x" is a structural one.
+  if (value.slice(0, protocol.length) !== protocol) return SCHEME_CASE_ERROR;
+  return INCOMPLETE_URL_ERROR;
+}
+
 export function rerankUrlValidationError(
   value: string,
   hasBaseUrl: boolean,
 ): string | undefined {
+  // The configurator trims the field before calling here (configurator.ts; the
+  // emitted config trims in builders.ts configWithReranker too); trim again so
+  // a direct caller cannot misread a padded URL as a scheme fault.
+  value = value.trim();
   if (!value) return undefined;
   // Protocol-relative URLs inherit the page scheme, so the fetch target is
   // ambiguous — reject them explicitly instead of treating them as relative.
   if (value.startsWith("//")) return PROTOCOL_RELATIVE_ERROR;
   try {
     const protocol = new URL(value).protocol;
-    if (protocol === "http:" || protocol === "https:") return undefined;
+    if (protocol === "http:" || protocol === "https:") {
+      return classifySchemeParityError(value, protocol);
+    }
     return ABSOLUTE_URL_ERROR;
   } catch {
     const schemeError = incompleteSchemeUrlError(value);
@@ -111,8 +139,18 @@ export interface RerankerValidation {
   field: RerankerErrorField;
 }
 
-// Returns the offending field so aria-invalid can target the exact input the
-// user must fix, not a neighboring one.
+/**
+ * Mirrors embedding_config.validate_rerank_configuration. UI-only additions:
+ * (1) the <select> only offers cohere/tei/voyage, so "auto" — a backend
+ * runtime sentinel — is rejected here; (2) rerankUrlValidationError is
+ * stricter on ambiguous URL forms (protocol-relative, empty host) and trims
+ * surrounding whitespace before classifying. When reranking is implied but no
+ * URL is given, the URL error fires first, matching the backend's
+ * model_validator, which raises RERANK_BASE_URL_REQUIRED before the shared
+ * validator reaches its model check.
+ * Reranking is implied by a model or TEI format; without a preset base_url
+ * the backend rejects it unless the provider reranks via SDK (VoyageAI).
+ */
 export function rerankerValidationError(
   retrieval: ConfiguratorEmbeddingProviderOption,
   url: string,
@@ -126,15 +164,6 @@ export function rerankerValidationError(
   if (urlError) return { message: urlError, field: "url" };
   const effective = effectiveReranker(retrieval, format, model);
   if (!url && !effective.format && !effective.model) return undefined;
-  // Deliberately stricter subset of embedding_config.validate_rerank_config:
-  // (1) voyageai presets without a rerank URL still get the model-required
-  // check (the backend returns early); (2) "auto" rerank_format is rejected
-  // because the UI format field is a required <select> with explicit choices.
-  // For the URL-less case, URL is checked before model-required here — matching
-  // the backend's no-base_url path, where RERANK_BASE_URL_REQUIRED is raised
-  // before the model check, so frontend messaging tracks that real failure.
-  // Reranking is implied by a model or TEI format; without a preset base_url
-  // the backend rejects it unless the provider reranks via SDK (VoyageAI).
   const rerankingImplied = effective.hasModel || effective.format === "tei";
   if (
     !url &&
@@ -147,12 +176,29 @@ export function rerankerValidationError(
       field: "url",
     };
   }
+  // VoyageAI reranks via SDK: the backend accepts any format/model, so the
+  // UI must not block a valid config the operator can't fix by picking a format.
+  if (retrieval.config.provider === "voyageai" && !url) {
+    return undefined;
+  }
+  return validateRerankerFields(effective);
+}
+
+// Format/model checks for configs that cleared the URL checks (URL present,
+// or VoyageAI SDK bypass). Separated so rerankerValidationError stays a linear
+// chain of early returns.
+function validateRerankerFields(
+  effective: EffectiveReranker,
+): RerankerValidation | undefined {
   if (!effective.hasFormat)
     return {
       message: "Choose TEI, Cohere, or Voyage for the external reranker.",
       field: "format",
     };
   return effective.requiresModel && !effective.hasModel
-    ? { message: "A Cohere or Voyage reranker requires a model.", field: "model" }
+    ? {
+        message: "A Cohere or Voyage reranker requires a model.",
+        field: "model",
+      }
     : undefined;
 }

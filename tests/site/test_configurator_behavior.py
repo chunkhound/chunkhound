@@ -162,6 +162,7 @@ console.log(JSON.stringify({ initialHidden, afterEmbed, afterExternalConfig, aft
     # stage-level block — and only one instance ever exists.
     assert after_embed["rerankHost"] == "Ollama"
     assert after_embed["rerankCount"] == 1
+
     # Requirement links, per the configurator requirements map: same hrefs,
     # labels, and new-tab/logo contract as renderRequirements renders.
     def link_contract(href: str, text: str) -> dict:
@@ -187,9 +188,7 @@ console.log(JSON.stringify({ initialHidden, afterEmbed, afterExternalConfig, aft
             "Vercel AI Gateway API key",
         )
     ]
-    assert after_embed["agentLinks"] == [
-        link_contract("https://pi.dev", "Pi 1.0+")
-    ]
+    assert after_embed["agentLinks"] == [link_contract("https://pi.dev", "Pi 1.0+")]
     assert (
         '"rerank_url": "https://tei.example.com/rerank"'
         in rendered["afterExternalConfig"]["configCopy"]
@@ -312,8 +311,105 @@ console.log(JSON.stringify({ validTei, modelRequired, resolved, badUrl }));
     )
     assert rendered["modelRequired"]["invalid"] == ["false", "false", "true"]
     assert rendered["resolved"] == {"error": "", "invalid": ["false"] * 3}
-    assert rendered["badUrl"]["error"] == "Use an absolute HTTP(S) URL or a relative path."
+    assert (
+        rendered["badUrl"]["error"] == "Use an absolute HTTP(S) URL or a relative path."
+    )
     assert rendered["badUrl"]["invalid"] == ["true", "false", "false"]
+
+
+def test_reranker_rejects_scheme_forms_the_backend_cannot_classify(
+    built_site,
+) -> None:
+    """Parity with the backend's case-sensitive startswith on rerank_url:
+    uppercase-scheme and single-slash URLs parse as http(s) in the browser
+    yet the backend rejects them as scheme faults rather than reading them as
+    relative paths, so the UI must reject them before they reach a config —
+    the case fault as a scheme-case error, the structural fault as an
+    incomplete URL. Protocol-relative URLs inherit the page scheme, so their
+    fetch target is ambiguous and the UI rejects them explicitly."""
+    script = (
+        browser_dom(dist_body(_GETTING_STARTED))
+        + """
+const { INCOMPLETE_URL_ERROR, SCHEME_CASE_ERROR, PROTOCOL_RELATIVE_ERROR } = await import(
+  './site/src/components/configurator/rerank-validate.ts');
+"""
+        + _INIT
+        + _SELECTORS
+        + """
+const errorText = () => q('[data-rerank-url-error]').textContent;
+const urlInvalid = () => q('[data-rerank-url]').getAttribute('aria-invalid');
+
+// ollama-embed has a base_url; malformed schemes must still be rejected.
+choose('data-retrieval', 'ollama-embed');
+const submit = (value) => {
+  rerankUrl.value = value;
+  rerankUrl.dispatchEvent(new window.Event('input'));
+  return { error: errorText(), invalid: urlInvalid() };
+};
+const upperScheme = submit('HTTPS://tei.example.com/rerank');
+const singleSlash = submit('http:/tei.example.com/rerank');
+const protocolRelative = submit('//tei.example.com/rerank');
+console.log(JSON.stringify({
+  incomplete: INCOMPLETE_URL_ERROR,
+  schemeCase: SCHEME_CASE_ERROR,
+  protocolRelativeMsg: PROTOCOL_RELATIVE_ERROR,
+  upperScheme,
+  singleSlash,
+  protocolRelative,
+}));
+"""
+    )
+    rendered = run_tsx_json(script)
+
+    assert rendered["upperScheme"]["error"] == rendered["schemeCase"], rendered[
+        "upperScheme"
+    ]
+    assert rendered["singleSlash"]["error"] == rendered["incomplete"], rendered[
+        "singleSlash"
+    ]
+    assert rendered["protocolRelative"]["error"] == rendered["protocolRelativeMsg"], (
+        rendered["protocolRelative"]
+    )
+    for case in ("upperScheme", "singleSlash", "protocolRelative"):
+        assert rendered[case]["invalid"] == "true", rendered[case]
+
+
+def test_voyageai_url_less_reranker_shows_no_error(built_site) -> None:
+    """VoyageAI reranks via SDK with no rerank_url; the backend accepts any
+    format/model combination for it (early return in
+    validate_rerank_configuration), so the UI must stay silent too — a model
+    or format without a URL is a valid voyageai config the operator cannot
+    fix by choosing a different format."""
+    script = (
+        browser_dom(dist_body(_GETTING_STARTED))
+        + _INIT
+        + _SELECTORS
+        + """
+const invalid = () => ['url', 'format', 'model'].map((role) =>
+  q(`[data-rerank-${role}]`).getAttribute('aria-invalid'));
+const errorText = () => q('[data-rerank-url-error]').textContent;
+
+choose('data-retrieval', 'voyageai');
+// Model without a URL or format: no error, no flags.
+rerankModel.value = 'voyage-rerank-2.0';
+rerankModel.dispatchEvent(new window.Event('input'));
+const modelOnly = { error: errorText(), invalid: invalid() };
+
+// Cohere format without a model and without a URL: no error either.
+rerankModel.value = '';
+rerankModel.dispatchEvent(new window.Event('input'));
+rerankFormat.value = 'cohere';
+rerankFormat.dispatchEvent(new window.Event('change'));
+const formatOnly = { error: errorText(), invalid: invalid() };
+
+console.log(JSON.stringify({ modelOnly, formatOnly }));
+"""
+    )
+    rendered = run_tsx_json(script)
+
+    for case in ("modelOnly", "formatOnly"):
+        assert rendered[case]["error"] == "", rendered[case]
+        assert rendered[case]["invalid"] == ["false"] * 3, rendered[case]
 
 
 def test_configurator_rejects_url_less_tei_when_preset_has_no_base_url(
@@ -714,7 +810,9 @@ console.log(JSON.stringify({ motion, reduced }));
         stage = f"{result['role']} -> {result['id']}"
         assert result["inTerminal"], f"{stage}: the terminal describes another pick"
         assert result["inCopy"], f"{stage}: the copy payload describes another pick"
-        assert result["staleGone"], f"{stage}: the copied setup carries the previous pick"
+        assert result["staleGone"], (
+            f"{stage}: the copied setup carries the previous pick"
+        )
         assert result["revealIsTheCheckedRow"], (
             f"{stage}: the open reveal describes a different row"
         )

@@ -303,9 +303,7 @@ def test_openai_external_reranker_config_round_trips(
 def test_tei_reranker_without_url_round_trips(tmp_path, clean_environment) -> None:
     """TEI derives /rerank from a preset's base_url, so a URL-less TEI override
     must still emit rerank_format and let the backend derive rerank_url."""
-    config = _build_chunkhound_config(
-        "ollama-embed", "ollama-llm", {"format": "tei"}
-    )
+    config = _build_chunkhound_config("ollama-embed", "ollama-llm", {"format": "tei"})
 
     assert config["embedding"]["rerank_format"] == "tei"
     assert "rerank_url" not in config["embedding"]
@@ -323,9 +321,7 @@ def test_url_less_tei_without_preset_base_url_is_rejected_by_backend(
     """The configurator now refuses a URL-less TEI reranker when the preset has
     no base_url (openai-embed). Prove the UI and backend agree: the override the
     UI blocks is exactly the one the backend validator rejects."""
-    config = _build_chunkhound_config(
-        "openai-embed", "ollama-llm", {"format": "tei"}
-    )
+    config = _build_chunkhound_config("openai-embed", "ollama-llm", {"format": "tei"})
 
     assert config["embedding"]["rerank_format"] == "tei"
     assert "rerank_url" not in config["embedding"]
@@ -336,21 +332,165 @@ def test_url_less_tei_without_preset_base_url_is_rejected_by_backend(
         Config(target_dir=tmp_path, **config)
 
 
-def test_voyageai_reranker_accepts_model_without_url(
-    tmp_path, clean_environment
+@pytest.mark.parametrize(
+    ("url", "embedding_id"),
+    [
+        ("HTTPS://tei.example.com/rerank", "openai-embed"),
+        ("HTTPS://tei.example.com/rerank", "ollama-embed"),
+        ("http:/tei.example.com/rerank", "openai-embed"),
+        ("http:/tei.example.com/rerank", "ollama-embed"),
+    ],
+)
+def test_backend_rejects_noncanonical_http_rerank_urls(
+    tmp_path, clean_environment, url, embedding_id
 ) -> None:
-    """VoyageAI reranks via SDK with no rerank_url, so a URL-less model override
-    must emit rerank_model and pass backend validation."""
+    """A scheme fault cannot be repaired by any base_url or model, so the
+    backend rejects it outright — with or without a base_url. The former
+    relative-URL branch no longer sees these forms; it only resolves genuine
+    relative paths."""
     config = _build_chunkhound_config(
-        "voyageai", "openrouter", {"model": "voyage-rerank-2.0"}
+        embedding_id, "ollama-llm", {"url": url, "format": "tei"}
     )
 
-    assert config["embedding"]["rerank_model"] == "voyage-rerank-2.0"
-    assert "rerank_url" not in config["embedding"]
-    assert "rerank_format" not in config["embedding"]
+    assert config["embedding"]["rerank_url"] == url
+    with pytest.raises(ValidationError, match="lowercase http:// or https://"):
+        Config(target_dir=tmp_path, **config)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["HTTPS://tei.example.com/rerank", "http:/tei.example.com/rerank"],
+)
+def test_backend_rejects_noncanonical_rerank_url_even_when_reranking_is_off(
+    tmp_path, clean_environment, url
+) -> None:
+    """The scheme check guards the value itself, not reranking activity, so a
+    scheme fault fails the load even with no rerank_model and no TEI format."""
+    config = _build_chunkhound_config("ollama-embed", "ollama-llm", {"url": url})
+
+    assert config["embedding"]["rerank_url"] == url
+    with pytest.raises(ValidationError, match="lowercase http:// or https://"):
+        Config(target_dir=tmp_path, **config)
+
+
+def _rerank_url_ui_verdicts(rows: list[tuple[str, str]]) -> list[dict]:
+    """Run the site's rerankUrlValidationError for (url, preset) rows.
+
+    The preset's own base_url decides ``hasBaseUrl``, so the UI sees the same
+    input the emitted backend config would carry."""
+    script = f"""
+import {{
+  buildChunkhoundConfig,
+  embeddingProviders,
+  llmProviders,
+}} from './site/src/components/configurator/index.ts';
+import {{
+  rerankUrlValidationError,
+}} from './site/src/components/configurator/rerank-validate.ts';
+
+const llm = llmProviders.find((provider) => provider.id === 'ollama-llm');
+const rows = {json.dumps(rows)};
+console.log(JSON.stringify(rows.map(([url, preset]) => {{
+  const embedding = embeddingProviders.find((provider) => provider.id === preset);
+  if (!embedding || !llm) throw new Error('missing provider');
+  const {{ base_url: baseUrl }} = buildChunkhoundConfig(embedding, llm).embedding;
+  const hasBaseUrl = typeof baseUrl === 'string';
+  const error = rerankUrlValidationError(url, hasBaseUrl) ?? null;
+  return {{ preset, url, hasBaseUrl, error }};
+}})));
+"""
+    return run_tsx_json(script)
+
+
+def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
+    """Pin the backend and UI verdict for canonical, scheme-fault, and
+    ambiguous rerank URLs in one table.
+
+    The UI is deliberately stricter in two places: protocol-relative URLs and
+    a scheme with no host (``http://``) are rejected by the UI yet accepted by
+    the backend (the factory joins or forwards them). Each row records the
+    actual verdict for both sides, so parity drift always fails here."""
+    # (url, embedding preset, format, backend accepts, UI accepts)
+    matrix = [
+        ("https://tei.example.com/rerank", "ollama-embed", "tei", True, True),
+        ("/rerank", "ollama-embed", "tei", True, True),
+        ("HTTPS://tei.example.com/rerank", "ollama-embed", "tei", False, False),
+        ("HTTPS://tei.example.com/rerank", "openai-embed", "tei", False, False),
+        ("http:/tei.example.com/rerank", "ollama-embed", "tei", False, False),
+        # UI-only strictness: the backend still accepts these forms.
+        ("//tei.example.com/rerank", "ollama-embed", "tei", True, False),
+        ("http://", "ollama-embed", "tei", True, False),
+        # Both sides accept ``http:///p``: it starts with lowercase http://, so
+        # neither side classifies it as a scheme fault.
+        ("http:///p", "ollama-embed", "tei", True, True),
+    ]
+    ui_verdicts = {
+        (verdict["url"], verdict["preset"]): verdict["error"] is None
+        for verdict in _rerank_url_ui_verdicts(
+            [(url, preset) for url, preset, _, _, _ in matrix]
+        )
+    }
+
+    for url, preset, fmt, backend_ok, ui_ok in matrix:
+        label = f"{url!r} on {preset}"
+        config = _build_chunkhound_config(
+            preset, "ollama-llm", {"url": url, "format": fmt}
+        )
+        if backend_ok:
+            validated = Config(target_dir=tmp_path, **config)
+            assert validated.embedding.rerank_url == url, label
+        else:
+            with pytest.raises(ValidationError, match="lowercase http:// or https://"):
+                Config(target_dir=tmp_path, **config)
+        assert ui_verdicts[(url, preset)] is ui_ok, label
+
+
+def test_rerank_url_validator_accepts_padded_canonical_urls() -> None:
+    """The configurator trims the field before validating and emitting
+    (configurator.ts and builders.ts configWithReranker), so the validator must
+    trim too: a whitespace-padded canonical URL is accepted, not misread as a
+    scheme fault."""
+    verdicts = _rerank_url_ui_verdicts(
+        [("  https://tei.example.com/rerank  ", "ollama-embed")]
+    )
+
+    assert verdicts[0]["error"] is None, verdicts[0]
+
+
+def test_relative_rerank_url_with_base_url_round_trips(
+    tmp_path, clean_environment
+) -> None:
+    """Relative rerank paths stay valid next to a base_url — the scheme
+    rejection must not tighten them away."""
+    config = _build_chunkhound_config(
+        "ollama-embed", "ollama-llm", {"url": "/rerank", "format": "tei"}
+    )
 
     validated = Config(target_dir=tmp_path, **config)
-    assert validated.embedding.rerank_model == "voyage-rerank-2.0"
+    assert validated.embedding.rerank_url == "/rerank"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "omitted_field"),
+    [
+        ("model", "voyage-rerank-2.0", "rerank_format"),
+        ("format", "cohere", "rerank_model"),
+    ],
+)
+def test_voyageai_url_less_reranker_overrides_round_trip(
+    tmp_path, clean_environment, field, value, omitted_field
+) -> None:
+    """SDK-based reranking accepts model-only and format-only overrides
+    without an external endpoint or its model requirement."""
+    config = _build_chunkhound_config("voyageai", "openrouter", {field: value})
+    config_field = f"rerank_{field}"
+
+    assert config["embedding"][config_field] == value
+    assert "rerank_url" not in config["embedding"]
+    assert omitted_field not in config["embedding"]
+
+    validated = Config(target_dir=tmp_path, **config)
+    assert getattr(validated.embedding, config_field) == value
     assert validated.embedding.rerank_url is None
 
 
@@ -525,7 +665,7 @@ def test_recommended_route_config_round_trips_through_backend_config(
         target_dir=tmp_path,
         **_build_chunkhound_config(
             defaults["defaultRetrieval"], defaults["defaultResearch"]
-        )
+        ),
     )
 
     assert config.embedding is not None
@@ -706,8 +846,7 @@ console.log(JSON.stringify({
     # Shell-safe paths stay bare: quoting them adds noise with zero benefit.
     assert rendered["posixSafe"] == ".chunkhound.json"
     assert (
-        "cat > 'my dir/.chunkhound.json' <<'CHUNKHOUND_EOF'"
-        in rendered["posixWrite"]
+        "cat > 'my dir/.chunkhound.json' <<'CHUNKHOUND_EOF'" in rendered["posixWrite"]
     )
     assert "mkdir -p 'my dir'" in rendered["posixWrite"]
     powershell_write = rendered["powershellWrite"]

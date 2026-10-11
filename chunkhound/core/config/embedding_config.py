@@ -32,6 +32,9 @@ RERANK_MODEL_REQUIRED = (
 RERANK_BASE_URL_REQUIRED = (
     "rerank_model or rerank_format requires base_url or explicit rerank_url"
 )
+RERANK_URL_SCHEME_INVALID = (
+    "rerank_url must use lowercase http:// or https://, or a relative path"
+)
 
 
 def _validate_explicit_output_dims(v: object) -> int | None:
@@ -55,6 +58,20 @@ def _require_env_bool(var_name: str, raw_value: str) -> bool:
             f"{var_name} must be a boolean value (true/false), got {raw_value!r}"
         )
     return parsed
+
+
+def _reject_noncanonical_rerank_url(rerank_url: str) -> None:
+    """Reject a rerank_url whose scheme is not lowercase HTTP(S).
+
+    Relative paths are resolved against base_url at runtime and only
+    lowercase http(s) URLs are used as-is, so an uppercase or mistyped scheme
+    is neither and misses the endpoint. The site UI blocks the same forms
+    (rerank-validate.ts).
+    """
+    if rerank_url.startswith(("http://", "https://")):
+        return
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", rerank_url):
+        raise ValueError(RERANK_URL_SCHEME_INVALID)
 
 
 def validate_rerank_configuration(
@@ -82,6 +99,10 @@ def validate_rerank_configuration(
     if provider == "voyageai" and not rerank_url:
         return
 
+    # A scheme fault is unfixable by any base_url or model, so reject it first.
+    if rerank_url:
+        _reject_noncanonical_rerank_url(rerank_url)
+
     # Cohere and Voyage-native formats both require an explicit rerank_model
     if rerank_format in ("cohere", "voyage") and not rerank_model:
         raise ValueError(RERANK_MODEL_REQUIRED)
@@ -89,13 +110,10 @@ def validate_rerank_configuration(
     # If using reranking (model set or TEI format with URL), validate URL config
     is_using_reranking = rerank_model or (rerank_format == "tei" and rerank_url)
 
-    if is_using_reranking:
-        # For relative URLs, we need base_url
-        if (
-            rerank_url
-            and not rerank_url.startswith(("http://", "https://"))
-            and not base_url
-        ):
+    if is_using_reranking and rerank_url:
+        # Scheme forms are rejected above, so this is a relative URL and it
+        # needs base_url to resolve.
+        if not rerank_url.startswith(("http://", "https://")) and not base_url:
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
