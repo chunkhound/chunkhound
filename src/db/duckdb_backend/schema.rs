@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use duckdb::core::{LogicalTypeHandle, LogicalTypeId};
 use duckdb::{Config, Connection};
 
 use super::DuckDbHnswBackend;
@@ -21,6 +22,24 @@ const WAL_VSS_UNAVAILABLE: &str = "Cannot safely inspect index: WAL is present b
     Reopening writable does not bypass this check.";
 
 impl DuckDbHnswBackend {
+    // Python decodes UNION to its active member, including nested UNIONs.
+    // Use logical metadata rather than Rust Value: its Arrow representation
+    // conflates scale-zero DECIMAL with HUGEINT, and cannot preserve UHUGEINT.
+    fn decoded_type_sql(kind: &LogicalTypeHandle, expression: &str) -> String {
+        if kind.id() != LogicalTypeId::Union {
+            return format!("typeof({expression})");
+        }
+        let mut sql = format!("CASE union_tag({expression})");
+        for index in 0..kind.num_children() {
+            let member = kind.child_name(index).replace('\'', "''");
+            let extracted = format!("union_extract({expression}, '{member}')");
+            let member_type = Self::decoded_type_sql(&kind.child(index), &extracted);
+            sql.push_str(&format!(" WHEN '{member}' THEN {member_type}"));
+        }
+        sql.push_str(" ELSE NULL END");
+        sql
+    }
+
     pub(super) fn check_index_format(conn: &Connection) -> Result<(), DbError> {
         Self::check_catalog_index_format(conn, false)
     }
@@ -47,26 +66,30 @@ impl DuckDbHnswBackend {
                 // Preserve integer type semantics: DuckDB/Rust numeric coercions
                 // would otherwise accept booleans, decimals or numeric strings.
                 // Text transport also avoids narrowing HUGEINT/UHUGEINT values.
+                let metadata = conn.prepare(&format!("SELECT version FROM {table}"))?;
+                let kind = Self::decoded_type_sql(&metadata.column_logical_type(0), "version");
                 let mut stmt = conn.prepare(&format!(
-                    "SELECT typeof(version), CAST(version AS VARCHAR) FROM {table}"
+                    "SELECT {kind}, CAST(version AS VARCHAR) FROM {table}"
                 ))?;
                 let mut rows = stmt.query([])?;
                 while let Some(row) = rows.next()? {
-                    let kind: String = row.get(0)?;
+                    let kind: Option<String> = row.get(0)?;
                     let stored: Option<String> = row.get(1)?;
                     let value = stored.and_then(|value| value.parse::<u128>().ok());
                     if !matches!(
-                        kind.as_str(),
-                        "TINYINT"
-                            | "SMALLINT"
-                            | "INTEGER"
-                            | "BIGINT"
-                            | "HUGEINT"
-                            | "UTINYINT"
-                            | "USMALLINT"
-                            | "UINTEGER"
-                            | "UBIGINT"
-                            | "UHUGEINT"
+                        kind.as_deref(),
+                        Some(
+                            "TINYINT"
+                                | "SMALLINT"
+                                | "INTEGER"
+                                | "BIGINT"
+                                | "HUGEINT"
+                                | "UTINYINT"
+                                | "USMALLINT"
+                                | "UINTEGER"
+                                | "UBIGINT"
+                                | "UHUGEINT"
+                        )
                     ) || value.is_none_or(|value| value < 1)
                     {
                         return Err(DbError::Other("Invalid stored index format".into()));
@@ -88,7 +111,7 @@ impl DuckDbHnswBackend {
     }
 
     /// Inspect every recovery candidate before any rename, removal or writable
-    /// replay. This is an ownership checkpoint, not lifetime/race protection.
+    /// replay. This is an inspection checkpoint, not lifetime/race protection.
     pub(super) fn preflight_index_formats(live: &Path) -> Result<(), DbError> {
         if live == Path::new(":memory:") {
             return Ok(());

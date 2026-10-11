@@ -5,7 +5,8 @@ import shutil
 import duckdb
 import pytest
 
-from chunkhound.core.index_format import INDEX_FORMAT_VERSION
+from chunkhound.core.index_format import INDEX_FORMAT_VERSION, IndexFormatError
+from chunkhound.providers.database.index_format import preflight_duckdb, read_format
 from tests.contracts.pipeline_harness import index_with_rust
 from tests.hub.test_index_format import snapshot
 
@@ -91,6 +92,89 @@ def test_native_writer_refuses_invalid_metadata_without_changes(tmp_path, metada
     else:
         assert any("index format" in error.lower() for error in report.errors)
     assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "member, supported",
+    [
+        pytest.param("1", True, id="integer"),
+        pytest.param("1::HUGEINT", True, id="hugeint"),
+        pytest.param("1::UHUGEINT", True, id="uhugeint"),
+        pytest.param('union_value("quo\'ted" := 1)', True, id="nested-quoted-tag"),
+        pytest.param("true", False, id="boolean"),
+        pytest.param("1::DECIMAL(38,0)", False, id="scale-zero-decimal"),
+        pytest.param("1.5", False, id="fractional-decimal"),
+        pytest.param("'1'", False, id="text"),
+        pytest.param("NULL::INTEGER", False, id="null-member"),
+        pytest.param("0", False, id="zero"),
+        pytest.param("-1", False, id="negative"),
+        pytest.param("2", False, id="future"),
+        pytest.param(
+            "340282366920938463463374607431768211455::UHUGEINT",
+            False,
+            id="full-width-future",
+        ),
+    ],
+)
+def test_native_pipeline_matches_python_union_values(tmp_path, member, supported):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.py").write_text("def retained(): return 7\n")
+    db = tmp_path / "db"
+    assert not index_with_rust(source, db, skip_embeddings=True).errors
+    path = db / "chunks.db"
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("DROP TABLE schema_version")
+        # Refusals mix a valid first row with an invalid/future second row.
+        # VARCHAR stays inactive so it must not invalidate supported members.
+        type_row = conn.execute(f"SELECT typeof({member})").fetchone()
+        assert type_row is not None
+        member_type = type_row[0]
+        union_type = f"UNION(inactive VARCHAR, other {member_type}"
+        if supported:
+            first = f"union_value(other := {member})"
+        else:
+            first = "union_value(i := 1)"
+            union_type += ", i INTEGER"
+        # Existing schema-stamp SQL binds an INTEGER even for nonempty tables;
+        # provide its implicit target when UHUGEINT cannot accept that cast.
+        if supported and member_type == "UHUGEINT":
+            union_type += ", stamp INTEGER"
+        union_type += ")"
+        conn.execute(
+            "CREATE TABLE schema_version AS "
+            "SELECT version, 'retained' AS description FROM ("
+            f"SELECT {first}::{union_type} AS version UNION ALL "
+            f"SELECT union_value(other := {member})::{union_type})"
+        )
+    (source / "b.py").write_text("def added(): return 8\n")
+    before = snapshot(tmp_path)
+
+    if supported:
+        assert read_format(path, "duckdb") == INDEX_FORMAT_VERSION
+        preflight_duckdb(path)
+    else:
+        with pytest.raises(IndexFormatError, match="index format"):
+            preflight_duckdb(path)
+    assert snapshot(tmp_path) == before, "Python inspection mutated the index"
+
+    if supported:
+        report = index_with_rust(source, db, skip_embeddings=True)
+        assert not report.errors
+        assert "b.py" in {chunk[0] for chunk in report.chunk_tuples}
+        with duckdb.connect(str(path), read_only=True) as conn:
+            assert conn.execute(
+                "SELECT version, description FROM schema_version"
+            ).fetchall() == [(1, "retained"), (1, "retained")]
+    else:
+        try:
+            report = index_with_rust(source, db, skip_embeddings=True)
+        except Exception as exc:
+            errors = [str(exc)]
+        else:
+            errors = report.errors
+        assert any("index format" in error.lower() for error in errors)
+        assert snapshot(tmp_path) == before, "native refusal mutated the index"
 
 
 @pytest.mark.parametrize("state", ["new", "absent", "empty", "supported"])
