@@ -55,7 +55,7 @@ This ensures your agent:
 Run the full quality gate:
 
 ```bash
-uv run ruff check chunkhound       # lint
+uv run ruff check chunkhound brand # lint
 uv run ruff format chunkhound      # format
 uv run mypy chunkhound             # type check
 uv run pytest tests/test_smoke.py -v -n auto  # smoke tests (mandatory)
