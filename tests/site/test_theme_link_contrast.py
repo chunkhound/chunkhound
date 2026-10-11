@@ -15,6 +15,7 @@ from tests.site.contrast_helpers import (
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 
+
 def _extract_shiki_dark_token(html: str) -> str:
     """Color of the first rendered shell-comment token (text starts with '#').
 

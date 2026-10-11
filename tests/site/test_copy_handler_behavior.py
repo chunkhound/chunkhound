@@ -8,12 +8,12 @@ from tests.site.tsx_runner import run_tsx_json
 def test_copy_handler_uses_clipboard_then_falls_back_and_resets_status() -> None:
     script = (
         browser_dom(
-            '''
+            """
 <div class="code-block-md">
   <button class="copy-btn" data-copy="clipboard text"></button>
   <span data-copy-status></span>
 </div>
-'''
+"""
         )
         + MANUAL_TIMERS
         + """
@@ -106,12 +106,12 @@ def test_copy_handler_announces_failure_on_install_command() -> None:
     primary install affordance is an a11y defect."""
     script = (
         browser_dom(
-            '''
+            """
 <button class="install-command copy-btn" data-copy="uv tool install chunkhound">
   <code>uv tool install chunkhound</code>
   <span class="copy-status sr-only" data-copy-status role="status" aria-live="polite"></span>
 </button>
-'''
+"""
         )
         + MANUAL_TIMERS
         + """
@@ -152,12 +152,12 @@ def test_install_pill_copies_from_a_click_anywhere_inside_it() -> None:
     beside it."""
     script = (
         browser_dom(
-            '''
+            """
 <button class="install-command copy-btn" data-copy="uv tool install chunkhound">
   <code>uv tool install chunkhound</code>
   <span class="copy-status sr-only" data-copy-status role="status" aria-live="polite"></span>
 </button>
-'''
+"""
         )
         + MANUAL_TIMERS
         + """

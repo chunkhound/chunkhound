@@ -62,9 +62,9 @@ console.log(JSON.stringify(provider.config));
 def test_configuration_docs_match_configurator_llm_defaults() -> None:
     """configuration.md's 'configurator defaults to X' claims must equal the
     presets the configurator emits for that provider."""
-    docs = (
-        ROOT / "site" / "src" / "pages" / "docs" / "configuration.md"
-    ).read_text(encoding="utf-8")
+    docs = (ROOT / "site" / "src" / "pages" / "docs" / "configuration.md").read_text(
+        encoding="utf-8"
+    )
     documented = dict(_CONFIGURATOR_DEFAULT.findall(docs))
     assert documented, "no '(configurator defaults to ...)' rows found"
 

@@ -25,6 +25,7 @@ console.log(JSON.stringify({
 }));
 """
 
+
 # One TS import/execution per session: the module is static data.
 @lru_cache(maxsize=1)
 def _load() -> dict:

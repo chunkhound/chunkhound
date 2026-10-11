@@ -56,9 +56,9 @@ def test_stacking_flow_bars_flip_the_glyph_down() -> None:
             if "flex-direction:column" in _flat(rule.body)
         ]
         assert stacked, f"{selector} must declare its stacked axis"
-        assert all(
-            any(glyph in body for glyph in _DOWN) for body in stacked
-        ), f"{selector} stacks its flow but keeps a horizontal arrow: {stacked}"
+        assert all(any(glyph in body for glyph in _DOWN) for body in stacked), (
+            f"{selector} stacks its flow but keeps a horizontal arrow: {stacked}"
+        )
 
 
 def test_flow_bars_delegate_the_glyph_to_the_component() -> None:

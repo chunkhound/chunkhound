@@ -79,10 +79,7 @@ _NOTE_TRACK_FLOOR_PX = 300
 _NOTE_CONTENT_PX = _NOTE_TRACK_FLOOR_PX - 3 - 12 - 16
 _NOTE_FONT_PX = 13
 _INTER_FONT = (
-    Path(__file__).resolve().parents[2]
-    / "brand"
-    / "fonts"
-    / "inter-variable.ttf"
+    Path(__file__).resolve().parents[2] / "brand" / "fonts" / "inter-variable.ttf"
 )
 
 
@@ -103,6 +100,7 @@ def _inter_advance_px(weight: int):
         ]
     )
     return font.getlength
+
 
 # The note's own vocabulary: the source classes the positioning subheadline
 # promises. A note label outside this set has nothing in the run to point at
@@ -142,7 +140,6 @@ for (let i = 0; i < 400; i += 1) {
 """
         + body
     )
-
 
 
 _NOTES_OF_RUN = """
@@ -290,9 +287,7 @@ console.log(JSON.stringify({
         assert note["kind"] in _NOTE_KINDS, note
         assert note["headline"] and note["detail"]
         assert note["role"] == "note"
-        assert note["hidden"] is None, (
-            "a note must stay in the accessibility tree"
-        )
+        assert note["hidden"] is None, "a note must stay in the accessibility tree"
         assert note["indexHidden"] == "true"
         assert note["current"] is False and note["ariaCurrent"] is None
 
@@ -475,7 +470,11 @@ def test_hero_no_js_shows_the_full_narrative() -> None:
     raw = html.unescape(strip_scripts((DIST / _HOMEPAGE).read_text(encoding="utf-8")))
     static = hero_noscript(raw)
 
-    for label in ("The default, located", "The reason: one caller", "The norm: lower, scoped"):
+    for label in (
+        "The default, located",
+        "The reason: one caller",
+        "The norm: lower, scoped",
+    ):
         assert label in static, f"missing from the no-JS notes: {label!r}"
 
     # Exactly three notes, and none for the agent's own turns.

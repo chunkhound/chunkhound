@@ -249,9 +249,7 @@ console.log(JSON.stringify({
         "line call",
         "line answer",
     ]
-    assert rendered["anchorParts"] == [
-        ["line call", "line evidence", "note"]
-    ] * 3
+    assert rendered["anchorParts"] == [["line call", "line evidence", "note"]] * 3
     assert rendered["workingCount"] == 0
     # The settled input is cleared — every prompt moved into the scrollback.
     assert rendered["inputText"] == ""
@@ -338,20 +336,19 @@ console.log(JSON.stringify({
     # composer edge (the bottom-entry contract): the first row eats the viewport's
     # free space, so the run grows upward and every append pushes the rest up.
     css = "".join(
-        path.read_text(encoding="utf-8")
-        for path in (DIST / "_astro").glob("*.css")
+        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
     )
-    assert re.search(
-        r"\.terminal-viewport[^{]*\{[^}]*overflow:\s*hidden", css
-    ), "viewport must clip the transcript at the top"
+    assert re.search(r"\.terminal-viewport[^{]*\{[^}]*overflow:\s*hidden", css), (
+        "viewport must clip the transcript at the top"
+    )
     assert re.search(
         r"\.terminal-lines[^{]*>\s*[^{}]*:first-child[^{}]*"
         r"\{[^}]*margin-top:\s*auto",
         css,
     ), "the transcript must rest on the composer edge (bottom-anchored)"
-    assert re.search(
-        r"\.terminal-lines[^{]*\{[^}]*transition:\s*transform", css
-    ), "the transcript must glide its push rather than jump"
+    assert re.search(r"\.terminal-lines[^{]*\{[^}]*transition:\s*transform", css), (
+        "the transcript must glide its push rather than jump"
+    )
 
 
 def test_hero_terminal_bottom_entry_push_is_gated_on_motion(built_site) -> None:
@@ -361,14 +358,11 @@ def test_hero_terminal_bottom_entry_push_is_gated_on_motion(built_site) -> None:
     overlap). Both phases collapse under reduced motion, where the transcript
     renders complete instead of animating in."""
     css = "".join(
-        path.read_text(encoding="utf-8")
-        for path in (DIST / "_astro").glob("*.css")
+        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
     )
 
     body = ""
-    for match in re.finditer(
-        r"@media\s*\(prefers-reduced-motion:reduce\)\s*\{", css
-    ):
+    for match in re.finditer(r"@media\s*\(prefers-reduced-motion:reduce\)\s*\{", css):
         depth, cursor = 1, match.end()
         while cursor < len(css) and depth:
             depth += (css[cursor] == "{") - (css[cursor] == "}")
@@ -377,13 +371,11 @@ def test_hero_terminal_bottom_entry_push_is_gated_on_motion(built_site) -> None:
         if ".terminal-lines" in block:
             body = block
     assert body, "the hero reduced-motion override must exist"
-    assert re.search(
-        r"\.terminal-lines[^{}]*\{[^}]*transition:\s*none", body
-    ), "reduced motion must freeze the stack glide"
-
-    assert "@keyframes hero-row-in" in css, (
-        "a new row needs an entrance fade"
+    assert re.search(r"\.terminal-lines[^{}]*\{[^}]*transition:\s*none", body), (
+        "reduced motion must freeze the stack glide"
     )
+
+    assert "@keyframes hero-row-in" in css, "a new row needs an entrance fade"
     assert re.search(
         r"\.terminal-lines[^{}]*\[data-enter\][^{}]*\{[^}]*"
         r"animation:\s*hero-row-in[^}]*var\(--hero-push\)",
@@ -393,11 +385,11 @@ def test_hero_terminal_bottom_entry_push_is_gated_on_motion(built_site) -> None:
         "so the row enters only after the stack has made room"
     )
     assert re.search(
-        r'\[data-enter=.?solo.?\][^{}]*\{[^}]*animation-delay:\s*0s', css
+        r"\[data-enter=.?solo.?\][^{}]*\{[^}]*animation-delay:\s*0s", css
     ), "the run's first row must skip the push delay (no room to make)"
-    assert re.search(
-        r"\[data-enter\][^{}]*\{[^}]*animation:\s*none", body
-    ), "reduced motion must freeze the entrance fade"
+    assert re.search(r"\[data-enter\][^{}]*\{[^}]*animation:\s*none", body), (
+        "reduced motion must freeze the entrance fade"
+    )
 
 
 def test_hero_terminal_prompt_caret_runs_until_submit(built_site) -> None:
@@ -405,8 +397,7 @@ def test_hero_terminal_prompt_caret_runs_until_submit(built_site) -> None:
     entered, and only goes dark once the run publishes the prompt as submitted —
     never before. Reduced motion keeps its own blanket animation:none."""
     css = "".join(
-        path.read_text(encoding="utf-8")
-        for path in (DIST / "_astro").glob("*.css")
+        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
     )
     assert re.search(
         r"\.terminal-card[^{]*data-composer=sent[^{]*\.terminal-input[^{]*\.cursor"
@@ -428,8 +419,7 @@ def test_hero_terminal_composer_recedes_after_submit(built_site) -> None:
     composer to the transcript. The run publishes that state as
     `data-composer="sent"`, keyed to the submit beat."""
     css = "".join(
-        path.read_text(encoding="utf-8")
-        for path in (DIST / "_astro").glob("*.css")
+        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
     )
     # Both live surfaces carry a colour transition, so submit is a fade, not a
     # jump; the marker's live shade is the bright user colour.
@@ -559,8 +549,7 @@ def test_hero_terminal_working_label_sweep_freezes_under_reduced_motion(
     """The working label carries a live highlight sweep so the row reads as
     active; reduced motion freezes it to the flat muted color."""
     css = "".join(
-        path.read_text(encoding="utf-8")
-        for path in (DIST / "_astro").glob("*.css")
+        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
     )
     assert "@keyframes working-sweep" in css
     assert re.search(
@@ -651,8 +640,7 @@ def test_hero_terminal_chunkhound_dot_blinks_and_freezes_under_reduced_motion(
     """The ChunkHound row's in-flight progress is a standard terminal blinking
     dot; reduced motion freezes it to a solid dot."""
     css = "".join(
-        path.read_text(encoding="utf-8")
-        for path in (DIST / "_astro").glob("*.css")
+        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
     )
     assert "@keyframes blink" in css
     assert re.search(
@@ -963,9 +951,9 @@ console.log(JSON.stringify({ initialHeight, afterFontsHeight, probe }));
     assert rendered["initialHeight"] == "120px"
     assert rendered["afterFontsHeight"] == "180px"
     # Every probe: the run's own width, measure cap released, transcript present.
-    assert rendered["probe"] == [
-        {"width": "320px", "maxWidth": "none"}
-    ] * len(rendered["probe"]), rendered["probe"]
+    assert rendered["probe"] == [{"width": "320px", "maxWidth": "none"}] * len(
+        rendered["probe"]
+    ), rendered["probe"]
     assert len(rendered["probe"]) >= 2, "the probe must re-run after fonts settle"
 
 
@@ -1108,7 +1096,9 @@ console.log(JSON.stringify({ before, afterFlip, afterFlipBack }));
 
     # Flipping back must not re-run the completed transcript.
     assert rendered["afterFlipBack"]["lineCount"] == 9
-    assert rendered["afterFlipBack"]["transcript"] == rendered["afterFlip"]["transcript"]
+    assert (
+        rendered["afterFlipBack"]["transcript"] == rendered["afterFlip"]["transcript"]
+    )
 
 
 def test_hero_demo_has_complete_copy() -> None:
@@ -1129,7 +1119,9 @@ def test_hero_demo_has_complete_copy() -> None:
     # measure is ~46 chars, so a row past ~90 costs a second wrapped line and
     # pushes the composer toward the fold.
     assert len(demo["prompt"]) <= 90, f"prompt out of the fold budget: {demo['prompt']}"
-    assert len(demo["answer"]) <= 90, f"verdict out of the fold budget: {demo['answer']}"
+    assert len(demo["answer"]) <= 90, (
+        f"verdict out of the fold budget: {demo['answer']}"
+    )
     for call in demo["calls"]:
         assert set(call) == {"call", "sources"}
         assert call["call"].strip()
@@ -1149,18 +1141,14 @@ def test_hero_demo_source_types_are_promised_by_subheadline() -> None:
     import json
 
     positioning = json.loads(
-        (ROOT / "site" / "src" / "lib" / "positioning.json").read_text(
-            encoding="utf-8"
-        )
+        (ROOT / "site" / "src" / "lib" / "positioning.json").read_text(encoding="utf-8")
     )
     subheadline = positioning["subheadline"].lower()
     demo = run_tsx_json(
         "import { DEMO } from './site/src/scripts/hero-transcript.ts';\n"
         "console.log(JSON.stringify(DEMO));\n"
     )
-    kinds = {
-        source["kind"] for call in demo["calls"] for source in call["sources"]
-    }
+    kinds = {source["kind"] for call in demo["calls"] for source in call["sources"]}
 
     assert len(kinds) >= 3, "the demo must cross-reference at least three classes"
     for kind in kinds:
@@ -1190,16 +1178,10 @@ def test_hero_noscript_carries_static_transcript(built_site) -> None:
     assert "ChunkHound" in static and "Agent" in static
 
     # The live container holds nothing but the noscript fallback pre-JS.
-    match = re.search(
-        r'<div class="terminal-lines" id="terminal-lines"[^>]*>', raw
-    )
+    match = re.search(r'<div class="terminal-lines" id="terminal-lines"[^>]*>', raw)
     assert match is not None
-    seg = raw[
-        match.end() : raw.index('<div class="terminal-composer"', match.end())
-    ]
-    without_noscript = re.sub(
-        r"<noscript>.*?</noscript>", "", seg, flags=re.S
-    )
+    seg = raw[match.end() : raw.index('<div class="terminal-composer"', match.end())]
+    without_noscript = re.sub(r"<noscript>.*?</noscript>", "", seg, flags=re.S)
     # Only the closing tags (run + viewport) remain. Whitespace between block
     # tags is minifier noise, not a contract, so compare tokens.
     assert re.sub(r"\s+", "", without_noscript) == "</div></div>"
@@ -1654,6 +1636,6 @@ def test_hero_transcript_colours_each_role_consistently(built_site) -> None:
         ".terminal-lines .note-headline": "--code-text",
     }
     for selector, token in contracts.items():
-        assert any(
-            f"var({token})" in body for body in bodies(selector)
-        ), f"{selector} must carry its role colour {token}"
+        assert any(f"var({token})" in body for body in bodies(selector)), (
+            f"{selector} must carry its role colour {token}"
+        )

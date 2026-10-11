@@ -420,7 +420,9 @@ console.log(JSON.stringify({
     assert after_replay == after_flip
 
 
-def test_count_reveal_reduced_flip_settles_unseen_content_permanently(built_site) -> None:
+def test_count_reveal_reduced_flip_settles_unseen_content_permanently(
+    built_site,
+) -> None:
     """Turning reduced-motion on settles content for good: a section the user
     had not scrolled to yet must not animate after the preference flips back."""
     script = (

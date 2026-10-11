@@ -65,9 +65,7 @@ def _make_repo_with_positioning(tmp: str, positioning: dict) -> pathlib.Path:
     repo_root = pathlib.Path(tmp)
     lib_dir = repo_root / "site" / "src" / "lib"
     lib_dir.mkdir(parents=True)
-    (lib_dir / "positioning.json").write_text(
-        json.dumps(positioning), encoding="utf-8"
-    )
+    (lib_dir / "positioning.json").write_text(json.dumps(positioning), encoding="utf-8")
     (repo_root / "README.md").write_text(
         SURROUNDING_PREFIX + _stale_block() + SURROUNDING_SUFFIX,
         encoding="utf-8",
@@ -202,9 +200,7 @@ def test_sync_out_of_order_markers_error() -> None:
         repo_root = pathlib.Path(tmp)
         lib_dir = repo_root / "site" / "src" / "lib"
         lib_dir.mkdir(parents=True)
-        (lib_dir / "positioning.json").write_text(
-            POSITIONING_CONTENT, encoding="utf-8"
-        )
+        (lib_dir / "positioning.json").write_text(POSITIONING_CONTENT, encoding="utf-8")
         (repo_root / "README.md").write_text(
             f"{END_MARKER}\n\n{BEGIN_MARKER}", encoding="utf-8"
         )

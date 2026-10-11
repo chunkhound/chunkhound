@@ -25,7 +25,7 @@ CHANGELOG_CONTENT = """# Changelog
 """
 
 EXPECTED_FRONTMATTER_LINES = (
-    'layout: ../../layouts/DocsLayout.astro',
+    "layout: ../../layouts/DocsLayout.astro",
     'title: "Changelog"',
 )
 

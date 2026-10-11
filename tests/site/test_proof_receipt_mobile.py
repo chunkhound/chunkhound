@@ -24,8 +24,7 @@ def test_receipt_row_shares_one_baseline_by_default() -> None:
     """Wide viewports: figure and label sit on one row, one baseline."""
     default = [_flat(body) for body in bodies(".proof-grid>div", media="")]
     assert any(
-        "display:flex" in body and "align-items:baseline" in body
-        for body in default
+        "display:flex" in body and "align-items:baseline" in body for body in default
     ), f"the receipt row must be a single-baseline flex row: {default}"
 
 

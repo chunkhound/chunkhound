@@ -112,9 +112,7 @@ def test_mobile_pane_is_bounded_by_the_available_height() -> None:
     pane's scroll from chaining into the page.
     """
     tokens = [
-        body
-        for body in bodies(".setup-builder", media="")
-        if "--stage-list-h" in body
+        body for body in bodies(".setup-builder", media="") if "--stage-list-h" in body
     ]
     assert tokens, "the base builder declares no pane height"
     assert all("dvh" in body for body in tokens), (
@@ -210,8 +208,7 @@ def test_desktop_output_and_list_share_one_height_bound() -> None:
     assert builder, "No desktop builder rule in the built CSS"
     # The minifier drops the space in `minmax(0,1fr)`, so compare space-free.
     assert any(
-        "grid-template-columns:minmax(0,1fr)minmax(0,1fr)"
-        in rule.replace(" ", "")
+        "grid-template-columns:minmax(0,1fr)minmax(0,1fr)" in rule.replace(" ", "")
         for rule in builder
     ), "the desktop layout no longer splits into config and output columns"
 

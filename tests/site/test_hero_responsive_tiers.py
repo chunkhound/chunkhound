@@ -37,9 +37,7 @@ def _flat(body: str) -> str:
 def _conditions(selector: str, declaration: str) -> list[str]:
     """Every enclosing @media/@container condition that sets `declaration`."""
     return [
-        rule.condition
-        for rule in rules(selector)
-        if declaration in _flat(rule.body)
+        rule.condition for rule in rules(selector) if declaration in _flat(rule.body)
     ]
 
 
@@ -119,9 +117,7 @@ def test_note_is_inline_at_every_width() -> None:
     assert not rules(".terminal-lines .line[data-current]"), (
         "the row band must be gone: the note's rail is the only live highlight"
     )
-    assert not rules_containing("[data-ordinal]"), (
-        "the band ordinal chip must be gone"
-    )
+    assert not rules_containing("[data-ordinal]"), "the band ordinal chip must be gone"
 
 
 def test_note_is_a_railed_offset_annotation() -> None:
@@ -148,9 +144,7 @@ def test_note_is_a_railed_offset_annotation() -> None:
     assert "--hero-note-rail:var(--code-accent)" in current_rail, (
         "only the live beat's rail may take the accent — the highlight travels"
     )
-    assert "border-inline-end" not in note, (
-        "the rail lives on the leading edge alone"
-    )
+    assert "border-inline-end" not in note, "the rail lives on the leading edge alone"
     assert "margin-inline-start:var(--hero-note-indent)" in note, (
         "the note must be offset out of the run's measure column"
     )
@@ -261,9 +255,7 @@ def test_note_rail_strokes_in_then_fills_across_the_beat() -> None:
     )
 
     tier = _flat("".join(bodies(".terminal-window", media="")))
-    assert "--hero-note-stroke:" in tier, (
-        "the reel's lead-in must be one shared token"
-    )
+    assert "--hero-note-stroke:" in tier, "the reel's lead-in must be one shared token"
 
     frozen = rules(
         ".terminal-lines .note[data-current]", media="prefers-reduced-motion"
@@ -320,8 +312,7 @@ def test_note_indent_tracks_the_copy_column() -> None:
 
     indent = _flat("".join(bodies(".terminal-window", media="480px")))
     assert (
-        "--hero-note-indent:calc(var(--hero-role-col)+2*var(--space-3)+1ch)"
-        in indent
+        "--hero-note-indent:calc(var(--hero-role-col)+2*var(--space-3)+1ch)" in indent
     ), "from a 480px card up the note must step past the role + glyph columns"
 
 
@@ -355,8 +346,7 @@ def test_role_labels_are_visible_from_a_480px_card_up() -> None:
     label on desktop. The user turn never shows a visible label."""
     selector = ".terminal-lines .call .role-label .sr-only"
     assert any(
-        "position:static" in _flat(body)
-        for body in bodies(selector, media="480px")
+        "position:static" in _flat(body) for body in bodies(selector, media="480px")
     ), "role labels must unclip from a 480px card up"
 
     conditions = [rule.condition for rule in rules(selector)]
@@ -429,9 +419,7 @@ def test_the_run_is_a_framed_window_at_the_runs_measure() -> None:
     assert "background:var(--code-bg)" in window, (
         "the window owns its surface explicitly, so the hero band can change"
     )
-    assert "box-shadow" not in window, (
-        "flat design: the frame can never be a shadow"
-    )
+    assert "box-shadow" not in window, "flat design: the frame can never be a shadow"
     for row in (".terminal-seam", ".terminal-viewport", ".terminal-composer"):
         assert any(
             "padding-inline:var(--space-3)" in _flat(body)
@@ -586,6 +574,5 @@ def test_composer_is_single_line_and_scrolls_right() -> None:
         "the field must never wrap"
     )
     assert any(
-        "white-space:nowrap" in _flat(body)
-        for body in bodies(".input-text", media="")
+        "white-space:nowrap" in _flat(body) for body in bodies(".input-text", media="")
     ), "the typed prompt must never wrap"

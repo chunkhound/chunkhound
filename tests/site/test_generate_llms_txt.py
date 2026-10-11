@@ -32,16 +32,12 @@ DOCS = {
 }
 
 
-def _write_fake_repo(
-    repo_root: pathlib.Path, positioning: dict | None = None
-) -> None:
+def _write_fake_repo(repo_root: pathlib.Path, positioning: dict | None = None) -> None:
     """Create a fake repo with positioning.json, docs pages, and site/public."""
     lib_dir = repo_root / "site" / "src" / "lib"
     lib_dir.mkdir(parents=True)
     (lib_dir / "positioning.json").write_text(
-        json.dumps(
-            positioning if positioning is not None else POSITIONING, indent=2
-        ),
+        json.dumps(positioning if positioning is not None else POSITIONING, indent=2),
         encoding="utf-8",
     )
     docs_dir = repo_root / "site" / "src" / "pages" / "docs"
@@ -53,9 +49,7 @@ def _write_fake_repo(
     (repo_root / "site" / "public").mkdir(parents=True)
 
 
-def _run_generate(
-    repo_root: pathlib.Path, *extra: str
-) -> subprocess.CompletedProcess:
+def _run_generate(repo_root: pathlib.Path, *extra: str) -> subprocess.CompletedProcess:
     """Run generate-llms-txt.mjs against a fake repo directory."""
     with isolated_subprocess_env(CHUNKHOUND_ROOT=str(repo_root)) as env:
         return run_text_process(

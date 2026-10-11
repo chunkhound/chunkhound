@@ -44,7 +44,8 @@ def test_hero_cta_visited_cascade_uses_contracted_surface_tokens(cta_states) -> 
             assert colors["visited"], f"{label}: no matching visited color rule"
             for visited in colors["visited"]:
                 assert visited["declaration"] in {
-                    "var(--link-visited)", "var(--code-accent)"
+                    "var(--link-visited)",
+                    "var(--code-accent)",
                 }, f"{label}: uncontracted visited override {visited['declaration']}"
                 assert re.fullmatch(r"#[0-9a-fA-F]{6}", visited["color"]), (
                     f"{label}: expected opaque sRGB token, got {visited['color']}"

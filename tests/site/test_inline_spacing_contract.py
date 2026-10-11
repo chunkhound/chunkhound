@@ -35,8 +35,8 @@ def test_no_inline_element_is_glued_to_adjacent_text() -> None:
         for match in _GLUED.finditer(body):
             snippet = body[max(0, match.start() - 24) : match.end() + 24]
             glued.append(f"{page}: …{snippet}…")
-    assert not glued, (
-        "Inline whitespace was lost between elements:\n" + "\n".join(glued)
+    assert not glued, "Inline whitespace was lost between elements:\n" + "\n".join(
+        glued
     )
 
 
