@@ -23,7 +23,6 @@ import pytest
 from chunkhound.embeddings import EmbeddingManager, LocalEmbeddingResult
 from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -266,6 +265,66 @@ async def test_deep_research_no_commit_range_skips_injection():
     # Without commit params, the original (unwrapped) service is passed through
     assert captured_search_service[0] is original_search
     assert not isinstance(captured_search_service[0], DiffAwareSearchService)
+
+
+@pytest.mark.parametrize(
+    ("commit_inputs", "expected_range"),
+    [
+        ({"commit_hash": "abc123"}, "abc123^..abc123"),
+        ({"last_n_commits": 5}, "HEAD~5..HEAD"),
+        ({"commit_range": "v1..v2"}, "v1..v2"),
+    ],
+)
+async def test_semantic_search_returns_changed_code_for_commit_inputs(
+    commit_inputs, expected_range
+):
+    """Each public shorthand selects the expected diff and returns its code."""
+    from chunkhound.mcp_server.tools import search_impl
+
+    git_diff = AsyncMock(return_value=FAKE_DIFF)
+    with patch("chunkhound.core.git_diff.run_git_diff", git_diff):
+        result = await search_impl(
+            services=_make_services(_make_original_search_service()),
+            embedding_manager=_make_embedding_manager(),
+            type="semantic",
+            query="log the user out",
+            **commit_inputs,
+        )
+
+    assert git_diff.await_args.args[0] == expected_range
+    assert result["results"], "changed code must be searchable via the public tool"
+
+
+@pytest.mark.parametrize(
+    ("commit_inputs", "message"),
+    [
+        ({"commit_hash": ""}, "commit_hash must not be empty"),
+        ({"commit_hash": "   "}, "commit_hash must not be empty"),
+        ({"last_n_commits": 0}, "last_n_commits must be a positive integer"),
+        ({"last_n_commits": -1}, "last_n_commits must be a positive integer"),
+        ({"commit_range": "v1..v2", "commit_hash": "abc123"}, "at most one"),
+        ({"commit_range": "v1..v2", "last_n_commits": 2}, "at most one"),
+        ({"commit_hash": "abc123", "last_n_commits": 2}, "at most one"),
+    ],
+)
+async def test_semantic_search_rejects_invalid_commit_inputs_before_git(
+    commit_inputs, message
+):
+    from chunkhound.mcp_server.tools import search_impl
+
+    git_diff = AsyncMock(return_value=FAKE_DIFF)
+    with (
+        patch("chunkhound.core.git_diff.run_git_diff", git_diff),
+        pytest.raises(ValueError, match=message),
+    ):
+        await search_impl(
+            services=_make_services(_make_original_search_service()),
+            embedding_manager=_make_embedding_manager(),
+            type="semantic",
+            query="changed code",
+            **commit_inputs,
+        )
+    git_diff.assert_not_awaited()
 
 
 @pytest.mark.asyncio
