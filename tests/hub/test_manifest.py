@@ -249,6 +249,77 @@ def test_known_or_explicit_dimensions_resolve_offline_without_mutation(
     assert list(tmp_path.rglob("*")) == files
 
 
+@pytest.mark.parametrize(
+    ("provider", "output_dims", "azure", "failure"),
+    [
+        ("openai", 8, False, None),
+        ("voyageai", 8, False, None),
+        ("openai", None, False, "dimensions"),
+        ("voyageai", None, False, "dimensions"),
+        ("openai", 8, True, "interoperability"),
+    ],
+)
+def test_configured_key_debug_diagnostics_do_not_expose_configuration_secrets(
+    tmp_path, provider, output_dims, azure, failure
+):
+    model = "https://model-secret.invalid/private?token=model-query-secret"
+    embedding = {
+        "provider": provider,
+        "model": model,
+        "api_key": "api-key-secret",
+        "output_dims": output_dims,
+        "rerank_model": "reranker?token=rerank-model-secret",
+        "rerank_url": "https://rerank-secret.invalid/rerank?token=rerank-query-secret",
+        "rerank_format": "cohere",
+    }
+    if azure:
+        embedding.update(
+            azure_endpoint="https://endpoint-secret.openai.azure.com",
+            api_version="2024-02-01-versionsecret",
+            azure_deployment="deployment?token=deployment-query-secret",
+        )
+    else:
+        embedding["base_url"] = (
+            "https://endpoint-user:endpoint-password@endpoint-secret.invalid/v1"
+            "?token=endpoint-query-secret"
+        )
+    config = Config(target_dir=tmp_path, embedding=embedding)
+    messages: list[tuple[str, str]] = []
+    sink = logger.add(
+        lambda message: messages.append((message.record["level"].name, str(message))),
+        level="DEBUG",
+    )
+    diagnostic = ""
+    try:
+        if failure:
+            with pytest.raises(HubUnavailable, match=failure) as error:
+                configured_key(config)
+            diagnostic = str(error.value)
+        else:
+            assert configured_key(config) == MatchKey(
+                "duckdb", provider, model, output_dims, INDEX_FORMAT_VERSION
+            )
+    finally:
+        logger.remove(sink)
+    assert any(level == "DEBUG" for level, _ in messages)
+    diagnostic += "".join(message for _, message in messages)
+    secrets = (
+        "model-secret.invalid",
+        "model-query-secret",
+        "api-key-secret",
+        "rerank-model-secret",
+        "rerank-secret.invalid",
+        "rerank-query-secret",
+        "endpoint-user",
+        "endpoint-password",
+        "endpoint-secret",
+        "endpoint-query-secret",
+        "versionsecret",
+        "deployment-query-secret",
+    )
+    assert not [secret for secret in secrets if secret in diagnostic]
+
+
 def test_azure_selector_does_not_alias_storage_identity(tmp_path):
     config = Config(
         target_dir=tmp_path,
