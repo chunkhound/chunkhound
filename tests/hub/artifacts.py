@@ -59,6 +59,69 @@ def build_database(
     return root / name
 
 
+def replace_with_view(path: Path, table: str, external: bool) -> Path | None:
+    """Replace owned storage by executable SQL; optionally depend on Parquet."""
+    import duckdb
+
+    outside = path.parent.parent / f"outside-{table}.parquet"
+    with duckdb.connect(str(path)) as conn:
+        if table == "files":
+            # Remove the FK so the fixture can replace its parent table.
+            conn.execute("CREATE TABLE chunks_copy AS SELECT * FROM chunks")
+            conn.execute("DROP TABLE chunks")
+            conn.execute("ALTER TABLE chunks_copy RENAME TO chunks")
+        if external:
+            conn.execute(f"COPY {table} TO '{outside}' (FORMAT PARQUET)")
+            query = f"SELECT * FROM read_parquet('{outside}')"
+            if table == "embeddings_8":
+                query = (
+                    "SELECT * REPLACE(embedding::FLOAT[8] AS embedding) "
+                    f"FROM read_parquet('{outside}')"
+                )
+        elif table == "schema_version":
+            query = "SELECT 1 AS version"
+        elif table == "embeddings_8":
+            query = (
+                "SELECT 1 AS chunk_id, 'openai' AS provider, 'hub-test' AS model, "
+                "[0.25,0.25,0.25,0.25,0.25,0.25,0.25,0.25]::FLOAT[8] AS embedding, "
+                "8 AS dims, TIMESTAMP '2026-01-01' AS created_at"
+            )
+        else:
+            conn.execute(f"CREATE TABLE retained_{table} AS SELECT * FROM {table}")
+            query = f"SELECT * FROM retained_{table}"
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f'CREATE VIEW "{table}" AS {query}')
+    return outside if external else None
+
+
+def collate_identities(path: Path, collation: str) -> tuple[str, str]:
+    """One exact selected identity versus 100 collating-but-distinct vectors."""
+    import duckdb
+
+    dominant = (
+        ("OPENAI", "HUB-TEST") if collation == "nocase" else ("opénai", "húb-test")
+    )
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("CREATE TABLE vectors_copy AS SELECT * FROM embeddings_8")
+        conn.execute("DROP TABLE embeddings_8")
+        conn.execute(
+            "CREATE TABLE embeddings_8 (chunk_id INTEGER, "
+            f"provider VARCHAR COLLATE {collation}, model VARCHAR COLLATE {collation}, "
+            "embedding FLOAT[8], dims INTEGER, created_at TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO embeddings_8 SELECT chunk_id, provider, model, "
+            "embedding, dims, created_at FROM vectors_copy LIMIT 1"
+        )
+        conn.execute(
+            "INSERT INTO embeddings_8 SELECT chunk_id, ?, ?, "
+            "embedding, dims, created_at FROM vectors_copy",
+            list(dominant),
+        )
+        conn.execute("DROP TABLE vectors_copy")
+    return dominant
+
+
 def pack_database(path: Path, archive: Path) -> dict[str, int | str]:
     """Package just the backend database with portable archive metadata."""
 

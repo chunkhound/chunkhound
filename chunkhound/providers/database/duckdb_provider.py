@@ -253,6 +253,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Class-level synchronization for WAL cleanup
         self._wal_cleanup_lock = threading.Lock()
         self._wal_cleanup_done = False
+        self._connect_initialized = False
 
         # Initialize connection manager (will be simplified later)
         self._connection_manager = DuckDBConnectionManager(db_path, config)
@@ -290,6 +291,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         Returns:
             DuckDB connection object
         """
+        # A lazy reopen is not proof that connect/schema initialization finished.
+        self._connect_initialized = False
         # Create a NEW connection for the executor thread
         # This ensures thread safety - only this thread will use this connection
         conn = duckdb.connect(
@@ -386,22 +389,60 @@ class DuckDBProvider(SerialDatabaseProvider):
                 allow_claim_if_missing=False,
             )
 
-            # Inspect formats before connection-manager recovery can change files.
-            from chunkhound.providers.database.index_format import preflight_duckdb
-
-            preflight_duckdb(self._connection_manager.db_path)
+            # Query actual handle state without lazy-opening the executor. A
+            # healthy initialized pair is idempotent; every genuine/partial
+            # reconnect preflights before releasing handles or doing recovery.
+            if self._executor.prepare_connection(self):
+                return
 
             # Initialize connection manager FIRST - this handles WAL validation
             self._connection_manager.connect()
 
             # Call parent connect which handles executor initialization
             super().connect()
+            self._connect_initialized = True
 
         except DatabaseTemporarilyUnavailableError:
             raise
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
             raise
+
+    def _executor_prepare_connection(self) -> bool:
+        """Inspect lifecycle state on the executor thread without creating handles."""
+        from chunkhound.providers.database.index_format import preflight_duckdb
+
+        executor_conn = getattr(_executor_local, "connection", None)
+        manager_conn = self._connection_manager.connection
+
+        def usable(conn: Any) -> bool:
+            if conn is None:
+                return False
+            try:
+                conn.execute("SELECT 1").fetchone()
+            except duckdb.ConnectionException:
+                # A real closed handle, not a generic attach/inspection failure.
+                return False
+            return True
+
+        executor_live = usable(executor_conn)
+        manager_live = usable(manager_conn)
+        if self._connect_initialized and executor_live and manager_live:
+            return True
+
+        # Keep remaining handles open until *every* candidate passes. Closing
+        # the last writable handle can checkpoint, so refusal must precede it.
+        live_conn = (
+            executor_conn if executor_live else manager_conn if manager_live else None
+        )
+        preflight_duckdb(self.db_path, live_connection=live_conn)
+        self._connect_initialized = False
+        if executor_conn is not None:
+            executor_conn.close()
+            delattr(_executor_local, "connection")
+        self._connection_manager.disconnect(skip_checkpoint=True)
+        self._wal_cleanup_done = False
+        return False
 
     def ensure_indexed_root_identity(
         self,
@@ -563,6 +604,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 that case — Python's DuckDB connection(s) would still be open on
                 the same file Rust is about to write to.
         """
+        self._connect_initialized = False
         failures: list[str] = []
         try:
             self._execute_in_db_thread_sync(
@@ -605,6 +647,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], skip_checkpoint: bool
     ) -> None:
         """Executor method for disconnect - runs in DB thread."""
+        self._connect_initialized = False
         try:
             if (
                 not skip_checkpoint

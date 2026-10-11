@@ -196,6 +196,16 @@ class SerialDatabaseExecutor:
                 "Rust indexing pipeline owns the database — retry once it finishes"
             )
 
+    def prepare_connection(self, provider: Any) -> bool:
+        """Check reconnect state on its owning thread without opening a connection.
+
+        Unlike normal dispatch, the provider's lifecycle hook must be able to
+        preflight a missing/partially released connection before lazy creation.
+        """
+        self._raise_if_db_unavailable_before_submit("connect")
+        future = self._db_executor.submit(provider._executor_prepare_connection)
+        return bool(future.result(timeout=self.resolve_timeout("connect")))
+
     def execute_sync(
         self,
         provider: Any,

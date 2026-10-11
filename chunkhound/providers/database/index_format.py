@@ -14,6 +14,15 @@ from chunkhound.providers.database.duckdb.schema_constants import (
     _SCHEMA_VERSION_TABLE_COLUMNS,
 )
 
+_INSPECTION_FAILED = (
+    "Cannot safely inspect index; format compatibility is unknown, "
+    "so automatic recovery is blocked. Some healthy WALs require "
+    "writes to replay and cannot be inspected read-only. Preserve "
+    "the database and any WAL/recovery files. Restore a known-good "
+    "complete index or recover a copy using compatible DuckDB/VSS "
+    "tooling, then retry. Reopening writable does not bypass this check."
+)
+
 
 def _stored_version(values: list[Any]) -> int:
     if not values:
@@ -64,35 +73,37 @@ def read_only_duckdb(path: Path) -> Iterator[Any]:
     except duckdb.Error as exc:
         # A failed inspection is not evidence of corruption or a known
         # unsupported format. Some healthy HNSW WALs need writable replay.
+        raise IndexFormatError(_INSPECTION_FAILED) from exc
+
+
+def read_duckdb_format(conn: Any, *, inspected: bool = False) -> int:
+    """Read physical metadata on an existing connection, without evaluating views."""
+    catalog = "'inspected'" if inspected else "current_database()"
+    table = "inspected.main.schema_version" if inspected else "main.schema_version"
+    # DuckDB preserves spelling but resolves identifiers case-insensitively
+    # using ASCII folding, not Unicode lower/casefold or publisher collation.
+    present = conn.execute(
+        "SELECT table_type FROM information_schema.tables "
+        f"WHERE table_catalog={catalog} AND table_schema='main' "
+        "AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+        "'abcdefghijklmnopqrstuvwxyz')='schema_version'"
+    ).fetchone()
+    if present is None:
+        return LEGACY_INDEX_FORMAT_VERSION
+    if present[0] != "BASE TABLE":
         raise IndexFormatError(
-            "Cannot safely inspect index; format compatibility is unknown, "
-            "so automatic recovery is blocked. Some healthy WALs require "
-            "writes to replay and cannot be inspected read-only. Preserve "
-            "the database and any WAL/recovery files. Restore a known-good "
-            "complete index or recover a copy using compatible DuckDB/VSS "
-            "tooling, then retry. Reopening writable does not bypass this check."
-        ) from exc
+            "Invalid stored index format: schema_version must be a physical table"
+        )
+    return _stored_version(
+        [row[0] for row in conn.execute(f"SELECT version FROM {table}").fetchall()]
+    )
 
 
 def read_format(path: Path, backend: str) -> int:
     """Inspect existing metadata without creating paths or migrating the index."""
     if backend == "duckdb":
         with read_only_duckdb(path) as conn:
-            present = conn.execute(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_catalog='inspected' AND table_schema='main' "
-                "AND table_name='schema_version'"
-            ).fetchone()
-            return _stored_version(
-                [
-                    row[0]
-                    for row in conn.execute(
-                        "SELECT version FROM inspected.main.schema_version"
-                    ).fetchall()
-                ]
-                if present
-                else []
-            )
+            return read_duckdb_format(conn, inspected=True)
     if backend == "lancedb":
         import lance  # type: ignore[import-untyped]  # Lance does not ship typing metadata.
 
@@ -108,13 +119,26 @@ def read_format(path: Path, backend: str) -> int:
     raise ValueError("Unsupported database backend")
 
 
-def preflight_duckdb(path: Path | str) -> None:
-    """Check all candidates before recovery; this is not lifetime/race protection."""
+def preflight_duckdb(path: Path | str, *, live_connection: Any | None = None) -> None:
+    """Check every candidate before recovery, using an owned live handle if present.
+
+    A partial reconnect must not attach the live file a second time or close its
+    remaining handle before inspection. This is not lifetime/race protection.
+    """
     if str(path) == ":memory:":
         return
     live = Path(path)
+    if live_connection is not None:
+        import duckdb
+
+        try:
+            require_supported(read_duckdb_format(live_connection))
+        except duckdb.Error as exc:
+            raise IndexFormatError(_INSPECTION_FAILED) from exc
     # Both recovery implementations can choose a different file before opening live.
     for suffix in ("", ".compact_backup", ".compact_new", ".old", ".compact"):
+        if not suffix and live_connection is not None:
+            continue
         candidate = Path(str(live) + suffix)
         if candidate.is_file() and candidate.stat().st_size:
             require_supported(read_format(candidate, "duckdb"))

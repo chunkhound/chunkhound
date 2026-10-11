@@ -36,15 +36,28 @@ def inspect_database(path: Path, backend: str) -> Inventory:
     if backend == "duckdb":
         # A direct file reopen would bypass the extension/WAL safety boundary.
         with read_only_duckdb(path) as conn:
-            names = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT table_name FROM information_schema.tables "
+            # Fold only ASCII, matching DuckDB identifier resolution. Check
+            # object kinds before binding any publisher-defined source/vector SQL.
+            objects = dict(
+                conn.execute(
+                    "SELECT translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+                    "'abcdefghijklmnopqrstuvwxyz'), table_type "
+                    "FROM information_schema.tables "
                     "WHERE table_catalog='inspected' AND table_schema='main'"
                 ).fetchall()
-            }
-            if not {"files", "chunks"}.issubset(names):
+            )
+            if not {"files", "chunks"}.issubset(objects):
                 raise ValueError("Database lacks required tables")
+            names = {
+                name
+                for name in objects
+                if name in {"files", "chunks"}
+                or re.fullmatch(r"embeddings_([0-9]+)", name)
+            }
+            if any(objects[name] != "BASE TABLE" for name in names):
+                raise ValueError(
+                    "Stored source and vector objects must be physical tables"
+                )
             conn.execute(
                 "SELECT id, path, size, modified_time, content_hash, language "
                 "FROM inspected.main.files LIMIT 1"
@@ -75,8 +88,11 @@ def inspect_database(path: Path, backend: str) -> Inventory:
                     raise ValueError("Stored vector dimensions are inconsistent")
                 rows.extend(
                     conn.execute(
-                        f"SELECT provider, model, dims, count(*), max(created_at) "
-                        f"FROM {table} GROUP BY provider, model, dims"
+                        # BLOB keys discard publisher-supplied string collations;
+                        # decode only after exact SQL-side aggregation.
+                        "SELECT decode(encode(provider)), decode(encode(model)), "
+                        f"dims, count(*), max(created_at) FROM {table} "
+                        "GROUP BY encode(provider), encode(model), dims"
                     ).fetchall()
                 )
     elif backend == "lancedb":

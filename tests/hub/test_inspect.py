@@ -12,7 +12,12 @@ import pytest
 
 from chunkhound.core.index_format import IndexFormatError
 from chunkhound.hub.inspect import inspect_database
-from tests.hub.artifacts import build_database, pack_database
+from tests.hub.artifacts import (
+    build_database,
+    collate_identities,
+    pack_database,
+    replace_with_view,
+)
 from tests.hub.test_index_format import run_python, snapshot
 
 
@@ -26,6 +31,37 @@ def test_inventory_reads_real_vectors_without_mutation(tmp_path, backend):
         ("openai", "hub-test", 8, 100)
     ]
     assert inventory.groups[0].latest > 0
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("table", ["schema_version", "files", "chunks", "embeddings_8"])
+@pytest.mark.parametrize("external", [False, True])
+def test_inventory_refuses_views_before_evaluating_them(tmp_path, table, external):
+    path = build_database(tmp_path / "published")
+    outside = replace_with_view(path, table, external)
+    if outside:
+        outside.unlink()
+    before = snapshot(tmp_path)
+    with pytest.raises(
+        (ValueError, IndexFormatError), match="physical table"
+    ) as caught:
+        inspect_database(path, "duckdb")
+    assert caught.value.__cause__ is None, "view was bound before its kind was checked"
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("collation", ["nocase", "noaccent"])
+def test_inventory_groups_exact_identities_independent_of_collation(
+    tmp_path, collation
+):
+    path = build_database(tmp_path / "published")
+    dominant = collate_identities(path, collation)
+    before = snapshot(tmp_path)
+    groups = inspect_database(path, "duckdb").groups
+    assert {(g.provider, g.model, g.dims, g.count) for g in groups} == {
+        ("openai", "hub-test", 8, 1),
+        (*dominant, 8, 100),
+    }
     assert snapshot(tmp_path) == before
 
 

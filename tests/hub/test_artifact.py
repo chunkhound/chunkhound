@@ -21,7 +21,12 @@ from chunkhound.hub.artifact import extract, prepare, verify_candidate
 from chunkhound.hub.errors import HubDatabaseMismatch, HubUnavailable
 from chunkhound.hub.manifest import MatchKey, select_manifest
 from chunkhound.hub.transport import CHUNK, RESERVE
-from tests.hub.artifacts import build_database, pack_database
+from tests.hub.artifacts import (
+    build_database,
+    collate_identities,
+    pack_database,
+    replace_with_view,
+)
 from tests.hub.test_index_format import snapshot
 from tests.hub.test_manifest import catalogue
 
@@ -217,6 +222,54 @@ def test_candidate_mismatch_is_fatal_without_mutation(tmp_path, backend, defect)
     assert "token=secret" not in str(caught.value)
     assert str(path) not in str(caught.value)
     assert caught.value.__suppress_context__
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("version", [2, 0, "1"])
+def test_candidate_case_variant_format_is_fatal(tmp_path, version):
+    path = build_database(tmp_path / "published")
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("DROP TABLE schema_version")
+        conn.execute('CREATE TABLE "ScHeMa_VeRsIoN" AS SELECT ? AS version', [version])
+    selected = select_manifest(
+        json.dumps(catalogue()).encode(),
+        MatchKey("duckdb", "openai", "hub-test", 8, 1),
+        "latest",
+    )
+    before = snapshot(tmp_path)
+    with pytest.raises(HubDatabaseMismatch):
+        verify_candidate(path, selected)
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("table", ["schema_version", "files", "chunks", "embeddings_8"])
+@pytest.mark.parametrize("external", [False, True])
+def test_candidate_requires_physical_storage(tmp_path, table, external):
+    path = build_database(tmp_path / "published")
+    replace_with_view(path, table, external)
+    selected = select_manifest(
+        json.dumps(catalogue()).encode(),
+        MatchKey("duckdb", "openai", "hub-test", 8, 1),
+        "latest",
+    )
+    before = snapshot(tmp_path)
+    with pytest.raises(HubDatabaseMismatch):
+        verify_candidate(path, selected)
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("collation", ["nocase", "noaccent"])
+def test_candidate_dominant_identity_is_exact_despite_collation(tmp_path, collation):
+    path = build_database(tmp_path / "published")
+    collate_identities(path, collation)
+    selected = select_manifest(
+        json.dumps(catalogue()).encode(),
+        MatchKey("duckdb", "openai", "hub-test", 8, 1),
+        "latest",
+    )
+    before = snapshot(tmp_path)
+    with pytest.raises(HubDatabaseMismatch):
+        verify_candidate(path, selected)
     assert snapshot(tmp_path) == before
 
 

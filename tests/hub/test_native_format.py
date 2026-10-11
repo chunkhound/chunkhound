@@ -11,6 +11,52 @@ from tests.contracts.pipeline_harness import index_with_rust
 from tests.hub.test_index_format import snapshot
 
 
+@pytest.mark.parametrize("suffix", ["", ".old"])
+@pytest.mark.parametrize("metadata", ["2", "0", "'1'", "view", "external-view"])
+def test_native_case_variant_metadata_refused_before_recovery(
+    tmp_path, suffix, metadata
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.py").write_text("def retained(): return 7\n")
+    db = tmp_path / "db"
+    assert not index_with_rust(source, db, skip_embeddings=True).errors
+    path = db / "chunks.db"
+    candidate = path.with_name(path.name + suffix)
+    if suffix:
+        shutil.copy2(path, candidate)
+        (db / "chunks.db.swap_intent").write_text("phase2")
+    outside = tmp_path / "outside.csv"
+    outside.write_text("version\n1\n")
+    with duckdb.connect(str(candidate)) as conn:
+        conn.execute("DROP TABLE schema_version")
+        if "view" in metadata:
+            query = (
+                f"SELECT version FROM read_csv('{outside}', header=true)"
+                if metadata == "external-view"
+                else "SELECT 1 AS version"
+            )
+            conn.execute(f'CREATE VIEW "ScHeMa_VeRsIoN" AS {query}')
+        else:
+            conn.execute(
+                f'CREATE TABLE "ScHeMa_VeRsIoN" AS SELECT {metadata} AS version, '
+                "'retained' AS description"
+            )
+    if metadata == "external-view":
+        outside.unlink()
+    (source / "b.py").write_text("def added(): return 8\n")
+    before = snapshot(tmp_path)
+    try:
+        report = index_with_rust(source, db, skip_embeddings=True)
+    except Exception as exc:
+        errors = [str(exc)]
+    else:
+        errors = report.errors
+    expected = "physical table" if "view" in metadata else "index format"
+    assert any(expected in error.lower() for error in errors), errors
+    assert snapshot(tmp_path) == before
+
+
 def test_native_writer_rejects_future_format_before_ddl(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

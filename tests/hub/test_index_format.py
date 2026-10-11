@@ -173,6 +173,83 @@ def test_inspection_does_not_create_missing_paths(tmp_path, backend):
     assert not path.parent.exists()
 
 
+@pytest.mark.parametrize("name", ["SCHEMA_VERSION", "sChEmA_vErSiOn"])
+@pytest.mark.parametrize("version", [2, 0, "1"])
+@pytest.mark.parametrize("suffix", ["", ".old"])
+def test_case_variant_metadata_blocks_provider_before_mutation(
+    tmp_path, name, version, suffix
+):
+    path = tmp_path / "chunks.db"
+    with duckdb.connect(str(path) + suffix) as conn:
+        conn.execute(
+            f'CREATE TABLE "{name}" AS SELECT ? AS version, '
+            "'retained' AS description",
+            [version],
+        )
+    before = snapshot(tmp_path)
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    try:
+        with pytest.raises(IndexFormatError, match="index format"):
+            provider.connect()
+    finally:
+        if provider.is_connected:
+            provider.disconnect()
+        else:
+            provider._executor.shutdown()
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_metadata_view_is_rejected_before_evaluation(tmp_path, external):
+    path = tmp_path / "chunks.db"
+    outside = tmp_path / "outside.csv"
+    outside.write_text("version\n1\n")
+    with duckdb.connect(str(path)) as conn:
+        query = (
+            f"SELECT version FROM read_csv('{outside}', header=true)"
+            if external
+            else "SELECT 1 AS version"
+        )
+        conn.execute(f'CREATE VIEW "ScHeMa_VeRsIoN" AS {query}')
+    # A missing dependency would raise an engine error if the view were bound.
+    # The contract requires our object-kind refusal instead, before evaluation.
+    if external:
+        outside.unlink()
+    before = snapshot(tmp_path)
+    with pytest.raises(IndexFormatError, match="physical table") as caught:
+        read_format(path, "duckdb")
+    assert caught.value.__cause__ is None
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    try:
+        with pytest.raises(IndexFormatError, match="physical table"):
+            provider.connect()
+    finally:
+        if provider.is_connected:
+            provider.disconnect()
+        else:
+            provider._executor.shutdown()
+    assert snapshot(tmp_path) == before
+
+
+def test_case_variant_supported_metadata_is_read_not_restamped(tmp_path):
+    path = tmp_path / "chunks.db"
+    with duckdb.connect(str(path)) as conn:
+        conn.execute(
+            'CREATE TABLE "ScHeMa_VeRsIoN" AS '
+            "SELECT 1 AS version, 'retained' AS description"
+        )
+    before = snapshot(tmp_path)
+    assert read_format(path, "duckdb") == 1
+    assert snapshot(tmp_path) == before
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    provider.disconnect()
+    with duckdb.connect(str(path), read_only=True) as conn:
+        assert conn.execute("SELECT * FROM schema_version").fetchall() == [
+            (1, "retained")
+        ]
+
+
 def run_python(script: str, *args: object) -> None:
     """Contain native WAL replay in a process, without installing dependencies."""
     result = subprocess.run(

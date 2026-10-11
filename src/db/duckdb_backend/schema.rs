@@ -52,15 +52,24 @@ impl DuckDbHnswBackend {
             ("current_database()", "main.schema_version")
         };
         let inspect = || -> Result<(), DbError> {
-            let present: i64 = conn.query_row(
+            // Match DuckDB's ASCII case-insensitive identifier resolution, not
+            // preserved catalogue spelling. Never bind an executable view.
+            let (present, physical): (i64, i64) = conn.query_row(
                 &format!(
-                    "SELECT count(*) FROM information_schema.tables \
+                    "SELECT count(*), count(*) FILTER (WHERE table_type='BASE TABLE') \
+                    FROM information_schema.tables \
                     WHERE table_catalog={catalog} AND table_schema='main' \
-                    AND table_name='schema_version'"
+                    AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                    'abcdefghijklmnopqrstuvwxyz')='schema_version'"
                 ),
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
+            if present != physical {
+                return Err(DbError::Other(
+                    "Invalid stored index format: schema_version must be a physical table".into(),
+                ));
+            }
             let mut version = LEGACY_INDEX_FORMAT_VERSION as u128;
             if present != 0 {
                 // Preserve integer type semantics: DuckDB/Rust numeric coercions
@@ -446,6 +455,36 @@ mod format_tests {
             "diff read recovered before format preflight"
         );
         assert!(result.is_err(), "diff read accepted future candidate");
+    }
+
+    #[test]
+    fn metadata_identifier_and_kind_checked_before_setup_ddl() {
+        for ddl in [
+            "CREATE TABLE SCHEMA_VERSION AS SELECT 2 AS version",
+            "CREATE TABLE ScHeMa_VeRsIoN AS SELECT '1' AS version",
+            "CREATE VIEW schema_version AS SELECT 1 AS version",
+            "CREATE VIEW ScHeMa_VeRsIoN AS SELECT 1 AS version",
+        ] {
+            let conn = Connection::open_in_memory().expect("memory");
+            conn.execute_batch(ddl).expect("fixture metadata");
+            let message = DuckDbHnswBackend::setup_schema(&conn)
+                .expect_err("malformed or future metadata must block schema setup")
+                .to_string();
+            let expected = if ddl.contains("VIEW") {
+                "physical table"
+            } else {
+                "index format"
+            };
+            assert!(message.contains(expected), "{message}");
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM information_schema.tables",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("catalogue");
+            assert_eq!(count, 1, "DDL ran before refusal");
+        }
     }
 
     #[test]
