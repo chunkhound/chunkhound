@@ -183,6 +183,15 @@ for (const embedding of embeddingProviders) {
 
           expect(rendered.copy.includes(configComment), `${label}: config comment`);
           expect(rendered.copy.includes(editorComment), `${label}: editor comment`);
+          // Pi only reads .pi/mcp.json once the project is trusted, so the
+          // generated copy must carry the trust instruction for it alone.
+          const trustNote = 'grant project trust so it can read .pi/mcp.json';
+          expect(
+            editor.id === 'pi'
+              ? rendered.copy.includes(trustNote)
+              : !rendered.copy.includes('grant project trust'),
+            `${label}: pi trust note`,
+          );
           expect(
             rendered.copy.includes(
               '# Keep generated configuration files out of version control.',
@@ -232,8 +241,7 @@ console.log(JSON.stringify({
     assert rendered["errors"] == []
 
 
-def test_full_mode_renderer_outputs_stable_html_and_copy_for_non_default_selection(
-) -> None:
+def test_full_mode_renderer_outputs_stable_output_for_non_default_selection() -> None:
     rendered = _render_full_output("ollama-embed", "codex-cli", "vscode")
 
     assert "echo .chunkhound.json >> .gitignore" in rendered["copy"]
