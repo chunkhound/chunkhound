@@ -1,4 +1,4 @@
-"""Secure full-URL downloads tested against a real local HTTP publisher."""
+"""Full-URL downloads tested against a real local HTTP(S) publisher."""
 
 import errno
 import hashlib
@@ -113,12 +113,123 @@ async def test_exact_manifest_url_and_relative_redirect(hub_http, caplog):
 
 @pytest.mark.parametrize("operation", ["manifest", "artifact"])
 @pytest.mark.parametrize("redirect", [False, True])
+@pytest.mark.parametrize("host", ["localhost", "hub.internal", "192.0.2.1", "127.1"])
+async def test_http_urls_allow_localhost_and_non_loopback_hosts(
+    hub_http, hub_network, tmp_path, operation, redirect, host
+):
+    artifact = artifact_at(hub_http, b"payload")
+    url = artifact.url.replace("127.0.0.1", host)
+    if redirect:
+        hub_http.redirects["/redirect"] = url
+        url = hub_http.url + "/redirect"
+    if operation == "manifest":
+        assert await fetch_manifest(url) == b"payload"
+    else:
+        artifact = artifact_at(hub_http, b"payload", url=url)
+        assert (
+            await download(artifact, tmp_path / "download.part")
+        ).read_bytes() == b"payload"
+    assert hub_http.requests == ([("/redirect", None)] if redirect else []) + [
+        (OBJECT, None)
+    ]
+
+
+@pytest.mark.parametrize("operation", ["manifest", "artifact"])
+async def test_https_accepts_a_valid_trusted_certificate(
+    hub_https, hub_trusted_certificate, tmp_path, operation
+):
+    artifact = artifact_at(hub_https, b"payload")
+    if operation == "manifest":
+        assert await fetch_manifest(artifact.url) == b"payload"
+    else:
+        assert (
+            await download(artifact, tmp_path / "download.part")
+        ).read_bytes() == b"payload"
+    assert hub_https.requests == [(OBJECT, None)]
+
+
+@pytest.mark.parametrize("operation", ["manifest", "artifact"])
+@pytest.mark.parametrize("fault", ["untrusted", "hostname"])
+async def test_https_rejects_invalid_certificates_without_sending_http(
+    hub_https, hub_network, tmp_path, caplog, request, operation, fault
+):
+    caplog.set_level(logging.DEBUG)
+    url = hub_https.url + OBJECT
+    if fault == "hostname":
+        request.getfixturevalue("hub_trusted_certificate")
+        url = url.replace("127.0.0.1", "hub.internal")
+    with pytest.raises(HubUnavailable) as caught:
+        if operation == "manifest":
+            await fetch_manifest(url)
+        else:
+            await download(artifact_at(hub_https, url=url), tmp_path / "download.part")
+    assert hub_https.requests == []
+    assert_secret_free(caught, caplog)
+
+
+@pytest.mark.parametrize("operation", ["manifest", "artifact"])
+@pytest.mark.parametrize("transition", ["http-http", "http-https", "https-https"])
+async def test_http_and_https_redirects_allow_non_downgrade_transitions(
+    hub_http, hub_https, hub_trusted_certificate, tmp_path, operation, transition
+):
+    source_scheme, target_scheme = transition.split("-")
+    servers = {"http": hub_http, "https": hub_https}
+    source, target = servers[source_scheme], servers[target_scheme]
+    artifact_at(target, b"payload")
+    source.redirects["/redirect"] = target.url + OBJECT
+    url = source.url + "/redirect"
+    if operation == "manifest":
+        assert await fetch_manifest(url) == b"payload"
+    else:
+        artifact = artifact_at(target, b"payload", url=url)
+        assert (
+            await download(artifact, tmp_path / "download.part")
+        ).read_bytes() == b"payload"
+    if source is target:
+        assert source.requests == [("/redirect", None), (OBJECT, None)]
+    else:
+        assert source.requests == [("/redirect", None)]
+        assert target.requests == [(OBJECT, None)]
+
+
+@pytest.mark.parametrize("operation", ["manifest", "artifact"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("start_http", [False, True])
+async def test_https_redirect_downgrades_are_rejected_before_the_http_request(
+    hub_http,
+    hub_https,
+    hub_trusted_certificate,
+    tmp_path,
+    caplog,
+    operation,
+    status,
+    start_http,
+):
+    caplog.set_level(logging.DEBUG)
+    artifact_at(hub_http, b"payload")
+    hub_https.redirect_status = status
+    hub_https.redirects["/secure"] = hub_http.url + OBJECT
+    url = hub_https.url + "/secure"
+    if start_http:
+        hub_http.redirects["/upgrade"] = url
+        url = hub_http.url + "/upgrade"
+    with pytest.raises(HubUnavailable) as caught:
+        if operation == "manifest":
+            await fetch_manifest(url)
+        else:
+            await download(
+                artifact_at(hub_http, b"payload", url=url), tmp_path / "download.part"
+            )
+    assert hub_https.requests == [("/secure", None)]
+    assert hub_http.requests == ([("/upgrade", None)] if start_http else [])
+    assert_secret_free(caught, caplog)
+
+
+@pytest.mark.parametrize("operation", ["manifest", "artifact"])
+@pytest.mark.parametrize("redirect", [False, True])
 @pytest.mark.parametrize(
     "unsafe",
     [
-        "http://localhost:{port}/?token=url-secret",
-        "http://not-loopback.invalid/?token=url-secret",
-        "http://127.1:{port}/?token=url-secret",
         "http://user:url-secret@127.0.0.1:{port}/",
         "https://user:url-secret@example.invalid/",
         "ftp://127.0.0.1/?token=url-secret",

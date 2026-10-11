@@ -1,4 +1,4 @@
-"""Bounded, secret-safe HTTP transport for full opaque hub URLs."""
+"""Bounded HTTP(S) transport with sanitized hub-owned failures."""
 
 import asyncio
 import hashlib
@@ -7,7 +7,6 @@ import re
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -20,21 +19,15 @@ MANIFEST_LIMIT = 4 * 1024 * 1024
 CHUNK = 1024 * 1024
 RESERVE = 16 * 1024 * 1024
 
-# Suppress HTTP request URLs even when hosted as a library rather than by the CLI.
+# Suppress default HTTP diagnostics in library use. Explicitly DEBUG-enabled
+# child loggers can still expose response headers, including redirect URLs.
 for name in ("httpx", "httpcore"):
     logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def url_scheme_ok(url: str) -> bool:
     parts = urlsplit(url)
-    if parts.scheme == "https":
-        return True
-    if parts.scheme != "http" or parts.hostname is None:
-        return False
-    try:
-        return ip_address(parts.hostname).is_loopback
-    except ValueError:
-        return False
+    return parts.scheme in {"http", "https"} and parts.hostname is not None
 
 
 def require_space(directory: Path, needed: int) -> None:
@@ -60,9 +53,7 @@ async def response(
         except ValueError:
             valid = False
         if not valid:
-            raise HubUnavailable(
-                "Hub URL must use HTTPS or literal loopback HTTP without userinfo"
-            )
+            raise HubUnavailable("Hub URL must use HTTP or HTTPS without userinfo")
         async with client.stream("GET", current, headers=headers) as result:
             if result.status_code not in {301, 302, 303, 307, 308}:
                 yield result
@@ -71,7 +62,10 @@ async def response(
             if hop == 5 or not location:
                 raise HubUnavailable("Hub redirect chain is invalid")
             # Only HTTP redirects resolve relative references, never artifact URLs.
-            current = urljoin(current, location)
+            target = urljoin(current, location)
+            if parts.scheme == "https" and urlsplit(target).scheme == "http":
+                raise HubUnavailable("Hub redirect cannot downgrade HTTPS to HTTP")
+            current = target
     raise HubUnavailable("Hub redirect limit exceeded")
 
 

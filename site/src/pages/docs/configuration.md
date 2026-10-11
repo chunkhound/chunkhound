@@ -134,6 +134,26 @@ Settings are resolved in this order (highest priority first):
 
 Global defaults let you maintain shared settings (e.g. embedding provider + API key, common exclude patterns, LLM roles) in a single file so you do not need to copy `.chunkhound.json` into every project. Any project-local `.chunkhound.json` (or explicit config/CLI) overrides values from the global layer. Nested objects (embedding, llm, research, database, ...) are deep-merged: specify only the keys you want to change and siblings from global survive. Lists such as `indexing.exclude` / `include` from a higher layer fully replace lower ones (built-in defaults are still applied on top; see Global Defaults above for details and examples).
 
+## Central Indexing Hub (Client Foundation)
+
+The hub client foundation accepts a full manifest URL in `hub.url` or `CHUNKHOUND_HUB__URL`. **Pull/install activation is not enabled yet**; setting this URL alone does not download or replace a local index.
+
+```json
+{
+  "hub": {
+    "url": "https://hub.internal/catalogue?branch=main"
+  }
+}
+```
+
+Organizations choose **HTTP or HTTPS in the URL**, with no extra opt-in setting or hub authentication configuration. HTTP supports non-loopback hosts as well as `localhost`. The same policy applies independently to each full `artifact.url` supplied by a v2 manifest. ChunkHound does not append `/manifest.json` or construct artifact URLs relative to the manifest.
+
+HTTPS certificate and hostname verification stay enabled. HTTP-to-HTTP, HTTP-to-HTTPS, and HTTPS-to-HTTPS redirects are allowed; HTTPS-to-HTTP redirects are rejected before the downgraded request, including after an earlier HTTP-to-HTTPS upgrade. Malformed URLs, userinfo (`user:password@host`), and non-HTTP(S) schemes are rejected. Bounded retries, byte-count and checksum verification, and disk-space checks apply to both schemes.
+
+**HTTP provides no protection against network interception or tampering.** A checksum delivered through the same untrusted connection does not authenticate an artifact. Use HTTPS when that protection is required. Hub URLs may be committed in project configuration, unlike the operator-owned [remote configuration](#remote-configuration) settings; the remote-config transport and scrub policies are unchanged. Do not commit secrets in URLs.
+
+Ordinary encoded paths and query strings are preserved, but standard HTTP client path normalization still applies (including literal dot segments). Hub-owned errors omit URLs, response bodies, and raw transport exception text. Default httpx/httpcore diagnostics are suppressed, but explicitly enabling DEBUG on their child loggers may expose response headers or redirect URLs; complete secret exclusion from third-party debug logs is not guaranteed.
+
 ## Remote Configuration
 
 For fleet-wide deployments, ChunkHound can fetch a configuration envelope from an operator-controlled HTTPS endpoint (or `http://` to a loopback host for local development) at the start of every invocation, apply a list of rules to the on-disk global config, and seed the discovery-layer `remote_config.url` / `auth_header` into the global config file on the first successful fetch so subsequent runs continue fetching without needing the CLI flag or environment variable that triggered the initial run.
