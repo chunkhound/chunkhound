@@ -1,5 +1,7 @@
 """Nonmutating format inspection and writable-only legacy format stamps."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,66 +23,76 @@ def _stored_version(values: list[Any]) -> int:
     return cast(int, max(values))
 
 
+@contextmanager
+def read_only_duckdb(path: Path) -> Iterator[Any]:
+    """Attach the original as ``inspected`` with the approved WAL safety policy.
+
+    No provider migrations, automatic extension installation, temporary-copy
+    recovery, or spill files. This is not lifetime/race protection.
+    """
+    import duckdb
+
+    # Establish extension policy before opening a file that may replay WAL.
+    try:
+        with duckdb.connect(
+            ":memory:",
+            config={
+                "autoinstall_known_extensions": "false",
+                "autoload_known_extensions": "false",
+                "temp_directory": "",
+            },
+        ) as conn:
+            if Path(str(path) + ".wal").exists():
+                # Arbitrary WAL may require VSS. Never continue replay after
+                # a failed local LOAD, even if this WAL might be ordinary.
+                try:
+                    conn.execute("LOAD vss")
+                    conn.execute("SET hnsw_enable_experimental_persistence = true")
+                except duckdb.Error as exc:
+                    raise IndexFormatError(
+                        "Cannot safely inspect index: WAL is present but local "
+                        "DuckDB VSS support could not be loaded or configured; "
+                        "format compatibility is unknown, so automatic recovery "
+                        "is blocked. Preserve the database and any WAL/recovery "
+                        "files. Make a compatible VSS extension available using "
+                        "an explicit setup operation, then retry. Reopening "
+                        "writable does not bypass this check."
+                    ) from exc
+            escaped = str(path).replace("'", "''")
+            conn.execute(f"ATTACH '{escaped}' AS inspected (READ_ONLY)")
+            yield conn
+    except duckdb.Error as exc:
+        # A failed inspection is not evidence of corruption or a known
+        # unsupported format. Some healthy HNSW WALs need writable replay.
+        raise IndexFormatError(
+            "Cannot safely inspect index; format compatibility is unknown, "
+            "so automatic recovery is blocked. Some healthy WALs require "
+            "writes to replay and cannot be inspected read-only. Preserve "
+            "the database and any WAL/recovery files. Restore a known-good "
+            "complete index or recover a copy using compatible DuckDB/VSS "
+            "tooling, then retry. Reopening writable does not bypass this check."
+        ) from exc
+
+
 def read_format(path: Path, backend: str) -> int:
     """Inspect existing metadata without creating paths or migrating the index."""
     if backend == "duckdb":
-        import duckdb
-
-        # Establish extension policy before opening a file that may replay WAL.
-        # In-memory inspection must not install extensions or spill to disk.
-        try:
-            with duckdb.connect(
-                ":memory:",
-                config={
-                    "autoinstall_known_extensions": "false",
-                    "autoload_known_extensions": "false",
-                    "temp_directory": "",
-                },
-            ) as conn:
-                if Path(str(path) + ".wal").exists():
-                    # Arbitrary WAL may require VSS. Never continue replay after
-                    # a failed local LOAD, even if this WAL might be ordinary.
-                    try:
-                        conn.execute("LOAD vss")
-                        conn.execute("SET hnsw_enable_experimental_persistence = true")
-                    except duckdb.Error as exc:
-                        raise IndexFormatError(
-                            "Cannot safely inspect index: WAL is present but local "
-                            "DuckDB VSS support could not be loaded or configured; "
-                            "format compatibility is unknown, so automatic recovery "
-                            "is blocked. Preserve the database and any WAL/recovery "
-                            "files. Make a compatible VSS extension available using "
-                            "an explicit setup operation, then retry. Reopening "
-                            "writable does not bypass this check."
-                        ) from exc
-                escaped = str(path).replace("'", "''")
-                conn.execute(f"ATTACH '{escaped}' AS inspected (READ_ONLY)")
-                present = conn.execute(
-                    "SELECT 1 FROM information_schema.tables "
-                    "WHERE table_catalog='inspected' AND table_schema='main' "
-                    "AND table_name='schema_version'"
-                ).fetchone()
-                return _stored_version(
-                    [
-                        row[0]
-                        for row in conn.execute(
-                            "SELECT version FROM inspected.main.schema_version"
-                        ).fetchall()
-                    ]
-                    if present
-                    else []
-                )
-        except duckdb.Error as exc:
-            # A failed inspection is not evidence of corruption or a known
-            # unsupported format. Some healthy HNSW WALs need writable replay.
-            raise IndexFormatError(
-                "Cannot safely inspect index; format compatibility is unknown, "
-                "so automatic recovery is blocked. Some healthy WALs require "
-                "writes to replay and cannot be inspected read-only. Preserve "
-                "the database and any WAL/recovery files. Restore a known-good "
-                "complete index or recover a copy using compatible DuckDB/VSS "
-                "tooling, then retry. Reopening writable does not bypass this check."
-            ) from exc
+        with read_only_duckdb(path) as conn:
+            present = conn.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_catalog='inspected' AND table_schema='main' "
+                "AND table_name='schema_version'"
+            ).fetchone()
+            return _stored_version(
+                [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT version FROM inspected.main.schema_version"
+                    ).fetchall()
+                ]
+                if present
+                else []
+            )
     if backend == "lancedb":
         import lance  # type: ignore[import-untyped]  # Lance does not ship typing metadata.
 
