@@ -62,11 +62,13 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         }
         // Crash recovery: check for swap_intent file (Invariant 17)
         let db_path = PathBuf::from(&self.config.db_path);
+        Self::preflight_index_formats(&db_path)?;
         let recovered = Self::recover_swap_intent(&db_path)?;
         Self::discard_incomplete_compact_if_phase1(recovered, &db_path);
 
         self.known_dims.clear();
         let conn = Connection::open(&self.config.db_path)?;
+        Self::check_index_format(&conn)?;
         // Defer WAL auto-checkpoints. DuckDB checkpoints synchronously on
         // COMMIT once the WAL exceeds checkpoint_threshold, and each checkpoint
         // does work proportional to the whole DB file (measured ~30ms/MiB) —
@@ -160,6 +162,8 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
+        // Diff reads recover independently, before the writer's open checkpoint.
+        Self::preflight_index_formats(&PathBuf::from(&self.config.db_path))?;
         read::read_file_states(self)
     }
 }
