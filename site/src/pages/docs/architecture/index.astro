@@ -90,10 +90,12 @@ const toc = [
         written in Rust: it scans in parallel, diffs against the stored index,
         and overlaps parsing, embedding, and storage so all three run at once.
         Database writes, compaction, crash recovery, and the embedding HTTP calls
-        are native too. Python still supplies tree-sitter parsing and the
-        embedding fallback for providers without a native client, called from the
-        engine — a holdover from when the whole system was Python. The project is
-        gradually leaving it behind, aiming to retire Python entirely.
+        are native too — for DuckDB, the only backend the Rust write pipeline
+        supports. Other backends use the Python write pipeline. Python still
+        supplies tree-sitter parsing and the embedding fallback for providers
+        without a native client, called from the engine — a holdover from when
+        the whole system was Python. The project is gradually leaving it behind,
+        aiming to retire Python entirely.
         Speed is only half the point. In a codebase built entirely by AI agents,
         Rust's static types are the other half — the compiler rejects whole
         classes of mistake before a single test runs.
