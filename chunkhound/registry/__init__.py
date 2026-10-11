@@ -20,6 +20,7 @@ from chunkhound.core.config.config import Config
 
 # Import embedding factory for unified provider creation
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.embedding_dimensions import configured_embedding_dims
 from chunkhound.core.embedding_model_drift import (
     ActiveModel,
     ActiveModelStateError,
@@ -44,21 +45,6 @@ from chunkhound.parsers.parser_factory import get_parser_factory
 # Answers "the configured model or dims differ from the index; switch to them?".
 # True re-embeds under the configuration, False keeps the index's settings.
 ModelDriftDecision = Callable[[ModelDrift], bool]
-
-
-def _configured_embedding_dims(provider: EmbeddingProvider) -> int | None:
-    """Dimensions the provider will embed at, or None if it cannot know yet.
-
-    An explicit ``output_dims`` wins. Otherwise a provider that knows its
-    model's dimensions reports them; an unknown model on a custom endpoint only
-    learns them from its first response, and guessing would flag drift against
-    an index that is actually fine.
-    """
-    if provider.output_dims is not None:
-        return provider.output_dims
-    if provider.supported_dimensions:
-        return provider.dims
-    return None
 
 
 class LazyLanguageParsers(MutableMapping[Language, Any]):
@@ -220,7 +206,7 @@ class ProviderRegistry:
                 ActiveModel(indexed.provider, indexed.model, indexed.dims),
             )
 
-        configured_dims = _configured_embedding_dims(embedding_provider)
+        configured_dims = configured_embedding_dims(embedding_provider)
         drift = detect_model_drift(
             indexed,
             embedding_provider.name,
