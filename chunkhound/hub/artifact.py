@@ -2,6 +2,7 @@
 
 import gzip
 import ntpath
+import sys
 import tarfile
 import zlib
 from collections.abc import AsyncIterator
@@ -39,10 +40,35 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
     metadata_remaining = CHUNK
 
     class BoundedTarInfo(tarfile.TarInfo):
+        @classmethod
+        def fromtarfile(cls, tar: tarfile.TarFile) -> "BoundedTarInfo":
+            try:
+                return super().fromtarfile(tar)
+            # Typeshed omits these concrete stdlib HeaderError subclasses.
+            except (
+                tarfile.InvalidHeaderError,  # type: ignore[attr-defined]
+                tarfile.TruncatedHeaderError,  # type: ignore[attr-defined]
+            ):
+                # TarFile.next silently treats these as EOF after a member.
+                # Keep genuine zero-block/clean boundary EOF semantics, but do
+                # not let broken headers (including PAX records) end iteration.
+                raise HubUnavailable("Hub archive contains a corrupt header") from None
+
         def _proc_member(self, tar: tarfile.TarFile) -> tarfile.TarInfo:
             # tarfile's extension hook runs BEFORE eager metadata/sparse parsing.
             # Bound aggregate metadata for each yielded member, including chains.
             nonlocal metadata_remaining
+            # Global PAX state survives yielded members and is copied by the
+            # parser. Check it on recursive entry, after a global update but
+            # BEFORE any subsequent metadata/member copies. Each update itself
+            # is bounded below; repeated replacement is not a lifetime quota.
+            global_headers = tar.pax_headers or {}
+            retained = sys.getsizeof(global_headers) + sum(
+                sys.getsizeof(key) + sys.getsizeof(value)
+                for key, value in global_headers.items()
+            )
+            if retained > CHUNK:
+                raise HubUnavailable("Hub archive metadata exceeds size limit")
             if self.type == tarfile.GNUTYPE_SPARSE:
                 raise HubUnavailable("Hub archive contains an unsafe member")
             if self.type in {

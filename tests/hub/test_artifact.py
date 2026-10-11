@@ -283,6 +283,43 @@ def test_oversized_extended_metadata_is_rejected_before_allocation(tmp_path, kin
     assert peak < 4 * CHUNK
 
 
+@pytest.mark.parametrize("distinct_keys", [True, False])
+def test_global_pax_retained_metadata_is_bounded_without_a_lifetime_quota(
+    tmp_path, distinct_keys
+):
+    archive = tmp_path / "global-metadata.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for index in range(16):
+            key = f"comment-{index}" if distinct_keys else "comment"
+            payload = tarfile.TarInfo.create_pax_global_header(
+                {key: "x" * (CHUNK // 2)}
+            )[512:]
+            header = tarfile.TarInfo("global")
+            header.type = tarfile.XGLTYPE
+            header.size = len(payload)
+            tar.addfile(header, io.BytesIO(payload))
+            tar.addfile(tarfile.TarInfo(f"lancedb.lancedb/file-{index}"))
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    failure = None
+    tracemalloc.start()
+    try:
+        try:
+            extract(archive, stage, "lancedb")
+        except HubUnavailable as exc:
+            failure = exc
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * CHUNK
+    if distinct_keys:
+        assert failure is not None
+        assert "metadata" in str(failure)
+    else:
+        assert failure is None
+        assert len(list((stage / "lancedb.lancedb").iterdir())) == 16
+
+
 def test_pax_sparse_maps_are_rejected_before_buffering(tmp_path):
     archive = tmp_path / "sparse.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
@@ -336,6 +373,50 @@ def test_large_compressible_member_is_streamed_and_metadata_not_restored(tmp_pat
 
 
 @pytest.mark.parametrize(
+    "suffix",
+    [
+        b"invalid header".ljust(512, b"\0") + b"\0" * 1024,
+        tarfile.TarInfo("chunks.db").tobuf()[:127],
+        b"\0" * 127,
+        tarfile.TarInfo.create_pax_global_header({"comment": "ok"})[:512]
+        + b"invalid pax record".ljust(512, b"\0"),
+    ],
+    ids=["bad-checksum", "truncated-header", "partial-zero-header", "bad-pax"],
+)
+def test_corrupt_header_after_valid_member_is_soft(tmp_path, suffix):
+    archive = tmp_path / "bad-header.tar.gz"
+    # Gzip itself is intact: this is tar corruption after a readable member.
+    archive.write_bytes(gzip.compress(tarfile.TarInfo("chunks.db").tobuf() + suffix))
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    with pytest.raises(HubUnavailable):
+        extract(archive, stage, "duckdb")
+
+
+@pytest.mark.parametrize(
+    "format", [tarfile.USTAR_FORMAT, tarfile.GNU_FORMAT, tarfile.PAX_FORMAT]
+)
+@pytest.mark.parametrize("padding", [0, 512, 1024, 10240])
+def test_portable_tar_formats_and_clean_header_boundary_eof_are_supported(
+    tmp_path, format, padding
+):
+    archive = tmp_path / "portable.tar.gz"
+    name = "lancedb.lancedb/" + "a" * 90 + "/" + "b" * 50
+    with tarfile.open(archive, "w:gz", format=format) as tar:
+        member = tarfile.TarInfo(name)
+        member.size = len(b"payload")
+        tar.addfile(member, io.BytesIO(b"payload"))
+    # Preserve data alignment; vary optional zero blocks after the final member.
+    body = gzip.decompress(archive.read_bytes()).rstrip(b"\0")
+    body += b"\0" * (-len(body) % 512 + padding)
+    archive.write_bytes(gzip.compress(body))
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    assert extract(archive, stage, "lancedb") == stage / "lancedb.lancedb"
+    assert (stage / name).read_bytes() == b"payload"
+
+
+@pytest.mark.parametrize(
     "defect", ["not-gzip", "truncated-member", "gzip-trailer", "gzip-crc"]
 )
 def test_unpack_corruption_is_soft(tmp_path, defect):
@@ -386,7 +467,7 @@ def test_existing_paths_cannot_redirect_or_be_overwritten(tmp_path, boundary):
 
 
 @pytest.mark.parametrize(
-    "failure", ["transport", "checksum", "unpack", "database", "enospc"]
+    "failure", ["transport", "checksum", "unpack", "tar-header", "database", "enospc"]
 )
 async def test_failed_prepare_removes_workspace_and_preserves_installed_files(
     tmp_path, hub_http, monkeypatch, failure
@@ -406,6 +487,9 @@ async def test_failed_prepare_removes_workspace_and_preserves_installed_files(
     )
     if failure == "unpack":
         archive.write_bytes(b"not gzip")
+    elif failure == "tar-header":
+        body = gzip.decompress(archive.read_bytes())[:1024]
+        archive.write_bytes(gzip.compress(body + b"bad header".ljust(512, b"\0")))
     selected = selected_archive(archive, hub_http)
     if failure == "transport":
         hub_http.status = 503
