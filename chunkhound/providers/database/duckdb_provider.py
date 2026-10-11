@@ -386,6 +386,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                 allow_claim_if_missing=False,
             )
 
+            # Inspect formats before connection-manager recovery can change files.
+            from chunkhound.providers.database.index_format import preflight_duckdb
+
+            preflight_duckdb(self._connection_manager.db_path)
+
             # Initialize connection manager FIRST - this handles WAL validation
             self._connection_manager.connect()
 
@@ -1600,10 +1605,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.info("Creating DuckDB schema")
 
         try:
-            conn.execute(
-                f"CREATE TABLE IF NOT EXISTS schema_version "
-                f"({_SCHEMA_VERSION_TABLE_COLUMNS})"
-            )
+            from chunkhound.providers.database.index_format import stamp_duckdb
+
+            stamp_duckdb(conn)
 
             self._executor_materialize_files_table(conn, state)
             self._executor_materialize_chunks_table(conn, state)
@@ -1657,14 +1661,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             else:
                 for dims in embedding_dims:
                     self._executor_materialize_embedding_table(conn, state, dims)
-
-            current_version = self._get_schema_version(conn)
-            if current_version == 0:
-                conn.execute("""
-                    INSERT INTO schema_version (version, description)
-                    VALUES (1, 'Initial schema')
-                """)
-                logger.info("Schema version initialized to 1")
 
             logger.info(
                 "DuckDB schema created successfully with multi-dimension support"

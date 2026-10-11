@@ -255,6 +255,13 @@ class LanceDBProvider(SerialDatabaseProvider):
         """
         import lancedb
 
+        from chunkhound.core.index_format import require_supported
+        from chunkhound.providers.database.index_format import read_format
+
+        inspection_path = Path(self._db_path)
+        if inspection_path.exists():
+            require_supported(read_format(inspection_path, "lancedb"))
+
         abs_db_path = self._db_path
 
         # Save CWD (thread-safe in executor)
@@ -279,6 +286,11 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             # Store connection reference for backward compatibility
             self.connection = conn
+
+            from chunkhound.providers.database.index_format import stamp_lancedb
+
+            # Stamp only after nonmutating inspection, before schema migrations.
+            stamp_lancedb(conn)
 
             # Create schema and indexes in executor thread
             self._executor_create_schema(conn, state)
