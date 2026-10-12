@@ -216,7 +216,10 @@ def test_homepage_layout_has_expected_sections_and_order() -> None:
     ]
     assert "remote embedding, reranking, and LLM providers" in homepage
     assert 'id="agent-scale"' not in homepage
-    assert 'id="use-cases"' not in homepage
+    # The redesign dropped the standalone UseCases section; #use-cases now
+    # deep-links into the questions section, so guard the old section markup
+    # rather than the reused anchor id.
+    assert 'class="use-cases"' not in homepage
     assert 'src="/logo.svg"' in homepage
     assert 'src="/logo-light.svg"' in homepage
     assert '<nav class="nav-tabs"' not in homepage
