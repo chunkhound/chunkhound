@@ -16,6 +16,7 @@ from chunkhound.core.exceptions.embedding import (
     EmbeddingProviderError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
+from chunkhound.core.utils.rerank_url import normalize_rerank_url, resolve_rerank_url
 from chunkhound.core.utils.voyageai_utils import (
     OFFICIAL_VOYAGEAI_BASE_V1,
     is_official_voyageai_endpoint,
@@ -327,6 +328,10 @@ class VoyageAIEmbeddingProvider:
         self._max_tokens = max_tokens or model_config["context_length"]
         self._api_key = api_key
         self._base_url = base_url
+        if rerank_url and (rerank_model or rerank_format == "tei"):
+            rerank_url = normalize_rerank_url(rerank_url)
+            if base_url:
+                rerank_url = resolve_rerank_url(rerank_url, base_url, join=True)
         self._rerank_url = rerank_url
         self._rerank_format = rerank_format
         self._model_config = model_config

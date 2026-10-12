@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 from typing import get_args
 
@@ -333,44 +334,14 @@ def test_url_less_tei_without_preset_base_url_is_rejected_by_backend(
 
 
 @pytest.mark.parametrize(
-    ("url", "embedding_id"),
-    [
-        ("HTTPS://tei.example.com/rerank", "openai-embed"),
-        ("HTTPS://tei.example.com/rerank", "ollama-embed"),
-        ("http:/tei.example.com/rerank", "openai-embed"),
-        ("http:/tei.example.com/rerank", "ollama-embed"),
-    ],
-)
-def test_backend_rejects_noncanonical_http_rerank_urls(
-    tmp_path, clean_environment, url, embedding_id
-) -> None:
-    """A scheme fault cannot be repaired by any base_url or model, so the
-    backend rejects it outright — with or without a base_url. The former
-    relative-URL branch no longer sees these forms; it only resolves genuine
-    relative paths."""
-    config = _build_chunkhound_config(
-        embedding_id, "ollama-llm", {"url": url, "format": "tei"}
-    )
-
-    assert config["embedding"]["rerank_url"] == url
-    with pytest.raises(ValidationError, match="lowercase http:// or https://"):
-        Config(target_dir=tmp_path, **config)
-
-
-@pytest.mark.parametrize(
     "url",
     ["HTTPS://tei.example.com/rerank", "http:/tei.example.com/rerank"],
 )
-def test_backend_rejects_noncanonical_rerank_url_even_when_reranking_is_off(
-    tmp_path, clean_environment, url
-) -> None:
-    """The scheme check guards the value itself, not reranking activity, so a
-    scheme fault fails the load even with no rerank_model and no TEI format."""
+def test_backend_tolerates_unused_rerank_url(tmp_path, clean_environment, url) -> None:
+    """An unused endpoint does not block embedding-only configurations."""
     config = _build_chunkhound_config("ollama-embed", "ollama-llm", {"url": url})
 
-    assert config["embedding"]["rerank_url"] == url
-    with pytest.raises(ValidationError, match="lowercase http:// or https://"):
-        Config(target_dir=tmp_path, **config)
+    Config(target_dir=tmp_path, **config)
 
 
 def _rerank_url_ui_verdicts(rows: list[tuple[str, str]]) -> list[dict]:
@@ -403,26 +374,18 @@ console.log(JSON.stringify(rows.map(([url, preset]) => {{
 
 
 def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
-    """Pin the backend and UI verdict for canonical, scheme-fault, and
-    ambiguous rerank URLs in one table.
-
-    The UI is deliberately stricter in two places: protocol-relative URLs and
-    a scheme with no host (``http://``) are rejected by the UI yet accepted by
-    the backend (the factory joins or forwards them). Each row records the
-    actual verdict for both sides, so parity drift always fails here."""
+    """Active reranking accepts valid scheme casing, not ambiguous URLs."""
     # (url, embedding preset, format, backend accepts, UI accepts)
     matrix = [
         ("https://tei.example.com/rerank", "ollama-embed", "tei", True, True),
         ("/rerank", "ollama-embed", "tei", True, True),
-        ("HTTPS://tei.example.com/rerank", "ollama-embed", "tei", False, False),
-        ("HTTPS://tei.example.com/rerank", "openai-embed", "tei", False, False),
+        ("HTTPS://tei.example.com/rerank", "ollama-embed", "tei", True, True),
+        ("HTTPS://tei.example.com/rerank", "openai-embed", "tei", True, True),
         ("http:/tei.example.com/rerank", "ollama-embed", "tei", False, False),
-        # UI-only strictness: the backend still accepts these forms.
-        ("//tei.example.com/rerank", "ollama-embed", "tei", True, False),
-        ("http://", "ollama-embed", "tei", True, False),
-        # Both sides accept ``http:///p``: it starts with lowercase http://, so
-        # neither side classifies it as a scheme fault.
-        ("http:///p", "ollama-embed", "tei", True, True),
+        ("http:/tei.example.com/rerank", "openai-embed", "tei", False, False),
+        ("//tei.example.com/rerank", "ollama-embed", "tei", False, False),
+        ("http://", "ollama-embed", "tei", False, False),
+        ("http:///p", "ollama-embed", "tei", False, False),
     ]
     ui_verdicts = {
         (verdict["url"], verdict["preset"]): verdict["error"] is None
@@ -438,9 +401,11 @@ def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
         )
         if backend_ok:
             validated = Config(target_dir=tmp_path, **config)
-            assert validated.embedding.rerank_url == url, label
+            assert validated.embedding.rerank_url == re.sub(
+                r"^HTTPS:", "https:", url
+            ), label
         else:
-            with pytest.raises(ValidationError, match="lowercase http:// or https://"):
+            with pytest.raises(ValidationError):
                 Config(target_dir=tmp_path, **config)
         assert ui_verdicts[(url, preset)] is ui_ok, label
 

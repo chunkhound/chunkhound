@@ -317,20 +317,14 @@ console.log(JSON.stringify({ validTei, modelRequired, resolved, badUrl }));
     assert rendered["badUrl"]["invalid"] == ["true", "false", "false"]
 
 
-def test_reranker_rejects_scheme_forms_the_backend_cannot_classify(
+def test_active_reranker_accepts_scheme_case_but_rejects_malformed_urls(
     built_site,
 ) -> None:
-    """Parity with the backend's case-sensitive startswith on rerank_url:
-    uppercase-scheme and single-slash URLs parse as http(s) in the browser
-    yet the backend rejects them as scheme faults rather than reading them as
-    relative paths, so the UI must reject them before they reach a config —
-    the case fault as a scheme-case error, the structural fault as an
-    incomplete URL. Protocol-relative URLs inherit the page scheme, so their
-    fetch target is ambiguous and the UI rejects them explicitly."""
+    """Only valid HTTP(S) schemes are canonicalized for active reranking."""
     script = (
         browser_dom(dist_body(_GETTING_STARTED))
         + """
-const { INCOMPLETE_URL_ERROR, SCHEME_CASE_ERROR, PROTOCOL_RELATIVE_ERROR } = await import(
+const { INCOMPLETE_URL_ERROR, PROTOCOL_RELATIVE_ERROR } = await import(
   './site/src/components/configurator/rerank-validate.ts');
 """
         + _INIT
@@ -341,6 +335,7 @@ const urlInvalid = () => q('[data-rerank-url]').getAttribute('aria-invalid');
 
 // ollama-embed has a base_url; malformed schemes must still be rejected.
 choose('data-retrieval', 'ollama-embed');
+rerankFormat.value = 'tei';
 const submit = (value) => {
   rerankUrl.value = value;
   rerankUrl.dispatchEvent(new window.Event('input'));
@@ -351,7 +346,6 @@ const singleSlash = submit('http:/tei.example.com/rerank');
 const protocolRelative = submit('//tei.example.com/rerank');
 console.log(JSON.stringify({
   incomplete: INCOMPLETE_URL_ERROR,
-  schemeCase: SCHEME_CASE_ERROR,
   protocolRelativeMsg: PROTOCOL_RELATIVE_ERROR,
   upperScheme,
   singleSlash,
@@ -361,16 +355,14 @@ console.log(JSON.stringify({
     )
     rendered = run_tsx_json(script)
 
-    assert rendered["upperScheme"]["error"] == rendered["schemeCase"], rendered[
-        "upperScheme"
-    ]
+    assert rendered["upperScheme"] == {"error": "", "invalid": "false"}
     assert rendered["singleSlash"]["error"] == rendered["incomplete"], rendered[
         "singleSlash"
     ]
     assert rendered["protocolRelative"]["error"] == rendered["protocolRelativeMsg"], (
         rendered["protocolRelative"]
     )
-    for case in ("upperScheme", "singleSlash", "protocolRelative"):
+    for case in ("singleSlash", "protocolRelative"):
         assert rendered[case]["invalid"] == "true", rendered[case]
 
 

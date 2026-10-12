@@ -14,7 +14,6 @@ from typing_extensions import NotRequired
 
 from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.embedding_config import (
-    RERANK_BASE_URL_REQUIRED,
     validate_rerank_configuration,
 )
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
@@ -29,6 +28,7 @@ from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
 )
+from chunkhound.core.utils.rerank_url import resolve_rerank_url
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.providers.embeddings.shared_utils import (
     apply_client_side_truncation,
@@ -1888,23 +1888,7 @@ class OpenAIEmbeddingProvider:
         """
         await self._ensure_client()
 
-        # Validate base_url exists for relative URLs (redundant check for safety)
-        if (
-            not self._rerank_url.startswith(("http://", "https://"))
-            and not self._base_url
-        ):
-            raise ValueError(RERANK_BASE_URL_REQUIRED)
-
-        # Build full rerank endpoint URL
-        if self._rerank_url.startswith(("http://", "https://")):
-            # Full URL - use as-is for separate reranking service
-            rerank_endpoint = self._rerank_url
-        else:
-            # Relative path - combine with base_url
-            assert self._base_url is not None
-            base_url = self._base_url.rstrip("/")
-            rerank_url = self._rerank_url.lstrip("/")
-            rerank_endpoint = f"{base_url}/{rerank_url}"
+        rerank_endpoint = resolve_rerank_url(self._rerank_url, self._base_url)
 
         # Resolve format and build payload
         format_to_use = self._resolve_rerank_format()

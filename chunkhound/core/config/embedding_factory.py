@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from chunkhound.core.utils.rerank_url import normalize_rerank_url
+
 from .embedding_config import EmbeddingConfig
 
 if TYPE_CHECKING:
@@ -197,7 +199,7 @@ class EmbeddingProviderFactory:
             }
             if base_url is not None:
                 kwargs["base_url"] = base_url
-            if rerank_model is not None:
+            if "rerank_model" in config:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
@@ -205,16 +207,15 @@ class EmbeddingProviderFactory:
                 kwargs["output_dims"] = output_dims
             if client_side_truncation:
                 kwargs["client_side_truncation"] = True
-            # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
-            if (
-                rerank_url
-                and base_url
-                and not rerank_url.startswith(("http://", "https://"))
+            # An omitted model uses Voyage's default; an explicit None disables it.
+            if rerank_url and (
+                "rerank_model" not in config or rerank_model or rerank_format == "tei"
             ):
-                from urllib.parse import urljoin
-
-                rerank_url = urljoin(base_url.rstrip("/") + "/", rerank_url.lstrip("/"))
-            if rerank_url and rerank_url.startswith(("http://", "https://")):
+                rerank_url = normalize_rerank_url(rerank_url)
+            # Preserve the factory's SDK fallback for relative URLs without a base.
+            if rerank_url and (
+                base_url or rerank_url.startswith(("http://", "https://"))
+            ):
                 kwargs["rerank_url"] = rerank_url
                 kwargs["rerank_format"] = rerank_format
                 if rerank_ssl_verify is not None:

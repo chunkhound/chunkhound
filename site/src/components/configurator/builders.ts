@@ -20,6 +20,7 @@ import {
 } from "./constants.ts";
 import { editors, findEditor } from "./providers.ts";
 import { requirementLabels } from "./utils.ts";
+import { canonicalRerankUrl } from "./rerank-validate.ts";
 import {
   assembleGuardedJsonWrite,
   assembleJsonWrite,
@@ -105,7 +106,7 @@ function configWithReranker(
   embedding: ConfiguratorProviderOption,
   reranker?: ConfiguratorReranker,
 ): ConfigRecord {
-  const url = reranker?.url?.trim();
+  const url = canonicalRerankUrl(reranker?.url ?? "");
   const format = reranker?.format?.trim();
   const model = reranker?.model?.trim();
   return {

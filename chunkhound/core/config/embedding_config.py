@@ -20,6 +20,10 @@ from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
 )
+from chunkhound.core.utils.rerank_url import (
+    RERANK_BASE_URL_REQUIRED,
+    normalize_rerank_url,
+)
 from chunkhound.core.utils.voyageai_utils import is_official_voyageai_endpoint
 
 from ._utils import _parse_env_bool
@@ -28,12 +32,6 @@ from ._utils import _parse_env_bool
 RERANK_MODEL_REQUIRED = (
     "rerank_model is required when using rerank_format='cohere' or 'voyage'. "
     "Either provide rerank_model or use rerank_format='tei'."
-)
-RERANK_BASE_URL_REQUIRED = (
-    "rerank_model or rerank_format requires base_url or explicit rerank_url"
-)
-RERANK_URL_SCHEME_INVALID = (
-    "rerank_url must use lowercase http:// or https://, or a relative path"
 )
 
 
@@ -58,20 +56,6 @@ def _require_env_bool(var_name: str, raw_value: str) -> bool:
             f"{var_name} must be a boolean value (true/false), got {raw_value!r}"
         )
     return parsed
-
-
-def _reject_noncanonical_rerank_url(rerank_url: str) -> None:
-    """Reject a rerank_url whose scheme is not lowercase HTTP(S).
-
-    Relative paths are resolved against base_url at runtime and only
-    lowercase http(s) URLs are used as-is, so an uppercase or mistyped scheme
-    is neither and misses the endpoint. The site UI blocks the same forms
-    (rerank-validate.ts).
-    """
-    if rerank_url.startswith(("http://", "https://")):
-        return
-    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", rerank_url):
-        raise ValueError(RERANK_URL_SCHEME_INVALID)
 
 
 def validate_rerank_configuration(
@@ -99,10 +83,6 @@ def validate_rerank_configuration(
     if provider == "voyageai" and not rerank_url:
         return
 
-    # A scheme fault is unfixable by any base_url or model, so reject it first.
-    if rerank_url:
-        _reject_noncanonical_rerank_url(rerank_url)
-
     # Cohere and Voyage-native formats both require an explicit rerank_model
     if rerank_format in ("cohere", "voyage") and not rerank_model:
         raise ValueError(RERANK_MODEL_REQUIRED)
@@ -111,9 +91,8 @@ def validate_rerank_configuration(
     is_using_reranking = rerank_model or (rerank_format == "tei" and rerank_url)
 
     if is_using_reranking and rerank_url:
-        # Scheme forms are rejected above, so this is a relative URL and it
-        # needs base_url to resolve.
-        if not rerank_url.startswith(("http://", "https://")) and not base_url:
+        normalized = normalize_rerank_url(rerank_url)
+        if not normalized.startswith(("http://", "https://")) and not base_url:
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
@@ -336,6 +315,8 @@ class EmbeddingConfig(BaseSettings):
             rerank_url=self.rerank_url,
             base_url=self.base_url,
         )
+        if self.rerank_url and (self.rerank_model or self.rerank_format == "tei"):
+            self.rerank_url = normalize_rerank_url(self.rerank_url)
         return self
 
     @model_validator(mode="after")
@@ -414,7 +395,8 @@ class EmbeddingConfig(BaseSettings):
             base_config["azure_deployment"] = self.azure_deployment
 
         # Add rerank configuration if available
-        if self.rerank_model:
+        # Preserve an inactive external endpoint instead of enabling Voyage's default.
+        if self.rerank_model or self.rerank_url:
             base_config["rerank_model"] = self.rerank_model
         base_config["rerank_url"] = self.rerank_url
         base_config["rerank_format"] = self.rerank_format

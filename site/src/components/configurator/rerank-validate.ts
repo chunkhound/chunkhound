@@ -13,11 +13,6 @@ export const PROTOCOL_RELATIVE_ERROR =
 // Exported so tests can assert the rendered error equals this constant.
 export const INCOMPLETE_URL_ERROR =
   "That URL is incomplete — use a full HTTP(S) URL such as https://reranker.example.com/rerank.";
-// The backend classifies with a case-sensitive startswith, so an uppercase
-// scheme parses in the browser but is not absolute to the backend.
-// Exported for the same test reason as INCOMPLETE_URL_ERROR above.
-export const SCHEME_CASE_ERROR =
-  "Write the scheme in lowercase: http:// or https://.";
 const RELATIVE_NO_BASE_URL_ERROR =
   "A relative reranker URL requires this retrieval preset to have a base URL.";
 
@@ -29,19 +24,11 @@ function incompleteSchemeUrlError(value: string): string | undefined {
   return undefined;
 }
 
-// Returns undefined for canonical HTTP(S) URLs. For scheme forms that parse
-// in the browser but miss the backend's case-sensitive startswith, returns
-// SCHEME_CASE_ERROR for uppercase schemes ("HTTPS://x") or INCOMPLETE_URL_ERROR
-// for structural faults ("http:/x") — so the emitted config always passes.
-function classifySchemeParityError(
-  value: string,
-  protocol: string,
-): string | undefined {
-  if (value.startsWith("http://") || value.startsWith("https://"))
-    return undefined;
-  // "HTTPS://x" is a scheme-case fault; "http:/x" is a structural one.
-  if (value.slice(0, protocol.length) !== protocol) return SCHEME_CASE_ERROR;
-  return INCOMPLETE_URL_ERROR;
+// Canonicalize only valid absolute HTTP(S) URLs; never repair malformed input.
+export function canonicalRerankUrl(value: string): string {
+  value = value.trim();
+  if (rerankUrlValidationError(value, true)) return value;
+  return value.replace(/^https?:/i, (scheme) => scheme.toLowerCase());
 }
 
 export function rerankUrlValidationError(
@@ -53,13 +40,16 @@ export function rerankUrlValidationError(
   // a direct caller cannot misread a padded URL as a scheme fault.
   value = value.trim();
   if (!value) return undefined;
+  if (/\s/.test(value)) return ABSOLUTE_URL_ERROR;
   // Protocol-relative URLs inherit the page scheme, so the fetch target is
   // ambiguous — reject them explicitly instead of treating them as relative.
   if (value.startsWith("//")) return PROTOCOL_RELATIVE_ERROR;
   try {
     const protocol = new URL(value).protocol;
     if (protocol === "http:" || protocol === "https:") {
-      return classifySchemeParityError(value, protocol);
+      return /^https?:\/\/[^/\\?#\s]+/i.test(value)
+        ? undefined
+        : INCOMPLETE_URL_ERROR;
     }
     return ABSOLUTE_URL_ERROR;
   } catch {
@@ -141,10 +131,9 @@ export interface RerankerValidation {
 
 /**
  * Mirrors embedding_config.validate_rerank_configuration. UI-only additions:
- * (1) the <select> only offers cohere/tei/voyage, so "auto" — a backend
- * runtime sentinel — is rejected here; (2) rerankUrlValidationError is
- * stricter on ambiguous URL forms (protocol-relative, empty host) and trims
- * surrounding whitespace before classifying. When reranking is implied but no
+ * The select offers explicit formats for active external reranking. Unused
+ * endpoints are tolerated; active endpoints require unambiguous HTTP(S) or
+ * relative paths with a base URL. When reranking is implied but no
  * URL is given, the URL error fires first, matching the backend's
  * model_validator, which raises RERANK_BASE_URL_REQUIRED before the shared
  * validator reaches its model check.
@@ -157,14 +146,13 @@ export function rerankerValidationError(
   format: string,
   model: string,
 ): RerankerValidation | undefined {
-  const urlError = rerankUrlValidationError(
-    url,
-    typeof retrieval.config.base_url === "string",
-  );
-  if (urlError) return { message: urlError, field: "url" };
+  url = url.trim();
   const effective = effectiveReranker(retrieval, format, model);
-  if (!url && !effective.format && !effective.model) return undefined;
   const rerankingImplied = effective.hasModel || effective.format === "tei";
+  // An unused endpoint must not block semantic-search-only configurations.
+  if (!rerankingImplied && !effective.requiresModel) return undefined;
+  const urlError = rerankUrlValidationError(url, Boolean(retrieval.config.base_url));
+  if (urlError) return { message: urlError, field: "url" };
   if (
     !url &&
     rerankingImplied &&
