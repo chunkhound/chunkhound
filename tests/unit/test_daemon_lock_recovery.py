@@ -144,23 +144,89 @@ async def test_index_command_recognizes_real_preflight_lock_and_checks_daemon(
             registered_provider.disconnect()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["future", "corrupt"])
-def test_non_lock_format_refusal_is_not_contention(tmp_path, kind):
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "locked-secret.duckdb",
+        "could not set lock.duckdb",
+        "database is locked.duckdb",
+        "being used by another process.duckdb",
+        "locked by another process.duckdb",
+    ],
+)
+async def test_non_lock_format_refusal_never_consults_daemon(
+    tmp_path, monkeypatch, clean_environment, capsys, kind, filename
+):
+    import os
+
     import duckdb
 
+    import chunkhound.registry as registry_module
+    from chunkhound.api.cli.commands.run import run_command
+    from chunkhound.core.config.config import Config
     from chunkhound.core.index_format import IndexFormatError
+    from chunkhound.daemon.discovery import DaemonDiscovery
     from chunkhound.providers.database.index_format import preflight_duckdb
 
-    path = tmp_path / "locked-secret.duckdb"
+    monkeypatch.setattr(
+        registry_module, "_registry", registry_module.ProviderRegistry()
+    )
+    monkeypatch.setenv("CHUNKHOUND_NO_PROMPTS", "0")
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_RUNTIME_DIR", str(tmp_path / ".runtime"))
+    monkeypatch.setenv("CHUNKHOUND_DAEMON_REGISTRY_DIR", str(tmp_path / ".registry"))
+    path = tmp_path / filename
     if kind == "future":
         with duckdb.connect(str(path)) as conn:
             conn.execute("CREATE TABLE schema_version AS SELECT 2 AS version")
     else:
         path.write_bytes(b"not a database")
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
     with pytest.raises(IndexFormatError) as error:
         preflight_duckdb(path)
-    assert not _is_db_lock_error(error.value)
     assert str(path) not in str(error.value)
+    config = Config(
+        database={"path": path, "provider": "duckdb"},
+        target_dir=tmp_path,
+        embedding=None,
+        embeddings_disabled=True,
+    )
+    args = argparse.Namespace(
+        path=tmp_path,
+        verbose=False,
+        no_embeddings=True,
+        include=["*.py"],
+        exclude=[],
+    )
+    # A live PID makes the unrelated-daemon hazard reachable. Fake only IPC,
+    # terminal input and process control; never stop this process or a daemon.
+    DaemonDiscovery(tmp_path).write_lock(os.getpid(), "tcp:127.0.0.1:1")
+    with (
+        patch.object(
+            DaemonDiscovery, "ping_daemon", new=AsyncMock(return_value=False)
+        ) as ping,
+        patch.object(DaemonDiscovery, "stop_daemon", return_value=True) as stop,
+        patch("sys.stdin.isatty", return_value=True),
+        patch("builtins.input", return_value="y") as prompt,
+    ):
+        with pytest.raises(SystemExit) as exit_info:
+            await run_command(args, config)
+        assert exit_info.value.code == 1
+        ping.assert_not_awaited()
+        prompt.assert_not_called()
+        stop.assert_not_called()
+    assert not _is_db_lock_error(error.value)
+    if kind == "corrupt":
+        # Direct engine failures must not classify arbitrary filenames either.
+        with pytest.raises(duckdb.IOException) as raw_error:
+            duckdb.connect(str(path), read_only=True)
+        assert not _is_db_lock_error(raw_error.value)
+    output = capsys.readouterr().out
+    assert "Run command failed:" in output
+    assert "is unresponsive" not in output
+    assert "is not a valid DuckDB database" not in output
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
 # ---------------------------------------------------------------------------

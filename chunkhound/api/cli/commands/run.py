@@ -131,19 +131,24 @@ def _is_db_lock_error(exc: Exception) -> bool:
         if not isinstance(cause, duckdb.IOException):
             return False
         exc = cause
-    msg = str(exc).lower()
+    msg = str(exc).lower().removeprefix("io error: ").strip()
+    # Match diagnostic forms, never phrases anywhere in engine text: even a
+    # corrupt file's quoted path may contain every one of these lock phrases.
     return (
-        "could not set lock" in msg
-        or "database is locked" in msg
-        # Windows: DuckDB reports "being used by another process" in IOException
-        or "being used by another process" in msg
+        msg.startswith("could not set lock on file")
+        or msg == "database is locked"
+        # Windows includes the path before the complete OS sharing diagnostic.
+        or (
+            msg.startswith("cannot open file")
+            and msg.endswith(
+                "the process cannot access the file because it is being used "
+                "by another process."
+            )
+        )
         # Windows: WAL file locked — PermissionError raised by WAL recovery code
         or (isinstance(exc, PermissionError) and ".wal" in msg)
-        # Do not apply the legacy broad match to sanitized inspection causes:
-        # a corrupt file's *path* can contain "locked" without any contention.
         or (
-            not wrapped_format_error
-            and "locked" in msg
+            msg == "locked by another process"
             and "duckdb" in type(exc).__module__.lower()
         )
     )
