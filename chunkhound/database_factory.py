@@ -93,14 +93,11 @@ def create_services(
     Returns:
         DatabaseServices bundle with all components
     """
-    # Avoid double-configuring the registry (which can open the DB twice and lock it).
+    # This factory owns registry initialization; callers must not configure it
+    # first. It does not provide simultaneous-provider ownership/reuse.
     registry = get_registry()
-    try:
-        existing_cfg = registry.get_config()
-    except Exception:
-        existing_cfg = None
 
-    # Always (re)configure the registry with an effective per-call config so that
+    # Always configure the registry with an effective per-call config so that
     # tests using distinct temporary directories get an IndexingCoordinator whose
     # base_directory matches the current tmp_path. This avoids cross-test leakage
     # from the global registry's previous target_dir.
@@ -127,8 +124,6 @@ def create_services(
         effective_config = config
 
     configure_registry(effective_config)
-    # else: assume already configured by caller (e.g., CLI), do not reconfigure again
-    # to prevent creating a second database provider connection in the same process.
 
     # If embedding_manager is provided, register its provider with the global registry
     # so services use the same instance, held to the index like the registry's own

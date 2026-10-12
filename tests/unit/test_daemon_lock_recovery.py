@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -51,6 +52,115 @@ class TestIsDbLockError:
 
     def test_table_not_found_not_lock(self):
         assert not _is_db_lock_error(Exception("table not found: chunks"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("daemon_state", ["healthy", "stuck", "recover"])
+async def test_index_command_recognizes_real_preflight_lock_and_checks_daemon(
+    tmp_path, monkeypatch, clean_environment, capsys, daemon_state
+):
+    import chunkhound.registry as registry_module
+    from chunkhound.api.cli.commands.run import run_command
+    from chunkhound.core.config.config import Config
+    from chunkhound.core.index_format import IndexFormatError
+    from chunkhound.daemon.discovery import DaemonDiscovery
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+    from chunkhound.providers.database.index_format import preflight_duckdb
+
+    registry = registry_module.ProviderRegistry()
+    monkeypatch.setattr(registry_module, "_registry", registry)
+    recovering = daemon_state == "recover"
+    monkeypatch.setenv("CHUNKHOUND_NO_PROMPTS", "0" if recovering else "1")
+    config = Config(
+        database={"path": tmp_path / "private-index", "provider": "duckdb"},
+        target_dir=tmp_path, embedding=None, embeddings_disabled=True,
+    )
+    path = config.database.get_db_path()
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    provider.disconnect()
+    registry = registry_module.ProviderRegistry()
+    monkeypatch.setattr(registry_module, "_registry", registry)
+    # A real external writer holds the lock; stdin gives deterministic release.
+    proc = subprocess.Popen(
+        [
+            "uv", "run", "python", "-u", "-c",
+            "import duckdb, sys; c=duckdb.connect(sys.argv[1]); "
+            "print('ready', flush=True); sys.stdin.readline(); c.close()", str(path),
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        with pytest.raises(IndexFormatError) as error:
+            preflight_duckdb(path)
+        assert str(path) not in str(error.value)
+        discovery = DaemonDiscovery(tmp_path)
+        discovery.write_lock(proc.pid, "tcp:127.0.0.1:1")
+        args = argparse.Namespace(
+            path=tmp_path, verbose=False, no_embeddings=True,
+            include=["*.py"], exclude=[],
+        )
+        def release_test_holder(*, timeout):
+            # Fake only the process-control boundary: release our holder
+            # gracefully, never terminate a real daemon.
+            proc.communicate("release\n", timeout=timeout)
+            return True
+
+        with (
+            patch.object(
+                DaemonDiscovery, "ping_daemon",
+                new=AsyncMock(return_value=daemon_state == "healthy"),
+            ) as ping,
+            patch.object(
+                DaemonDiscovery, "stop_daemon", side_effect=release_test_holder
+            ) as stop,
+            patch("sys.stdin.isatty", return_value=recovering),
+            patch("builtins.input", return_value="y"),
+        ):
+            if recovering:
+                await run_command(args, config)
+                stop.assert_called_once()
+            else:
+                with pytest.raises(SystemExit) as exit_info:
+                    await run_command(args, config)
+                assert exit_info.value.code == 1
+                stop.assert_not_called()
+            ping.assert_awaited_once()
+        assert _is_db_lock_error(error.value)
+        output = capsys.readouterr().out
+        if recovering:
+            assert "Run command completed successfully" in output
+        else:
+            assert (
+                "is running" if daemon_state == "healthy" else "is unresponsive"
+            ) in output
+    finally:
+        if proc.poll() is None:
+            proc.communicate("release\n", timeout=15)
+        registered_provider = registry._providers.get("database")
+        if registered_provider is not None:
+            registered_provider.disconnect()
+
+
+@pytest.mark.parametrize("kind", ["future", "corrupt"])
+def test_non_lock_format_refusal_is_not_contention(tmp_path, kind):
+    import duckdb
+
+    from chunkhound.core.index_format import IndexFormatError
+    from chunkhound.providers.database.index_format import preflight_duckdb
+
+    path = tmp_path / "locked-secret.duckdb"
+    if kind == "future":
+        with duckdb.connect(str(path)) as conn:
+            conn.execute("CREATE TABLE schema_version AS SELECT 2 AS version")
+    else:
+        path.write_bytes(b"not a database")
+    with pytest.raises(IndexFormatError) as error:
+        preflight_duckdb(path)
+    assert not _is_db_lock_error(error.value)
+    assert str(path) not in str(error.value)
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,11 @@ Uses real DuckDB in-memory, real tree-sitter parsing, and real regex search —
 no subprocesses, no network calls, no mocks.
 """
 
+import argparse
+
 import pytest
 
+from chunkhound.api.cli.commands.search import search_command
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
@@ -82,6 +85,55 @@ async def indexed_project(tmp_path):
     await indexing_service.process_directory(tmp_path, no_embeddings=True)
 
     yield tmp_path, services
+
+
+@pytest.mark.asyncio
+async def test_file_backed_search_command_uses_factory_initialization(
+    tmp_path, monkeypatch, clean_environment, capsys
+):
+    import chunkhound.registry as registry_module
+
+    # Isolate global lifecycle state but use the real registry/factory/provider.
+    registry = registry_module.ProviderRegistry()
+    monkeypatch.setattr(registry_module, "_registry", registry)
+    (tmp_path / "calculator.py").write_text(CALCULATOR_PY)
+    config = Config(
+        database=DatabaseConfig(
+            path=tmp_path / ".chunkhound" / "db", provider="duckdb"
+        ),
+        indexing=IndexingConfig(include=["*.py"]),
+        target_dir=tmp_path,
+        embedding=None,
+        embeddings_disabled=True,
+    )
+    assert config.hub.url is None
+    db_path = config.database.get_db_path()
+    services = create_services(db_path, config)
+    try:
+        assert services.provider.db_path == str(db_path)
+        assert services.provider.get_base_directory() == tmp_path
+        indexing = DirectoryIndexingService(
+            indexing_coordinator=services.indexing_coordinator, config=config
+        )
+        await indexing.process_directory(tmp_path, no_embeddings=True)
+    finally:
+        services.provider.disconnect()
+    capsys.readouterr()
+
+    args = argparse.Namespace(
+        verbose=False, regex=True, query="calculate_tax", page_size=10,
+        offset=0, path_filter=None, single_hop=False, multi_hop=False,
+    )
+    try:
+        await search_command(args, config)
+        output = capsys.readouterr().out
+        assert "Regex Search Results" in output
+        assert "calculator.py" in output
+        assert "calculate_tax" in output
+        assert config.database.get_db_path() == db_path
+        assert registry.get_provider("database").get_base_directory() == tmp_path
+    finally:
+        registry.get_provider("database").disconnect()
 
 
 async def _regex_search(services, query, **kwargs):

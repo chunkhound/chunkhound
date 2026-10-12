@@ -25,6 +25,7 @@ import duckdb
 from loguru import logger
 
 from chunkhound.core.exceptions import DatabaseError
+from chunkhound.core.index_format import IndexFormatError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -49,6 +50,7 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseRustPipelineInProgressError,
     DatabaseTemporarilyUnavailableError,
     _executor_local,
+    get_thread_local_state,
 )
 from chunkhound.utils.windows_constants import (
     IS_WINDOWS,
@@ -423,12 +425,45 @@ class DuckDBProvider(SerialDatabaseProvider):
             except duckdb.ConnectionException:
                 # A real closed handle, not a generic attach/inspection failure.
                 return False
+            except duckdb.Error as exc:
+                raise IndexFormatError(
+                    "Cannot safely reconnect: transaction state is unknown. "
+                    "Explicitly commit or roll back pending work before retrying."
+                ) from exc
             return True
 
         executor_live = usable(executor_conn)
         manager_live = usable(manager_conn)
         if self._connect_initialized and executor_live and manager_live:
             return True
+
+        # SELECT 1 and our transaction_active flag do not establish committed
+        # visibility: direct SQL can start/end transactions on either handle.
+        # Separate autocommit statements get distinct engine transaction IDs;
+        # a stable ID means an explicit transaction (possibly a stale snapshot).
+        # Never BEGIN/ROLLBACK as a probe: that could abort caller-owned work.
+        for conn, live in (
+            (executor_conn, executor_live), (manager_conn, manager_live)
+        ):
+            if conn is None or not live:
+                continue
+            try:
+                first = conn.execute(
+                    "SELECT system.main.current_transaction_id()"
+                ).fetchone()
+                second = conn.execute(
+                    "SELECT system.main.current_transaction_id()"
+                ).fetchone()
+            except duckdb.Error as exc:
+                raise IndexFormatError(
+                    "Cannot safely reconnect: transaction state is unknown. "
+                    "Explicitly commit or roll back pending work before retrying."
+                ) from exc
+            if first is None or second is None or first == second:
+                raise IndexFormatError(
+                    "Cannot safely reconnect with an active transaction. "
+                    "Explicitly commit or roll back pending work before retrying."
+                )
 
         # Keep remaining handles open until *every* candidate passes. Closing
         # the last writable handle can checkpoint, so refusal must precede it.
@@ -441,6 +476,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             executor_conn.close()
             delattr(_executor_local, "connection")
         self._connection_manager.disconnect(skip_checkpoint=True)
+        get_thread_local_state()["transaction_active"] = False
         self._wal_cleanup_done = False
         return False
 

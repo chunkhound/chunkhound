@@ -153,6 +153,182 @@ def test_partial_reconnect_checks_live_metadata_before_closing_handles(
         provider._connection_manager.disconnect(skip_checkpoint=True)
 
 
+@pytest.mark.parametrize("owner", ["executor-api", "executor-sql", "manager"])
+@pytest.mark.parametrize("metadata", ["stale-snapshot", "uncommitted-mask"])
+def test_partial_reconnect_refuses_transaction_local_format_without_mutation(
+    tmp_path, owner, metadata
+):
+    path = tmp_path / "chunks.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    manager = provider.connection
+    query = manager.execute if owner == "manager" else provider.execute_query
+    other_query = provider.execute_query if owner == "manager" else manager.execute
+    try:
+        if metadata == "uncommitted-mask":
+            other_query("UPDATE schema_version SET version=2")
+        if owner == "executor-api":
+            provider.begin_transaction()
+        else:
+            query("BEGIN TRANSACTION")
+        if metadata == "stale-snapshot":
+            query("SELECT version FROM schema_version")
+            other_query("UPDATE schema_version SET version=2")
+        else:
+            query("UPDATE schema_version SET version=1")
+        if owner == "manager":
+            provider._execute_in_db_thread_sync("disconnect", True)
+        else:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+
+        before = snapshot(tmp_path)
+        with pytest.raises(IndexFormatError, match="transaction"):
+            provider.connect()
+        assert snapshot(tmp_path) == before, "refusal changed DB/WAL hashes or mtimes"
+        # Refusal must leave the original transaction, including its snapshot,
+        # usable until the caller explicitly ends it.
+        rows = query("SELECT version FROM schema_version")
+        assert (rows.fetchone()[0] if owner == "manager" else rows[0]["version"]) == 1
+        if owner == "executor-api":
+            provider.rollback_transaction()
+        else:
+            query("ROLLBACK")
+        before = snapshot(tmp_path)
+        with pytest.raises(IndexFormatError, match="Unsupported index format"):
+            provider.connect()
+        assert snapshot(tmp_path) == before
+    finally:
+        provider._executor.shutdown()
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+
+
+@pytest.mark.parametrize("owner", ["executor-api", "executor-sql", "manager"])
+@pytest.mark.parametrize("finish", ["commit", "rollback"])
+def test_partial_reconnect_preserves_pending_work_for_explicit_completion(
+    tmp_path, owner, finish
+):
+    provider = DuckDBProvider(tmp_path / "chunks.db", base_directory=tmp_path)
+    provider.connect()
+    manager = provider.connection
+    query = manager.execute if owner == "manager" else provider.execute_query
+    try:
+        if owner == "executor-api":
+            provider.begin_transaction()
+        else:
+            query("BEGIN")
+        query("CREATE TABLE pending_work AS SELECT 42 AS value")
+        if owner == "manager":
+            provider._execute_in_db_thread_sync("disconnect", True)
+        else:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+        before = snapshot(tmp_path)
+        with pytest.raises(IndexFormatError, match="transaction"):
+            provider.connect()
+        assert snapshot(tmp_path) == before
+        rows = query("SELECT value FROM pending_work")
+        assert (rows.fetchone()[0] if owner == "manager" else rows[0]["value"]) == 42
+        if owner == "executor-api":
+            getattr(provider, f"{finish}_transaction")()
+        else:
+            query(finish.upper())
+        provider.connect()
+        if finish == "commit":
+            assert provider.execute_query("SELECT value FROM pending_work") == [
+                {"value": 42}
+            ]
+        else:
+            assert provider.execute_query(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name='pending_work'"
+            ) == []
+        provider.begin_transaction()
+        provider.commit_transaction()
+    finally:
+        provider.disconnect()
+
+
+@pytest.mark.parametrize("owner", ["executor-api", "executor-sql", "manager"])
+def test_partial_reconnect_keeps_aborted_transaction_for_explicit_rollback(
+    tmp_path, owner
+):
+    provider = DuckDBProvider(tmp_path / "chunks.db", base_directory=tmp_path)
+    provider.connect()
+    query = (
+        provider.connection.execute if owner == "manager" else provider.execute_query
+    )
+    try:
+        if owner == "executor-api":
+            provider.begin_transaction()
+        else:
+            query("BEGIN")
+        query("CREATE TABLE pending_work AS SELECT 42 AS value")
+        with pytest.raises(duckdb.ConversionException):
+            query("SELECT CAST('bad' AS INTEGER)")
+        if owner == "manager":
+            provider._execute_in_db_thread_sync("disconnect", True)
+        else:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+        before = snapshot(tmp_path)
+        with pytest.raises(IndexFormatError, match="transaction"):
+            provider.connect()
+        assert snapshot(tmp_path) == before
+        query("ROLLBACK")
+        provider.connect()
+        assert provider.execute_query(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name='pending_work'"
+        ) == []
+    finally:
+        provider._executor.shutdown()
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+
+
+@pytest.mark.parametrize("owner", ["executor", "manager"])
+def test_lazy_partial_reconnect_checks_transactions_on_both_live_handles(
+    tmp_path, owner
+):
+    provider = DuckDBProvider(tmp_path / "chunks.db", base_directory=tmp_path)
+    provider.connect()
+    try:
+        provider._execute_in_db_thread_sync("disconnect", True)
+        assert provider.get_stats()["files"] == 0  # lazy recreation is not full init
+        query = (
+            provider.connection.execute
+            if owner == "manager"
+            else provider.execute_query
+        )
+        query("BEGIN")
+        query("CREATE TABLE pending_work AS SELECT 42 AS value")
+        before = snapshot(tmp_path)
+        with pytest.raises(IndexFormatError, match="transaction"):
+            provider.connect()
+        assert snapshot(tmp_path) == before
+        query("COMMIT")
+        provider.connect()
+        assert provider.execute_query("SELECT value FROM pending_work") == [
+            {"value": 42}
+        ]
+    finally:
+        provider._executor.shutdown()
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+
+
+def test_partial_reconnect_resets_tracking_after_explicit_sql_commit(tmp_path):
+    provider = DuckDBProvider(tmp_path / "chunks.db", base_directory=tmp_path)
+    provider.connect()
+    try:
+        provider.begin_transaction()
+        provider.execute_query("COMMIT")  # direct SQL does not update API tracking
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.connect()
+        # A stale transaction_active flag must not block public maintenance on
+        # the replacement connection after all actual transactions have ended.
+        provider.compact_database()
+        assert provider.get_stats()["files"] == 0
+    finally:
+        provider.disconnect()
+
+
 def test_reconnect_after_release_checks_live_format(tmp_path):
     path = tmp_path / "chunks.db"
     provider = DuckDBProvider(path, base_directory=tmp_path)

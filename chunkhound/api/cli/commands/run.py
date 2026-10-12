@@ -16,6 +16,7 @@ from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.config import Config
 from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
 from chunkhound.core.embedding_model_drift import ModelDrift, format_drift_warning
+from chunkhound.core.index_format import IndexFormatError
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.daemon.process import pid_alive
 from chunkhound.registry import (
@@ -118,7 +119,18 @@ def _suggest_model_upgrade(formatter: RichOutputFormatter) -> None:
 
 
 def _is_db_lock_error(exc: Exception) -> bool:
-    """Return True if *exc* looks like a DuckDB exclusive-lock failure."""
+    """Recognize local lock failures without displaying a sanitized cause."""
+    wrapped_format_error = isinstance(exc, IndexFormatError)
+    if wrapped_format_error:
+        # Preflight deliberately hides engine text (paths and other details).
+        # Inspect only its explicit DuckDB IO cause, not arbitrary format text
+        # or exception chains: an unsupported/corrupt format is not contention.
+        import duckdb
+
+        cause = exc.__cause__
+        if not isinstance(cause, duckdb.IOException):
+            return False
+        exc = cause
     msg = str(exc).lower()
     return (
         "could not set lock" in msg
@@ -127,7 +139,13 @@ def _is_db_lock_error(exc: Exception) -> bool:
         or "being used by another process" in msg
         # Windows: WAL file locked — PermissionError raised by WAL recovery code
         or (isinstance(exc, PermissionError) and ".wal" in msg)
-        or ("locked" in msg and "duckdb" in type(exc).__module__.lower())
+        # Do not apply the legacy broad match to sanitized inspection causes:
+        # a corrupt file's *path* can contain "locked" without any contention.
+        or (
+            not wrapped_format_error
+            and "locked" in msg
+            and "duckdb" in type(exc).__module__.lower()
+        )
     )
 
 
