@@ -9,6 +9,8 @@ export interface ConfiguratorEditor {
   mcp?: ConfigRecord;
   rawCmd?: string;
   gitignoreEntries?: string[];
+  /** Client-specific action required after writing its MCP configuration. */
+  setupNote?: string;
   requirements: ConfiguratorRequirement[];
 }
 

@@ -43,6 +43,7 @@ export const editors: ConfiguratorEditor[] = [
       },
     },
     gitignoreEntries: [".pi/mcp.json"],
+    setupNote: "Restart Pi from your project root and grant project trust so it can read .pi/mcp.json.",
   },
   {
     id: "cursor",

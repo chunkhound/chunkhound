@@ -188,12 +188,7 @@ function requirementsComment(
 }
 
 function editorComment(editor: ConfiguratorEditor): string {
-  if (editor.id === "pi") {
-    // Pi requires explicit project trust before it reads .pi/mcp.json —
-    // surface the instruction in the generated output, not just docs.
-    return `Configure ${editor.name} to connect to ChunkHound via MCP. Restart ${editor.name} from your project root and grant project trust so it can read ${editor.mcpFile}.`;
-  }
-  return `Configure ${editor.name} to connect to ChunkHound via MCP.`;
+  return `Configure ${editor.name} to connect to ChunkHound via MCP.${editor.setupNote ? ` ${editor.setupNote}` : ""}`;
 }
 
 function buildEditorCommand(
