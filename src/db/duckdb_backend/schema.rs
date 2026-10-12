@@ -45,24 +45,25 @@ impl DuckDbHnswBackend {
     }
 
     fn check_catalog_index_format(conn: &Connection, inspected: bool) -> Result<(), DbError> {
-        // These are constant identifiers, never supplied by a path or caller.
-        let (catalog, table) = if inspected {
-            ("'inspected'", "inspected.main.schema_version")
-        } else {
-            ("current_database()", "main.schema_version")
-        };
         let inspect = || -> Result<(), DbError> {
+            // Native setup/read handles are newly opened, never caller-owned
+            // sessions. Fully qualify the object so TEMP lookup cannot differ
+            // from the catalog definition check.
+            let catalog: String = if inspected {
+                "inspected".into()
+            } else {
+                conn.query_row("SELECT current_database()", [], |row| row.get(0))?
+            };
+            let table = format!("\"{}\".main.schema_version", catalog.replace('"', "\"\""));
             // Match DuckDB's ASCII case-insensitive identifier resolution, not
             // preserved catalogue spelling. Never bind an executable view.
             let (present, physical): (i64, i64) = conn.query_row(
-                &format!(
-                    "SELECT count(*), count(*) FILTER (WHERE table_type='BASE TABLE') \
-                    FROM information_schema.tables \
-                    WHERE table_catalog={catalog} AND table_schema='main' \
+                "SELECT count(*), count(*) FILTER (WHERE table_type='BASE TABLE') \
+                    FROM system.information_schema.tables \
+                    WHERE table_catalog=? AND table_schema='main' \
                     AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                    'abcdefghijklmnopqrstuvwxyz')='schema_version'"
-                ),
-                [],
+                    'abcdefghijklmnopqrstuvwxyz')='schema_version'",
+                [&catalog],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             if present != physical {
@@ -72,6 +73,26 @@ impl DuckDbHnswBackend {
             }
             let mut version = LEGACY_INDEX_FORMAT_VERSION as u128;
             if present != 0 {
+                // is_generated is unset in DuckDB's column catalog; defaults
+                // also contain generated expressions. Inspect canonical DDL
+                // without binding/evaluating any publisher-defined columns.
+                // Strip quoted identifiers/literals (with doubled escaping),
+                // so ordinary defaults containing DDL words remain supported.
+                let generated: bool = conn.query_row(
+                    r#"SELECT system.main.regexp_matches(
+                        system.main.regexp_replace(sql, ?, ' ', 'g'), '\bGENERATED\s+ALWAYS\s+AS\b')
+                        FROM system.main.duckdb_tables()
+                        WHERE database_name=? AND schema_name='main'
+                        AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+                        'abcdefghijklmnopqrstuvwxyz')='schema_version'"#,
+                    [r#""(?:[^"]|"")*"|'(?:[^']|'')*'"#, &catalog],
+                    |row| row.get(0),
+                )?;
+                if generated {
+                    return Err(DbError::Other(
+                        "Owned metadata requires stored columns, not generated columns".into(),
+                    ));
+                }
                 // Preserve integer type semantics: DuckDB/Rust numeric coercions
                 // would otherwise accept booleans, decimals or numeric strings.
                 // Text transport also avoids narrowing HUGEINT/UHUGEINT values.
@@ -485,6 +506,50 @@ mod format_tests {
                 .expect("catalogue");
             assert_eq!(count, 1, "DDL ran before refusal");
         }
+    }
+
+    #[test]
+    fn generated_format_refused_before_setup_or_candidate_recovery() {
+        let ddl = "CREATE TABLE schema_version(seed INTEGER, version INTEGER \
+            GENERATED ALWAYS AS (CASE WHEN current_database()='memory' THEN 1 ELSE 2 END), \
+            description VARCHAR); \
+            INSERT INTO schema_version(seed, description) VALUES (1, 'generated')";
+        let conn = Connection::open_in_memory().expect("memory");
+        conn.execute_batch(ddl).expect("generated fixture");
+        let message = DuckDbHnswBackend::setup_schema(&conn)
+            .expect_err("generated metadata must block setup")
+            .to_string();
+        assert!(message.contains("stored column"), "{message}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM information_schema.tables",
+                [],
+                |row| row.get(0),
+            )
+            .expect("catalog");
+        assert_eq!(count, 1, "setup DDL ran before refusal");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let live = tmp.path().join("chunks.db");
+        checkpointed(&live, 1);
+        fixture_connection(&sidecar(&live, ".old"))
+            .execute_batch(ddl)
+            .expect("generated candidate");
+        std::fs::write(sidecar(&live, ".swap_intent"), "phase2").expect("marker");
+        assert_refused_unchanged(tmp.path(), &live, "stored column");
+    }
+
+    #[test]
+    fn stored_format_defaults_are_not_generated_columns() {
+        let conn = Connection::open_in_memory().expect("memory");
+        conn.execute_batch(
+            "CREATE TABLE schema_version(version INTEGER DEFAULT 1, \
+            description VARCHAR DEFAULT 'GENERATED ALWAYS AS', \
+            \"GENERATED ALWAYS AS\" INTEGER DEFAULT 3); \
+            INSERT INTO schema_version DEFAULT VALUES",
+        )
+        .expect("stored defaults");
+        DuckDbHnswBackend::setup_schema(&conn).expect("stored metadata allowed");
     }
 
     #[test]

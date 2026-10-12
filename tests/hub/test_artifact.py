@@ -25,6 +25,7 @@ from tests.hub.artifacts import (
     build_database,
     collate_identities,
     pack_database,
+    replace_with_generated_column,
     replace_with_view,
 )
 from tests.hub.test_index_format import snapshot
@@ -255,6 +256,36 @@ def test_candidate_requires_physical_storage(tmp_path, table, external):
     before = snapshot(tmp_path)
     with pytest.raises(HubDatabaseMismatch):
         verify_candidate(path, selected)
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "table,column",
+    [
+        ("files", "path"),
+        ("chunks", "code"),
+        ("embeddings_8", "chunk_id"),
+        ("embeddings_8", "provider"),
+        ("embeddings_8", "model"),
+        ("embeddings_8", "dims"),
+        ("embeddings_8", "embedding"),
+        ("embeddings_8", "created_at"),
+        ("schema_version", "version"),
+    ],
+)
+def test_downloaded_generated_contract_columns_are_fatal(tmp_path, table, column):
+    path = build_database(tmp_path / "published")
+    replace_with_generated_column(path, table, column)
+    selected = select_manifest(
+        json.dumps(catalogue()).encode(),
+        MatchKey("duckdb", "openai", "hub-test", 8, 1),
+        "latest",
+    )
+    before = snapshot(tmp_path)
+    with pytest.raises(HubDatabaseMismatch) as caught:
+        verify_candidate(path, selected)
+    assert caught.value.__suppress_context__
+    assert str(path) not in str(caught.value)
     assert snapshot(tmp_path) == before
 
 

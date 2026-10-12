@@ -1,5 +1,6 @@
 """Nonmutating format inspection and writable-only legacy format stamps."""
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -76,17 +77,62 @@ def read_only_duckdb(path: Path) -> Iterator[Any]:
         raise IndexFormatError(_INSPECTION_FAILED) from exc
 
 
-def read_duckdb_format(conn: Any, *, inspected: bool = False) -> int:
-    """Read physical metadata on an existing connection, without evaluating views."""
-    catalog = "'inspected'" if inspected else "current_database()"
-    table = "inspected.main.schema_version" if inspected else "main.schema_version"
-    # DuckDB preserves spelling but resolves identifiers case-insensitively
-    # using ASCII folding, not Unicode lower/casefold or publisher collation.
-    present = conn.execute(
-        "SELECT table_type FROM information_schema.tables "
-        f"WHERE table_catalog={catalog} AND table_schema='main' "
+def owned_duckdb_catalog(conn: Any, path: Path) -> str:
+    """Bind a live handle to its owned file, never its mutable USE namespace."""
+    catalogs = conn.execute(
+        "SELECT database_name, path FROM system.main.duckdb_databases() "
+        "WHERE NOT internal AND type='duckdb'"
+    ).fetchall()
+    matches = [
+        name
+        for name, filename in catalogs
+        if filename and Path(filename).resolve() == path.resolve()
+    ]
+    if len(matches) != 1:
+        raise IndexFormatError(
+            "Cannot safely reconnect: owned database catalog identity is ambiguous. "
+            "Preserve live handles and pending work before retrying."
+        )
+    return cast(str, matches[0])
+
+
+def require_stored_duckdb_table(conn: Any, catalog: str, table: str) -> None:
+    """Refuse generated columns in owned contract tables before binding values.
+
+    DuckDB's is_generated field is unset, and column_default conflates defaults
+    with generated expressions. Inspect its canonical DDL instead. Remove quoted
+    identifiers/literals (including doubled quotes) before checking DDL keywords;
+    ordinary defaults containing those words remain supported. Requiring the
+    whole contract table to be stored also covers empty tables without reading
+    rows or evaluating publisher expressions.
+    """
+    row = conn.execute(
+        "SELECT sql FROM system.main.duckdb_tables() "
+        "WHERE database_name=? AND schema_name='main' "
         "AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-        "'abcdefghijklmnopqrstuvwxyz')='schema_version'"
+        "'abcdefghijklmnopqrstuvwxyz')=?",
+        [catalog, table],
+    ).fetchone()
+    if row is None or not isinstance(row[0], str):
+        raise IndexFormatError("Owned metadata must be a physical table")
+    unquoted = re.sub(r"\"(?:[^\"]|\"\")*\"|'(?:[^']|'')*'", " ", row[0])
+    if re.search(r"\bGENERATED\s+ALWAYS\s+AS\b", unquoted, flags=re.ASCII):
+        raise IndexFormatError(
+            "Owned metadata requires stored columns, not generated columns"
+        )
+
+
+def read_duckdb_format(conn: Any, *, catalog: str) -> int:
+    """Read exactly one catalog's physical metadata, without evaluating views."""
+    # Both kind and value lookup use the same fully qualified object. Three-part
+    # qualification bypasses TEMP shadowing; catalog names are SQL identifiers.
+    table = '"' + catalog.replace('"', '""') + '".main.schema_version'
+    present = conn.execute(
+        "SELECT table_type FROM system.information_schema.tables "
+        "WHERE table_catalog=? AND table_schema='main' "
+        "AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+        "'abcdefghijklmnopqrstuvwxyz')='schema_version'",
+        [catalog],
     ).fetchone()
     if present is None:
         return LEGACY_INDEX_FORMAT_VERSION
@@ -94,6 +140,7 @@ def read_duckdb_format(conn: Any, *, inspected: bool = False) -> int:
         raise IndexFormatError(
             "Invalid stored index format: schema_version must be a physical table"
         )
+    require_stored_duckdb_table(conn, catalog, "schema_version")
     return _stored_version(
         [row[0] for row in conn.execute(f"SELECT version FROM {table}").fetchall()]
     )
@@ -103,7 +150,7 @@ def read_format(path: Path, backend: str) -> int:
     """Inspect existing metadata without creating paths or migrating the index."""
     if backend == "duckdb":
         with read_only_duckdb(path) as conn:
-            return read_duckdb_format(conn, inspected=True)
+            return read_duckdb_format(conn, catalog="inspected")
     if backend == "lancedb":
         import lance  # type: ignore[import-untyped]  # Lance does not ship typing metadata.
 
@@ -132,7 +179,8 @@ def preflight_duckdb(path: Path | str, *, live_connection: Any | None = None) ->
         import duckdb
 
         try:
-            require_supported(read_duckdb_format(live_connection))
+            catalog = owned_duckdb_catalog(live_connection, live)
+            require_supported(read_duckdb_format(live_connection, catalog=catalog))
         except duckdb.Error as exc:
             raise IndexFormatError(_INSPECTION_FAILED) from exc
     # Both recovery implementations can choose a different file before opening live.
@@ -144,15 +192,17 @@ def preflight_duckdb(path: Path | str, *, live_connection: Any | None = None) ->
             require_supported(read_format(candidate, "duckdb"))
 
 
-def stamp_duckdb(conn: Any) -> None:
-    """Record format 1 for writable new/legacy databases using canonical DDL."""
+def stamp_duckdb(conn: Any, *, catalog: str) -> None:
+    """Record format 1 only after checking existing physical, stored metadata."""
+    require_supported(read_duckdb_format(conn, catalog=catalog))
+    table = '"' + catalog.replace('"', '""') + '".main.schema_version'
     conn.execute(
-        f"CREATE TABLE IF NOT EXISTS schema_version ({_SCHEMA_VERSION_TABLE_COLUMNS})"
+        f"CREATE TABLE IF NOT EXISTS {table} ({_SCHEMA_VERSION_TABLE_COLUMNS})"
     )
     conn.execute(
-        "INSERT INTO schema_version(version, description) "
+        f"INSERT INTO {table}(version, description) "
         "SELECT ?, 'ChunkHound index format' "
-        "WHERE NOT EXISTS (SELECT 1 FROM schema_version)",
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table})",
         [LEGACY_INDEX_FORMAT_VERSION],
     )
 

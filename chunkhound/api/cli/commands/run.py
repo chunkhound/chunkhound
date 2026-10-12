@@ -531,7 +531,10 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(0)
     except Exception as e:
         formatter.error(f"Run command failed: {e}")
-        logger.exception("Run command error details")
+        # Expected format refusals deliberately retain a typed engine cause for
+        # lock recovery. Rendering its chain would defeat the sanitized message.
+        if not isinstance(e, IndexFormatError):
+            logger.exception("Run command error details")
         sys.exit(1)
 
 

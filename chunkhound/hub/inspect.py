@@ -10,7 +10,11 @@ from datetime import datetime
 from pathlib import Path
 
 from chunkhound.core.embedding_model_drift import ModelGroup
-from chunkhound.providers.database.index_format import read_format, read_only_duckdb
+from chunkhound.providers.database.index_format import (
+    read_format,
+    read_only_duckdb,
+    require_stored_duckdb_table,
+)
 
 
 @dataclass(frozen=True)
@@ -42,7 +46,7 @@ def inspect_database(path: Path, backend: str) -> Inventory:
                 conn.execute(
                     "SELECT translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
                     "'abcdefghijklmnopqrstuvwxyz'), table_type "
-                    "FROM information_schema.tables "
+                    "FROM system.information_schema.tables "
                     "WHERE table_catalog='inspected' AND table_schema='main'"
                 ).fetchall()
             )
@@ -58,6 +62,10 @@ def inspect_database(path: Path, backend: str) -> Inventory:
                 raise ValueError(
                     "Stored source and vector objects must be physical tables"
                 )
+            # Validate definitions for every owned source/vector table before
+            # selecting any publisher-controlled values, even from empty tables.
+            for name in names:
+                require_stored_duckdb_table(conn, "inspected", name)
             conn.execute(
                 "SELECT id, path, size, modified_time, content_hash, language "
                 "FROM inspected.main.files LIMIT 1"

@@ -1684,9 +1684,16 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.info("Creating DuckDB schema")
 
         try:
-            from chunkhound.providers.database.index_format import stamp_duckdb
+            from chunkhound.providers.database.index_format import (
+                owned_duckdb_catalog,
+                stamp_duckdb,
+            )
 
-            stamp_duckdb(conn)
+            catalog = (
+                "memory" if str(self.db_path) == ":memory:"
+                else owned_duckdb_catalog(conn, Path(self.db_path))
+            )
+            stamp_duckdb(conn, catalog=catalog)
 
             self._executor_materialize_files_table(conn, state)
             self._executor_materialize_chunks_table(conn, state)

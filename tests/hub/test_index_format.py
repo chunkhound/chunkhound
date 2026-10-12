@@ -231,6 +231,82 @@ def test_metadata_view_is_rejected_before_evaluation(tmp_path, external):
     assert snapshot(tmp_path) == before
 
 
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("suffix", ["", ".old"])
+@pytest.mark.parametrize("wal", [False, True])
+def test_generated_format_refused_before_python_recovery(
+    tmp_path, read_only, suffix, wal
+):
+    path = tmp_path / "chunks.db"
+    with duckdb.connect(str(path) + ".compact_backup") as conn:
+        conn.execute("CREATE TABLE schema_version AS SELECT 1 AS version")
+    with duckdb.connect(str(path) + suffix) as conn:
+        conn.execute(
+            "CREATE TABLE schema_version(seed INTEGER, version INTEGER "
+            "GENERATED ALWAYS AS (CASE WHEN current_database()='memory' "
+            "THEN 1 ELSE 2 END), description VARCHAR)"
+        )
+        conn.execute(
+            "INSERT INTO schema_version(seed, description) VALUES (1, 'generated')"
+        )
+        assert conn.execute("SELECT version FROM schema_version").fetchone() == (2,)
+    if wal:
+        run_python(
+            """
+            import os, sys, duckdb
+            conn = duckdb.connect(sys.argv[1])
+            conn.execute("UPDATE schema_version SET seed=2")
+            os._exit(0)
+            """,
+            Path(str(path) + suffix),
+        )
+        assert Path(str(path) + suffix + ".wal").stat().st_size > 0
+    (tmp_path / "chunks.db.swap_intent").write_text("phase2")
+    before = snapshot(tmp_path)
+    with pytest.raises(IndexFormatError, match="stored column") as error:
+        read_format(Path(str(path) + suffix), "duckdb")
+    assert error.value.__cause__ is None, "generated expression was evaluated"
+    provider = DuckDBProvider(
+        path, base_directory=tmp_path, config=DatabaseConfig(read_only=read_only)
+    )
+    try:
+        with pytest.raises(IndexFormatError, match="stored column"):
+            provider.connect()
+        assert snapshot(tmp_path) == before
+    finally:
+        provider._executor.shutdown()
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+
+
+def test_live_preflight_refuses_handle_for_another_database(tmp_path):
+    from chunkhound.providers.database.index_format import preflight_duckdb
+
+    path = tmp_path / "owned.db"
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("CREATE TABLE schema_version AS SELECT 2 AS version")
+    with duckdb.connect(str(tmp_path / "unrelated.db")) as other:
+        other.execute("CREATE TABLE schema_version AS SELECT 1 AS version")
+        before = snapshot(tmp_path)
+        with pytest.raises(IndexFormatError, match="catalog identity is ambiguous"):
+            preflight_duckdb(path, live_connection=other)
+        assert snapshot(tmp_path) == before
+        assert other.execute("SELECT version FROM schema_version").fetchone() == (1,)
+
+
+def test_stored_format_defaults_are_not_generated_columns(tmp_path):
+    path = tmp_path / "chunks.db"
+    with duckdb.connect(str(path)) as conn:
+        conn.execute(
+            "CREATE TABLE schema_version(version INTEGER DEFAULT 1, "
+            "description VARCHAR DEFAULT 'GENERATED ALWAYS AS', "
+            '"GENERATED ALWAYS AS" INTEGER DEFAULT 3)'
+        )
+        conn.execute("INSERT INTO schema_version DEFAULT VALUES")
+    before = snapshot(tmp_path)
+    assert read_format(path, "duckdb") == 1
+    assert snapshot(tmp_path) == before
+
+
 def test_case_variant_supported_metadata_is_read_not_restamped(tmp_path):
     path = tmp_path / "chunks.db"
     with duckdb.connect(str(path)) as conn:

@@ -12,7 +12,9 @@ from tests.hub.test_index_format import snapshot
 
 
 @pytest.mark.parametrize("suffix", ["", ".old"])
-@pytest.mark.parametrize("metadata", ["2", "0", "'1'", "view", "external-view"])
+@pytest.mark.parametrize(
+    "metadata", ["2", "0", "'1'", "view", "external-view", "generated"]
+)
 def test_native_case_variant_metadata_refused_before_recovery(
     tmp_path, suffix, metadata
 ):
@@ -30,7 +32,17 @@ def test_native_case_variant_metadata_refused_before_recovery(
     outside.write_text("version\n1\n")
     with duckdb.connect(str(candidate)) as conn:
         conn.execute("DROP TABLE schema_version")
-        if "view" in metadata:
+        if metadata == "generated":
+            conn.execute(
+                'CREATE TABLE "ScHeMa_VeRsIoN"(seed INTEGER, version INTEGER '
+                "GENERATED ALWAYS AS (CASE WHEN current_database()='memory' "
+                "THEN 1 ELSE 2 END), description VARCHAR)"
+            )
+            conn.execute(
+                "INSERT INTO schema_version(seed, description) VALUES (1, 'generated')"
+            )
+            assert conn.execute("SELECT version FROM schema_version").fetchone() == (2,)
+        elif "view" in metadata:
             query = (
                 f"SELECT version FROM read_csv('{outside}', header=true)"
                 if metadata == "external-view"
@@ -52,7 +64,13 @@ def test_native_case_variant_metadata_refused_before_recovery(
         errors = [str(exc)]
     else:
         errors = report.errors
-    expected = "physical table" if "view" in metadata else "index format"
+    expected = (
+        "stored column"
+        if metadata == "generated"
+        else "physical table"
+        if "view" in metadata
+        else "index format"
+    )
     assert any(expected in error.lower() for error in errors), errors
     assert snapshot(tmp_path) == before
 

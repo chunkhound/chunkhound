@@ -94,6 +94,49 @@ def replace_with_view(path: Path, table: str, external: bool) -> Path | None:
     return outside if external else None
 
 
+def replace_with_generated_column(path: Path, table: str, column: str) -> None:
+    """Retain real storage except one context-dependent owned contract column."""
+    import duckdb
+
+    with duckdb.connect(str(path)) as conn:
+        if table == "files":
+            conn.execute("CREATE TABLE chunks_copy AS SELECT * FROM chunks")
+            conn.execute("DROP TABLE chunks")
+            conn.execute("ALTER TABLE chunks_copy RENAME TO chunks")
+        columns = conn.execute(f"DESCRIBE {table}").fetchall()
+        conn.execute(f"CREATE TABLE retained AS SELECT * FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        definitions = []
+        stored = []
+        for name, kind, *_ in columns:
+            if name == column:
+                expression = (
+                    "CASE WHEN current_database()='memory' "
+                    "THEN 'openai' ELSE 'wrong-provider' END"
+                    if column == "provider"
+                    else f"retained_{column}"
+                )
+                definitions.append(
+                    f'"{name}" {kind} GENERATED ALWAYS AS ({expression})'
+                )
+            else:
+                definitions.append(f'"{name}" {kind}')
+                stored.append(f'"{name}"')
+        definitions.append(
+            f"retained_{column} {next(c[1] for c in columns if c[0] == column)}"
+        )
+        conn.execute(f"CREATE TABLE {table} ({', '.join(definitions)})")
+        conn.execute(
+            f"INSERT INTO {table} ({', '.join(stored)}, retained_{column}) "
+            f'SELECT {", ".join(stored)}, "{column}" FROM retained'
+        )
+        conn.execute("DROP TABLE retained")
+        if column == "provider":
+            assert conn.execute(
+                f"SELECT DISTINCT provider FROM {table}"
+            ).fetchall() == [("wrong-provider",)]
+
+
 def collate_identities(path: Path, collation: str) -> tuple[str, str]:
     """One exact selected identity versus 100 collating-but-distinct vectors."""
     import duckdb

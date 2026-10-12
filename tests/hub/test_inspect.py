@@ -16,6 +16,7 @@ from tests.hub.artifacts import (
     build_database,
     collate_identities,
     pack_database,
+    replace_with_generated_column,
     replace_with_view,
 )
 from tests.hub.test_index_format import run_python, snapshot
@@ -47,6 +48,21 @@ def test_inventory_refuses_views_before_evaluating_them(tmp_path, table, externa
     ) as caught:
         inspect_database(path, "duckdb")
     assert caught.value.__cause__ is None, "view was bound before its kind was checked"
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "table,column", [("files", "path"), ("embeddings_8", "provider")]
+)
+def test_inventory_refuses_generated_columns_without_evaluation(
+    tmp_path, table, column
+):
+    path = build_database(tmp_path / "published")
+    replace_with_generated_column(path, table, column)
+    before = snapshot(tmp_path)
+    with pytest.raises(IndexFormatError, match="stored column") as caught:
+        inspect_database(path, "duckdb")
+    assert caught.value.__cause__ is None
     assert snapshot(tmp_path) == before
 
 

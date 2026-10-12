@@ -229,6 +229,60 @@ async def test_non_lock_format_refusal_never_consults_daemon(
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verbose", [False, True])
+async def test_cli_format_refusal_sanitizes_actual_log_sink(
+    tmp_path, monkeypatch, clean_environment, capsys, verbose
+):
+    import logging
+
+    from loguru import logger
+
+    import chunkhound.registry as registry_module
+    from chunkhound.api.cli.commands.run import run_command
+    from chunkhound.api.cli.main import setup_logging
+    from chunkhound.core.config.config import Config
+
+    monkeypatch.setattr(
+        registry_module, "_registry", registry_module.ProviderRegistry()
+    )
+    path = tmp_path / "corrupt.duckdb"
+    path.write_bytes(b"not a database")
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    config = Config(
+        database={"path": path, "provider": "duckdb"}, target_dir=tmp_path,
+        embedding=None, embeddings_disabled=True,
+    )
+    args = argparse.Namespace(
+        path=tmp_path, verbose=verbose, no_embeddings=True,
+        include=["*.py"], exclude=[],
+    )
+    # conftest removes sinks: exercise the actual public CLI sink explicitly.
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    noisy_levels = {
+        name: logging.getLogger(name).level for name in ("httpx", "httpcore", "openai")
+    }
+    try:
+        setup_logging(verbose=verbose)
+        with pytest.raises(SystemExit) as exit_info:
+            await run_command(args, config)
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Run command failed:" in captured.out
+        for output in (captured.out, captured.err):
+            assert "is not a valid DuckDB database" not in output
+            assert "direct cause" not in output
+            assert "Traceback" not in output
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    finally:
+        logger.remove()
+        root.handlers[:] = handlers
+        root.setLevel(level)
+        for name, old_level in noisy_levels.items():
+            logging.getLogger(name).setLevel(old_level)
+
+
 # ---------------------------------------------------------------------------
 # TestPingDaemon
 # ---------------------------------------------------------------------------

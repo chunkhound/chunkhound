@@ -86,6 +86,55 @@ def test_partial_release_reconnect_preflights_before_recovery(
         provider._connection_manager.disconnect(skip_checkpoint=True)
 
 
+@pytest.mark.parametrize("remaining", ["manager", "executor"])
+@pytest.mark.parametrize("mask", ["temporary", "alternate"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_partial_reconnect_checks_owned_catalog_despite_session_namespace(
+    tmp_path, remaining, mask, version
+):
+    # Quotes in the catalog name must not become SQL syntax.
+    path = tmp_path / 'owned"quoted.db'
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    query = (
+        provider.connection.execute
+        if remaining == "manager"
+        else provider.execute_query
+    )
+    try:
+        query(f"UPDATE schema_version SET version={version}")
+        if mask == "temporary":
+            query("CREATE TEMP TABLE schema_version AS SELECT 1 AS version")
+        else:
+            query("ATTACH ':memory:' AS alternate")
+            query("USE alternate")
+        if remaining == "manager":
+            provider._execute_in_db_thread_sync("disconnect", True)
+        else:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+        before = snapshot(tmp_path)
+        assert str(path) + ".wal" in before
+        if version == 2:
+            with pytest.raises(IndexFormatError, match="Unsupported index format"):
+                provider.connect()
+            assert snapshot(tmp_path) == before
+            # Refusal keeps the live handle and its namespace intact.
+            sql = (
+                "SELECT version AS value FROM schema_version"
+                if mask == "temporary"
+                else "SELECT current_database() AS value"
+            )
+            rows = query(sql)
+            value = rows.fetchone()[0] if remaining == "manager" else rows[0]["value"]
+            assert value == (1 if mask == "temporary" else "alternate")
+        else:
+            provider.connect()
+            assert provider.get_stats()["files"] == 0
+    finally:
+        provider._executor.shutdown()
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+
+
 def test_lazy_read_after_partial_release_does_not_skip_reconnect_preflight(tmp_path):
     path = tmp_path / "chunks.db"
     provider = DuckDBProvider(path, base_directory=tmp_path)
@@ -124,7 +173,9 @@ def test_failed_initialization_with_two_live_handles_does_not_skip_preflight(tmp
 
 
 @pytest.mark.parametrize("remaining", ["manager", "executor"])
-@pytest.mark.parametrize("metadata", ["2", "'1'", "missing-column", "view"])
+@pytest.mark.parametrize(
+    "metadata", ["2", "'1'", "missing-column", "view", "generated"]
+)
 def test_partial_reconnect_checks_live_metadata_before_closing_handles(
     tmp_path, remaining, metadata
 ):
@@ -132,7 +183,12 @@ def test_partial_reconnect_checks_live_metadata_before_closing_handles(
     provider = DuckDBProvider(path, base_directory=tmp_path)
     provider.connect()
     provider.connection.execute("DROP TABLE schema_version")
-    if metadata == "view":
+    if metadata == "generated":
+        ddl = (
+            'CREATE TABLE "ScHeMa_VeRsIoN"(seed INTEGER, version INTEGER '
+            "GENERATED ALWAYS AS (1), description VARCHAR)"
+        )
+    elif metadata == "view":
         ddl = 'CREATE VIEW "ScHeMa_VeRsIoN" AS SELECT 1 AS version'
     elif metadata == "missing-column":
         ddl = 'CREATE TABLE "ScHeMa_VeRsIoN" AS SELECT 1 AS wrong_column'
