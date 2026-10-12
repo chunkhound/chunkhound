@@ -5,6 +5,7 @@ function setCopyStatus(button, message) {
 }
 
 function copyWithSelection(text) {
+    const previousFocus = document.activeElement;
     const textarea = document.createElement("textarea");
     textarea.value = text;
     textarea.style.cssText = "position:fixed;opacity:0";
@@ -18,6 +19,7 @@ function copyWithSelection(text) {
         return false;
     } finally {
         textarea.remove();
+        if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
     }
 }
 

@@ -43,12 +43,14 @@ const button = window.document.querySelector('.copy-btn');
 const status = window.document.querySelector('[data-copy-status]');
 const click = async (text) => {
   button.setAttribute('data-copy', text);
+  button.focus();
   button.click();
   await Promise.resolve();
   await Promise.resolve();
   return {
     copied: button.classList.contains('copied'),
     status: status.textContent,
+    focusRetained: document.activeElement === button,
   };
 };
 
@@ -86,10 +88,22 @@ console.log(JSON.stringify({
     )
     rendered = run_tsx_json(script)
 
-    assert rendered["clipboard"] == {"copied": True, "status": "Copied"}
+    assert rendered["clipboard"] == {
+        "copied": True,
+        "status": "Copied",
+        "focusRetained": True,
+    }
     assert rendered["reset"] == {"copied": False, "status": ""}
-    assert rendered["fallback"] == {"copied": True, "status": "Copied"}
-    assert rendered["failed"] == {"copied": False, "status": "Copy failed"}
+    assert rendered["fallback"] == {
+        "copied": True,
+        "status": "Copied",
+        "focusRetained": True,
+    }
+    assert rendered["failed"] == {
+        "copied": False,
+        "status": "Copy failed",
+        "focusRetained": True,
+    }
     assert rendered["failedReset"] == {"copied": False, "status": ""}
     assert rendered["clipboardWrites"] == [
         "clipboard text",

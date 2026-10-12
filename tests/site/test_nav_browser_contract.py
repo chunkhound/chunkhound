@@ -36,3 +36,23 @@ console.log(JSON.stringify(await homepageProbe(['light'], async page => {
         assert 0 <= destination["top"] < viewport_band
 
 
+def test_fallback_copy_restores_keyboard_focus_in_chromium(built_site):
+    result = homepage_probe("""
+console.log(JSON.stringify(await homepageProbe(['light'], async page => {
+  // Clipboard availability is a browser boundary; execCommand remains real.
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {
+    value: undefined,
+  }));
+  const button = page.locator('#install .copy-btn');
+  await button.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() =>
+    document.querySelector('#install [data-copy-status]').textContent !== '');
+  return await button.evaluate(element => ({
+    focused: element === document.activeElement,
+    status: element.querySelector('[data-copy-status]').textContent,
+    scratch: document.querySelectorAll('textarea').length,
+  }));
+})));
+""")
+    assert result["light"] == {"focused": True, "status": "Copied", "scratch": 0}
