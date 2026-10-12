@@ -35,7 +35,7 @@ const isActive = (href: string) => isActivePath(currentPath, href);
       <Wordmark />
     </a>
 
-    <div class="nav-tabs" aria-label="Sections" data-nav-mobile-inert>
+    <div class="nav-tabs" role="group" aria-label="Sections" data-nav-mobile-inert>
       {NAV_TABS.map((tab) => {
         const active = isActive(tab.href);
         return (

@@ -112,11 +112,15 @@ function initSearchShortcut(doc: Document = document): void {
     const filter = doc.querySelector<HTMLInputElement>("[data-docs-nav-filter]");
     if (!filter) return;
     doc.addEventListener("keydown", (event) => {
-        if ((event.metaKey || event.ctrlKey) && event.key === "k") {
-            event.preventDefault();
-            filter.focus();
-            filter.select();
+        if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+        const sidebar = filter.closest<HTMLElement>("#docs-sidebar");
+        if (sidebar?.inert || sidebar?.getAttribute("aria-hidden") === "true") {
+            doc.querySelector<HTMLButtonElement>("[data-nav-toggle]")?.click();
         }
+        if (sidebar?.inert || sidebar?.getAttribute("aria-hidden") === "true") return;
+        event.preventDefault();
+        filter.focus();
+        filter.select();
     });
 }
 

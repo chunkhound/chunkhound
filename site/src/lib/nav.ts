@@ -1,7 +1,7 @@
 /**
  * Canonical site-navigation model — the single source of truth for:
  *  - every documentation guide (DOCS_PAGES): the docs sidebar, the docs
- *    landing page, and the top-nav shortcuts all derive from this list;
+ *    landing page, and featured top-nav shortcuts derive from this list;
  *  - the marketing top nav (NAV_TABS).
  *
  * Nav philosophy: the top nav is a global nav. It links to the few real
@@ -101,7 +101,7 @@ export type NavTab = {
 };
 
 /**
- * Top nav = the docs hub plus the critical guides, highest-value first.
+ * Top nav = the featured guides, highest-value first.
  * A tab is active on an exact pathname match to its href (see Nav.astro).
  */
 export const NAV_TABS: NavTab[] = [
