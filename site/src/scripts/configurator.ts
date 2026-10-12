@@ -165,8 +165,6 @@ function rerankerValue(
   error: string | undefined,
 ): ConfiguratorReranker | undefined {
   if (error) return undefined;
-  // The format <select> only offers valid options, so a non-empty value is
-  // already a known format — the guard narrows without a cast.
   if (!url && !format && !model) return undefined;
   const value: ConfiguratorReranker = { url, ...(model && { model }) };
   // The format <select> only offers valid options, so a non-empty value is
@@ -195,6 +193,8 @@ function updateReranker(
   const fields = [inputs.url, inputs.format, inputs.model];
   updateRerankerValidity(fields, error, validation?.field);
   updateRerankerText(section, retrieval, error);
+  section.querySelector<HTMLButtonElement>("#config-copy-btn")
+    ?.toggleAttribute("disabled", Boolean(error));
   return rerankerValue(url, format, model, error);
 }
 
@@ -289,7 +289,8 @@ function renderOutput(
     mode === "full" ? buildFullConfiguratorOutput : buildCompactConfiguratorOutput;
   const rendered = build(retrieval, research, state.agentId, state.platform, reranker);
   output.innerHTML = rendered.html;
-  copyButton.setAttribute("data-copy", rendered.copy);
+  if (copyButton.hasAttribute("disabled")) copyButton.removeAttribute("data-copy");
+  else copyButton.setAttribute("data-copy", rendered.copy);
 }
 
 function placeReranker(section: Element): void {

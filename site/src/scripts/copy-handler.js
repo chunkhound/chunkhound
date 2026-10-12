@@ -38,7 +38,7 @@ const copyResetTimers = new Map();
 document.addEventListener("click", async (event) => {
     const button = event.target.closest(".copy-btn");
     const text = button?.getAttribute("data-copy");
-    if (!button || !text) return;
+    if (!button || button.hasAttribute("disabled") || !text) return;
 
     const copied = await copyText(text);
     if (copied) button.classList.add("copied");

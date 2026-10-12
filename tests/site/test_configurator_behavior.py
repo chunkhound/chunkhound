@@ -288,12 +288,16 @@ const validTei = { error: errorText(), invalid: invalid() };
 // Cohere without a model: error names the model, only the model is flagged.
 rerankFormat.value = 'cohere';
 rerankFormat.dispatchEvent(new window.Event('change'));
-const modelRequired = { error: errorText(), invalid: invalid() };
+const modelRequired = { error: errorText(), invalid: invalid(),
+  disabled: q('#config-copy-btn').disabled,
+  copy: q('#config-copy-btn').getAttribute('data-copy') };
 
 // Filling the model clears the error and all flags.
 rerankModel.value = 'bge-reranker-v2-m3';
 rerankModel.dispatchEvent(new window.Event('input'));
-const resolved = { error: errorText(), invalid: invalid() };
+const resolved = { error: errorText(), invalid: invalid(),
+  disabled: q('#config-copy-btn').disabled,
+  copy: q('#config-copy-btn').getAttribute('data-copy') };
 
 // URL error (non-HTTP scheme): only the URL is flagged.
 rerankUrl.value = 'ftp://example.com/rerank';
@@ -310,7 +314,12 @@ console.log(JSON.stringify({ validTei, modelRequired, resolved, badUrl }));
         "A Cohere or Voyage reranker requires a model."
     )
     assert rendered["modelRequired"]["invalid"] == ["false", "false", "true"]
-    assert rendered["resolved"] == {"error": "", "invalid": ["false"] * 3}
+    assert rendered["modelRequired"]["disabled"] is True
+    assert rendered["modelRequired"]["copy"] is None
+    assert rendered["resolved"]["error"] == ""
+    assert rendered["resolved"]["invalid"] == ["false"] * 3
+    assert rendered["resolved"]["disabled"] is False
+    assert '"rerank_model": "bge-reranker-v2-m3"' in rendered["resolved"]["copy"]
     assert (
         rendered["badUrl"]["error"] == "Use an absolute HTTP(S) URL or a relative path."
     )
