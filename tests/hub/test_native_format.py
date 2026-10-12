@@ -77,8 +77,9 @@ def test_native_case_variant_metadata_refused_before_recovery(
 
 @pytest.mark.parametrize("suffix", ["", ".old"])
 @pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("helpers", ["scalar", "catalog"])
 def test_native_pipeline_ignores_persistent_format_helper_macros(
-    tmp_path, suffix, version
+    tmp_path, suffix, version, helpers
 ):
     source = tmp_path / "source"
     source.mkdir()
@@ -92,11 +93,23 @@ def test_native_pipeline_ignores_persistent_format_helper_macros(
         (db / "chunks.db.swap_intent").write_text("phase2")
     with duckdb.connect(str(candidate)) as conn:
         conn.execute(f"UPDATE schema_version SET version={version}")
-        conn.execute("CREATE MACRO translate(a,b,c) AS 'hidden'")
-        conn.execute("CREATE MACRO current_database() AS 'absent'")
-        conn.execute("CREATE MACRO typeof(a) AS 'INTEGER'")
-        conn.execute("CREATE MACRO union_tag(a) AS 'i'")
-        conn.execute("CREATE MACRO union_extract(a,b) AS 1")
+        if helpers == "scalar":
+            conn.execute("CREATE MACRO translate(a,b,c) AS 'hidden'")
+            conn.execute("CREATE MACRO current_database() AS 'absent'")
+            conn.execute("CREATE MACRO typeof(a) AS 'INTEGER'")
+            conn.execute("CREATE MACRO union_tag(a) AS 'i'")
+            conn.execute("CREATE MACRO union_extract(a,b) AS 1")
+        else:
+            conn.execute(
+                "CREATE MACRO duckdb_tables() AS TABLE "
+                "SELECT * FROM system.main.duckdb_tables() "
+                "WHERE table_name <> 'schema_version'"
+            )
+            conn.execute(
+                "CREATE MACRO duckdb_views() AS TABLE "
+                "SELECT * FROM system.main.duckdb_views() "
+                "WHERE view_name <> 'schema_version'"
+            )
     (source / "b.py").write_text("def added(): return 8\n")
     before = snapshot(tmp_path)
     if version == 1:

@@ -58,12 +58,17 @@ impl DuckDbHnswBackend {
             };
             let table = format!("\"{}\".main.schema_version", catalog.replace('"', "\"\""));
             // Match DuckDB's ASCII case-insensitive identifier resolution, not
-            // preserved catalogue spelling. Never bind an executable view.
+            // preserved catalogue spelling. Use direct engine primitives: even
+            // system.information_schema views expand caller-resolved helpers.
+            // Kind, canonical DDL and values must identify the same owned object.
             let (present, physical): (i64, i64) = conn.query_row(
                 "SELECT system.main.count(*), \
                     system.main.count(*) FILTER (WHERE table_type='BASE TABLE') \
-                    FROM system.information_schema.tables \
-                    WHERE table_catalog=? AND table_schema='main' \
+                    FROM (SELECT database_name, schema_name, table_name, \
+                        'BASE TABLE' AS table_type FROM system.main.duckdb_tables() \
+                        UNION ALL SELECT database_name, schema_name, view_name, \
+                        'VIEW' AS table_type FROM system.main.duckdb_views()) \
+                    WHERE database_name=? AND schema_name='main' \
                     AND system.main.translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
                     'abcdefghijklmnopqrstuvwxyz')='schema_version'",
                 [&catalog],
@@ -594,6 +599,82 @@ mod format_tests {
                         )
                         .expect("catalog");
                     assert_eq!(tables, 1, "{helper}: setup DDL ran before refusal");
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "setup accepted masked metadata: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn setup_checks_metadata_despite_transitive_catalog_masks_before_ddl() {
+        let mut failures = Vec::new();
+        for scope in ["TEMP", ""] {
+            for (helper, mask, is_view) in [
+                (
+                    "duckdb_tables function",
+                    "MACRO duckdb_tables() AS TABLE SELECT * FROM system.main.duckdb_tables() \
+                    WHERE table_name <> 'schema_version'",
+                    false,
+                ),
+                (
+                    "duckdb_views function",
+                    "MACRO duckdb_views() AS TABLE SELECT * FROM system.main.duckdb_views() \
+                    WHERE view_name <> 'schema_version'",
+                    true,
+                ),
+                (
+                    "duckdb_views relation",
+                    "VIEW duckdb_views AS SELECT * FROM system.main.duckdb_views() \
+                    WHERE view_name <> 'schema_version'",
+                    true,
+                ),
+            ] {
+                for supported in [false, true] {
+                    let conn = Connection::open_in_memory().expect("memory");
+                    let kind = if is_view && !supported {
+                        "VIEW"
+                    } else {
+                        "TABLE"
+                    };
+                    conn.execute_batch(&format!(
+                        "CREATE {kind} schema_version AS SELECT {} AS version, \
+                        'retained' AS description; CREATE {scope} {mask}",
+                        if supported { 1 } else { 2 },
+                    ))
+                    .expect("masked catalog fixture");
+                    let catalog_sql = "SELECT database_name, schema_name, table_name FROM \
+                        system.main.duckdb_tables() ORDER BY ALL";
+                    let tables = || -> Vec<(String, String, String)> {
+                        conn.prepare(catalog_sql)
+                            .expect("trusted catalog")
+                            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                            .expect("physical tables")
+                            .collect::<Result<Vec<_>, _>>()
+                            .expect("catalog rows")
+                    };
+                    let before = tables();
+                    let result = DuckDbHnswBackend::setup_schema(&conn);
+                    if supported {
+                        assert!(result.is_ok(), "healthy {scope} {helper}: {result:?}");
+                    } else {
+                        if result.is_ok() {
+                            failures.push(format!("{scope} {helper}"));
+                            continue;
+                        }
+                        let message = result.expect_err("refusal").to_string();
+                        let expected = if is_view {
+                            "physical table"
+                        } else {
+                            "index format"
+                        };
+                        if !message.contains(expected) || tables() != before {
+                            failures
+                                .push(format!("{scope} {helper}: late/wrong refusal: {message}"));
+                        }
+                    }
                 }
             }
         }

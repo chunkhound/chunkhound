@@ -124,12 +124,17 @@ def require_stored_duckdb_table(conn: Any, catalog: str, table: str) -> None:
 
 def read_duckdb_format(conn: Any, *, catalog: str) -> int:
     """Read exactly one catalog's physical metadata, without evaluating views."""
-    # Bind helpers as well as objects: caller TEMP/persistent macros can shadow
-    # builtins. Three-part object names bypass TEMP; catalog names are identifiers.
+    # Trust direct engine primitives throughout: even system.information_schema
+    # views expand caller-resolved helpers. Three-part names bypass TEMP objects;
+    # kind, canonical DDL and values must all identify this catalog's main table.
     table = '"' + catalog.replace('"', '""') + '".main.schema_version'
     present = conn.execute(
-        "SELECT table_type FROM system.information_schema.tables "
-        "WHERE table_catalog=? AND table_schema='main' "
+        "SELECT table_type FROM ("
+        "SELECT database_name, schema_name, table_name, 'BASE TABLE' AS table_type "
+        "FROM system.main.duckdb_tables() UNION ALL "
+        "SELECT database_name, schema_name, view_name, 'VIEW' AS table_type "
+        "FROM system.main.duckdb_views()) "
+        "WHERE database_name=? AND schema_name='main' "
         "AND system.main.translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
         "'abcdefghijklmnopqrstuvwxyz')='schema_version'",
         [catalog],

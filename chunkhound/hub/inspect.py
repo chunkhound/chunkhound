@@ -42,13 +42,18 @@ def inspect_database(path: Path, backend: str) -> Inventory:
         with read_only_duckdb(path) as conn:
             # Fold only ASCII, matching DuckDB identifier resolution. Check
             # object kinds before binding any publisher-defined source/vector SQL.
+            # Direct system functions, not information_schema's ambient-resolving
+            # views, bind every dependency in this discovery to engine primitives.
             objects = dict(
                 conn.execute(
                     "SELECT system.main.translate(table_name, "
                     "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
                     "table_type "
-                    "FROM system.information_schema.tables "
-                    "WHERE table_catalog='inspected' AND table_schema='main'"
+                    "FROM (SELECT database_name, schema_name, table_name, "
+                    "'BASE TABLE' AS table_type FROM system.main.duckdb_tables() "
+                    "UNION ALL SELECT database_name, schema_name, view_name, "
+                    "'VIEW' AS table_type FROM system.main.duckdb_views()) "
+                    "WHERE database_name='inspected' AND schema_name='main'"
                 ).fetchall()
             )
             if not {"files", "chunks"}.issubset(objects):

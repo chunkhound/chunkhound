@@ -138,8 +138,9 @@ def test_partial_reconnect_checks_owned_catalog_despite_session_namespace(
 @pytest.mark.parametrize("remaining", ["manager", "executor"])
 @pytest.mark.parametrize("scope", ["TEMP", ""])
 @pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("helper", ["translate", "duckdb_tables"])
 def test_partial_reconnect_ignores_catalog_helper_macros(
-    tmp_path, remaining, scope, version
+    tmp_path, remaining, scope, version, helper
 ):
     path = tmp_path / "owned.db"
     provider = DuckDBProvider(path, base_directory=tmp_path)
@@ -151,7 +152,21 @@ def test_partial_reconnect_ignores_catalog_helper_macros(
     )
     try:
         query(f"UPDATE schema_version SET version={version}")
-        query(f"CREATE {scope} MACRO translate(a,b,c) AS 'hidden'")
+        if helper == "translate":
+            query(f"CREATE {scope} MACRO translate(a,b,c) AS 'hidden'")
+            masked_sql = "translate('A','A','a')"
+            masked_value = "hidden"
+        else:
+            query(
+                f"CREATE {scope} MACRO duckdb_tables() AS TABLE "
+                "SELECT * FROM system.main.duckdb_tables() "
+                "WHERE table_name <> 'schema_version'"
+            )
+            masked_sql = (
+                "(SELECT count(*) FROM duckdb_tables() "
+                "WHERE table_name='schema_version' AND database_name='owned')"
+            )
+            masked_value = 0
         # A TEMP sentinel proves that refusal retains the original session,
         # including in the persistent-macro case where the macro survives reopen.
         query("CREATE TEMP TABLE retained_session AS SELECT 42 AS value")
@@ -170,7 +185,7 @@ def test_partial_reconnect_ignores_catalog_helper_macros(
                 provider.connect()
             assert snapshot(tmp_path) == before, "refusal changed DB/WAL/backup"
             rows = query(
-                "SELECT value, translate('A','A','a') AS masked, "
+                f"SELECT value, {masked_sql} AS masked, "
                 "(SELECT version FROM owned.main.schema_version) AS version "
                 "FROM retained_session"
             )
@@ -178,7 +193,7 @@ def test_partial_reconnect_ignores_catalog_helper_macros(
                 rows.fetchone() if remaining == "manager"
                 else tuple(rows[0][key] for key in ("value", "masked", "version"))
             )
-            assert retained == (42, "hidden", 2)
+            assert retained == (42, masked_value, 2)
             assert snapshot(tmp_path) == before
         else:
             provider.connect()
@@ -186,6 +201,55 @@ def test_partial_reconnect_ignores_catalog_helper_macros(
             assert provider.execute_query(
                 "SELECT version FROM owned.main.schema_version"
             ) == [{"version": 1}]
+    finally:
+        provider._executor.shutdown()
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+
+
+@pytest.mark.parametrize("remaining", ["manager", "executor"])
+@pytest.mark.parametrize("scope", ["TEMP", ""])
+@pytest.mark.parametrize("mask", ["function", "relation"])
+def test_partial_reconnect_refuses_metadata_view_despite_catalog_mask(
+    tmp_path, remaining, scope, mask
+):
+    path = tmp_path / "owned.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    query = (
+        provider.connection.execute
+        if remaining == "manager"
+        else provider.execute_query
+    )
+    try:
+        query("DROP TABLE schema_version")
+        query("CREATE VIEW schema_version AS SELECT 1 AS version")
+        definition = (
+            "MACRO duckdb_views() AS TABLE" if mask == "function"
+            else "VIEW duckdb_views AS"
+        )
+        query(
+            f"CREATE {scope} {definition} "
+            "SELECT * FROM system.main.duckdb_views() "
+            "WHERE view_name <> 'schema_version'"
+        )
+        query("CREATE TEMP TABLE retained_session AS SELECT 42 AS value")
+        if remaining == "manager":
+            provider._execute_in_db_thread_sync("disconnect", True)
+        else:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+        backup = str(path) + ".compact_backup"
+        with duckdb.connect(backup) as conn:
+            conn.execute("CREATE TABLE schema_version AS SELECT 1 AS version")
+        before = snapshot(tmp_path)
+        assert str(path) + ".wal" in before
+        assert backup in before
+        with pytest.raises(IndexFormatError, match="physical table"):
+            provider.connect()
+        assert snapshot(tmp_path) == before, "refusal changed DB/WAL/backup"
+        rows = query("SELECT value FROM retained_session")
+        value = rows.fetchone()[0] if remaining == "manager" else rows[0]["value"]
+        assert value == 42
+        assert snapshot(tmp_path) == before
     finally:
         provider._executor.shutdown()
         provider._connection_manager.disconnect(skip_checkpoint=True)
