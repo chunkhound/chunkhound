@@ -111,7 +111,8 @@ def _suggest_model_upgrade(formatter: RichOutputFormatter) -> None:
         return
 
     formatter.info(
-        f"{successor} supersedes {model}. Switching re-embeds every chunk and "
+        f"{successor} is the newer model ChunkHound maps from {model}. "
+        "Switching re-embeds every chunk and "
         f"leaves the {model} vectors in place until removed, so it is not "
         f"automatic: set embedding.model to {successor} when you want it. "
         "Silence this with CHUNKHOUND_NO_MODEL_SUGGESTIONS=1."

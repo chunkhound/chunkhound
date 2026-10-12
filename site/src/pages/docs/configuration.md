@@ -385,7 +385,7 @@ Which model and dimensions an index uses is recorded in a small file beside the 
 
 To adopt a new model deliberately, accept the prompt. To change dimensions, or to start clean, delete the database directory and re-index. To stop being asked, set `embedding.model` and `embedding.output_dims` to whatever the index already holds.
 
-When a newer model supersedes the one in use, an interactive `chunkhound index` prints a one-line suggestion. It never acts on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
+For models in the bundled upgrade map, an interactive `chunkhound index` prints a one-line suggestion naming an alternative. This print-only hint does not mean that the suggested model is better for every workload. It never changes the model or re-embeds on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
 `voyage-4-lite` is the default for both the homepage configurator and the VoyageAI provider.
 
