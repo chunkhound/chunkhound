@@ -84,6 +84,23 @@ def test_architecture_page_states_how_the_index_is_built_accurately() -> None:
         assert false_claim not in text
 
 
+def test_contributor_rust_prerequisite_tracks_cargo_manifest() -> None:
+    import tomllib
+
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    minimum = manifest["package"]["rust-version"]
+    documents = (
+        (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8"),
+        _text(DIST / "docs" / "contributing" / "index.html"),
+    )
+    for text in documents:
+        assert f"{minimum} or newer" in text
+        for prerequisite in ("Rust", "Cargo", "rustup", "Cargo.toml"):
+            assert prerequisite in text
+        for command in ("make dev", "make rust-check", "make rust-test"):
+            assert command in text
+
+
 def test_architecture_page_toc_tracks_its_heading_anchors() -> None:
     """The page's hand-written toc must mirror its rendered <h2 id> anchors.
 

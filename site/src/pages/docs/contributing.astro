@@ -64,6 +64,12 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
 
     <h2 id="building-the-rust-extension">Building the Rust extension</h2>
     <p>
+        Install <a href="https://rustup.rs/">Rust and Cargo with rustup</a> first.
+        Rust <strong>1.82 or newer</strong> is required; <code>rust-version</code>
+        in <a href="https://github.com/chunkhound/chunkhound/blob/main/Cargo.toml">Cargo.toml</a>
+        is the source of truth.
+    </p>
+    <p>
         ChunkHound's fast indexing pipeline runs through a Rust extension
         (<code>chunkhound_native</code>) built with maturin. The published PyPI
         wheel includes a pre-built extension, but if you are developing on a
