@@ -75,6 +75,45 @@ def test_native_case_variant_metadata_refused_before_recovery(
     assert snapshot(tmp_path) == before
 
 
+@pytest.mark.parametrize("suffix", ["", ".old"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_native_pipeline_ignores_persistent_format_helper_macros(
+    tmp_path, suffix, version
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.py").write_text("def retained(): return 7\n")
+    db = tmp_path / "db"
+    assert not index_with_rust(source, db, skip_embeddings=True).errors
+    path = db / "chunks.db"
+    candidate = path.with_name(path.name + suffix)
+    if suffix:
+        shutil.copy2(path, candidate)
+        (db / "chunks.db.swap_intent").write_text("phase2")
+    with duckdb.connect(str(candidate)) as conn:
+        conn.execute(f"UPDATE schema_version SET version={version}")
+        conn.execute("CREATE MACRO translate(a,b,c) AS 'hidden'")
+        conn.execute("CREATE MACRO current_database() AS 'absent'")
+        conn.execute("CREATE MACRO typeof(a) AS 'INTEGER'")
+        conn.execute("CREATE MACRO union_tag(a) AS 'i'")
+        conn.execute("CREATE MACRO union_extract(a,b) AS 1")
+    (source / "b.py").write_text("def added(): return 8\n")
+    before = snapshot(tmp_path)
+    if version == 1:
+        report = index_with_rust(source, db, skip_embeddings=True)
+        assert not report.errors
+        assert "b.py" in {chunk[0] for chunk in report.chunk_tuples}
+    else:
+        try:
+            report = index_with_rust(source, db, skip_embeddings=True)
+        except Exception as exc:
+            errors = [str(exc)]
+        else:
+            errors = report.errors
+        assert any("unsupported index format" in error.lower() for error in errors)
+        assert snapshot(tmp_path) == before
+
+
 def test_native_writer_rejects_future_format_before_ddl(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

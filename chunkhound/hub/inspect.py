@@ -44,8 +44,9 @@ def inspect_database(path: Path, backend: str) -> Inventory:
             # object kinds before binding any publisher-defined source/vector SQL.
             objects = dict(
                 conn.execute(
-                    "SELECT translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-                    "'abcdefghijklmnopqrstuvwxyz'), table_type "
+                    "SELECT system.main.translate(table_name, "
+                    "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
+                    "table_type "
                     "FROM system.information_schema.tables "
                     "WHERE table_catalog='inspected' AND table_schema='main'"
                 ).fetchall()
@@ -88,8 +89,9 @@ def inspect_database(path: Path, backend: str) -> Inventory:
                 if str(columns[1][1]) != f"FLOAT[{dims}]":
                     raise ValueError("Stored embedding type is not a float vector")
                 malformed = conn.execute(
-                    f"SELECT count(*) FROM {table} WHERE dims != ? OR dims IS NULL "
-                    "OR embedding IS NULL OR array_length(embedding) != ?",
+                    f"SELECT system.main.count(*) FROM {table} "
+                    "WHERE dims != ? OR dims IS NULL OR embedding IS NULL "
+                    "OR system.main.array_length(embedding) != ?",
                     [dims, dims],
                 ).fetchone()[0]
                 if malformed:
@@ -98,9 +100,11 @@ def inspect_database(path: Path, backend: str) -> Inventory:
                     conn.execute(
                         # BLOB keys discard publisher-supplied string collations;
                         # decode only after exact SQL-side aggregation.
-                        "SELECT decode(encode(provider)), decode(encode(model)), "
-                        f"dims, count(*), max(created_at) FROM {table} "
-                        "GROUP BY encode(provider), encode(model), dims"
+                        "SELECT system.main.decode(system.main.encode(provider)), "
+                        "system.main.decode(system.main.encode(model)), "
+                        "dims, system.main.count(*), system.main.max(created_at) "
+                        f"FROM {table} GROUP BY system.main.encode(provider), "
+                        "system.main.encode(model), dims"
                     ).fetchall()
                 )
     elif backend == "lancedb":

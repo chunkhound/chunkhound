@@ -109,7 +109,7 @@ def require_stored_duckdb_table(conn: Any, catalog: str, table: str) -> None:
     row = conn.execute(
         "SELECT sql FROM system.main.duckdb_tables() "
         "WHERE database_name=? AND schema_name='main' "
-        "AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+        "AND system.main.translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
         "'abcdefghijklmnopqrstuvwxyz')=?",
         [catalog, table],
     ).fetchone()
@@ -124,13 +124,13 @@ def require_stored_duckdb_table(conn: Any, catalog: str, table: str) -> None:
 
 def read_duckdb_format(conn: Any, *, catalog: str) -> int:
     """Read exactly one catalog's physical metadata, without evaluating views."""
-    # Both kind and value lookup use the same fully qualified object. Three-part
-    # qualification bypasses TEMP shadowing; catalog names are SQL identifiers.
+    # Bind helpers as well as objects: caller TEMP/persistent macros can shadow
+    # builtins. Three-part object names bypass TEMP; catalog names are identifiers.
     table = '"' + catalog.replace('"', '""') + '".main.schema_version'
     present = conn.execute(
         "SELECT table_type FROM system.information_schema.tables "
         "WHERE table_catalog=? AND table_schema='main' "
-        "AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+        "AND system.main.translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
         "'abcdefghijklmnopqrstuvwxyz')='schema_version'",
         [catalog],
     ).fetchone()

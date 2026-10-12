@@ -135,6 +135,62 @@ def test_partial_reconnect_checks_owned_catalog_despite_session_namespace(
         provider._connection_manager.disconnect(skip_checkpoint=True)
 
 
+@pytest.mark.parametrize("remaining", ["manager", "executor"])
+@pytest.mark.parametrize("scope", ["TEMP", ""])
+@pytest.mark.parametrize("version", [1, 2])
+def test_partial_reconnect_ignores_catalog_helper_macros(
+    tmp_path, remaining, scope, version
+):
+    path = tmp_path / "owned.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    query = (
+        provider.connection.execute
+        if remaining == "manager"
+        else provider.execute_query
+    )
+    try:
+        query(f"UPDATE schema_version SET version={version}")
+        query(f"CREATE {scope} MACRO translate(a,b,c) AS 'hidden'")
+        # A TEMP sentinel proves that refusal retains the original session,
+        # including in the persistent-macro case where the macro survives reopen.
+        query("CREATE TEMP TABLE retained_session AS SELECT 42 AS value")
+        if remaining == "manager":
+            provider._execute_in_db_thread_sync("disconnect", True)
+        else:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+        backup = str(path) + ".compact_backup"
+        with duckdb.connect(backup) as conn:
+            conn.execute("CREATE TABLE schema_version AS SELECT 1 AS version")
+        before = snapshot(tmp_path)
+        assert str(path) + ".wal" in before
+        assert backup in before
+        if version == 2:
+            with pytest.raises(IndexFormatError, match="Unsupported index format"):
+                provider.connect()
+            assert snapshot(tmp_path) == before, "refusal changed DB/WAL/backup"
+            rows = query(
+                "SELECT value, translate('A','A','a') AS masked, "
+                "(SELECT version FROM owned.main.schema_version) AS version "
+                "FROM retained_session"
+            )
+            retained = (
+                rows.fetchone() if remaining == "manager"
+                else tuple(rows[0][key] for key in ("value", "masked", "version"))
+            )
+            assert retained == (42, "hidden", 2)
+            assert snapshot(tmp_path) == before
+        else:
+            provider.connect()
+            assert provider.get_stats()["files"] == 0
+            assert provider.execute_query(
+                "SELECT version FROM owned.main.schema_version"
+            ) == [{"version": 1}]
+    finally:
+        provider._executor.shutdown()
+        provider._connection_manager.disconnect(skip_checkpoint=True)
+
+
 def test_lazy_read_after_partial_release_does_not_skip_reconnect_preflight(tmp_path):
     path = tmp_path / "chunks.db"
     provider = DuckDBProvider(path, base_directory=tmp_path)

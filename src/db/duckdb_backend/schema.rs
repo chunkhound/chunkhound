@@ -27,12 +27,12 @@ impl DuckDbHnswBackend {
     // conflates scale-zero DECIMAL with HUGEINT, and cannot preserve UHUGEINT.
     fn decoded_type_sql(kind: &LogicalTypeHandle, expression: &str) -> String {
         if kind.id() != LogicalTypeId::Union {
-            return format!("typeof({expression})");
+            return format!("system.main.typeof({expression})");
         }
-        let mut sql = format!("CASE union_tag({expression})");
+        let mut sql = format!("CASE system.main.union_tag({expression})");
         for index in 0..kind.num_children() {
             let member = kind.child_name(index).replace('\'', "''");
-            let extracted = format!("union_extract({expression}, '{member}')");
+            let extracted = format!("system.main.union_extract({expression}, '{member}')");
             let member_type = Self::decoded_type_sql(&kind.child(index), &extracted);
             sql.push_str(&format!(" WHEN '{member}' THEN {member_type}"));
         }
@@ -47,21 +47,24 @@ impl DuckDbHnswBackend {
     fn check_catalog_index_format(conn: &Connection, inspected: bool) -> Result<(), DbError> {
         let inspect = || -> Result<(), DbError> {
             // Native setup/read handles are newly opened, never caller-owned
-            // sessions. Fully qualify the object so TEMP lookup cannot differ
-            // from the catalog definition check.
+            // sessions. Bind helpers to the system catalog too: persistent
+            // macros can shadow builtins even on a newly opened handle.
             let catalog: String = if inspected {
                 "inspected".into()
             } else {
-                conn.query_row("SELECT current_database()", [], |row| row.get(0))?
+                conn.query_row("SELECT system.main.current_database()", [], |row| {
+                    row.get(0)
+                })?
             };
             let table = format!("\"{}\".main.schema_version", catalog.replace('"', "\"\""));
             // Match DuckDB's ASCII case-insensitive identifier resolution, not
             // preserved catalogue spelling. Never bind an executable view.
             let (present, physical): (i64, i64) = conn.query_row(
-                "SELECT count(*), count(*) FILTER (WHERE table_type='BASE TABLE') \
+                "SELECT system.main.count(*), \
+                    system.main.count(*) FILTER (WHERE table_type='BASE TABLE') \
                     FROM system.information_schema.tables \
                     WHERE table_catalog=? AND table_schema='main' \
-                    AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                    AND system.main.translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
                     'abcdefghijklmnopqrstuvwxyz')='schema_version'",
                 [&catalog],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -83,7 +86,7 @@ impl DuckDbHnswBackend {
                         system.main.regexp_replace(sql, ?, ' ', 'g'), '\bGENERATED\s+ALWAYS\s+AS\b')
                         FROM system.main.duckdb_tables()
                         WHERE database_name=? AND schema_name='main'
-                        AND translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+                        AND system.main.translate(table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
                         'abcdefghijklmnopqrstuvwxyz')='schema_version'"#,
                     [r#""(?:[^"]|"")*"|'(?:[^']|'')*'"#, &catalog],
                     |row| row.get(0),
@@ -537,6 +540,67 @@ mod format_tests {
             .expect("generated candidate");
         std::fs::write(sidecar(&live, ".swap_intent"), "phase2").expect("marker");
         assert_refused_unchanged(tmp.path(), &live, "stored column");
+    }
+
+    #[test]
+    fn setup_refuses_macro_masked_metadata_before_ddl() {
+        let mut failures = Vec::new();
+        for (helper, ddl, metadata) in [
+            (
+                "translate",
+                "CREATE MACRO translate(a,b,c) AS 'hidden'",
+                "2",
+            ),
+            (
+                "current_database",
+                "CREATE MACRO current_database() AS 'absent'",
+                "2",
+            ),
+            ("typeof", "CREATE MACRO typeof(a) AS 'INTEGER'", "'1'"),
+            (
+                "union_tag",
+                "CREATE MACRO union_tag(a) AS 'i'",
+                "union_value(s:='1')::UNION(s VARCHAR, i INTEGER)",
+            ),
+            (
+                "union_extract",
+                "CREATE MACRO union_extract(a,b) AS 1",
+                "union_value(s:='1')::UNION(s VARCHAR, i INTEGER)",
+            ),
+        ] {
+            for supported in [false, true] {
+                let conn = Connection::open_in_memory().expect("memory");
+                conn.execute_batch(&format!(
+                    "CREATE TABLE schema_version AS SELECT {} AS version, \
+                    'retained' AS description; {ddl}",
+                    if supported { "1" } else { metadata },
+                ))
+                .expect("macro fixture");
+                let result = DuckDbHnswBackend::setup_schema(&conn);
+                if supported {
+                    assert!(result.is_ok(), "healthy {helper}: {result:?}");
+                } else {
+                    if result.is_ok() {
+                        failures.push(helper);
+                        continue;
+                    }
+                    let message = result.expect_err("refusal").to_string();
+                    assert!(message.contains("index format"), "{helper}: {message}");
+                    let tables: i64 = conn
+                        .query_row(
+                            "SELECT system.main.count(*) FROM system.information_schema.tables",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("catalog");
+                    assert_eq!(tables, 1, "{helper}: setup DDL ran before refusal");
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "setup accepted masked metadata: {failures:?}"
+        );
     }
 
     #[test]
