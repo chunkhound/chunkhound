@@ -535,7 +535,7 @@ def test_homepage_closing_section_is_the_single_activation_cta() -> None:
     assert re.search(r'href="/docs/getting-started/"[^>]*>\s*Get started', closing)
     for fact in (
         "No license or per-seat fee",
-        "Nothing leaves your machine",
+        "Your index stays on your machine",
         "MIT licensed",
     ):
         assert fact in closing, f"closing section must answer: {fact}"
@@ -688,6 +688,20 @@ def test_homepage_and_readme_state_scale_ownership_and_privacy_boundaries() -> N
     ):
         assert absolute_claim not in combined
     assert NUMERIC_LANGUAGE_CLAIM.search(combined) is None
+
+
+def test_homepage_distinguishes_local_index_from_network_egress() -> None:
+    from tests.site.html_helpers import visible_text
+
+    homepage = (DIST / "index.html").read_text(encoding="utf-8")
+    text = visible_text(homepage)
+    assert "Your index stays on your machine" in text
+    assert (
+        "Remote embedding, reranking, and LLM providers receive request content" in text
+    )
+    assert "Web research also contacts external sites and services" in text
+    for absolute_claim in ("Nothing leaves your machine", "because nothing leaves"):
+        assert absolute_claim not in text
 
 
 def test_built_site_has_og_meta_tags() -> None:

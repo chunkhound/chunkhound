@@ -93,7 +93,7 @@ def test_scale_terms_rail_names_conditions_then_interfaces() -> None:
     assert r["labels"][:4] == [
         "Free & open-source",
         "Local-first",
-        "Nothing leaves your machine",
+        "Your index stays on your machine",
         "Your models, your bill",
     ]
     assert r["labels"][4] == "CLI"

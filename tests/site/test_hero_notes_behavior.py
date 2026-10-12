@@ -492,7 +492,7 @@ def test_hero_no_js_shows_the_full_narrative() -> None:
     for promise in (
         "Free & open-source",
         "Local-first",
-        "Nothing leaves your machine",
+        "Your index stays on your machine",
         "Your models, your bill",
     ):
         assert promise in raw, f"missing from the no-JS promises: {promise!r}"

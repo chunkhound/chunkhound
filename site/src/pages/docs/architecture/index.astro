@@ -86,12 +86,13 @@ const toc = [
     <h2 id="index">From files to a current index</h2>
     <p>
         Before a question can be answered, files have to become a current index —
-        and at repository scale that is a throughput problem. The engine is
-        written in Rust: it scans in parallel, diffs against the stored index,
+        and at repository scale that is a throughput problem. The default DuckDB
+        write pipeline is written in Rust: it scans in parallel, diffs against the stored index,
         and overlaps parsing, embedding, and storage so all three run at once.
         Database writes, compaction, crash recovery, and the embedding HTTP calls
         are native too — for DuckDB, the only backend the Rust write pipeline
-        supports. Other backends use the Python write pipeline. Python still
+        supports. LanceDB uses the Python write pipeline, but file discovery can
+        still use Rust. Python still
         supplies tree-sitter parsing and the embedding fallback for providers
         without a native client, called from the engine — a holdover from when
         the whole system was Python. The project is gradually leaving it behind,

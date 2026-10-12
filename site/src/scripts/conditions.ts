@@ -27,13 +27,12 @@ export const ENTRY_POINTS: Term[] = [
 
 /** The conditions — the hero's critical selling points (open-source, deployment,
  * privacy, economics), in rail order. The literal ids are the vocabulary a run
- * note's `condition` must name. “Nothing leaves your machine” intentionally
- * means ChunkHound's runtime and index stay local, not that an operator-selected
- * remote provider receives no request content; NothingLeaves.astro discloses it. */
+ * note's `condition` must name. NothingLeaves.astro discloses the separate
+ * provider and web boundary; index custody alone is promised here. */
 export const PROMISES = [
     { id: "open-source", icon: "ph-git-fork", label: "Free & open-source" },
     { id: "local-first", icon: "ph-laptop", label: "Local-first" },
-    { id: "nothing-leaves", icon: "ph-shield-check", label: "Nothing leaves your machine" },
+    { id: "nothing-leaves", icon: "ph-shield-check", label: "Your index stays on your machine" },
     { id: "your-models", icon: "ph-sliders-horizontal", label: "Your models, your bill" },
 ] as const;
 

@@ -59,22 +59,17 @@ def test_architecture_page_claims_one_pipeline_for_every_source() -> None:
 
 
 def test_architecture_page_states_how_the_index_is_built_accurately() -> None:
-    """The index build runs on a Rust engine; Python keeps parsing and the
-    embedding fallback.
-
-    Guards the bug class the redesign removed: a page claiming the indexing
-    pipeline is Python-orchestrated, or crediting Rust with parsing/embedding it
-    does not do. v6.0.0 moved the engine (scan, diff, scheduling, storage,
-    compaction) to Rust; native embeddings are Rust too, leaving tree-sitter
-    parsing and the provider fallback in Python.
-    """
+    """Native write ownership is specific to DuckDB, not every backend."""
     text = _text(EXPLANATION_ROUTE)
 
     # The phase sequence is intact.
     assert "Parse ∥ store" in text
-    # The engine is Rust.
     assert "written in Rust" in text
-    assert "The indexing engine" in text
+    assert "Default DuckDB write pipeline" in text
+    assert (
+        "LanceDB uses the Python write pipeline; file discovery can still use Rust."
+        in text
+    )
     # Parsing is still called back into Python; native embeddings are Rust.
     assert "tree-sitter" in text
     assert "embedding fallback" in text

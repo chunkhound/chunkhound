@@ -7,9 +7,8 @@
  * Hosts the structured facts (stages, phases, layers, roles, index phases) that
  * the page's diagrams render. The prose narrates these facts; the labels and
  * structure are defined only here, so a rename is a one-place edit.
- * Facts are code-verified against v6.0.0: the indexing engine is Rust — scanning,
- * diffing, scheduling, database writes, and compaction; Python still supplies
- * parsing and the embedding fallback, both slated to move to Rust.
+ * INDEX_PHASES describes the default DuckDB write pipeline, not every backend.
+ * LanceDB uses Python writes; Rust-assisted discovery is independent of writes.
  */
 
 export type Stage = {
@@ -143,7 +142,14 @@ export const LLM_ROLES: LlmRole[] = [
   },
 ];
 
-/** The real index build, phase by phase. */
+/** Scope stays visible in every consumer of the native indexing phases. */
+export const INDEX_PIPELINE = {
+  title: "Default DuckDB write pipeline",
+  description: "The default DuckDB indexing engine is written in Rust: it discovers files in parallel, detects changes, overlaps parsing, embedding, and storage, and owns database writes, compaction, and crash recovery. Python supplies tree-sitter parsing and the embedding fallback for providers without a native client.",
+  fallback: "LanceDB uses the Python write pipeline; file discovery can still use Rust.",
+};
+
+/** Default DuckDB index build, phase by phase. */
 export type IndexPhase = {
   title: string;
   detail: string;

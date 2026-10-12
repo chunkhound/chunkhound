@@ -71,7 +71,7 @@ export const NARRATIVE: HeroNarrativeStep[] = [
         beats: ["git"],
         label: "GIT HISTORY",
         headline: "The reason: one caller",
-        detail: "Nothing leaves — your commits explain it.",
+        detail: "Local git history — your commits explain it.",
         condition: "nothing-leaves",
     },
     {

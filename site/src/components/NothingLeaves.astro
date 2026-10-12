@@ -7,8 +7,7 @@ import FlowArrow from "./FlowArrow.astro";
 // (code uploaded = exposure) vs house (the hound lives where your code lives).
 // Registered in the script below, like siblings. All three share one .card-grid
 // peer entrance (default fade-up, staggered) — see global.css.
-// "Nothing leaves" describes custody of the local index, not zero network egress.
-// Preserve the remote-provider boundary below; docs/configuration.md explains it.
+// Index custody is local; the visible boundary below discloses network egress.
 const tradeoff = [
   {
     icon: "ph-cloud-arrow-up",
@@ -20,7 +19,7 @@ const tradeoff = [
     icon: "ph-house",
     title: "The house-trained hound",
     detail:
-      "ChunkHound lives where your code lives. The agent gets the whole territory — every module, every commit — while <em>the index stays on your machine</em>. A hound that phones home isn&rsquo;t yours.",
+      "ChunkHound lives where your code lives. The agent gets the whole territory — every module, every commit — while <em>the index stays on your machine</em>. You choose which providers process request content.",
   },
 ];
 ---
@@ -34,9 +33,9 @@ const tradeoff = [
 <section id="nothing-leaves" class="nothing-leaves" aria-labelledby="nothing-leaves-heading">
   <div class="container">
     <header class="intro" data-reveal>
-      <p class="eyebrow">NOTHING LEAVES</p>
-      <h2 id="nothing-leaves-heading">Cloud coding assistants make you choose: a smart agent, or private code.</h2>
-      <p>Send your codebase to a cloud service and it builds the index that makes the agent smart — but your code has left the building. Keep it home and the agent sees only what fits in the context. ChunkHound dissolves the tradeoff: the index lives on your machine, so your agent may read <em>everything</em> precisely because <em>nothing</em> leaves.</p>
+      <p class="eyebrow">LOCAL INDEX</p>
+      <h2 id="nothing-leaves-heading">Your index stays on your machine</h2>
+      <p>ChunkHound builds and searches the index locally, so your agent can explore the whole codebase without a hosted index service. Model processing is a separate choice: use local providers for local processing, or send request content to remote providers you select.</p>
     </header>
 
     <div class="card-grid contrast-grid">
@@ -74,7 +73,7 @@ const tradeoff = [
       <strong>Your models. Your bill. Deep research at cost.</strong>
     </p>
 
-    <p class="boundary" data-reveal>You draw the trust boundary: choose local providers (Ollama, vLLM) for local model processing, or remote embedding and LLM providers when their data boundary fits. Remote providers receive request content — ChunkHound never sends anything on its own.</p>
+    <p class="boundary" data-reveal>You draw the trust boundary: choose local providers (Ollama, vLLM) for local model processing, or remote embedding and LLM providers when their data boundary fits. Remote embedding, reranking, and LLM providers receive request content. Web research also contacts external sites and services.</p>
   </div>
 </section>
 
