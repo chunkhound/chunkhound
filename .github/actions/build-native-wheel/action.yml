@@ -8,12 +8,41 @@ description: >
   watchman-rollout-gate jobs (all with skip-tag-version-patch: true, since a
   CI branch/PR ref has no release tag to derive a version from). Published
   native-wheel support is
-  macOS arm64, Linux x86_64/aarch64 (manylinux_2_34), and Windows x86_64.
+  macOS arm64, Linux x86_64/aarch64 (manylinux_2_28), and Windows x86_64.
   Intel macOS is deliberately excluded: free Intel macOS runners are retired,
   and arm64 cross-compilation has unresolved PyO3 framework-linking failures.
-  musl and older glibc need a separate manylinux-container build; no native
-  sdist fallback exists. Assumes the calling job has already checked out the
-  repo and installed `uv`.
+  Linux wheels are built inside a manylinux_2_28 Docker container (AlmaLinux
+  8, glibc 2.28) rather than directly on the GitHub-hosted runner's own glibc
+  (>=2.34 on ubuntu-latest/ubuntu-24.04-arm) -- glibc 2.34 merged libpthread
+  and libdl into libc itself, so a native-runner build silently links only
+  against the merged libc.so.6 and narrows real-world compatibility below
+  what the manylinux_2_34 tag it would otherwise carry actually promises (see
+  pydantic-core/polars, which build the same way for the same reason). After
+  the container build, `patchelf --clear-symbol-version` strips the glibc
+  version pinned to two still-weak (optional, non-blocking-at-link-time)
+  symbols -- `statx` and `getrandom` -- that Rust's std library intentionally
+  references as weak so the binary can fall back to a raw syscall when the
+  glibc wrapper isn't present. The version pin is a build-host artifact, not
+  something Rust's source requests: `statx` debuted in glibc exactly at
+  2.28, so any build on a glibc>=2.28 host stamps that version onto the
+  still-weak reference even though it's otherwise harmless; building on an
+  older glibc host reproduces the same weak-but-unversioned symbol without
+  this step. Clearing the version post-build is simpler than building in an
+  even older container, has no observed downside, and was verified
+  end-to-end (real crate, real Python 3.10, real Ubuntu 18.04 VM) to let the
+  resulting wheel load and run correctly on glibc well below 2.28 -- this is
+  a pure compatibility-widening step and does not change the wheel's declared
+  manylinux_2_28 platform tag. DuckDB's own precompiled dynamic library
+  (downloaded via DUCKDB_DOWNLOAD_LIB=1) has an independent, unrelated hard
+  floor around glibc 2.23-2.25 (non-weak `lgamma` symbol) that this step does
+  not and cannot change; that floor is below manylinux_2_28's own 2.28
+  baseline so it isn't the binding constraint for the published tag, but it
+  does mean compatibility can't be pushed below ~2.25 without separately
+  addressing DuckDB (source build or an alternate prebuilt artifact). Going
+  all the way to manylinux2014/glibc 2.17 (RHEL/CentOS 7-class) would need to
+  resolve that DuckDB floor too and is out of scope here. musl needs a
+  separate build entirely; no native sdist fallback exists. Assumes the
+  calling job has already checked out the repo and installed `uv`.
 
 inputs:
   out-dir:
@@ -40,10 +69,8 @@ runs:
     - name: Set up Rust toolchain
       uses: ./.github/actions/setup-rust-toolchain
 
-    - name: Build native wheel
+    - name: Patch Cargo.toml version from git tag
       shell: bash
-      env:
-        DUCKDB_DOWNLOAD_LIB: "1"
       run: |
         # maturin build has no --set-version flag; it reads the wheel version from
         # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
@@ -71,6 +98,126 @@ runs:
         path.write_text(new_text)
         PYEOF
         fi
+
+    - name: Build native wheel (Linux, manylinux_2_28 container)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        DUCKDB_DOWNLOAD_LIB: "1"
+      run: |
+        # Build inside a manylinux_2_28 container (AlmaLinux 8, glibc 2.28)
+        # instead of directly on this runner's own glibc (>=2.34 on
+        # ubuntu-latest/ubuntu-24.04-arm). glibc 2.34 merged libpthread and
+        # libdl into libc itself, so a native-runner build silently links
+        # only against the merged libc.so.6 -- narrower real-world
+        # compatibility than the manylinux tag implies (see pydantic-core,
+        # polars, which build the same way for the same reason). No QEMU is
+        # needed: GitHub's Linux arm64 runner (ubuntu-24.04-arm) is itself
+        # an aarch64 host, so pulling the aarch64 container image there is a
+        # native (not emulated) docker run.
+        case "$(uname -m)" in
+          x86_64)  MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest" ;;
+          aarch64) MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28_aarch64:latest" ;;
+          *) echo "Unsupported Linux arch for manylinux_2_28 build: $(uname -m)" >&2; exit 1 ;;
+        esac
+        mkdir -p "${{ inputs.out-dir }}"
+        # maturin treats a sibling pyproject.toml as authoritative package metadata
+        # ("mixed" Rust/Python project support), which misnames this wheel as
+        # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
+        # Python package's pyproject.toml for the build; restored once the
+        # container exits below.
+        mv pyproject.toml pyproject.toml.hidden
+
+        cat > /tmp/build-manylinux-2-28.sh <<'CONTAINER_SCRIPT'
+        set -euo pipefail
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+        export PATH="$HOME/.cargo/bin:/opt/python/cp312-cp312/bin:$PATH"
+        pip install -q 'maturin[patchelf]'
+        cd /work
+        # maturin's repair step hard-links its staging copy
+        # (target/maturin/lib*.so) to the real cargo output
+        # (target/release/deps/lib*.so) and has patchelf rewrite that
+        # in-place file's RPATH/NEEDED entries for the wheel -- which,
+        # because of the hard link, permanently mutates the cached cargo
+        # artifact itself. Cargo's fingerprint then considers the crate
+        # unchanged and won't relink it, so a second build against the
+        # same warm `target/` cache fails with "Cannot repair wheel,
+        # because required library lib*-<hash>.so could not be located"
+        # -- reproduced directly. This specifically bites a manual re-run
+        # of this job for the *same* tag. Force a fresh link of just this
+        # crate every time; the expensive dependency compilation (duckdb,
+        # arrow, ...) stays cached.
+        cargo clean -p chunkhound_native --release || true
+        # --auditwheel repair makes maturin bundle DuckDB's shared library
+        # into the wheel and rewrite the extension's link path to resolve
+        # it relative to itself. On Linux, repair shells out to `patchelf`,
+        # which is an optional maturin extra -- requested explicitly above
+        # or the build fails with "Failed to execute 'patchelf'".
+        maturin build --release --auditwheel repair --out "/work/${OUT_DIR}/"
+
+        WHEEL="$(ls "/work/${OUT_DIR}"/chunkhound_native-*.whl)"
+        # Rust's std intentionally references `statx` and `getrandom` as
+        # true ELF weak symbols (library/std/src/sys/pal/unix/weak/
+        # weak_linkage.rs) so the binary falls back to a raw syscall when
+        # the glibc wrapper isn't present -- but the glibc *version*
+        # stamped onto those still-weak references is a build-host
+        # artifact, not something Rust's source requests: `statx` debuted
+        # in glibc exactly at 2.28, so building on this glibc-2.28
+        # container pins that version onto the reference even though it's
+        # otherwise harmless. Clearing the version post-build keeps the
+        # symbol weak (still an optional runtime probe, not a hard
+        # dependency) while removing the spurious version floor -- verified
+        # end-to-end (real crate, real Python 3.10, real Ubuntu 18.04) to
+        # let the wheel load and run correctly on glibc well below 2.28.
+        # This does not change the wheel's declared manylinux_2_28 platform
+        # tag; it only widens real runtime compatibility beyond what that
+        # tag promises. DuckDB's own bundled prebuilt library has its own,
+        # separate hard floor around glibc 2.23-2.25 that this step does
+        # not touch.
+        PATCH_DIR="$(mktemp -d)"
+        cd "$PATCH_DIR"
+        unzip -q "$WHEEL"
+        SO_PATH="chunkhound_native/chunkhound_native.abi3.so"
+        patchelf --clear-symbol-version statx "$SO_PATH" || echo "no statx symbol to clear"
+        patchelf --clear-symbol-version getrandom "$SO_PATH" || echo "no getrandom symbol to clear"
+        python3 - "$WHEEL" "$SO_PATH" <<'PYEOF'
+        import shutil
+        import sys
+        import zipfile
+
+        wheel_path, so_path = sys.argv[1], sys.argv[2]
+        tmp_path = wheel_path + ".tmp"
+        with zipfile.ZipFile(wheel_path) as zin, zipfile.ZipFile(
+            tmp_path, "w", zipfile.ZIP_DEFLATED
+        ) as zout:
+            for item in zin.infolist():
+                if item.filename == so_path:
+                    with open(so_path, "rb") as f:
+                        data = f.read()
+                else:
+                    data = zin.read(item.filename)
+                zout.writestr(item, data)
+        shutil.move(tmp_path, wheel_path)
+        PYEOF
+        CONTAINER_SCRIPT
+
+        docker run --rm \
+          -v "$(pwd)":/work \
+          -v /tmp/build-manylinux-2-28.sh:/tmp/build-manylinux-2-28.sh \
+          -e DUCKDB_DOWNLOAD_LIB \
+          -e OUT_DIR="${{ inputs.out-dir }}" \
+          -e RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN' \
+          "$MANYLINUX_IMAGE" \
+          bash /tmp/build-manylinux-2-28.sh
+
+        mv pyproject.toml.hidden pyproject.toml
+
+    - name: Build native wheel (macOS/Windows)
+      if: runner.os != 'Linux'
+      shell: bash
+      env:
+        DUCKDB_DOWNLOAD_LIB: "1"
+      run: |
         # maturin treats a sibling pyproject.toml as authoritative package metadata
         # ("mixed" Rust/Python project support), which misnames this wheel as
         # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
@@ -96,20 +243,11 @@ runs:
         mkdir -p "${{ inputs.out-dir }}"
         # --auditwheel repair makes maturin bundle DuckDB's shared library
         # into the wheel and rewrite the extension's link path to resolve
-        # it relative to itself (auditwheel-equivalent on Linux, its own
-        # native re-implementations of delocate/delvewheel on macOS/Windows
-        # -- see maturin >=1.13). Without this flag maturin only *warns*
-        # about the external dependency on macOS/Windows instead of fixing
-        # it (Linux's default is already "repair"; passing it explicitly
-        # everywhere keeps every platform's behavior identical).
-        # On Linux, repair shells out to `patchelf`, which is an optional
-        # maturin extra (not a default dependency) -- request it explicitly
-        # or the build fails with "Failed to execute 'patchelf'".
-        if [[ "$RUNNER_OS" == "Linux" ]]; then
-          uvx --python 3.12 --from 'maturin[patchelf]' maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
-        else
-          uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
-        fi
+        # it relative to itself (its own native re-implementations of
+        # delocate/delvewheel on macOS/Windows -- see maturin >=1.13).
+        # Without this flag maturin only *warns* about the external
+        # dependency instead of fixing it.
+        uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
         mv pyproject.toml.hidden pyproject.toml
 
     - name: Smoke test native wheel API
