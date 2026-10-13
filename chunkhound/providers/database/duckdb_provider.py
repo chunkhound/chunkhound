@@ -669,7 +669,8 @@ class DuckDBProvider(SerialDatabaseProvider):
     def release_for_rust_pipeline(self) -> None:
         """Close ALL DuckDB connections without shutting down the executor.
 
-        Includes manager handles and retained failed-open/temporary cursor handles.
+        Includes manager handles, failed-open/temporary cursors and retained
+        inspection readers, without releasing their shared ownership.
         If only the executor's thread-local connection is closed, Python's DuckDB
         C-instance keeps the file open in its buffer pool.  When Rust then writes new
         data and Python reconnects, duckdb.connect() returns a connection to the same
@@ -718,12 +719,20 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             self._connection_manager.disconnect(skip_checkpoint=True)
         finally:
-            close_retained_duckdb_connections(self._failed_open_connections)
+            try:
+                close_retained_duckdb_connections(self._failed_open_connections)
+            finally:
+                if self._database_ownership is not None:
+                    self._database_ownership.close_readers()
 
     def _additional_connections_closed(self) -> bool:
         return (
             self._connection_manager.handles_closed
             and not self._failed_open_connections
+            and (
+                self._database_ownership is None
+                or self._database_ownership.readers_closed
+            )
         )
 
     def _executor_disconnect(

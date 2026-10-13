@@ -17,7 +17,10 @@ from chunkhound.providers.database.index_format import (
     read_format,
     read_only_duckdb,
 )
-from chunkhound.providers.database.ownership import DatabaseOwnership
+from chunkhound.providers.database.ownership import (
+    DatabaseOwnership,
+    DatabaseReaderCloseError,
+)
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import run_python
 
@@ -184,6 +187,55 @@ def test_persistent_reader_close_failure_retains_retryable_ownership(
             owner.close()
         if retained_owner is not None and retained_owner() is not None:
             retained_owner().close()
+
+
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_reader_error_retry_respects_scope_ownership(tmp_path, monkeypatch, borrowed):
+    path = build_database(tmp_path / "published")
+    readers = []
+    owner = (
+        DatabaseOwnership(native.acquire_install_lease(str(path), "duckdb"))
+        if borrowed else None
+    )
+    real_close = duckdb.DuckDBPyConnection.close
+
+    def fail_exit(conn, *args):
+        readers.append(weakref.ref(conn))
+        raise OSError("inspection exit failed")
+
+    def fail_close(conn):
+        if any(reader() is conn for reader in readers):
+            raise OSError("inspection close failed")
+        return real_close(conn)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(duckdb.DuckDBPyConnection, "__exit__", fail_exit)
+            fault.setattr(duckdb.DuckDBPyConnection, "close", fail_close)
+            with pytest.raises(DatabaseReaderCloseError) as raised:
+                _consume_reader(path, ownership=owner)
+            if borrowed:
+                assert raised.value.ownership is owner
+            owner = raised.value.ownership
+            with pytest.raises(DatabaseReaderCloseError):
+                raised.value.retry_close()
+            assert readers[0]().execute("SELECT 42").fetchone() == (42,)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        raised.value.retry_close()
+        raised.value.retry_close()
+        if borrowed:
+            owner.assert_covers(path)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+            owner.close()
+        if readers[0]() is not None:
+            with pytest.raises(duckdb.ConnectionException):
+                readers[0]().execute("SELECT 42")
+        native.acquire_install_lease(str(path), "duckdb").close()
+    finally:
+        if owner is not None:
+            owner.close()
 
 
 def test_borrowed_reader_success_leaves_owner_open_and_reader_closed(tmp_path):

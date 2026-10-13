@@ -3,9 +3,11 @@
 import asyncio
 import concurrent.futures
 import os
+import shutil
 import threading
 import traceback
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
@@ -23,6 +25,7 @@ from chunkhound.providers.database.duckdb.connection_manager import (
 )
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+from chunkhound.providers.database.ownership import DatabaseReaderCloseError
 from tests.hub.test_index_format import run_python, snapshot
 
 
@@ -73,6 +76,140 @@ def test_live_provider_excludes_install_until_final_close(
         provider.close()
     lease = native.acquire_install_lease(str(path), backend)
     lease.close()
+
+
+@contextmanager
+def _failed_inspection_shutdown(monkeypatch):
+    """Fault only DuckDB reader shutdown; keep real ATTACH/query behavior."""
+    readers = []
+    real_close = duckdb.DuckDBPyConnection.close
+
+    def fail_exit(conn, *args):
+        readers.append(weakref.ref(conn))
+        raise OSError("inspection exit failed")
+
+    def fail_close(conn):
+        if any(reader() is conn for reader in readers):
+            raise OSError("inspection close failed")
+        return real_close(conn)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(duckdb.DuckDBPyConnection, "__exit__", fail_exit)
+        fault.setattr(duckdb.DuckDBPyConnection, "close", fail_close)
+        yield readers
+
+
+def test_native_handoff_drains_failed_reconnect_reader_without_releasing_lease(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "chunks.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    owner = provider._database_ownership
+    try:
+        provider.set_rust_pipeline_in_progress(True)
+        provider.release_for_rust_pipeline()
+        provider.set_rust_pipeline_in_progress(False)
+        with _failed_inspection_shutdown(monkeypatch) as readers:
+            with pytest.raises(DatabaseReaderCloseError):
+                provider.connect()
+            assert readers[0]().execute(
+                "SELECT count(*) FROM inspected.main.files"
+            ).fetchone() == (0,)
+            provider.set_rust_pipeline_in_progress(True)
+            with pytest.raises(DatabaseError, match="inspection reader"):
+                provider.release_for_rust_pipeline()
+            assert readers[0]().execute("SELECT 42").fetchone() == (42,)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        provider.release_for_rust_pipeline()
+        if readers[0]() is not None:
+            with pytest.raises(duckdb.ConnectionException):
+                readers[0]().execute("SELECT 42")
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        provider.set_rust_pipeline_in_progress(False)
+        provider.connect()
+        assert provider.get_stats()["files"] == 0
+        provider.close()
+        native.acquire_install_lease(str(path), "duckdb").close()
+    finally:
+        provider.set_rust_pipeline_in_progress(False)
+        provider.close()
+        owner.close()
+
+
+def test_public_close_retries_failed_reader_after_executor_finalization(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "chunks.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    owner = provider._database_ownership
+    try:
+        provider.set_rust_pipeline_in_progress(True)
+        provider.release_for_rust_pipeline()
+        provider.set_rust_pipeline_in_progress(False)
+        with _failed_inspection_shutdown(monkeypatch) as readers:
+            with pytest.raises(DatabaseReaderCloseError):
+                provider.connect()
+            with pytest.raises(DatabaseReaderCloseError):
+                provider.close()
+            assert readers[0]().execute(
+                "SELECT count(*) FROM inspected.main.files"
+            ).fetchone() == (0,)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        provider.close()
+        provider.close()
+        if readers[0]() is not None:
+            with pytest.raises(duckdb.ConnectionException):
+                readers[0]().execute("SELECT 42")
+        native.acquire_install_lease(str(path), "duckdb").close()
+    finally:
+        provider.close()
+        owner.close()
+
+
+def test_borrowed_reader_recovery_preserves_live_provider_and_transaction(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "chunks.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    owner = provider._database_ownership
+    manager = provider.connection
+    try:
+        provider.execute_query("CHECKPOINT")
+        shutil.copyfile(path, Path(str(path) + ".compact_backup"))
+        # Supported partial reconnect: the manager survives executor disconnect.
+        provider._execute_in_db_thread_sync("disconnect", True)
+        with _failed_inspection_shutdown(monkeypatch) as readers:
+            with pytest.raises(DatabaseReaderCloseError) as raised:
+                provider.connect()
+            assert raised.value.ownership is owner
+            assert readers[0]().execute(
+                "SELECT count(*) FROM inspected.main.files"
+            ).fetchone() == (0,)
+        manager.execute("BEGIN")
+        manager.execute("CREATE TABLE pending_recovery AS SELECT 42 AS value")
+        # Follow the error's public recovery instruction, not raw lease access.
+        raised.value.retry_close()
+        assert manager.execute("SELECT count(*) FROM files").fetchone() == (0,)
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        assert manager.execute("SELECT value FROM pending_recovery").fetchone() == (42,)
+        manager.execute("COMMIT")
+        if readers[0]() is not None:
+            with pytest.raises(duckdb.ConnectionException):
+                readers[0]().execute("SELECT 42")
+        provider.close()
+        with pytest.raises(duckdb.ConnectionException):
+            manager.execute("SELECT 42")
+        native.acquire_install_lease(str(path), "duckdb").close()
+    finally:
+        provider.close()
+        owner.close()
 
 
 def test_compatible_providers_preserve_each_others_transactions(tmp_path):

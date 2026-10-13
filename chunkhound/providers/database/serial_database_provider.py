@@ -215,10 +215,12 @@ class SerialDatabaseProvider(ABC):
                             and self._executor.handles_closed
                             and self._additional_connections_closed()
                         ):
-                            self._closed = True
                             if self._database_ownership is not None:
                                 self._database_ownership.close()
                                 self._database_ownership = None
+                            # A finalized executor is not complete provider
+                            # shutdown: retained readers/native close may fail.
+                            self._closed = True
 
     def release_for_rust_pipeline(self) -> None:
         """Close the DuckDB connection without shutting down the executor.

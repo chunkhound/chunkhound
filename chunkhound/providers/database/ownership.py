@@ -35,8 +35,14 @@ class DatabaseOwnership:
                 self._failed_readers.append(reader)
             _failed_reader_owners.add(self)
 
-    def close(self) -> None:
-        """Retry failed reader shutdown before releasing either kind of lease."""
+    @property
+    def readers_closed(self) -> bool:
+        """Whether all retained inspection readers have successfully closed."""
+        with self._close_lock:
+            return not self._failed_readers
+
+    def close_readers(self) -> None:
+        """Drain failed inspection readers without releasing the enclosing lease."""
         with self._close_lock:
             failure: BaseException | None = None
             for reader in list(self._failed_readers):
@@ -49,8 +55,19 @@ class DatabaseOwnership:
                     self._failed_readers.remove(reader)
             if failure is not None:
                 raise DatabaseReaderCloseError(self) from failure
-            self._handle.close()
             _failed_reader_owners.discard(self)
+
+    def close(self) -> None:
+        """Release the lease; the lifecycle owner must close its other handles first."""
+        with self._close_lock:
+            try:
+                self.close_readers()
+            except DatabaseReaderCloseError as error:
+                # This lifecycle has requested full closure (e.g. an acquired
+                # inspection scope unwinding), unlike a borrowed reader failure.
+                error._release_ownership = True
+                raise
+            self._handle.close()
 
     def __enter__(self) -> DatabaseOwnership:
         return self
@@ -65,14 +82,29 @@ class DatabaseOwnership:
 
 
 class DatabaseReaderCloseError(RuntimeError):
-    """Reader shutdown is unproven; ownership.close() retries without unlocking."""
+    """Retry reader shutdown safely, without closing a borrowed lifecycle's lease."""
 
     def __init__(self, ownership: DatabaseOwnership) -> None:
         super().__init__(
             "Cannot close database inspection reader; ownership is retained. "
-            "Retry this error's ownership.close() before installation."
+            "Call this error's retry_close() to retry reader shutdown. "
+            "Borrowed ownership stays held until its lifecycle owner fully closes."
         )
         self.ownership = ownership
+        self._release_ownership = False
+
+    def retry_close(self) -> None:
+        """Close retained readers; finish lease release only for a closing owner.
+
+        Borrowed provider inspection errors never request lease release: use the
+        provider's public close() to finish its complete cleanup. An acquired
+        inspection scope already requested full closure on exit, so its retry
+        also releases the otherwise-abandoned standalone lease.
+        """
+        if self._release_ownership:
+            self.ownership.close()
+        else:
+            self.ownership.close_readers()
 
 
 def inspection_parent_missing(
