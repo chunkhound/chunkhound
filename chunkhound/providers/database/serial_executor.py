@@ -281,10 +281,16 @@ class SerialDatabaseExecutor:
         preflight a missing/partially released connection before lazy creation.
         """
         self._raise_if_db_unavailable_before_submit("connect")
-        future = self._submit(provider._executor_prepare_connection)
+        future = self._submit(self._prepare_connection, provider)
         return bool(
             self._wait_for_operation(future, "connect", self.resolve_timeout("connect"))
         )
+
+    def _prepare_connection(self, provider: Any) -> bool:
+        # Caller admission can precede a completed native handoff. Recheck on
+        # the serial worker before preparation can inspect, recover or reopen.
+        self._raise_if_db_unavailable_before_submit("connect")
+        return bool(provider._executor_prepare_connection())
 
     def execute_sync(
         self,

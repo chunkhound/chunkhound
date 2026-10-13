@@ -3,9 +3,11 @@
 import asyncio
 import concurrent.futures
 import contextvars
+import inspect
 import os
 import signal
 import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -14,7 +16,75 @@ import pytest
 
 import chunkhound_native as native
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.providers.database.serial_executor import (
+    DatabaseRustPipelineInProgressError,
+    SerialDatabaseExecutor,
+)
 from chunkhound.utils.async_worker import await_worker_completion
+
+
+def test_admitted_connect_cannot_reopen_python_handles_during_native_handoff(tmp_path):
+    path = tmp_path / "chunks.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    admitted, resume = threading.Event(), threading.Event()
+    prepare = SerialDatabaseExecutor.prepare_connection
+    source, start = inspect.getsourcelines(prepare)
+    submit_line = next(
+        start + index
+        for index, line in enumerate(source)
+        if "future = self._submit" in line
+    )
+
+    def pause_after_admission(frame, event, arg):
+        # Schedule a real public connect at the caller's admission/submission
+        # boundary, without replacing any executor or backend operation.
+        if (
+            event == "line"
+            and frame.f_code is prepare.__code__
+            and frame.f_lineno == submit_line
+        ):
+            admitted.set()
+            assert resume.wait(20)
+        return pause_after_admission
+
+    def connect():
+        sys.settrace(pause_after_admission)
+        try:
+            provider.connect()
+        finally:
+            sys.settrace(None)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(1) as callers:
+            pending = callers.submit(connect)
+            try:
+                assert admitted.wait(10)
+                provider.set_rust_pipeline_in_progress(True)
+                provider.release_for_rust_pipeline()
+                assert provider.connection is None
+                resume.set()
+                with pytest.raises(DatabaseRustPipelineInProgressError):
+                    pending.result(timeout=20)
+                assert provider.is_rust_pipeline_in_progress()
+                assert provider.connection is None, "stale connect reopened manager"
+                assert provider._executor.handles_closed
+                with pytest.raises(native.DatabaseBusyError):
+                    native.acquire_install_lease(str(path), "duckdb")
+                native.IndexingPipeline(
+                    {"db_path": str(tmp_path), "skip_embeddings": True}
+                ).run([], lambda paths, config: [])
+                assert provider.connection is None
+            finally:
+                resume.set()
+        provider.set_rust_pipeline_in_progress(False)
+        provider.connect()
+        assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+    finally:
+        resume.set()
+        provider.set_rust_pipeline_in_progress(False)
+        provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()
 
 
 @pytest.mark.asyncio

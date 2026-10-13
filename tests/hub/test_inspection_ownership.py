@@ -1,9 +1,11 @@
 """Real-backend contracts for owned and borrowed inspection lifetimes."""
 
+import gc
 import traceback
 import weakref
 from pathlib import Path
 
+import duckdb
 import lance
 import pytest
 
@@ -57,6 +59,146 @@ def test_ordinary_inspection_owns_database_until_context_exit(tmp_path):
         )
     exclusive = native.acquire_install_lease(str(path), "duckdb")
     exclusive.close()
+
+
+def _consume_reader(path, *, ownership=None):
+    conn = None
+    try:
+        with read_only_duckdb(path, ownership=ownership) as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM inspected.main.files"
+            ).fetchone()[0]
+    finally:
+        # The caller does not keep the handle alive; any retention is in the
+        # public exception graph or the implementation's failed-close policy.
+        conn = None
+
+
+def test_retained_reader_exit_error_cannot_leave_queryable_handle(
+    tmp_path, monkeypatch
+):
+    path = build_database(tmp_path / "published")
+    readers = []
+
+    def fail_exit(conn, *args):
+        readers.append(weakref.ref(conn))
+
+        def fail():
+            retained = conn
+            assert retained.execute("SELECT 42").fetchone() == (42,)
+            raise OSError("reader exit failed")
+
+        try:
+            fail()
+        except OSError as context:
+            try:
+                fail()
+            except OSError as cause:
+                error = RuntimeError("chained reader exit failed")
+                error.__cause__ = cause
+                error.__context__ = context
+                context.__cause__ = error
+        raise error
+
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "__exit__", fail_exit)
+    with pytest.raises(RuntimeError, match="chained reader exit failed") as raised:
+        _consume_reader(path)
+    assert raised.value.__cause__ is not raised.value.__context__
+    assert raised.value.__context__.__cause__ is raised.value
+    lease = native.acquire_install_lease(str(path), "duckdb")
+    try:
+        for reader in readers:
+            if reader() is not None:
+                with pytest.raises(duckdb.ConnectionException):
+                    reader().execute("SELECT * FROM inspected.main.files")
+    finally:
+        lease.close()
+        for reader in readers:
+            if reader() is not None:
+                reader().close()
+
+
+@pytest.mark.parametrize("borrowed", [False, True])
+@pytest.mark.parametrize("operation", ["reader", "format", "inventory", "preflight"])
+def test_persistent_reader_close_failure_retains_retryable_ownership(
+    tmp_path, monkeypatch, borrowed, operation
+):
+    path = build_database(tmp_path / "published")
+    owner = (
+        DatabaseOwnership(native.acquire_install_lease(str(path), "duckdb"))
+        if borrowed else None
+    )
+    readers = []
+    retained_owner = None
+    real_close = duckdb.DuckDBPyConnection.close
+
+    def fail_exit(conn, *args):
+        readers.append(weakref.ref(conn))
+        raise RuntimeError("reader exit failed")
+
+    def fail_close(conn):
+        if any(reader() is conn for reader in readers):
+            raise OSError("persistent reader close failure")
+        return real_close(conn)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(duckdb.DuckDBPyConnection, "__exit__", fail_exit)
+            fault.setattr(duckdb.DuckDBPyConnection, "close", fail_close)
+            with pytest.raises(RuntimeError) as raised:
+                if operation == "reader":
+                    _consume_reader(path, ownership=owner)
+                else:
+                    inspect_path(path, operation, "duckdb", ownership=owner)
+            assert readers[0]().execute(
+                "SELECT count(*) FROM inspected.main.files"
+            ).fetchone()[0]
+            if owner is not None:
+                with pytest.raises(RuntimeError):
+                    owner.close()
+                owner.assert_covers(path)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+            # The failure exposes a retryable owner, without transferring or
+            # replacing borrowed ownership. Even dropped diagnostics must not
+            # discard a still-live reader's installation exclusion.
+            retained_owner = weakref.ref(raised.value.ownership)
+            if borrowed:
+                assert retained_owner() is owner
+            del raised
+            owner = None
+            gc.collect()
+            assert readers[0]().execute("SELECT 42").fetchone() == (42,)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        retained_owner().close()
+        native.acquire_install_lease(str(path), "duckdb").close()
+        if readers[0]() is not None:
+            with pytest.raises(duckdb.ConnectionException):
+                readers[0]().execute("SELECT 42")
+    finally:
+        for reader in readers:
+            if reader() is not None:
+                real_close(reader())
+        if owner is not None:
+            owner.close()
+        if retained_owner is not None and retained_owner() is not None:
+            retained_owner().close()
+
+
+def test_borrowed_reader_success_leaves_owner_open_and_reader_closed(tmp_path):
+    path = build_database(tmp_path / "published")
+    with DatabaseOwnership(native.acquire_install_lease(str(path), "duckdb")) as owner:
+        with read_only_duckdb(path, ownership=owner) as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM inspected.main.files"
+            ).fetchone()[0]
+        with pytest.raises(duckdb.ConnectionException):
+            conn.execute("SELECT 42")
+        owner.assert_covers(path)
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+    native.acquire_install_lease(str(path), "duckdb").close()
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])

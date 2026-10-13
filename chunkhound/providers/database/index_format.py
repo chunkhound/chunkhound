@@ -17,6 +17,7 @@ from chunkhound.providers.database.duckdb.schema_constants import (
 from chunkhound.providers.database.exception_cleanup import clear_exception_frames
 from chunkhound.providers.database.ownership import (
     DatabaseOwnership,
+    DatabaseReaderCloseError,
     inspection_parent_missing,
     ownership_scope,
 )
@@ -46,13 +47,15 @@ def read_only_duckdb(
     """Hold database ownership until the read-only connection has closed."""
     if inspection_parent_missing(path, ownership):
         raise IndexFormatError(_INSPECTION_FAILED)
-    with ownership_scope(path, ownership):
-        with _read_only_duckdb(path) as conn:
+    with ownership_scope(path, ownership) as held:
+        with _read_only_duckdb(path, ownership=held) as conn:
             yield conn
 
 
 @contextmanager
-def _read_only_duckdb(path: Path) -> Iterator[Any]:
+def _read_only_duckdb(
+    path: Path, *, ownership: DatabaseOwnership | None
+) -> Iterator[Any]:
     """Attach the original as ``inspected`` with the approved WAL safety policy.
 
     No provider migrations, automatic extension installation, temporary-copy
@@ -61,6 +64,7 @@ def _read_only_duckdb(path: Path) -> Iterator[Any]:
     import duckdb
 
     # Establish extension policy before opening a file that may replay WAL.
+    conn = None
     try:
         with duckdb.connect(
             ":memory:",
@@ -93,6 +97,19 @@ def _read_only_duckdb(path: Path) -> Iterator[Any]:
         # A failed inspection is not evidence of corruption or a known
         # unsupported format. Some healthy HNSW WALs need writable replay.
         raise IndexFormatError(_INSPECTION_FAILED) from exc
+    finally:
+        if conn is not None:
+            # __exit__ can fail before closing, and its exception graph can keep
+            # this real ATTACH reader usable. Explicit, idempotent close is the
+            # shutdown proof, not unwinding or clearing a traceback. On failure
+            # retain both reader and owner before ANY enclosing scope releases.
+            try:
+                conn.close()
+            except BaseException as error:
+                if ownership is not None:
+                    ownership.retain_failed_reader(conn)
+                    raise DatabaseReaderCloseError(ownership) from error
+                raise
 
 
 def owned_duckdb_catalog(conn: Any, path: Path) -> str:
@@ -179,18 +196,20 @@ def read_format(
         if backend == "lancedb":
             return LEGACY_INDEX_FORMAT_VERSION
         raise ValueError("Unsupported database backend")
-    with ownership_scope(path, ownership):
+    with ownership_scope(path, ownership) as held:
         try:
-            return _read_format(path, backend)
+            return _read_format(path, backend, ownership=held)
         except BaseException as error:
             clear_exception_frames(error)
             raise
 
 
-def _read_format(path: Path, backend: str) -> int:
+def _read_format(
+    path: Path, backend: str, *, ownership: DatabaseOwnership | None
+) -> int:
     """Inspect existing metadata while the caller holds database ownership."""
     if backend == "duckdb":
-        with _read_only_duckdb(path) as conn:
+        with _read_only_duckdb(path, ownership=ownership) as conn:
             return read_duckdb_format(conn, catalog="inspected")
     if backend == "lancedb":
         import lance  # type: ignore[import-untyped]  # Lance does not ship typing metadata.
@@ -218,7 +237,7 @@ def preflight_duckdb(
         return
     if live_connection is None and inspection_parent_missing(path, ownership):
         return
-    with ownership_scope(path, ownership):
+    with ownership_scope(path, ownership) as held:
         live = Path(path)
         if live_connection is not None:
             import duckdb
@@ -236,7 +255,7 @@ def preflight_duckdb(
                 # These are recovery inputs belonging to the PRIMARY target.
                 # Do not assert that a primary lease covers a different filename,
                 # and do not obtain a second lease for each sidecar candidate.
-                require_supported(_read_format(candidate, "duckdb"))
+                require_supported(_read_format(candidate, "duckdb", ownership=held))
 
 
 def stamp_duckdb(conn: Any, *, catalog: str) -> None:
