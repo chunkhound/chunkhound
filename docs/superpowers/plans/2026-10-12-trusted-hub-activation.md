@@ -279,6 +279,60 @@ def test_install_refuses_symlink_leaf_but_normal_users_coordinate_referent(tmp_p
     assert alias.is_symlink() and real.read_bytes() == b"existing"
 ```
 
+Approved I1 correction: cover LanceDB directory leaves with bare, trailing `/` and
+trailing `/.` spellings. Pass strings directly so Python `Path` does not remove
+the suffix before the native boundary. All symlink-leaf variants must be rejected
+before creating coordination; ordinary directory variants remain supported,
+including a symlinked parent followed by `..` (resolve the symlink first).
+
+```python
+@pytest.mark.parametrize("suffix", ["", "/", "/."])
+def test_install_refuses_lancedb_symlink_leaf_with_directory_suffix(tmp_path, suffix):
+    real = tmp_path / "real" / "lancedb.lancedb"
+    real.mkdir(parents=True)
+    alias = tmp_path / "alias" / "lancedb.lancedb"
+    alias.parent.mkdir()
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+    with pytest.raises(native.DatabaseLayoutError):
+        native.acquire_install_lease(str(alias) + suffix, "lancedb").close()
+    assert alias.is_symlink() and real.is_dir()
+    assert not Path(str(real) + ".chunkhound.lock").exists()
+
+
+@pytest.mark.parametrize("suffix", ["", "/", "/."])
+def test_install_accepts_directory_suffix_after_symlink_parent_traversal(
+    tmp_path, suffix
+):
+    real = tmp_path / "real"
+    (real / "nested").mkdir(parents=True)
+    target = real / "lancedb.lancedb"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real / "nested", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+    spelling = str(alias / ".." / "lancedb.lancedb") + suffix
+    exclusive = native.acquire_install_lease(spelling, "lancedb")
+    try:
+        exclusive.assert_covers(str(target))
+        with pytest.raises(native.DatabaseLayoutError):
+            exclusive.assert_covers(str(tmp_path / "lancedb.lancedb"))
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_database_lease(str(target))
+    finally:
+        exclusive.close()
+    assert Path(str(target) + ".chunkhound.lock").is_file()
+```
+
+I1 regression command against the original T1 implementation:
+`UV_NO_SYNC=1 uv run pytest tests/hub/test_native_leases.py -q -k directory_suffix`
+=> RED: two suffix symlink cases fail with missing `DatabaseLayoutError`; four
+controls pass. After the normalization correction and native rebuild => six pass.
+
 - [ ] **T1.2 Dependency/errors.** Add `fs4 = { version = "=1.1.0", default-features = false, features = ["sync"] }`; regenerate necessary Cargo.lock entries. New `error.rs`:
 
 ```rust
@@ -383,7 +437,10 @@ impl Backend {
         match self { Self::DuckDb => "chunks.db", Self::LanceDb => "lancedb.lancedb" }
     }
     pub(crate) fn validate_shape(self, path: &Path) -> Result<(), LeaseError> {
-        if let Some(metadata) = metadata_optional(path)? {
+        // Strip redundant separators/dots so metadata inspects the unresolved leaf.
+        // Components preserve `..`; do not collapse it or resolve parent symlinks here.
+        let path: PathBuf = path.components().collect();
+        if let Some(metadata) = metadata_optional(&path)? {
             if metadata.file_type().is_symlink()
                 || match self { Self::DuckDb => !metadata.is_file(), Self::LanceDb => !metadata.is_dir() }
             {
@@ -395,7 +452,14 @@ impl Backend {
 }
 ```
 
-Shared retains legacy/memory use. Exclusive rejects unresolved leaf symlinks before canonicalization; symlinked parents remain supported.
+Shared retains legacy/memory use. Before each unresolved-leaf shape check,
+reconstruct the path from `components()` to remove redundant separators and dot
+components, including terminal `/` and `/.`, without resolving symlinks or
+collapsing `..`. Otherwise `symlink_metadata` can follow a directory leaf symlink
+hidden by terminal syntax. Exclusive therefore rejects every symlink install
+leaf before canonicalization; ordinary directory suffix variants and symlinked
+parents remain supported. Canonical identity still resolves each existing symlink
+before parent traversal.
 
 - [ ] **T1.4 Implement one independently opened descriptor per owner.** Continue `lease.rs`:
 
@@ -465,7 +529,7 @@ pub(crate) fn acquire_exclusive(path: &Path, backend: Backend) -> Result<Lease, 
     if path.file_name() != Some(std::ffi::OsStr::new(backend.filename())) {
         return Err(LeaseError::Layout("installation requires directory-layout target"));
     }
-    backend.validate_shape(path)?; // rejects leaf symlink before canonicalization
+    backend.validate_shape(path)?; // strips redundant syntax, then rejects unresolved leaf symlinks
     let lease = acquire(path, true)?;
     backend.validate_shape(path)?; // ordinary cooperative opener could have raced acquisition
     lease.assert_covers(path)?;

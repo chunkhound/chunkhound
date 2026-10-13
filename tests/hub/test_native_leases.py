@@ -143,6 +143,48 @@ def test_install_refuses_symlink_leaf_but_normal_users_coordinate_referent(tmp_p
     assert alias.is_symlink() and real.read_bytes() == b"existing"
 
 
+@pytest.mark.parametrize("suffix", ["", "/", "/."])
+def test_install_refuses_lancedb_symlink_leaf_with_directory_suffix(tmp_path, suffix):
+    real = tmp_path / "real" / "lancedb.lancedb"
+    real.mkdir(parents=True)
+    alias = tmp_path / "alias" / "lancedb.lancedb"
+    alias.parent.mkdir()
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+    with pytest.raises(native.DatabaseLayoutError):
+        native.acquire_install_lease(str(alias) + suffix, "lancedb").close()
+    assert alias.is_symlink() and real.is_dir()
+    assert not Path(str(real) + ".chunkhound.lock").exists()
+
+
+@pytest.mark.parametrize("suffix", ["", "/", "/."])
+def test_install_accepts_directory_suffix_after_symlink_parent_traversal(
+    tmp_path, suffix
+):
+    real = tmp_path / "real"
+    (real / "nested").mkdir(parents=True)
+    target = real / "lancedb.lancedb"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real / "nested", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+    spelling = str(alias / ".." / "lancedb.lancedb") + suffix
+    exclusive = native.acquire_install_lease(spelling, "lancedb")
+    try:
+        exclusive.assert_covers(str(target))
+        with pytest.raises(native.DatabaseLayoutError):
+            exclusive.assert_covers(str(tmp_path / "lancedb.lancedb"))
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_database_lease(str(target))
+    finally:
+        exclusive.close()
+    assert Path(str(target) + ".chunkhound.lock").is_file()
+
+
 def test_parent_traversal_resolves_existing_symlink_before_dotdot(tmp_path):
     real = tmp_path / "real"
     (real / "nested").mkdir(parents=True)

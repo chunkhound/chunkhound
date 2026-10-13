@@ -76,7 +76,10 @@ impl Backend {
     }
 
     pub(crate) fn validate_shape(self, path: &Path) -> Result<(), LeaseError> {
-        if let Some(metadata) = metadata_optional(path)? {
+        // Strip redundant separators/dots so metadata inspects the unresolved leaf.
+        // Components preserve `..`; do not collapse it or resolve parent symlinks here.
+        let path: PathBuf = path.components().collect();
+        if let Some(metadata) = metadata_optional(&path)? {
             if metadata.file_type().is_symlink()
                 || match self {
                     Self::DuckDb => !metadata.is_file(),
