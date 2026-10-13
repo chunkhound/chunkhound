@@ -5,12 +5,12 @@ It never opens providers, runs migrations, or chooses an active model.
 """
 
 import re
-import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from chunkhound.core.embedding_model_drift import ModelGroup
+from chunkhound.providers.database.exception_cleanup import clear_exception_frames
 from chunkhound.providers.database.index_format import (
     read_format,
     read_only_duckdb,
@@ -49,7 +49,7 @@ def inspect_database(
         except BaseException as error:
             # The finished _inspect_database frame and SDK frames can otherwise
             # retain Lance datasets/scanners through a caught exception.
-            traceback.clear_frames(error.__traceback__)
+            clear_exception_frames(error)
             raise
 
 

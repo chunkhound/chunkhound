@@ -1,8 +1,10 @@
 """Real provider handles exclude installation until deterministic final close."""
 
+import asyncio
 import concurrent.futures
 import os
 import threading
+import traceback
 import weakref
 from pathlib import Path
 
@@ -13,6 +15,8 @@ import pytest
 import chunkhound_native as native
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.exceptions import DatabaseError
+from chunkhound.core.models import Chunk, File
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.database import Database
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
@@ -459,6 +463,89 @@ def test_failed_public_close_retains_lease_and_allows_cleanup_retry(
         assert fresh.execute("SELECT description FROM schema_version").fetchone() == (
             "retry-durable",
         )
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_retained_lance_regex_error_cannot_keep_table_alive_after_close(
+    tmp_path, asynchronous
+):
+    path = tmp_path / "lancedb.lancedb"
+    provider = LanceDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    try:
+        file_id = provider.insert_file(
+            File(path="source.py", mtime=1.0, language=Language.PYTHON, size_bytes=32)
+        )
+        provider.insert_chunks_batch(
+            [
+                Chunk(
+                    file_id=file_id,
+                    code="def function(): return 1",
+                    start_line=1,
+                    end_line=1,
+                    chunk_type=ChunkType.FUNCTION,
+                    language=Language.PYTHON,
+                    symbol="function",
+                )
+            ]
+        )
+        table = weakref.ref(provider._chunks_table)
+        with pytest.raises(RuntimeError, match="Regex search failed") as raised:
+            if asynchronous:
+                asyncio.run(provider.search_regex_async("["))
+            else:
+                provider.search_regex("[")
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "lancedb")
+        provider.close()
+        lease = native.acquire_install_lease(str(path), "lancedb")
+        try:
+            # Keep the public exception, not a backend handle. No GC is needed
+            # to make final-close installation admission safe.
+            assert raised.value.__cause__ is not None
+            assert traceback.extract_tb(raised.value.__cause__.__traceback__)
+            assert "regex" in str(raised.value.__cause__).lower()
+            assert table() is None, (
+                "retained error still owns a usable table with "
+                f"{table().count_rows()} rows"
+            )
+        finally:
+            lease.close()
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("operation", ["connect", "get_stats"])
+def test_failed_lance_open_error_cannot_keep_untransferred_table_alive(
+    tmp_path, monkeypatch, operation
+):
+    path = tmp_path / "lancedb.lancedb"
+    seed = LanceDBProvider(path, base_directory=tmp_path)
+    seed.connect()
+    seed.close()
+    provider = LanceDBProvider(path, base_directory=tmp_path)
+    real_connect = lancedb.connect
+    tables = []
+
+    def failed_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        table = connection.open_table("chunks")
+        tables.append(weakref.ref(table))
+        try:
+            raise OSError("backend open failed after table access")
+        except OSError as error:
+            raise RuntimeError("Lance open failed") from error
+
+    monkeypatch.setattr(lancedb, "connect", failed_connect)
+    try:
+        with pytest.raises(RuntimeError, match="Lance open failed") as raised:
+            getattr(provider, operation)()
+        provider.close()
+        native.acquire_install_lease(str(path), "lancedb").close()
+        assert raised.value.__cause__ is not None
+        assert tables and all(table() is None for table in tables)
+    finally:
+        provider.close()
 
 
 def assert_closed_or_collected(handles):

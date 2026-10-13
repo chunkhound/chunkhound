@@ -1,7 +1,10 @@
 """Real-backend contracts for owned and borrowed inspection lifetimes."""
 
+import traceback
+import weakref
 from pathlib import Path
 
+import lance
 import pytest
 
 import chunkhound_native as native
@@ -72,6 +75,52 @@ def test_marker_refuses_ordinary_inspection_but_not_exclusive_identity_validatio
         # parent skips inspection if its recovery policy needs no old inventory.
         assert inspect_database(path, backend, ownership=owner).format_version == 1
     assert marker.read_bytes() == b"{"
+
+
+@pytest.mark.parametrize("operation", ["format", "inventory"])
+def test_retained_chained_inspection_error_releases_all_datasets(
+    tmp_path, monkeypatch, operation
+):
+    path = build_database(tmp_path / "published", "lancedb")
+    real_dataset = lance.dataset
+    datasets = []
+    target = "schema_version.lance" if operation == "format" else "chunks.lance"
+
+    def failed_dataset(uri, *args, **kwargs):
+        if Path(uri).name != target:
+            return real_dataset(uri, *args, **kwargs)
+
+        def failed_read():
+            dataset = real_dataset(uri, *args, **kwargs)
+            datasets.append(weakref.ref(dataset))
+            raise OSError("backend read failed")
+
+        try:
+            failed_read()
+        except OSError as context:
+            # Distinct cause/context branches plus a cycle model a third-party
+            # wrapper. Both branches retain real handles in completed frames.
+            try:
+                failed_read()
+            except OSError as cause:
+                cause.__context__ = None
+                error = RuntimeError("dataset inspection failed")
+                error.__cause__ = cause
+                error.__context__ = context
+                context.__cause__ = error
+        raise error
+
+    monkeypatch.setattr(lance, "dataset", failed_dataset)
+    with pytest.raises(RuntimeError, match="dataset inspection failed") as raised:
+        inspect_path(path, operation, "lancedb")
+    native.acquire_install_lease(str(path), "lancedb").close()
+    # Diagnostic chaining remains intact, including cycles and hidden context.
+    assert raised.value.__cause__ is not raised.value.__context__
+    assert raised.value.__context__.__cause__ is raised.value
+    assert traceback.extract_tb(raised.value.__cause__.__traceback__)
+    assert traceback.extract_tb(raised.value.__context__.__traceback__)
+    assert len(datasets) == 2
+    assert all(dataset() is None for dataset in datasets)
 
 
 INSPECTIONS = [

@@ -9,13 +9,13 @@ import contextvars
 import random
 import threading
 import time
-import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from loguru import logger
 
+from chunkhound.providers.database.exception_cleanup import clear_exception_frames
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 
@@ -209,13 +209,22 @@ class SerialDatabaseExecutor:
                 "Rust indexing pipeline owns the database — retry once it finishes"
             )
 
+    @staticmethod
+    def _run_with_cleanup(function: Callable[..., Any], *args: Any) -> Any:
+        """Release completed backend frames before publishing a worker failure."""
+        try:
+            return function(*args)
+        except BaseException as error:
+            clear_exception_frames(error)
+            raise
+
     def _submit(
         self, function: Callable[..., Any], *args: Any
     ) -> concurrent.futures.Future[Any]:
         with self._submission_lock:
             if not self._accepting:
                 raise RuntimeError("Database executor is closing or closed")
-            return self._db_executor.submit(function, *args)
+            return self._db_executor.submit(self._run_with_cleanup, function, *args)
 
     def _execute_operation(
         self,
@@ -244,9 +253,6 @@ class SerialDatabaseExecutor:
         op_func = getattr(provider, f"_executor_{operation_name}")
         try:
             return op_func(conn, state, *args, **kwargs)
-        except BaseException as error:
-            traceback.clear_frames(error.__traceback__)
-            raise
         finally:
             conn = None
             self.handles_closed = not hasattr(_executor_local, "connection")
@@ -415,9 +421,6 @@ class SerialDatabaseExecutor:
                 state = get_thread_local_state()
                 try:
                     provider._executor_disconnect(conn, state, skip_checkpoint)
-                except BaseException as error:
-                    traceback.clear_frames(error.__traceback__)
-                    raise
                 finally:
                     conn = None
                     self.handles_closed = not hasattr(_executor_local, "connection")
@@ -431,7 +434,9 @@ class SerialDatabaseExecutor:
                 # Only a retained handle needs another worker attempt. Reuse a
                 # completed successful future if an earlier caller was interrupted
                 # before joining; never resubmit after successful finalization.
-                self._finalization = self._db_executor.submit(finish)
+                self._finalization = self._db_executor.submit(
+                    self._run_with_cleanup, finish
+                )
             future = self._finalization
         try:
             future.result()  # Must follow all previously queued work; no timeout.
@@ -471,7 +476,7 @@ class SerialDatabaseExecutor:
             finally:
                 conn = None
                 self.handles_closed = not hasattr(_executor_local, "connection")
-        self._db_executor.submit(close_connection).result()
+        self._db_executor.submit(self._run_with_cleanup, close_connection).result()
 
     def clear_thread_local(self) -> None:
         """Clear thread-local storage (for cleanup).

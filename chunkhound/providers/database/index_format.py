@@ -1,7 +1,6 @@
 """Nonmutating format inspection and writable-only legacy format stamps."""
 
 import re
-import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +14,7 @@ from chunkhound.core.index_format import (
 from chunkhound.providers.database.duckdb.schema_constants import (
     _SCHEMA_VERSION_TABLE_COLUMNS,
 )
+from chunkhound.providers.database.exception_cleanup import clear_exception_frames
 from chunkhound.providers.database.ownership import (
     DatabaseOwnership,
     inspection_parent_missing,
@@ -183,7 +183,7 @@ def read_format(
         try:
             return _read_format(path, backend)
         except BaseException as error:
-            traceback.clear_frames(error.__traceback__)
+            clear_exception_frames(error)
             raise
 
 
