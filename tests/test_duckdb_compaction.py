@@ -2345,7 +2345,7 @@ class TestAutoCompactionMaintenance:
         monkeypatch.setattr(
             provider._connection_manager,
             "connect",
-            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         buf = io.StringIO()
         sink_id = logger.add(buf, level="ERROR")

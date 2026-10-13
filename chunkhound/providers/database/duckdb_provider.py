@@ -40,7 +40,12 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
-from chunkhound.utils.logging_guard import log_if_not_mcp
+from chunkhound.providers.database.duckdb.live_connections import (
+    close_duckdb_connection,
+    compatible_duckdb_cursor,
+    register_duckdb_connection,
+)
+from chunkhound.providers.database.index_format import preflight_duckdb
 from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
@@ -52,6 +57,7 @@ from chunkhound.providers.database.serial_executor import (
     _executor_local,
     get_thread_local_state,
 )
+from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.utils.windows_constants import (
     IS_WINDOWS,
     WINDOWS_FILE_HANDLE_DELAY,
@@ -256,9 +262,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._wal_cleanup_lock = threading.Lock()
         self._wal_cleanup_done = False
         self._connect_initialized = False
+        self._reconnect_preflight_passed = False
+        self._failed_open_connections: list[Any] = []
 
         # Initialize connection manager (will be simplified later)
-        self._connection_manager = DuckDBConnectionManager(db_path, config)
+        self._connection_manager = DuckDBConnectionManager(self._db_path, config)
 
         # Initialize file repository with provider reference for transaction awareness
         self._file_repository = DuckDBFileRepository(self._connection_manager, self)
@@ -293,32 +301,29 @@ class DuckDBProvider(SerialDatabaseProvider):
         Returns:
             DuckDB connection object
         """
-        # A lazy reopen is not proof that connect/schema initialization finished.
+        owned = self._ensure_database_ownership()
         self._connect_initialized = False
-        # Create a NEW connection for the executor thread
-        # This ensures thread safety - only this thread will use this connection
-        conn = duckdb.connect(
-            str(self._connection_manager.db_path),
-            read_only=self._connection_manager.is_read_only,
-        )
-
-        # Load required extensions
-        conn.execute("INSTALL vss")
-        conn.execute("LOAD vss")
-        conn.execute("SET hnsw_enable_experimental_persistence = true")
-
-        logger.debug(
-            f"Created new DuckDB connection in executor thread {threading.get_ident()}"
-        )
-        return conn
+        read_only = self._connection_manager.is_read_only
+        with compatible_duckdb_cursor(self.db_path, read_only=read_only) as live:
+            preflight_duckdb(self.db_path, live_connection=live, ownership=owned)
+            conn = duckdb.connect(str(self.db_path), read_only=read_only)
+        try:
+            conn.execute("INSTALL vss")
+            conn.execute("LOAD vss")
+            conn.execute("SET hnsw_enable_experimental_persistence = true")
+            register_duckdb_connection(self.db_path, read_only, conn)
+            return conn
+        except BaseException:
+            try:
+                close_duckdb_connection(conn)
+            except BaseException:
+                self._failed_open_connections.append(conn)
+                raise
+            raise
 
     def _create_connection_manager_connection(self) -> Any:
         """Create the public health/compatibility connection."""
-        conn = duckdb.connect(str(self._connection_manager.db_path))
-        conn.execute("INSTALL vss")
-        conn.execute("LOAD vss")
-        conn.execute("SET hnsw_enable_experimental_persistence = true")
-        return conn
+        return self._create_connection()
 
     def _get_schema_sql(self) -> list[str] | None:
         """Get SQL statements for creating the DuckDB schema.
@@ -360,6 +365,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
+        had_ownership = self._database_ownership is not None
+        self._reconnect_preflight_passed = False
         try:
             # Fast-fail if compaction owns the database — connection_manager's
             # recovery path would otherwise undo the in-progress compaction.
@@ -397,9 +404,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             if self._executor.prepare_connection(self):
                 return
 
-            # Initialize connection manager FIRST - this handles WAL validation
-            self._connection_manager.connect()
-
             # Call parent connect which handles executor initialization
             super().connect()
             self._connect_initialized = True
@@ -408,11 +412,14 @@ class DuckDBProvider(SerialDatabaseProvider):
             raise
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
+            if not had_ownership or self._reconnect_preflight_passed:
+                self.disconnect(skip_checkpoint=True)
             raise
 
     def _executor_prepare_connection(self) -> bool:
         """Inspect lifecycle state on the executor thread without creating handles."""
-        from chunkhound.providers.database.index_format import preflight_duckdb
+        owned = self._ensure_database_ownership()
+        self._reconnect_preflight_passed = False
 
         executor_conn = getattr(_executor_local, "connection", None)
         manager_conn = self._connection_manager.connection
@@ -470,17 +477,39 @@ class DuckDBProvider(SerialDatabaseProvider):
         live_conn = (
             executor_conn if executor_live else manager_conn if manager_live else None
         )
-        preflight_duckdb(self.db_path, live_connection=live_conn)
+        if live_conn is not None:
+            preflight_duckdb(self.db_path, live_connection=live_conn, ownership=owned)
+        else:
+            with compatible_duckdb_cursor(
+                self.db_path, read_only=self._connection_manager.is_read_only
+            ) as compatible:
+                preflight_duckdb(
+                    self.db_path, live_connection=compatible, ownership=owned
+                )
+        self._reconnect_preflight_passed = True
         self._connect_initialized = False
         if executor_conn is not None:
-            executor_conn.close()
+            close_duckdb_connection(executor_conn)
             delattr(_executor_local, "connection")
         self._connection_manager.disconnect(skip_checkpoint=True)
         get_thread_local_state()["transaction_active"] = False
         self._wal_cleanup_done = False
+        self._connection_manager.connect(ownership=owned)
         return False
 
     def ensure_indexed_root_identity(
+        self, *, requested_root: Path | str, allow_claim_if_missing: bool
+    ) -> None:
+        with self._ownership_lock:
+            if self._closing:
+                raise RuntimeError("Database provider is closing")
+            self._ensure_database_ownership()
+            self._ensure_indexed_root_identity_owned(
+                requested_root=requested_root,
+                allow_claim_if_missing=allow_claim_if_missing,
+            )
+
+    def _ensure_indexed_root_identity_owned(
         self,
         *,
         requested_root: Path | str,
@@ -567,7 +596,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             # from thread-local so subsequent operations use the live connection.
             with self._wal_cleanup_lock:
                 if not self._wal_cleanup_done:
-                    self._perform_wal_cleanup_in_executor(conn)
+                    if not self._connection_manager.joined_live_database:
+                        self._perform_wal_cleanup_in_executor(conn)
                     self._wal_cleanup_done = True
                     # Re-read in case WAL cleanup replaced the connection
                     conn = _executor_local.connection
@@ -619,7 +649,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.debug("WAL file validation passed")
         except Exception as e:
             logger.warning(f"WAL validation failed ({e}), removing WAL file")
-            conn.close()
+            close_duckdb_connection(conn)
             wal_file.unlink(missing_ok=True)
             # Recreate connection after WAL cleanup
             _executor_local.connection = self._create_connection()
@@ -640,6 +670,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 that case — Python's DuckDB connection(s) would still be open on
                 the same file Rust is about to write to.
         """
+        self._ensure_database_ownership()
         self._connect_initialized = False
         failures: list[str] = []
         try:
@@ -649,7 +680,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         except Exception as e:
             failures.append(f"executor connection: {e}")
         finally:
-            self._executor.clear_thread_local()
             try:
                 # Close the connection manager's connection so Python's DuckDB
                 # fully releases the file before Rust takes ownership.
@@ -668,22 +698,28 @@ class DuckDBProvider(SerialDatabaseProvider):
                 ),
             )
 
-    def disconnect(self, skip_checkpoint: bool = False) -> None:
-        """Close database connection with optional checkpointing - delegate to connection manager."""
+    def _close_additional_connections(self) -> None:
         try:
-            # Call parent disconnect
-            super().disconnect(skip_checkpoint)
+            self._connection_manager.disconnect(skip_checkpoint=True)
         finally:
-            # Disconnect connection manager for backward compatibility
-            self._connection_manager.disconnect(
-                skip_checkpoint=True
-            )  # Skip checkpoint since we did it in executor
+            while self._failed_open_connections:
+                close_duckdb_connection(self._failed_open_connections[-1])
+                self._failed_open_connections.pop()
+
+    def _additional_connections_closed(self) -> bool:
+        return (
+            self._connection_manager.connection is None
+            and not self._failed_open_connections
+        )
 
     def _executor_disconnect(
         self, conn: Any, state: dict[str, Any], skip_checkpoint: bool
     ) -> None:
         """Executor method for disconnect - runs in DB thread."""
         self._connect_initialized = False
+        if conn is None:
+            state.clear()
+            return
         try:
             if (
                 not skip_checkpoint
@@ -714,7 +750,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             ) from e
         finally:
             # Close connection
-            conn.close()
+            close_duckdb_connection(conn)
             # Clear thread-local connection
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")
@@ -1491,17 +1527,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Close any live handles before filesystem-level restore/swap work."""
         thread_conn = getattr(_executor_local, "connection", None)
         if thread_conn is not None:
-            try:
-                thread_conn.close()
-            finally:
-                delattr(_executor_local, "connection")
-
+            close_duckdb_connection(thread_conn)
+            delattr(_executor_local, "connection")
         manager_conn = self._connection_manager.connection
         if manager_conn is not None:
-            try:
-                manager_conn.close()
-            finally:
-                self._connection_manager.connection = None
+            close_duckdb_connection(manager_conn)
+            self._connection_manager.connection = None
 
     def _compact_restore(
         self,

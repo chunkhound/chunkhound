@@ -193,10 +193,7 @@ def test_case_variant_metadata_blocks_provider_before_mutation(
         with pytest.raises(IndexFormatError, match="index format"):
             provider.connect()
     finally:
-        if provider.is_connected:
-            provider.disconnect()
-        else:
-            provider._executor.shutdown()
+        provider.disconnect(skip_checkpoint=True)
     assert snapshot(tmp_path) == before
 
 
@@ -225,10 +222,7 @@ def test_metadata_view_is_rejected_before_evaluation(tmp_path, external):
         with pytest.raises(IndexFormatError, match="physical table"):
             provider.connect()
     finally:
-        if provider.is_connected:
-            provider.disconnect()
-        else:
-            provider._executor.shutdown()
+        provider.disconnect(skip_checkpoint=True)
     assert snapshot(tmp_path) == before
 
 
@@ -275,8 +269,7 @@ def test_generated_format_refused_before_python_recovery(
             provider.connect()
         assert snapshot(tmp_path) == before
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 def test_live_preflight_refuses_handle_for_another_database(tmp_path):

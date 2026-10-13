@@ -21,6 +21,7 @@ from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
+from chunkhound.providers.database.serial_executor import _executor_local
 from chunkhound.utils.chunk_hashing import generate_chunk_id
 
 # Type hinting only
@@ -253,6 +254,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         Returns:
             LanceDB connection object
         """
+        owned = self._ensure_database_ownership()
         import lancedb
 
         from chunkhound.core.index_format import require_supported
@@ -260,7 +262,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         inspection_path = Path(self._db_path)
         if inspection_path.exists():
-            require_supported(read_format(inspection_path, "lancedb"))
+            require_supported(read_format(inspection_path, "lancedb", ownership=owned))
 
         abs_db_path = self._db_path
 
@@ -304,18 +306,13 @@ class LanceDBProvider(SerialDatabaseProvider):
     def _executor_disconnect(
         self, conn: Any, state: dict[str, Any], skip_checkpoint: bool
     ) -> None:
-        """Executor method for disconnect - runs in DB thread."""
-        try:
-            # Clear connection and table references
-            self.connection = None
-            self._files_table = None
-            self._chunks_table = None
-
-            # Connection will be closed by base class
-            logger.info("Disconnected from LanceDB")
-        except Exception as e:
-            logger.error(f"Error in LanceDB disconnect: {e}")
-            raise
+        """Drop all LanceDB references on their owning worker thread."""
+        self.connection = None
+        self._files_table = None
+        self._chunks_table = None
+        if hasattr(_executor_local, "connection"):
+            delattr(_executor_local, "connection")
+        state.clear()
 
     def _get_embedding_dimensions_safe(self) -> int | None:
         """Safely retrieve embedding dimensions from embedding manager.

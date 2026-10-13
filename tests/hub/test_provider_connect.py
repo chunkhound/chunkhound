@@ -3,6 +3,7 @@
 import duckdb
 import pytest
 
+import chunkhound_native as native
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.index_format import IndexFormatError
 from chunkhound.database_factory import create_database_with_dependencies
@@ -82,8 +83,7 @@ def test_partial_release_reconnect_preflights_before_recovery(
             provider.connect()
     finally:
         # Close without accidentally opening a released executor on refusal.
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 @pytest.mark.parametrize("remaining", ["manager", "executor"])
@@ -131,8 +131,7 @@ def test_partial_reconnect_checks_owned_catalog_despite_session_namespace(
             provider.connect()
             assert provider.get_stats()["files"] == 0
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 @pytest.mark.parametrize("remaining", ["manager", "executor"])
@@ -202,8 +201,7 @@ def test_partial_reconnect_ignores_catalog_helper_macros(
                 "SELECT version FROM owned.main.schema_version"
             ) == [{"version": 1}]
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 @pytest.mark.parametrize("remaining", ["manager", "executor"])
@@ -251,8 +249,7 @@ def test_partial_reconnect_refuses_metadata_view_despite_catalog_mask(
         assert value == 42
         assert snapshot(tmp_path) == before
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 def test_lazy_read_after_partial_release_does_not_skip_reconnect_preflight(tmp_path):
@@ -269,27 +266,31 @@ def test_lazy_read_after_partial_release_does_not_skip_reconnect_preflight(tmp_p
             provider.connect()
         assert snapshot(tmp_path) == before
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
-def test_failed_initialization_with_two_live_handles_does_not_skip_preflight(tmp_path):
+def test_failed_initialization_closes_partial_handles_before_retry_with_new_provider(
+    tmp_path,
+):
     path = tmp_path / "chunks.db"
     with duckdb.connect(str(path)) as conn:
         conn.execute("CREATE TABLE files(id INTEGER)")
     provider = DuckDBProvider(path, base_directory=tmp_path)
+    with pytest.raises(duckdb.Error):
+        provider.connect()
+    assert not provider.is_connected
+    provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("UPDATE schema_version SET version=2")
+    retry = DuckDBProvider(path, base_directory=tmp_path)
+    before = snapshot(tmp_path)
     try:
-        with pytest.raises(duckdb.Error):
-            provider.connect()
-        assert provider.is_connected
-        provider.connection.execute("UPDATE schema_version SET version=2")
-        before = snapshot(tmp_path)
         with pytest.raises(IndexFormatError, match="Unsupported index format"):
-            provider.connect()
+            retry.connect()
         assert snapshot(tmp_path) == before
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        retry.close()
 
 
 @pytest.mark.parametrize("remaining", ["manager", "executor"])
@@ -325,8 +326,7 @@ def test_partial_reconnect_checks_live_metadata_before_closing_handles(
             provider.connect()
         assert snapshot(tmp_path) == before, "refusal checkpointed a live handle"
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 @pytest.mark.parametrize("owner", ["executor-api", "executor-sql", "manager"])
@@ -374,8 +374,7 @@ def test_partial_reconnect_refuses_transaction_local_format_without_mutation(
             provider.connect()
         assert snapshot(tmp_path) == before
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 @pytest.mark.parametrize("owner", ["executor-api", "executor-sql", "manager"])
@@ -400,6 +399,8 @@ def test_partial_reconnect_preserves_pending_work_for_explicit_completion(
         before = snapshot(tmp_path)
         with pytest.raises(IndexFormatError, match="transaction"):
             provider.connect()
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(provider.db_path), "duckdb")
         assert snapshot(tmp_path) == before
         rows = query("SELECT value FROM pending_work")
         assert (rows.fetchone()[0] if owner == "manager" else rows[0]["value"]) == 42
@@ -455,8 +456,7 @@ def test_partial_reconnect_keeps_aborted_transaction_for_explicit_rollback(
             "WHERE table_name='pending_work'"
         ) == []
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 @pytest.mark.parametrize("owner", ["executor", "manager"])
@@ -485,8 +485,7 @@ def test_lazy_partial_reconnect_checks_transactions_on_both_live_handles(
             {"value": 42}
         ]
     finally:
-        provider._executor.shutdown()
-        provider._connection_manager.disconnect(skip_checkpoint=True)
+        provider.disconnect(skip_checkpoint=True)
 
 
 def test_partial_reconnect_resets_tracking_after_explicit_sql_commit(tmp_path):
@@ -519,4 +518,4 @@ def test_reconnect_after_release_checks_live_format(tmp_path):
             provider.connect()
         assert snapshot(tmp_path) == before
     finally:
-        provider._executor.shutdown()
+        provider.disconnect(skip_checkpoint=True)

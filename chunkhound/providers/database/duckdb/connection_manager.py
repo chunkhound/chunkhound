@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from chunkhound_native import acquire_database_lease
+
 # CRITICAL: Import numpy modules FIRST to prevent DuckDB threading segfaults
 # This must happen before DuckDB operations start in threaded environments
 # See: https://duckdb.org/docs/stable/clients/python/known_issues.html
@@ -34,6 +36,13 @@ import duckdb
 from loguru import logger
 
 from chunkhound.core.exceptions import DatabaseError
+from chunkhound.providers.database.duckdb.live_connections import (  # noqa: E402
+    close_duckdb_connection,
+    compatible_duckdb_cursor,
+    register_duckdb_connection,
+)
+from chunkhound.providers.database.index_format import preflight_duckdb  # noqa: E402
+from chunkhound.providers.database.ownership import DatabaseOwnership  # noqa: E402
 from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.utils.windows_constants import _unlink_compacted
 
@@ -51,6 +60,9 @@ class DuckDBConnectionManager:
         self._db_path = db_path
         self.connection: Any | None = None
         self.config = config
+        self._ownership: DatabaseOwnership | None = None
+        self._owns_ownership = False
+        self.joined_live_database = False
         # :memory: DBs cannot meaningfully be opened read-only — there is
         # nothing to read. Dropping the flag here keeps callers that inherit a
         # project-level read_only setting (e.g. _quickresearch under --config)
@@ -82,43 +94,48 @@ class DuckDBConnectionManager:
         """Check if database connection is active."""
         return self.connection is not None
 
-    def connect(self) -> None:
-        """Establish database connection and initialize schema with WAL validation."""
-        logger.info(f"Connecting to DuckDB database: {self.db_path}")
-
-        # Ensure parent directory exists for file-based databases. Skipped in
-        # read-only mode so a shared / immutable DB path is never written to.
-        if isinstance(self.db_path, Path) and not self._read_only:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            if duckdb is None:
-                raise ImportError("duckdb not available")
-
-            # Connect to database with WAL validation
-            # Thread safety is now handled by DuckDBProvider's executor pattern
-            # Gate recovery on read-only mode — a read-only observer must never
-            # mutate compaction artifacts or attempt WAL replay.
-            if not self._read_only:
-                self._recover_interrupted_compaction()
-                self._preemptive_wal_cleanup()
-            else:
-                logger.debug(
-                    "Read-only mode — skipping compaction recovery and WAL cleanup"
+    def connect(self, *, ownership: DatabaseOwnership | None = None) -> None:
+        """Preflight under ownership before opening or recovering the database."""
+        if self.connection is not None:
+            if ownership is not None:
+                ownership.assert_covers(self.db_path)
+            return
+        if not self.is_memory_db:
+            if ownership is not None:
+                ownership.assert_covers(self.db_path)
+                self._ownership = ownership
+                self._owns_ownership = False
+            elif self._ownership is None:
+                self._ownership = DatabaseOwnership(
+                    acquire_database_lease(str(self.db_path))
                 )
-            self._connect_with_wal_validation()
-
-            logger.info("DuckDB connection established")
-
-            # Load required extensions
-            self._load_extensions()
-
-            # Note: Schema and index creation is now handled by DuckDBProvider's executor
-
-            logger.info("DuckDB connection manager initialization complete")
-
-        except Exception as e:
-            logger.error(f"DuckDB connection failed: {e}")
+                self._owns_ownership = True
+        try:
+            if not self.is_memory_db and not self._read_only:
+                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            with compatible_duckdb_cursor(
+                self.db_path, read_only=self._read_only
+            ) as live:
+                preflight_duckdb(
+                    self.db_path, live_connection=live, ownership=self._ownership
+                )
+                self.joined_live_database = live is not None
+                if live is None and not self._read_only:
+                    self._recover_interrupted_compaction()
+                    self._preemptive_wal_cleanup()
+                if live is None:
+                    self._connect_with_wal_validation()
+                else:
+                    # Pin the same-mode live instance; never recover another user's DB.
+                    self.connection = duckdb.connect(
+                        str(self.db_path), read_only=self._read_only
+                    )
+                self._load_extensions()
+                register_duckdb_connection(
+                    self.db_path, self._read_only, self.connection
+                )
+        except BaseException:
+            self.disconnect(skip_checkpoint=True)
             raise
 
     def _connect_with_wal_validation(self) -> None:
@@ -323,30 +340,17 @@ class DuckDBConnectionManager:
         logger.info("Attempting WAL recovery with VSS extension preloaded...")
 
         try:
-            # Create a temporary recovery connection
-            recovery_conn = duckdb.connect(":memory:")
-
-            # Load VSS extension first
-            recovery_conn.execute("INSTALL vss")
-            recovery_conn.execute("LOAD vss")
-
-            # Enable experimental persistence for HNSW indexes
-            recovery_conn.execute("SET hnsw_enable_experimental_persistence = true")
-
-            # Now attach the database file - this will trigger WAL replay
-            # with extension loaded
-            escaped = str(db_path).replace("'", "''")
-            recovery_conn.execute(f"ATTACH '{escaped}' AS recovery_db")
-
-            # Verify tables are accessible
-            recovery_conn.execute("SELECT COUNT(*) FROM recovery_db.files").fetchone()
-
-            # Force a checkpoint to ensure WAL is integrated
-            recovery_conn.execute("CHECKPOINT recovery_db")
-
-            # Detach and close
-            recovery_conn.execute("DETACH recovery_db")
-            recovery_conn.close()
+            with duckdb.connect(":memory:") as recovery_conn:
+                recovery_conn.execute("INSTALL vss")
+                recovery_conn.execute("LOAD vss")
+                recovery_conn.execute("SET hnsw_enable_experimental_persistence = true")
+                escaped = str(db_path).replace("'", "''")
+                recovery_conn.execute(f"ATTACH '{escaped}' AS recovery_db")
+                recovery_conn.execute(
+                    "SELECT COUNT(*) FROM recovery_db.files"
+                ).fetchone()
+                recovery_conn.execute("CHECKPOINT recovery_db")
+                recovery_conn.execute("DETACH recovery_db")
 
             logger.info("WAL recovery successful with VSS extension preloaded")
             return
@@ -377,28 +381,39 @@ class DuckDBConnectionManager:
                            checkpoint was already done recently to avoid
                            checkpoint conflicts)
         """
-        if self.connection is not None:
-            try:
-                if (
-                    not skip_checkpoint
-                    and not self.is_memory_db
-                    and not self._read_only
-                ):
-                    # Force checkpoint before close to ensure durability
-                    self.connection.execute("CHECKPOINT")
-                    log_if_not_mcp("debug", "Database checkpoint completed before disconnect")
-                else:
-                    log_if_not_mcp("debug", "Skipping checkpoint before disconnect (already done)")
-            except Exception as e:
-                log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
-                raise DatabaseError(
-                    operation="disconnect",
-                    reason=f"checkpoint failed before disconnect: {e}",
-                ) from e
-            finally:
-                self.connection.close()
-                self.connection = None
-                log_if_not_mcp("info", "DuckDB connection closed")
+        try:
+            if self.connection is not None:
+                try:
+                    if (
+                        not skip_checkpoint
+                        and not self.is_memory_db
+                        and not self._read_only
+                    ):
+                        # Force checkpoint before close to ensure durability
+                        self.connection.execute("CHECKPOINT")
+                        log_if_not_mcp(
+                            "debug", "Database checkpoint completed before disconnect"
+                        )
+                    else:
+                        log_if_not_mcp(
+                            "debug", "Skipping checkpoint before disconnect (already done)"
+                        )
+                except Exception as e:
+                    log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")
+                    raise DatabaseError(
+                        operation="disconnect",
+                        reason=f"checkpoint failed before disconnect: {e}",
+                    ) from e
+                finally:
+                    close_duckdb_connection(self.connection)
+                    self.connection = None
+                    log_if_not_mcp("info", "DuckDB connection closed")
+        finally:
+            if self.connection is None:
+                if self._owns_ownership and self._ownership is not None:
+                    self._ownership.close()
+                self._ownership = None
+                self._owns_ownership = False
 
     def _load_extensions(self) -> None:
         """Load required DuckDB extensions with macOS x86 crash prevention."""
