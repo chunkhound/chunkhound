@@ -32,7 +32,6 @@ impl DatabaseLease {
 #[pyclass(module = "chunkhound_native")]
 pub(crate) struct InstallLease {
     held: Option<Lease>,
-    #[allow(dead_code)] // T6 consumes this when its install method lands; remove then.
     backend: Backend,
 }
 
@@ -50,6 +49,18 @@ impl InstallLease {
                 .as_ref()
                 .ok_or(LeaseError::Layout("lease is closed"))?
                 .assert_covers(&path)
+        })
+        .map_err(Into::into)
+    }
+
+    fn install(&mut self, py: Python<'_>, candidate: String) -> PyResult<Vec<String>> {
+        let candidate = PathBuf::from(candidate);
+        py.allow_threads(move || {
+            let lease = self
+                .held
+                .as_ref()
+                .ok_or(LeaseError::Layout("lease is closed"))?;
+            super::install::install(lease, self.backend, &candidate)
         })
         .map_err(Into::into)
     }
