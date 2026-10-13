@@ -26,6 +26,7 @@ def snapshot(path: Path) -> dict[str, tuple[str, int]]:
     return {
         str(p): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
         for p in files
+        if not p.name.endswith(".chunkhound.lock")
     }
 
 

@@ -721,6 +721,12 @@ DatabaseFilesystemError = _native_module.DatabaseFilesystemError
 
 ### Task T2: Explicit ownership scopes for complete inspection
 
+**User-approved missing-parent correction:** Preserve non-creating inspection by returning the existing absence result when the parent is missing, without opening a backend. All actual database reads remain lease-protected; borrowed ownership and interruption checks remain enforced.
+
+This is terminal absence-only handling at the inspection entry points, **not** an unlocked `ownership_scope` that can continue to backend reads. Resolve aliases before checking parent absence: `missing/../existing` and symlink-parent aliases must still coordinate with existing parents and refuse their markers. A supplied owner always proceeds through native identity/open validation, even for a missing path. Once absence is observed, return/raise immediately even if another process creates the parent/database concurrently. Do not change native acquisition, provider creation, or the ordinary owned/borrowed/memory scope contract. A live-connection preflight never uses the absence shortcut.
+
+Absence results remain: DuckDB reader/format raises `IndexFormatError(_INSPECTION_FAILED)`; Lance format returns `LEGACY_INDEX_FORMAT_VERSION`; inventory raises `ValueError("Database is absent")`; preflight without a live connection returns `None`. No backend is opened on these terminal paths. Existing non-creation tests remain unchanged. Add external contracts in `test_inspection_ownership.py` for absent-parent aliases, wrong/closed borrowed owners, existing-parent interruption through missing-component aliases, and a deterministic filesystem race that publishes real storage after observing absence while forbidding backend opens.
+
 **Files:**
 - Create `chunkhound/providers/database/ownership.py`.
 - Modify `chunkhound/providers/database/index_format.py` (`read_only_duckdb`, `read_format`, `preflight_duckdb`).
@@ -851,6 +857,22 @@ class DatabaseOwnership:
         self.close()
 
 
+def inspection_parent_missing(
+    path: Path | str, ownership: DatabaseOwnership | None = None
+) -> bool:
+    """Permit only a terminal absence result, never an unowned backend read."""
+    if ownership is not None or str(path) == ":memory:":
+        # Borrowed ownership must reach ownership_scope's identity/open check.
+        return False
+    try:
+        # Resolve aliases before checking: missing/../existing still coordinates
+        # with the existing target, including its interruption marker.
+        Path(path).resolve().parent.stat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
 @contextmanager
 def ownership_scope(
     path: Path | str, ownership: DatabaseOwnership | None = None
@@ -865,13 +887,15 @@ def ownership_scope(
             yield acquired
 ```
 
-- [ ] **T2.4 Scope format/preflight.** Import `traceback` and ownership types in `index_format.py`. Rename existing `read_only_duckdb`/`read_format` to `_read_only_duckdb`/`_read_format`; private format calls private reader. Preserve bodies; add public wrappers:
+- [ ] **T2.4 Scope format/preflight.** Import `traceback`, ownership types, and `inspection_parent_missing` in `index_format.py`. Rename existing `read_only_duckdb`/`read_format` to `_read_only_duckdb`/`_read_format`; private format calls private reader. Preserve bodies; add public wrappers:
 
 ```python
 @contextmanager
 def read_only_duckdb(
     path: Path, *, ownership: DatabaseOwnership | None = None
 ) -> Iterator[Any]:
+    if inspection_parent_missing(path, ownership):
+        raise IndexFormatError(_INSPECTION_FAILED)
     with ownership_scope(path, ownership):
         with _read_only_duckdb(path) as conn:
             yield conn
@@ -880,6 +904,12 @@ def read_only_duckdb(
 def read_format(
     path: Path, backend: str, *, ownership: DatabaseOwnership | None = None
 ) -> int:
+    if inspection_parent_missing(path, ownership):
+        if backend == "duckdb":
+            raise IndexFormatError(_INSPECTION_FAILED)
+        if backend == "lancedb":
+            return LEGACY_INDEX_FORMAT_VERSION
+        raise ValueError("Unsupported database backend")
     with ownership_scope(path, ownership):
         try:
             return _read_format(path, backend)
@@ -898,6 +928,8 @@ def preflight_duckdb(
     ownership: DatabaseOwnership | None = None,
 ) -> None:
     if str(path) == ":memory:":
+        return
+    if live_connection is None and inspection_parent_missing(path, ownership):
         return
     with ownership_scope(path, ownership):
         live = Path(path)
@@ -921,7 +953,7 @@ def preflight_duckdb(
 
 Private readers stay inside `index_format.py`; preserve error/close policy. Remove outdated no-lifetime-protection docstrings.
 
-- [ ] **T2.5 Scope complete inventory.** In `hub/inspect.py` import traceback/ownership; rename existing body `_inspect_database`, adding required keyword `ownership: DatabaseOwnership | None`. Change calls:
+- [ ] **T2.5 Scope complete inventory.** In `hub/inspect.py` import traceback/ownership/`inspection_parent_missing`; rename existing body `_inspect_database`, adding required keyword `ownership: DatabaseOwnership | None`. Change calls:
 
 ```python
 version = read_format(path, backend, ownership=ownership)
@@ -935,6 +967,8 @@ Keep the existing SQL, schemas, grouping and `Inventory` return unchanged. Add t
 def inspect_database(
     path: Path, backend: str, *, ownership: DatabaseOwnership | None = None
 ) -> Inventory:
+    if inspection_parent_missing(path, ownership):
+        raise ValueError("Database is absent")
     with ownership_scope(path, ownership) as held:
         try:
             return _inspect_database(path, backend, ownership=held)
@@ -963,16 +997,16 @@ T1 tests lock stability; retain marker/quarantine/WAL/root/model checks.
 
 ```bash
 UV_NO_SYNC=1 uv run pytest tests/hub/test_inspection_ownership.py tests/hub/test_index_format.py tests/hub/test_inspect.py -v
-UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/lifetime-l1-mypy.log 2>&1
+UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/activation-T2-correction-mypy.log 2>&1
 UV_NO_SYNC=1 uv run pytest tests/test_smoke.py -v -n auto
 ```
 
-Expected: targeted/smoke PASS; no new mypy errors.
+Expected: targeted/smoke PASS; no new mypy errors. Compare diagnostic multiplicities against the preserved `.superpowers/sdd/activation-mypy-before.log`, ignoring only shifted line/column numbers; never overwrite the baseline.
 
 - [ ] **T2.8 Commit only after green smoke and review.**
 
 ```bash
-git add chunkhound/providers/database/ownership.py chunkhound/providers/database/index_format.py chunkhound/hub/inspect.py tests/hub/test_inspection_ownership.py tests/hub/test_index_format.py
+git add chunkhound/providers/database/ownership.py chunkhound/providers/database/index_format.py chunkhound/hub/inspect.py tests/hub/test_inspection_ownership.py tests/hub/test_index_format.py docs/superpowers/plans/2026-10-12-trusted-hub-activation.md
 git commit -m "feat: scope Python inspection with native database ownership"
 ```
 

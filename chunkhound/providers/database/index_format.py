@@ -1,6 +1,7 @@
 """Nonmutating format inspection and writable-only legacy format stamps."""
 
 import re
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,6 +14,11 @@ from chunkhound.core.index_format import (
 )
 from chunkhound.providers.database.duckdb.schema_constants import (
     _SCHEMA_VERSION_TABLE_COLUMNS,
+)
+from chunkhound.providers.database.ownership import (
+    DatabaseOwnership,
+    inspection_parent_missing,
+    ownership_scope,
 )
 
 _INSPECTION_FAILED = (
@@ -34,11 +40,23 @@ def _stored_version(values: list[Any]) -> int:
 
 
 @contextmanager
-def read_only_duckdb(path: Path) -> Iterator[Any]:
+def read_only_duckdb(
+    path: Path, *, ownership: DatabaseOwnership | None = None
+) -> Iterator[Any]:
+    """Hold database ownership until the read-only connection has closed."""
+    if inspection_parent_missing(path, ownership):
+        raise IndexFormatError(_INSPECTION_FAILED)
+    with ownership_scope(path, ownership):
+        with _read_only_duckdb(path) as conn:
+            yield conn
+
+
+@contextmanager
+def _read_only_duckdb(path: Path) -> Iterator[Any]:
     """Attach the original as ``inspected`` with the approved WAL safety policy.
 
     No provider migrations, automatic extension installation, temporary-copy
-    recovery, or spill files. This is not lifetime/race protection.
+    recovery, or spill files. The caller must hold database ownership.
     """
     import duckdb
 
@@ -151,10 +169,28 @@ def read_duckdb_format(conn: Any, *, catalog: str) -> int:
     )
 
 
-def read_format(path: Path, backend: str) -> int:
-    """Inspect existing metadata without creating paths or migrating the index."""
+def read_format(
+    path: Path, backend: str, *, ownership: DatabaseOwnership | None = None
+) -> int:
+    """Inspect metadata under ownership without migrating the index."""
+    if inspection_parent_missing(path, ownership):
+        if backend == "duckdb":
+            raise IndexFormatError(_INSPECTION_FAILED)
+        if backend == "lancedb":
+            return LEGACY_INDEX_FORMAT_VERSION
+        raise ValueError("Unsupported database backend")
+    with ownership_scope(path, ownership):
+        try:
+            return _read_format(path, backend)
+        except BaseException as error:
+            traceback.clear_frames(error.__traceback__)
+            raise
+
+
+def _read_format(path: Path, backend: str) -> int:
+    """Inspect existing metadata while the caller holds database ownership."""
     if backend == "duckdb":
-        with read_only_duckdb(path) as conn:
+        with _read_only_duckdb(path) as conn:
             return read_duckdb_format(conn, catalog="inspected")
     if backend == "lancedb":
         import lance  # type: ignore[import-untyped]  # Lance does not ship typing metadata.
@@ -171,30 +207,36 @@ def read_format(path: Path, backend: str) -> int:
     raise ValueError("Unsupported database backend")
 
 
-def preflight_duckdb(path: Path | str, *, live_connection: Any | None = None) -> None:
-    """Check every candidate before recovery, using an owned live handle if present.
-
-    A partial reconnect must not attach the live file a second time or close its
-    remaining handle before inspection. This is not lifetime/race protection.
-    """
+def preflight_duckdb(
+    path: Path | str,
+    *,
+    live_connection: Any | None = None,
+    ownership: DatabaseOwnership | None = None,
+) -> None:
+    """Check live and recovery inputs while holding the primary target's lease."""
     if str(path) == ":memory:":
         return
-    live = Path(path)
-    if live_connection is not None:
-        import duckdb
+    if live_connection is None and inspection_parent_missing(path, ownership):
+        return
+    with ownership_scope(path, ownership):
+        live = Path(path)
+        if live_connection is not None:
+            import duckdb
 
-        try:
-            catalog = owned_duckdb_catalog(live_connection, live)
-            require_supported(read_duckdb_format(live_connection, catalog=catalog))
-        except duckdb.Error as exc:
-            raise IndexFormatError(_INSPECTION_FAILED) from exc
-    # Both recovery implementations can choose a different file before opening live.
-    for suffix in ("", ".compact_backup", ".compact_new", ".old", ".compact"):
-        if not suffix and live_connection is not None:
-            continue
-        candidate = Path(str(live) + suffix)
-        if candidate.is_file() and candidate.stat().st_size:
-            require_supported(read_format(candidate, "duckdb"))
+            try:
+                catalog = owned_duckdb_catalog(live_connection, live)
+                require_supported(read_duckdb_format(live_connection, catalog=catalog))
+            except duckdb.Error as exc:
+                raise IndexFormatError(_INSPECTION_FAILED) from exc
+        for suffix in ("", ".compact_backup", ".compact_new", ".old", ".compact"):
+            if not suffix and live_connection is not None:
+                continue
+            candidate = Path(str(live) + suffix)
+            if candidate.is_file() and candidate.stat().st_size:
+                # These are recovery inputs belonging to the PRIMARY target.
+                # Do not assert that a primary lease covers a different filename,
+                # and do not obtain a second lease for each sidecar candidate.
+                require_supported(_read_format(candidate, "duckdb"))
 
 
 def stamp_duckdb(conn: Any, *, catalog: str) -> None:

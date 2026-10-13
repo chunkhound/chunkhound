@@ -5,6 +5,7 @@ It never opens providers, runs migrations, or chooses an active model.
 """
 
 import re
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,11 @@ from chunkhound.providers.database.index_format import (
     read_format,
     read_only_duckdb,
     require_stored_duckdb_table,
+)
+from chunkhound.providers.database.ownership import (
+    DatabaseOwnership,
+    inspection_parent_missing,
+    ownership_scope,
 )
 
 
@@ -31,15 +37,33 @@ def _time(value: object) -> float:
     return float(value) if isinstance(value, int | float) else float("-inf")
 
 
-def inspect_database(path: Path, backend: str) -> Inventory:
+def inspect_database(
+    path: Path, backend: str, *, ownership: DatabaseOwnership | None = None
+) -> Inventory:
+    """Hold database ownership for the complete read-only inventory."""
+    if inspection_parent_missing(path, ownership):
+        raise ValueError("Database is absent")
+    with ownership_scope(path, ownership) as held:
+        try:
+            return _inspect_database(path, backend, ownership=held)
+        except BaseException as error:
+            # The finished _inspect_database frame and SDK frames can otherwise
+            # retain Lance datasets/scanners through a caught exception.
+            traceback.clear_frames(error.__traceback__)
+            raise
+
+
+def _inspect_database(
+    path: Path, backend: str, *, ownership: DatabaseOwnership | None
+) -> Inventory:
     """Read actual backend storage without modifying the database or sidecars."""
     if not path.exists():
         raise ValueError("Database is absent")
-    version = read_format(path, backend)
+    version = read_format(path, backend, ownership=ownership)
     rows = []
     if backend == "duckdb":
         # A direct file reopen would bypass the extension/WAL safety boundary.
-        with read_only_duckdb(path) as conn:
+        with read_only_duckdb(path, ownership=ownership) as conn:
             # Fold only ASCII, matching DuckDB identifier resolution. Check
             # object kinds before binding any publisher-defined source/vector SQL.
             # Direct system functions, not information_schema's ambient-resolving
