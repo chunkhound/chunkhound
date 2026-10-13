@@ -55,7 +55,8 @@ def resolve_cli_binary(
     does not exist, this raises instead of searching PATH for ``name``.
 
     Returns:
-        Absolute path to the executable (or override path that exists / which found).
+        Path to the executable. An explicit filesystem path is absolute.
+        ``shutil.which`` keeps a relative PATH entry relative.
 
     Raises:
         FileNotFoundError: If no matching binary is found.
@@ -106,8 +107,11 @@ def is_windows_batch_shim(binary: str) -> bool:
 
 def _windows_short_path(path: str) -> str:
     """8.3 form when the OS can make one. A missing name comes back unchanged."""
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return path
     buffer = ctypes.create_unicode_buffer(32768)
-    length = ctypes.windll.kernel32.GetShortPathNameW(path, buffer, len(buffer))
+    length = windll.kernel32.GetShortPathNameW(path, buffer, len(buffer))
     if length == 0 or length >= len(buffer):
         return path
     return buffer.value

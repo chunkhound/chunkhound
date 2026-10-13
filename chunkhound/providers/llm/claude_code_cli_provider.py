@@ -44,46 +44,59 @@ from chunkhound.utils.text_sanitization import sanitize_error_text
 _EMPTY_MCP_CONFIG_JSON = b'{"mcpServers":{}}\n'
 
 
-def _write_empty_mcp_config_file(directory: str | None = None) -> Path:
-    """Write a unique empty MCP config JSON file; caller must unlink it."""
+def _write_temp_bytes(
+    payload: bytes,
+    *,
+    prefix: str,
+    suffix: str,
+    directory: str | None,
+) -> Path:
+    """Write bytes to a new temp file. Caller unlinks the returned path."""
     fd, name = tempfile.mkstemp(
-        prefix="chunkhound_claude_mcp_",
-        suffix=".json",
+        prefix=prefix,
+        suffix=suffix,
         dir=directory,
         text=False,
     )
     path = Path(name)
+    opened = False
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(_EMPTY_MCP_CONFIG_JSON)
+        with os.fdopen(fd, "wb") as handle:
+            # fdopen owns fd. Closing it again can close a reused descriptor.
+            opened = True
+            handle.write(payload)
+        return path.resolve()
     except Exception:
+        if not opened:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
-    return path.resolve()
+
+
+def _write_empty_mcp_config_file(directory: str | None = None) -> Path:
+    """Write a unique empty MCP config JSON file; caller must unlink it."""
+    return _write_temp_bytes(
+        _EMPTY_MCP_CONFIG_JSON,
+        prefix="chunkhound_claude_mcp_",
+        suffix=".json",
+        directory=directory,
+    )
 
 
 def _write_system_prompt_file(system: str, directory: str | None = None) -> Path:
     """Write instructions to a temp file; caller must unlink it."""
-    fd, name = tempfile.mkstemp(
+    return _write_temp_bytes(
+        system.encode("utf-8"),
         prefix="chunkhound_claude_system_",
         suffix=".txt",
-        dir=directory,
-        text=False,
+        directory=directory,
     )
-    path = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(system.encode("utf-8"))
-        return path.resolve()
-    except Exception:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
 
 
 class ClaudeCodeCLIProvider(BaseCLIProvider):
@@ -224,9 +237,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     cli_args.extend(["--append-system-prompt", system])
                 else:
                     try:
-                        system_prompt_path = _write_system_prompt_file(
-                            system, file_dir
-                        )
+                        system_prompt_path = _write_system_prompt_file(system, file_dir)
                     except OSError as e:
                         raise RuntimeError(
                             f"Failed to write Claude system prompt: {e}"
@@ -308,9 +319,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                         f"CLI command timed out after {request_timeout}s"
                     )
                     if attempt < self._max_retries - 1:
-                        logger.warning(
-                            f"CLI attempt {attempt + 1} timed out, retrying"
-                        )
+                        logger.warning(f"CLI attempt {attempt + 1} timed out, retrying")
                         continue
                     raise last_error from e
 
@@ -335,6 +344,4 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 try:
                     temp_path.unlink(missing_ok=True)
                 except OSError as e:
-                    logger.debug(
-                        "Failed to remove temp CLI file {}: {}", temp_path, e
-                    )
+                    logger.debug("Failed to remove temp CLI file {}: {}", temp_path, e)

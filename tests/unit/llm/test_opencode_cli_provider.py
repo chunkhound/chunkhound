@@ -19,7 +19,9 @@ def test_default_timeout():
     assert p.timeout == DEFAULT_LLM_TIMEOUT
 
 
-def test_unshortenable_shim_does_not_crash_availability(monkeypatch: pytest.MonkeyPatch):
+def test_unshortenable_shim_does_not_crash_availability(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """A spaced .cmd that cannot be shortened reports the CLI unavailable."""
     monkeypatch.setattr(
         "chunkhound.providers.llm.base_cli_provider.sys.platform", "win32"
@@ -63,9 +65,7 @@ class TestOpenCodeCLIProvider:
     def provider(self):
         """Create a provider with a dummy model."""
         with (
-            patch.object(
-                OpenCodeCLIProvider, "_opencode_available", return_value=True
-            ),
+            patch.object(OpenCodeCLIProvider, "_opencode_available", return_value=True),
             patch(
                 "chunkhound.providers.llm.opencode_cli_provider.resolve_cli_binary",
                 return_value="opencode",
