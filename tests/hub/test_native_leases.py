@@ -185,6 +185,54 @@ def test_install_accepts_directory_suffix_after_symlink_parent_traversal(
     assert Path(str(target) + ".chunkhound.lock").is_file()
 
 
+@pytest.mark.parametrize("suffix", ["", "/", "/."])
+def test_install_refuses_symlink_leaf_after_absent_parent_traversal(tmp_path, suffix):
+    real = tmp_path / "real" / "lancedb.lancedb"
+    real.mkdir(parents=True)
+    alias = tmp_path / "lancedb.lancedb"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+    spelling = str(tmp_path / "missing" / ".." / alias.name) + suffix
+    with pytest.raises(native.DatabaseLayoutError):
+        native.acquire_install_lease(spelling, "lancedb").close()
+    assert alias.is_symlink() and real.is_dir()
+    assert not (tmp_path / "missing").exists()
+    assert not list(tmp_path.rglob("*.chunkhound.lock"))
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["lancedb.lancedb", "alias/../missing/../new/deeper/lancedb.lancedb"],
+)
+def test_install_accepts_absent_target_parents(tmp_path, monkeypatch, spelling):
+    real = tmp_path / "real"
+    (real / "nested").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real / "nested", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+    monkeypatch.chdir(tmp_path)
+    target = (
+        tmp_path / spelling
+        if spelling == "lancedb.lancedb"
+        else real / "new" / "deeper" / "lancedb.lancedb"
+    )
+    assert not target.exists()
+    exclusive = native.acquire_install_lease(spelling, "lancedb")
+    try:
+        exclusive.assert_covers(str(target))
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_database_lease(str(target))
+    finally:
+        exclusive.close()
+    assert not target.exists()
+    assert not (real / "missing").exists()
+    assert Path(str(target) + ".chunkhound.lock").is_file()
+
+
 def test_parent_traversal_resolves_existing_symlink_before_dotdot(tmp_path):
     real = tmp_path / "real"
     (real / "nested").mkdir(parents=True)

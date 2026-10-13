@@ -26,6 +26,15 @@ pub(crate) fn canonical_target(path: &Path) -> Result<PathBuf, LeaseError> {
     if path.as_os_str().is_empty() {
         return Err(LeaseError::Layout("empty target"));
     }
+    let resolved = resolve_path(path)?;
+    if resolved.file_name().is_none() {
+        return Err(LeaseError::Layout("target must have a filename"));
+    }
+    Ok(resolved)
+}
+
+/// Share absent-parent and symlink-before-`..` semantics for identities and shape checks.
+fn resolve_path(path: &Path) -> Result<PathBuf, LeaseError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -46,9 +55,6 @@ pub(crate) fn canonical_target(path: &Path) -> Result<PathBuf, LeaseError> {
                 }
             }
         }
-    }
-    if resolved.file_name().is_none() {
-        return Err(LeaseError::Layout("target must have a filename"));
     }
     Ok(resolved)
 }
@@ -76,10 +82,17 @@ impl Backend {
     }
 
     pub(crate) fn validate_shape(self, path: &Path) -> Result<(), LeaseError> {
-        // Strip redundant separators/dots so metadata inspects the unresolved leaf.
-        // Components preserve `..`; do not collapse it or resolve parent symlinks here.
+        // Strip terminal directory syntax, then resolve only the parent as for identity.
+        // The final entry must stay unresolved so metadata can reject a leaf symlink.
         let path: PathBuf = path.components().collect();
-        if let Some(metadata) = metadata_optional(&path)? {
+        let leaf = path
+            .file_name()
+            .ok_or(LeaseError::Layout("target must have a filename"))?;
+        let parent = path
+            .parent()
+            .ok_or(LeaseError::Layout("target has no parent"))?;
+        let unresolved_leaf = resolve_path(parent)?.join(leaf);
+        if let Some(metadata) = metadata_optional(&unresolved_leaf)? {
             if metadata.file_type().is_symlink()
                 || match self {
                     Self::DuckDb => !metadata.is_file(),
