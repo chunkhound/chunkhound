@@ -28,6 +28,7 @@ def hub_server(context: ssl.SSLContext | None = None) -> Iterator[SimpleNamespac
         encoding=None,
         content_range=None,
         omit_length=False,
+        before_get=None,
     )
 
     class Handler(BaseHTTPRequestHandler):
@@ -36,6 +37,8 @@ def hub_server(context: ssl.SSLContext | None = None) -> Iterator[SimpleNamespac
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler API
             state.requests.append((self.path, self.headers.get("Range")))
+            if state.before_get is not None:
+                state.before_get(self.path)
             state.encodings.append(self.headers.get("Accept-Encoding"))
             if self.path in state.redirects:
                 self.send_response(state.redirect_status)

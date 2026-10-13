@@ -7,6 +7,7 @@ import tarfile
 import zlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
@@ -220,8 +221,20 @@ def verify_candidate(path: Path, selected: Selected) -> None:
         ) from None
 
 
+@dataclass
+class PreparationState:
+    """Set by the completed install worker, never inferred from candidate existence."""
+
+    committed: bool = False
+
+
 @asynccontextmanager
-async def prepare(selected: Selected, work_parent: Path) -> AsyncIterator[Path]:
+async def prepare(
+    selected: Selected,
+    work_parent: Path,
+    *,
+    state: PreparationState | None = None,
+) -> AsyncIterator[Path]:
     """Yield one verified candidate, closing readers first and always removing work.
 
     Caller exceptions are not hub failures and retain their original category.
@@ -252,9 +265,15 @@ async def prepare(selected: Selected, work_parent: Path) -> AsyncIterator[Path]:
         try:
             workspace.cleanup()
         except OSError:
-            if failed:
-                # Never turn a fatal DB mismatch into a soft cleanup failure.
-                logger.error("Hub staging workspace could not be removed")
+            if state is not None and state.committed:
+                logger.bind(hub_client=True).warning(
+                    "Hub base installed; staging cleanup could not be completed"
+                )
+            elif failed:
+                # Preserve a caller failure/fatal mismatch/cancellation category.
+                logger.bind(hub_client=True).error(
+                    "Hub staging workspace could not be removed"
+                )
             else:
                 raise HubUnavailable(
                     "Hub staging workspace could not be removed"

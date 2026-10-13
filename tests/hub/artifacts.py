@@ -16,6 +16,7 @@ def build_database(
     provider: str = "openai",
     model: str = "hub-test",
     dims: int = 8,
+    symbol_prefix: str = "function",
 ) -> Path:
     """Publish a small real index with a full batch of stored embeddings."""
     root.mkdir(parents=True, exist_ok=True)
@@ -32,12 +33,12 @@ def build_database(
         chunks = [
             Chunk(
                 file_id=file_id,
-                code=f"def function_{i}(): return {i}",
+                code=f"def {symbol_prefix}_{i}(): return {i}",
                 start_line=i + 1,
                 end_line=i + 1,
                 chunk_type=ChunkType.FUNCTION,
                 language=Language.PYTHON,
-                symbol=f"function_{i}",
+                symbol=f"{symbol_prefix}_{i}",
             )
             for i in range(100)
         ]

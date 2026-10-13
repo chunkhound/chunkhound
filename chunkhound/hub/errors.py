@@ -11,6 +11,10 @@ class HubDatabaseMismatch(RuntimeError):  # noqa: N818 - public hub failure cate
     """Downloaded database contradicts the selected manifest; never fall back."""
 
 
+class HubInstallationInterrupted(RuntimeError):  # noqa: N818 - public hub category
+    """Installation may be incomplete; ordinary opens and automatic fallback stop."""
+
+
 def safe_label(value: object) -> str:
     text = json.dumps(value, ensure_ascii=True, default=str)
     return (
