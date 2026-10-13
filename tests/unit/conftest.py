@@ -6,7 +6,19 @@ We disable the sampling unconditionally here so all tests in
 this directory are deterministic.
 """
 
+from pathlib import Path
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_llm_capability_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep unit tests isolated from the developer's capability cache."""
+    monkeypatch.setenv(
+        "CHUNKHOUND_LLM_CAPABILITY_CACHE", str(tmp_path / "llm-capabilities.json")
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -222,6 +222,14 @@ class LLMManager:
             )
 
         base_url = config.get("base_url")
+        if (
+            base_url is not None
+            and spec.structured_reasoning_disable_extra_body is not None
+        ):
+            logger.debug(
+                f"{name}: explicit llm.base_url disables structured reasoning "
+                "negotiation; the reasoning-disable payload will not be sent."
+            )
 
         kwargs: dict[str, Any] = {
             "provider_name": name,
@@ -238,6 +246,11 @@ class LLMManager:
                 spec.output_limit_omission
                 if base_url is None
                 else OutputLimitCapability.UNKNOWN
+            ),
+            "structured_reasoning_disable_extra_body": (
+                spec.structured_reasoning_disable_extra_body
+                if base_url is None
+                else None
             ),
         }
 
