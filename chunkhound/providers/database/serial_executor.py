@@ -16,6 +16,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.providers.database.exception_cleanup import clear_exception_frames
+from chunkhound.utils.async_worker import await_worker_completion
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 
@@ -373,7 +374,8 @@ class SerialDatabaseExecutor:
         ctx = contextvars.copy_context()
 
         # Run in executor with context
-        result = await asyncio.wrap_future(self._submit(ctx.run, executor_operation))
+        future = asyncio.wrap_future(self._submit(ctx.run, executor_operation))
+        result = await await_worker_completion(future)
 
         await self._maybe_run_sampled_auto_compaction_async(provider, operation_name)
         return result

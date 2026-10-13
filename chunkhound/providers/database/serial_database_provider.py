@@ -18,6 +18,7 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseRustPipelineInProgressError,
     SerialDatabaseExecutor,
 )
+from chunkhound.utils.async_worker import await_worker_completion
 from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound_native import acquire_database_lease
 
@@ -817,9 +818,8 @@ class SerialDatabaseProvider(ABC):
 
     async def compact_database_async(self) -> int:
         """Async variant of compact_database."""
-        return await asyncio.get_running_loop().run_in_executor(
-            None, self.compact_database
-        )
+        future = asyncio.get_running_loop().run_in_executor(None, self.compact_database)
+        return await await_worker_completion(future)
 
     def measure_fragmentation(self) -> float:
         """Return fragmentation ratio. Stateless by default.

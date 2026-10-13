@@ -394,20 +394,11 @@ async def run_rust_indexing_phase(
     # that only surfaces later as a deserialization error when
     # some other process reopens the DB.
     #
-    # Safe to close here: the parse_batch_callback's
-    # ProcessPoolExecutor (whose fork'd children inherit
-    # whatever DuckDB state is live at fork time) is a lazy,
-    # process-wide singleton (see pipeline_bridge._get_parse_pool)
-    # — it's created only once, on the first call from Rust's
-    # parse phase, which starts only after this call returns on
-    # this very first run. Every later run reuses the
-    # already-created workers, so no new fork ever happens after
-    # this point — there's nothing later to inherit a live
-    # connection. Must use the provider's full disconnect(),
-    # not just closing _connection_manager.connection: the
-    # SerialExecutor holds its own separate thread-local DuckDB
-    # connection (created lazily on its worker thread), which a
-    # bare connection_manager close would leave dangling.
+    # The provider retains native shared ownership while its backend handles are
+    # closed. Native work independently owns a shared lease for its entire run.
+    # Parser pools use spawn, so children cannot inherit either database state or
+    # lease descriptors. run_rust_pipeline drains cancelled workers and embed-cache
+    # cleanup before this function clears the guard and reconnects in finally.
     # `released_for_rust` tracks whether we *attempted* release, not
     # whether it succeeded — release_for_rust_pipeline() can raise after
     # only partially closing its two connections (see its docstring), and
