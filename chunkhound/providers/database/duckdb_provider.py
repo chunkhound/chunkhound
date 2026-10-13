@@ -2165,6 +2165,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         """
         self._execute_in_db_thread_sync("ensure_all_hnsw_indexes")
 
+    async def drop_all_hnsw_indexes_async(self) -> None:
+        """Drop indexes on the serial DB executor without the sync timeout."""
+        await self._execute_in_db_thread("drop_all_hnsw_indexes")
+
+    async def ensure_all_hnsw_indexes_async(self) -> None:
+        """Rebuild indexes on the serial DB executor without the sync timeout."""
+        await self._execute_in_db_thread("ensure_all_hnsw_indexes")
+
     def _executor_get_existing_vector_indexes(
         self, conn: Any, state: dict[str, Any]
     ) -> list[dict[str, Any]]:

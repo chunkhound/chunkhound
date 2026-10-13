@@ -8,6 +8,7 @@ this directory are deterministic.
 
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +37,16 @@ def _stub_cli_version_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 def _block_cli_version_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Constructors probe ``--version``. A resolver stub must not launch a CLI."""
     _stub_cli_version_probe(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_llm_capability_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep unit tests isolated from the developer's capability cache."""
+    monkeypatch.setenv(
+        "CHUNKHOUND_LLM_CAPABILITY_CACHE", str(tmp_path / "llm-capabilities.json")
+    )
 
 
 @pytest.fixture(autouse=True)
