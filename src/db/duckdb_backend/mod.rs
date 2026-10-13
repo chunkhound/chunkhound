@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use duckdb::Connection;
 
 use crate::database_coordination::lease::Lease;
-use crate::db::{DbBackend, DbConfig};
+use crate::db::{database_path_string, DbBackend, DbConfig};
 use crate::error::DbError;
 use crate::types::{BatchResult, DbFileEntry, DbWriterBatch};
 
@@ -121,7 +121,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             let lease = crate::database_coordination::lease::acquire_shared(std::path::Path::new(
                 &self.config.db_path,
             ))?;
-            self.config.db_path = lease.target().to_string_lossy().into_owned();
+            self.config.db_path = database_path_string(lease.target())?;
             self.lease = Some(lease);
         }
         let result = self.open_owned();
@@ -194,7 +194,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             &self.config.db_path,
         ))?;
         let mut config = self.config.clone();
-        config.db_path = lease.target().to_string_lossy().into_owned();
+        config.db_path = database_path_string(lease.target())?;
         let reader = Self::new(config);
         Self::preflight_index_formats(lease.target())?;
         read::read_file_states(&reader)

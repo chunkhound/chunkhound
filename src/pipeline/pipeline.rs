@@ -9,7 +9,9 @@ use super::config::PipelineConfig;
 use super::differ::DiffResult;
 use super::report::PipelineReport;
 
-use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
+use crate::db::{
+    check_disk_usage_limit, create_backend, database_path_string, DbBackend, DbConfig,
+};
 use crate::embed::{create_embed_fn, EmbedBatchFn};
 use crate::error::DbError;
 use crate::types::{ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
@@ -142,6 +144,9 @@ impl IndexingPipeline {
         })?;
         let db_file = run_lease.target().to_path_buf();
         let result = (|| -> PyResult<PipelineReport> {
+            // Validate before even the empty-run shortcut; diff and writer must
+            // use exactly the canonical target covered by run_lease.
+            let db_path = database_path_string(&db_file)?;
             let started = Instant::now();
             // Extracted once here, while the GIL is still held (this whole
             // method releases it via py.allow_threads() below) -- the resulting
@@ -203,7 +208,7 @@ impl IndexingPipeline {
                     &progress_callback,
                     &batch_paths,
                     &rel_keys,
-                    db_file.clone(),
+                    db_path.clone(),
                 )?;
                 // Only process changed files
                 batch_paths = diff.changed;
@@ -229,7 +234,7 @@ impl IndexingPipeline {
                     &progress_callback,
                     &batch_paths,
                     &rel_keys,
-                    db_file.clone(),
+                    db_path.clone(),
                 )?;
                 delete_paths = if self.config.do_cleanup {
                     diff.removed
@@ -242,7 +247,7 @@ impl IndexingPipeline {
             }
 
             let db_config = DbConfig {
-                db_path: db_file.to_string_lossy().into_owned(),
+                db_path,
                 compaction_threshold: self.config.compaction_threshold,
                 compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
                 insert_batch_size: self.config.db_batch_size.max(1),
@@ -353,12 +358,12 @@ impl IndexingPipeline {
         progress_callback: &Option<Py<PyAny>>,
         files: &[PathBuf],
         rel_keys: &std::collections::HashMap<PathBuf, String>,
-        db_file: PathBuf,
+        db_path: String,
     ) -> PyResult<DiffResult> {
         let total_files = files.len() as u64;
         emit_progress(py, progress_callback, "diff", 0, total_files);
 
-        if db_file == Path::new(":memory:") {
+        if db_path == ":memory:" {
             emit_progress(py, progress_callback, "diff", total_files, total_files);
             return Ok(DiffResult {
                 changed: files.to_vec(),
@@ -383,7 +388,6 @@ impl IndexingPipeline {
         let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
         let files_owned: Vec<PathBuf> = files.to_vec();
         let rel_keys_owned = rel_keys.clone();
-        let db_path = db_file.to_string_lossy().into_owned();
         let compaction_threshold = self.config.compaction_threshold;
         let compaction_min_size_bytes = self.config.compaction_min_size_mb * 1024 * 1024;
         let insert_batch_size = self.config.db_batch_size.max(1);

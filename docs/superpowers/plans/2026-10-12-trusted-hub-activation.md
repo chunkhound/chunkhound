@@ -26,7 +26,7 @@ Source of truth: `docs/superpowers/specs/2026-10-12-trusted-hub-activation-desig
 - “Simulation, ignore checking and no-embeddings indexing do not pull. MCP and search never initiate a pull.” Aligned local state makes zero hub requests.
 - `chunkhound pull [path] --version latest|-1|-2`; explicit inability exits 1; no version walking. Hook automatic pull before registry initialization/drift pinning.
 - “Power-loss durability across platforms/filesystems is not guaranteed by a marker or rename.” Never claim an atomic multi-file swap or durable rollback.
-- Directory-layout installation only: `chunks.db` / `lancedb.lancedb`. Ordinary legacy/memory use stays supported. Reject symlink install leaves; canonical relative/symlink-parent aliases coordinate. Hard-link aliases, old/direct clients and unreliable network locks are outside cooperative support.
+- Directory-layout installation only: `chunks.db` / `lancedb.lancedb`. Ordinary legacy/memory use stays supported. Reject symlink install leaves; canonical relative/symlink-parent aliases coordinate. The native String-backed database interface requires UTF-8 canonical targets: reject aliases resolving to non-UTF-8 paths with typed `DatabaseLayoutError` before any database preflight/read/recovery/write, including empty pipeline runs. Never convert database operation targets lossily. Preserve exact `PathBuf` lease-only identity; stable coordination-file creation is permitted, but original DB/recovery files and replacement-character neighbors remain untouched and acquired leases are released. UTF-8 Unicode paths and aliases to valid UTF-8 targets remain supported; arbitrary filename-byte database support is not added. Hard-link aliases, old/direct clients and unreliable network locks are outside cooperative support.
 - Never sweep neighbors or read cleanup paths from a marker; never unlink/recreate the stable coordination file. Abandoned quarantines are manual removal only.
 - All Python operations use `UV_NO_SYNC=1 uv`. Smoke before every commit; Rust fmt/clippy/test for Rust changes; mypy baseline comparison; full suite before any future PR push; platform CI before cross-platform support claims.
 - AGENTS files are immutable without explicit request and approval. No version changes, push, merge or release are authorized.
@@ -66,7 +66,7 @@ Tasks are commit-sized review units. Within a long numbered implementation step,
 | `chunkhound/providers/database/duckdb/live_connections.py` | Same-process committed-cursor preflight, not another lock protocol (T3) |
 | `serial_database_provider.py`, `serial_executor.py`, `duckdb_provider.py`, `lancedb_provider.py` under `chunkhound/providers/database/` | Provider acquisition, work admission, teardown and temporary handoff (T3/T5) |
 | `chunkhound/providers/database/duckdb/connection_manager.py`, `chunkhound/database.py` | Additional/partial handle cleanup (T3) |
-| `src/error.rs`, `src/db/duckdb_backend/{mod,compaction}.rs`, `src/pipeline/pipeline.rs` | Direct and run-wide native ownership/error propagation (T4) |
+| `src/error.rs`, `src/db/mod.rs`, `src/db/duckdb_backend/{mod,compaction}.rs`, `src/pipeline/pipeline.rs` | Direct and run-wide native ownership/error propagation; checked canonical database path conversion (T4) |
 | `chunkhound/utils/async_worker.py`, `chunkhound/pipeline_bridge.py`, `chunkhound/services/{indexing_coordinator,rust_pipeline_runner}.py` | Drain worker completion and avoid forked lease inheritance (T5) |
 | `chunkhound/hub/{install,client}.py`, `errors.py`, `artifact.py` | Thin native adapter, policy and postcommit staging state (T7) |
 | `chunkhound/api/cli/parsers/pull_parser.py`, `commands/pull.py`, `main.py`, `commands/run.py`, `utils/rich_output.py` | CLI registration, exits, one pre-registry hook and safe logs (T8) |
@@ -1727,9 +1727,13 @@ git commit -m "fix: retain database ownership through provider handles and final
 
 ### Task T4: Native run-wide and backend ownership with typed failures
 
-**Files:** Modify `src/error.rs`, `src/pipeline/pipeline.rs`, `src/db/duckdb_backend/{mod,compaction}.rs`; create `src/db/duckdb_backend/ownership_tests.rs`, `tests/hub/test_native_pipeline_ownership.py`.
+**Files:** Modify `src/error.rs`, `src/db/mod.rs`, `src/pipeline/pipeline.rs`, `src/db/duckdb_backend/{mod,compaction}.rs`; create `src/db/duckdb_backend/ownership_tests.rs`, `tests/hub/test_native_pipeline_ownership.py`.
 
 **Consumes:** T1 acquire_shared/Lease/LeaseError, existing DbConfig/DbBackend. **Produces:** guarded native work and typed errors. T3/T5 retain provider guard through handoff.
+
+**User-approved I1 correction:** The String-backed native database interface rejects canonical targets that are not UTF-8 with `DbError::Coordination(LeaseError::Layout(_))`, exposed as `DatabaseLayoutError`, before any database preflight/read/recovery/write. Validate at direct open/read and before the pipeline empty shortcut; diff and writer receive the same checked owned String. Keep `Lease::target()` as an exact `PathBuf` identity and do not change lease-only acquisition or broaden arbitrary filename-byte support. A shared checked conversion helper in `src/db/mod.rs` avoids mismatched behavior. Never use `to_string_lossy()` for database operation targets; compaction ATTACH uses the already checked String plus its suffix. Existing stable coordination-file creation is permitted; on refusal, original DB/recovery files and replacement-character neighboring targets stay unchanged and acquired leases are released. Ordinary UTF-8 Unicode, aliases to valid UTF-8 targets and memory remain supported.
+
+Add real Unix-gated raw-byte fixtures: ASCII symlink-parent aliases to non-UTF-8 directories; public pipeline empty/nonempty and absent/existing target cases; direct backend open/read. Include invalid DB/recovery inputs so typed layout errors establish rejection before preflight/recovery, snapshot bytes/mtime and directory entries for both original and replacement-character neighbors (including stable coordination files), and acquire exclusive ownership after failure while the caller object remains alive. Cover positive Unicode/valid-alias/memory behavior. Append RED/GREEN, full covering validation and self-review evidence to `activation-T4-report.md`; re-review I1 before accepting T4. Update this plan, the approved spec and extracted T4/global briefs together; T9 owns creating `docs/hub-client.md`, not this correction.
 
 - [ ] **T4.1 Write failing direct-pipeline contracts.** `tests/hub/test_native_pipeline_ownership.py`:
 
@@ -1847,7 +1851,20 @@ if let Some(hook) = &self.compaction_closed_hook { hook(&db_path); }
 
 No production hooks. `cargo test ownership_tests` => RED missing variant/hook, then unguarded access.
 
-- [ ] **T4.3 Backend guard.** Import `crate::database_coordination::lease::Lease`; add `lease: Option<Lease>` after conn (drop order), initialize None. Move existing open body from crash-recovery comment through Ok into inherent `fn open_owned(&mut self) -> Result<(), DbError>` unchanged; trait open becomes:
+- [ ] **T4.3 Backend guard and exact target conversion.** Add a shared helper to `src/db/mod.rs`:
+
+```rust
+/// Convert a leased canonical target without substituting filesystem bytes.
+pub(crate) fn database_path_string(target: &std::path::Path) -> Result<String, DbError> {
+    target.to_str().map(str::to_owned).ok_or_else(|| {
+        crate::database_coordination::error::LeaseError::Layout(
+            "native database access requires a UTF-8 canonical target",
+        ).into()
+    })
+}
+```
+
+Import `crate::db::database_path_string` at both backend and pipeline call sites. Import `crate::database_coordination::lease::Lease`; add `lease: Option<Lease>` after conn (drop order), initialize None. Move existing open body from crash-recovery comment through Ok into inherent `fn open_owned(&mut self) -> Result<(), DbError>` unchanged; trait open becomes:
 
 ```rust
 fn open(&mut self) -> Result<(), DbError> {
@@ -1856,7 +1873,7 @@ fn open(&mut self) -> Result<(), DbError> {
         let lease = crate::database_coordination::lease::acquire_shared(
             std::path::Path::new(&self.config.db_path)
         )?;
-        self.config.db_path = lease.target().to_string_lossy().into_owned();
+        self.config.db_path = database_path_string(lease.target())?;
         self.lease = Some(lease);
     }
     let result = self.open_owned();
@@ -1875,7 +1892,7 @@ fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
         std::path::Path::new(&self.config.db_path)
     )?;
     let mut config = self.config.clone();
-    config.db_path = lease.target().to_string_lossy().into_owned();
+    config.db_path = database_path_string(lease.target())?;
     let reader = Self::new(config);
     Self::preflight_index_formats(lease.target())?;
     read::read_file_states(&reader)
@@ -1938,6 +1955,8 @@ let run_lease = py.allow_threads(move || {
 })?;
 let db_file = run_lease.target().to_path_buf();
 let result = (|| -> PyResult<PipelineReport> {
+    // Validate before any shortcut or DB preflight/recovery/read/write.
+    let db_path = database_path_string(&db_file)?;
 ```
 
 Keep run body inside closure, remove duplicate target resolution; replace no_db_yet:
@@ -1949,7 +1968,7 @@ let no_db_yet = py.allow_threads(move || {
 });
 ```
 
-Both compute_diff_blocking calls gain final `db_file.clone()` argument; signature gains `db_file: PathBuf`. Remove its target recomputation; memory shortcut checks db_file. Writer uses same target. Remove redundant run() create_dir_all (lease acquisition did it without GIL).
+Both compute_diff_blocking calls gain final `db_path.clone()` argument; signature gains `db_path: String`. Remove its target recomputation and lossy conversion; memory shortcut checks `db_path == ":memory:"`. Writer `DbConfig` consumes the same checked `db_path` String. Keep the exact `db_file: PathBuf` for the existence probe only. Remove redundant run() create_dir_all (lease acquisition did it without GIL). Validation stays inside the result closure so its typed error also takes the explicit no-GIL run-lease release path below.
 
 After the existing final report-construction expression, close the closure and add:
 
@@ -4027,6 +4046,15 @@ Installation supports directory-layout databases only: `chunks.db` or
 single-file path, even one named `chunks.db`, memory and read-only installation
 are unsupported. A symlinked installation target is refused. Ordinary relative
 paths and symlinked parents coordinate through a stable adjacent lock file.
+The native database interface requires the resolved canonical database path to
+be UTF-8. An ASCII alias pointing to a non-UTF-8 target is also refused with
+`DatabaseLayoutError` before database preflight, recovery, read or write, even
+on an empty indexing run. Use a UTF-8 database location; no replacement-character
+neighbor is accessed instead. UTF-8 Unicode paths, aliases to valid UTF-8
+locations and ordinary memory/legacy database use remain supported. This
+restriction does not change exact lease-only path identity. Refusal may create
+the stable coordination file, but leaves original database/recovery files and
+neighboring targets untouched and releases acquired ownership.
 Do not delete that lock file: its existence does not mean a process is live.
 
 Current-version providers, read-only holders and native work share installation
@@ -4112,7 +4140,7 @@ This section records plan coverage, not implementation/test success.
 |---|---|
 | Status/precedence; trusted publisher; retained foundation | Header/global constraints; T7 reuses manifest/transport/artifact/inspection rather than rewriting them |
 | Rust/Python boundaries; safe maintained lock crate/MSRV/GIL | T1 exact fs4 dependency and owned PyO3 handles; T6 filesystem-only core; T7 thin policy adapter |
-| Identity/layout; relative and symlink-parent aliases; read-only cooperation | T1 alias/permission/symlink-leaf tests; T7 configured legacy/memory/read-only refusal; T9 support boundaries |
+| Identity/layout; relative and symlink-parent aliases; read-only cooperation | T1 alias/permission/symlink-leaf tests; T4 checked UTF-8 canonical database target refusal/nonmutation without changing lease identity; T7 configured legacy/memory/read-only refusal; T9 support boundaries |
 | Full Python holder lifetime, lazy/partial/reconnect, compatible users | T2 whole inspection; T3 provider/executor/manager teardown and committed-cursor preflight; original transaction preservation tests retained |
 | Native readers/writers/recovery/compaction; handoff interval | T4 backend and run guards through worker joins; T5 retained provider guard through disconnect/native/reconnect |
 | Cancellation/resources and process inheritance | T5 shield-and-drain actual workers; spawn all parser pools; child-survives-owner contract; T7 stage/lease delay contract |
