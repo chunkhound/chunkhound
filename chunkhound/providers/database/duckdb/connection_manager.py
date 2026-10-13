@@ -38,6 +38,7 @@ from loguru import logger
 from chunkhound.core.exceptions import DatabaseError
 from chunkhound.providers.database.duckdb.live_connections import (  # noqa: E402
     close_duckdb_connection,
+    close_retained_duckdb_connections,
     compatible_duckdb_cursor,
     register_duckdb_connection,
 )
@@ -62,6 +63,7 @@ class DuckDBConnectionManager:
         self.config = config
         self._ownership: DatabaseOwnership | None = None
         self._owns_ownership = False
+        self._retained_connections: list[Any] = []
         self.joined_live_database = False
         # :memory: DBs cannot meaningfully be opened read-only — there is
         # nothing to read. Dropping the flag here keeps callers that inherit a
@@ -94,6 +96,11 @@ class DuckDBConnectionManager:
         """Check if database connection is active."""
         return self.connection is not None
 
+    @property
+    def handles_closed(self) -> bool:
+        """Include failed-close temporary cursors before releasing ownership."""
+        return self.connection is None and not self._retained_connections
+
     def connect(self, *, ownership: DatabaseOwnership | None = None) -> None:
         """Preflight under ownership before opening or recovering the database."""
         if self.connection is not None:
@@ -114,7 +121,9 @@ class DuckDBConnectionManager:
             if not self.is_memory_db and not self._read_only:
                 Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             with compatible_duckdb_cursor(
-                self.db_path, read_only=self._read_only
+                self.db_path,
+                read_only=self._read_only,
+                retained_connections=self._retained_connections,
             ) as live:
                 preflight_duckdb(
                     self.db_path, live_connection=live, ownership=self._ownership
@@ -409,11 +418,14 @@ class DuckDBConnectionManager:
                     self.connection = None
                     log_if_not_mcp("info", "DuckDB connection closed")
         finally:
-            if self.connection is None:
-                if self._owns_ownership and self._ownership is not None:
-                    self._ownership.close()
-                self._ownership = None
-                self._owns_ownership = False
+            try:
+                close_retained_duckdb_connections(self._retained_connections)
+            finally:
+                if self.handles_closed:
+                    if self._owns_ownership and self._ownership is not None:
+                        self._ownership.close()
+                    self._ownership = None
+                    self._owns_ownership = False
 
     def _load_extensions(self) -> None:
         """Load required DuckDB extensions with macOS x86 crash prevention."""

@@ -35,9 +35,24 @@ def close_duckdb_connection(conn: Any) -> None:
                 del _live[key]
 
 
+def close_retained_duckdb_connections(connections: list[Any]) -> None:
+    """Attempt every retained handle; failed closes stay owned for public retry."""
+    failure: BaseException | None = None
+    for conn in list(connections):
+        try:
+            close_duckdb_connection(conn)
+        except BaseException as error:
+            if failure is None:
+                failure = error
+        else:
+            connections.remove(conn)
+    if failure is not None:
+        raise failure
+
+
 @contextmanager
 def compatible_duckdb_cursor(
-    path: Path | str, *, read_only: bool
+    path: Path | str, *, read_only: bool, retained_connections: list[Any]
 ) -> Iterator[Any | None]:
     # Admission spans preflight, backend open and registration. Compaction must
     # not see an empty registry while an open already pins the old database.
@@ -51,11 +66,18 @@ def compatible_duckdb_cursor(
                 except duckdb.ConnectionException:
                     # Public compatibility callers may have closed their handle.
                     _live[_key(path, read_only)].discard(conn)
+        if cursor is not None:
+            # The borrowing manager/provider owns cursor cleanup, not the source
+            # connection or an exception traceback. Failed exit keeps both this
+            # strong reference and registry admission until a successful retry.
+            retained_connections.append(cursor)
+            register_duckdb_connection(path, read_only, cursor)
         try:
             yield cursor
         finally:
             if cursor is not None:
-                cursor.close()
+                close_duckdb_connection(cursor)
+                retained_connections.remove(cursor)
 
 
 @contextmanager

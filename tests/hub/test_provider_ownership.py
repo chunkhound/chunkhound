@@ -3,6 +3,7 @@
 import concurrent.futures
 import os
 import threading
+import weakref
 from pathlib import Path
 
 import duckdb
@@ -11,7 +12,11 @@ import pytest
 
 import chunkhound_native as native
 from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.exceptions import DatabaseError
 from chunkhound.database import Database
+from chunkhound.providers.database.duckdb.connection_manager import (
+    DuckDBConnectionManager,
+)
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 from tests.hub.test_index_format import run_python, snapshot
@@ -454,3 +459,162 @@ def test_failed_public_close_retains_lease_and_allows_cleanup_retry(
         assert fresh.execute("SELECT description FROM schema_version").fetchone() == (
             "retry-durable",
         )
+
+
+def assert_closed_or_collected(handles):
+    """A retained public exception must not keep a usable backend handle alive."""
+    for reference in handles:
+        conn = reference()
+        if conn is not None:
+            with pytest.raises(duckdb.ConnectionException):
+                conn.execute("SELECT 42").fetchone()
+
+
+@pytest.mark.parametrize(
+    "opening", ["lazy", "prepare", "manager", "standalone-manager"]
+)
+def test_cursor_close_failure_retains_install_exclusion_until_cleanup_retry(
+    tmp_path, monkeypatch, opening
+):
+    path = tmp_path / "chunks.db"
+    first = DuckDBProvider(path, base_directory=tmp_path)
+    first.connect()
+    second = (
+        DuckDBConnectionManager(path)
+        if opening == "standalone-manager"
+        else DuckDBProvider(path, base_directory=tmp_path)
+    )
+    close_second = (
+        second.disconnect if opening == "standalone-manager" else second.close
+    )
+    real_connect = duckdb.connect
+    real_cursor = duckdb.DuckDBPyConnection.cursor
+    real_close = duckdb.DuckDBPyConnection.close
+    opened = []
+    cursors = []
+    target_cursor = 2 if opening == "manager" else 1
+
+    def track_connect(database, *args, **kwargs):
+        conn = real_connect(database, *args, **kwargs)
+        if str(database) == str(path):
+            opened.append(weakref.ref(conn))
+        return conn
+
+    def track_cursor(conn, *args, **kwargs):
+        cursor = real_cursor(conn, *args, **kwargs)
+        cursors.append(weakref.ref(cursor))
+        return cursor
+
+    def fail_cursor_close(conn):
+        if len(cursors) >= target_cursor and conn is cursors[target_cursor - 1]():
+            raise OSError("compatible cursor close failed")
+        return real_close(conn)
+
+    monkeypatch.setattr(duckdb, "connect", track_connect)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "cursor", track_cursor)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", fail_cursor_close)
+    try:
+        # Keep the public exception alive throughout final close and installation
+        # admission. Backend tracking uses weak refs, never a test-owned lease.
+        with pytest.raises(OSError, match="compatible cursor close failed") as raised:
+            if opening == "lazy":
+                second.get_stats()
+            else:
+                second.connect()
+        assert cursors[target_cursor - 1]().execute("SELECT 42").fetchone() == (42,)
+        first.close()
+        with pytest.raises(OSError, match="compatible cursor close failed"):
+            close_second()
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", real_close)
+        close_second()
+        close_second()
+        native.acquire_install_lease(str(path), "duckdb").close()
+        assert raised.value is not None
+        assert_closed_or_collected(opened + cursors)
+    finally:
+        monkeypatch.undo()
+        close_second()
+        first.close()
+        # Avoid leaving a known-broken pre-fix handle alive in the RED run.
+        for reference in opened + cursors:
+            if reference() is not None:
+                real_close(reference())
+
+
+@pytest.mark.parametrize("retained", ["failed-open", "cursor-and-open"])
+def test_rust_release_closes_all_retained_handles_or_preserves_lease_for_retry(
+    tmp_path, monkeypatch, retained
+):
+    path = tmp_path / "chunks.db"
+    seed = DuckDBProvider(path, base_directory=tmp_path)
+    seed.connect()
+    if retained == "failed-open":
+        seed.close()
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    real_connect = duckdb.connect
+    real_execute = duckdb.DuckDBPyConnection.execute
+    real_cursor = duckdb.DuckDBPyConnection.cursor
+    real_close = duckdb.DuckDBPyConnection.close
+    handles = []
+
+    def track_connect(database, *args, **kwargs):
+        conn = real_connect(database, *args, **kwargs)
+        if str(database) == str(path) and not kwargs.get("read_only"):
+            handles.append(weakref.ref(conn))
+        return conn
+
+    def track_cursor(conn, *args, **kwargs):
+        cursor = real_cursor(conn, *args, **kwargs)
+        if retained == "cursor-and-open":
+            handles.append(weakref.ref(cursor))
+        return cursor
+
+    def fail_extension(conn, query, *args, **kwargs):
+        if retained == "failed-open" and query == "INSTALL vss" and any(
+            conn is ref() for ref in handles
+        ):
+            raise OSError("extension initialization failed")
+        return real_execute(conn, query, *args, **kwargs)
+
+    def fail_retained_close(conn):
+        if any(conn is ref() for ref in handles):
+            raise OSError("retained backend close failed")
+        return real_close(conn)
+
+    monkeypatch.setattr(duckdb, "connect", track_connect)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "cursor", track_cursor)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", fail_extension)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", fail_retained_close)
+    try:
+        with pytest.raises(OSError, match="retained backend close failed") as raised:
+            provider.get_stats()
+        assert handles
+        assert all(ref() is not None for ref in handles)
+        for reference in handles:
+            assert reference().execute("SELECT 42").fetchone() == (42,)
+        seed.close()
+        with pytest.raises(DatabaseError, match="retained backend close failed"):
+            provider.release_for_rust_pipeline()
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        monkeypatch.undo()
+        provider.release_for_rust_pipeline()
+        assert raised.value is not None
+        assert_closed_or_collected(handles)
+        # Temporary release is not final close; it keeps ownership and a usable
+        # executor so Python can reconnect after the native run.
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        provider.connect()
+        assert provider.get_stats()["files"] == 0
+        provider.close()
+        native.acquire_install_lease(str(path), "duckdb").close()
+    finally:
+        monkeypatch.undo()
+        provider.close()
+        seed.close()
+        for reference in handles:
+            if reference() is not None:
+                real_close(reference())

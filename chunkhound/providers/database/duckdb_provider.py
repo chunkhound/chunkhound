@@ -42,6 +42,7 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
 from chunkhound.providers.database.duckdb.live_connections import (
     close_duckdb_connection,
+    close_retained_duckdb_connections,
     compatible_duckdb_cursor,
     exclusive_duckdb_compaction,
     register_duckdb_connection,
@@ -306,24 +307,29 @@ class DuckDBProvider(SerialDatabaseProvider):
         owned = self._ensure_database_ownership()
         self._connect_initialized = False
         read_only = self._connection_manager.is_read_only
-        with compatible_duckdb_cursor(self.db_path, read_only=read_only) as live:
-            preflight_duckdb(self.db_path, live_connection=live, ownership=owned)
-            conn = duckdb.connect(str(self.db_path), read_only=read_only)
-            # Represent the handle before extension setup can fail. Failed-close
-            # handles must also exclude filesystem replacement by other providers.
-            register_duckdb_connection(self.db_path, read_only, conn)
-            try:
+        conn = None
+        try:
+            with compatible_duckdb_cursor(
+                self.db_path,
+                read_only=read_only,
+                retained_connections=self._failed_open_connections,
+            ) as live:
+                preflight_duckdb(self.db_path, live_connection=live, ownership=owned)
+                conn = duckdb.connect(str(self.db_path), read_only=read_only)
+                # Strong ownership and registry admission precede extension setup
+                # and survive a failure when the compatible cursor context exits.
+                self._failed_open_connections.append(conn)
+                register_duckdb_connection(self.db_path, read_only, conn)
                 conn.execute("INSTALL vss")
                 conn.execute("LOAD vss")
                 conn.execute("SET hnsw_enable_experimental_persistence = true")
-                return conn
-            except BaseException:
-                try:
-                    close_duckdb_connection(conn)
-                except BaseException:
-                    self._failed_open_connections.append(conn)
-                    raise
-                raise
+        except BaseException:
+            if conn is not None:
+                close_duckdb_connection(conn)
+                self._failed_open_connections.remove(conn)
+            raise
+        self._failed_open_connections.remove(conn)
+        return conn
 
     def _create_connection_manager_connection(self) -> Any:
         """Create the public health/compatibility connection."""
@@ -485,7 +491,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             preflight_duckdb(self.db_path, live_connection=live_conn, ownership=owned)
         else:
             with compatible_duckdb_cursor(
-                self.db_path, read_only=self._connection_manager.is_read_only
+                self.db_path,
+                read_only=self._connection_manager.is_read_only,
+                retained_connections=self._failed_open_connections,
             ) as compatible:
                 preflight_duckdb(
                     self.db_path, live_connection=compatible, ownership=owned
@@ -661,7 +669,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     def release_for_rust_pipeline(self) -> None:
         """Close ALL DuckDB connections without shutting down the executor.
 
-        Overrides SerialDatabaseProvider to also close _connection_manager.connection.
+        Includes manager handles and retained failed-open/temporary cursor handles.
         If only the executor's thread-local connection is closed, Python's DuckDB
         C-instance keeps the file open in its buffer pool.  When Rust then writes new
         data and Python reconnects, duckdb.connect() returns a connection to the same
@@ -669,7 +677,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         freshly-written data from disk.
 
         Raises:
-            DatabaseError: if either connection could not be closed. The caller
+            DatabaseError: if any connection could not be closed. The caller
                 must not proceed to hand write ownership to the Rust pipeline in
                 that case — Python's DuckDB connection(s) would still be open on
                 the same file Rust is about to write to.
@@ -685,13 +693,17 @@ class DuckDBProvider(SerialDatabaseProvider):
             failures.append(f"executor connection: {e}")
         finally:
             try:
-                # Close the connection manager's connection so Python's DuckDB
-                # fully releases the file before Rust takes ownership.
-                # skip_checkpoint=True: executor already checkpointed above.
-                self._connection_manager.disconnect(skip_checkpoint=True)
+                # Use exactly the same retained-handle cleanup as final close;
+                # a successful handoff must leave no Python cached instance live.
+                self._close_additional_connections()
             except Exception as e:
-                failures.append(f"connection manager: {e}")
+                failures.append(f"additional connections: {e}")
 
+        if (
+            not self._executor.handles_closed
+            or not self._additional_connections_closed()
+        ):
+            failures.append("Python DuckDB handles remain open")
         if failures:
             raise DatabaseError(
                 operation="release_for_rust_pipeline",
@@ -706,13 +718,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             self._connection_manager.disconnect(skip_checkpoint=True)
         finally:
-            while self._failed_open_connections:
-                close_duckdb_connection(self._failed_open_connections[-1])
-                self._failed_open_connections.pop()
+            close_retained_duckdb_connections(self._failed_open_connections)
 
     def _additional_connections_closed(self) -> bool:
         return (
-            self._connection_manager.connection is None
+            self._connection_manager.handles_closed
             and not self._failed_open_connections
         )
 
