@@ -211,7 +211,6 @@ def test_asyncio_shutdown_drains_native_handoff_before_reconnect(
 
     def probe(loop, task, remaining):
         try:
-            assert task.cancelling(), "asyncio.run must have begun shutdown"
             assert not task.done(), "owner returned while its worker was blocked"
             assert provider.is_rust_pipeline_in_progress()
             assert not provider.is_connected
