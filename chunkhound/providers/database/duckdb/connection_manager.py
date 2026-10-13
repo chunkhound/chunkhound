@@ -130,10 +130,10 @@ class DuckDBConnectionManager:
                     self.connection = duckdb.connect(
                         str(self.db_path), read_only=self._read_only
                     )
-                self._load_extensions()
                 register_duckdb_connection(
                     self.db_path, self._read_only, self.connection
                 )
+                self._load_extensions()
         except BaseException:
             self.disconnect(skip_checkpoint=True)
             raise

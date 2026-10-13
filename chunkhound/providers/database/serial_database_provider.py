@@ -14,6 +14,7 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
 from chunkhound.providers.database.ownership import DatabaseOwnership
 from chunkhound.providers.database.serial_executor import (
+    DatabaseOperationTimeoutError,
     DatabaseRustPipelineInProgressError,
     SerialDatabaseExecutor,
 )
@@ -63,6 +64,7 @@ class SerialDatabaseProvider(ABC):
             db_path if str(db_path) == ":memory:" else Path(db_path).absolute()
         )
         self._ownership_lock = threading.RLock()
+        self._close_lock = threading.RLock()
         self._database_ownership: DatabaseOwnership | None = None
         self._closed = False
         self._closing = False
@@ -168,6 +170,10 @@ class SerialDatabaseProvider(ABC):
 
             logger.info(f"{self.__class__.__name__} initialization complete")
 
+        except DatabaseOperationTimeoutError:
+            # The worker is still owned. Only explicit final close may drain it
+            # and release the lease after a caller-side deadline.
+            raise
         except Exception as e:
             logger.error(f"{self.__class__.__name__} connection failed: {e}")
             self.disconnect(skip_checkpoint=True)
@@ -182,32 +188,36 @@ class SerialDatabaseProvider(ABC):
 
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Drain admitted work and release ownership only after all handles close."""
-        with self._ownership_lock:
-            if self._closed:
-                return
-            if self.is_rust_pipeline_in_progress():
-                raise DatabaseRustPipelineInProgressError(
-                    "Wait for the Rust indexing operation to finish before closing"
-                )
-            self._closing = True
-        try:
-            self._executor.disconnect_provider(self, skip_checkpoint)
-        finally:
+        # Serialize the entire close, including additional handles and lease
+        # release. This is separate from ownership: admitted workers need that
+        # mutex while the close caller drains them.
+        with self._close_lock:
+            with self._ownership_lock:
+                if self._closed:
+                    return
+                if self.is_rust_pipeline_in_progress():
+                    raise DatabaseRustPipelineInProgressError(
+                        "Wait for the Rust indexing operation to finish before closing"
+                    )
+                self._closing = True
             try:
-                # Never close the manager alongside a still-running DB worker.
-                if self._executor.finalization_complete:
-                    self._close_additional_connections()
+                self._executor.disconnect_provider(self, skip_checkpoint)
             finally:
-                with self._ownership_lock:
-                    if (
-                        self._executor.finalization_complete
-                        and self._executor.handles_closed
-                        and self._additional_connections_closed()
-                    ):
-                        self._closed = True
-                        if self._database_ownership is not None:
-                            self._database_ownership.close()
-                            self._database_ownership = None
+                try:
+                    # Never close the manager alongside a still-running DB worker.
+                    if self._executor.finalization_complete:
+                        self._close_additional_connections()
+                finally:
+                    with self._ownership_lock:
+                        if (
+                            self._executor.finalization_complete
+                            and self._executor.handles_closed
+                            and self._additional_connections_closed()
+                        ):
+                            self._closed = True
+                            if self._database_ownership is not None:
+                                self._database_ownership.close()
+                                self._database_ownership = None
 
     def release_for_rust_pipeline(self) -> None:
         """Close the DuckDB connection without shutting down the executor.

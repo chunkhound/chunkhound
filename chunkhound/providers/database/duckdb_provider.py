@@ -43,6 +43,7 @@ from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepos
 from chunkhound.providers.database.duckdb.live_connections import (
     close_duckdb_connection,
     compatible_duckdb_cursor,
+    exclusive_duckdb_compaction,
     register_duckdb_connection,
 )
 from chunkhound.providers.database.index_format import preflight_duckdb
@@ -52,6 +53,7 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
+    DatabaseOperationTimeoutError,
     DatabaseRustPipelineInProgressError,
     DatabaseTemporarilyUnavailableError,
     _executor_local,
@@ -307,19 +309,21 @@ class DuckDBProvider(SerialDatabaseProvider):
         with compatible_duckdb_cursor(self.db_path, read_only=read_only) as live:
             preflight_duckdb(self.db_path, live_connection=live, ownership=owned)
             conn = duckdb.connect(str(self.db_path), read_only=read_only)
-        try:
-            conn.execute("INSTALL vss")
-            conn.execute("LOAD vss")
-            conn.execute("SET hnsw_enable_experimental_persistence = true")
+            # Represent the handle before extension setup can fail. Failed-close
+            # handles must also exclude filesystem replacement by other providers.
             register_duckdb_connection(self.db_path, read_only, conn)
-            return conn
-        except BaseException:
             try:
-                close_duckdb_connection(conn)
+                conn.execute("INSTALL vss")
+                conn.execute("LOAD vss")
+                conn.execute("SET hnsw_enable_experimental_persistence = true")
+                return conn
             except BaseException:
-                self._failed_open_connections.append(conn)
+                try:
+                    close_duckdb_connection(conn)
+                except BaseException:
+                    self._failed_open_connections.append(conn)
+                    raise
                 raise
-            raise
 
     def _create_connection_manager_connection(self) -> Any:
         """Create the public health/compatibility connection."""
@@ -408,7 +412,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             super().connect()
             self._connect_initialized = True
 
-        except DatabaseTemporarilyUnavailableError:
+        except (DatabaseTemporarilyUnavailableError, DatabaseOperationTimeoutError):
             raise
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
@@ -1590,6 +1594,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         if state.get("transaction_active", False):
             raise RuntimeError("Cannot compact database while a transaction is active")
 
+        # Check and reserve admission BEFORE checkpoint/close/restore can mutate
+        # anything. Keep opens excluded through replacement and reconnection.
+        with exclusive_duckdb_compaction(
+            self.db_path, (conn, self._connection_manager.connection)
+        ):
+            return self._compact_database_exclusive(conn, state)
+
+    def _compact_database_exclusive(self, conn: Any, state: dict[str, Any]) -> int:
+        """Rebuild while the same-process open/swap admission gate is held."""
         self._executor.set_compaction_in_progress(True)
         _t0 = time.monotonic()
         db_path = Path(cast(str, self._connection_manager.db_path))

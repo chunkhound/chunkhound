@@ -19,6 +19,10 @@ from loguru import logger
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 
+class DatabaseOperationTimeoutError(TimeoutError):
+    """The caller's wait expired; submitted database work still owns its handles."""
+
+
 class DatabaseTemporarilyUnavailableError(RuntimeError):
     """Base for errors raised when the DB is fast-failed because some other
     owner (compaction, Rust pipeline) currently controls it."""
@@ -149,6 +153,7 @@ class SerialDatabaseExecutor:
         self._rust_pipeline_in_progress = threading.Event()
         self._execute_timeout_seconds = execute_timeout_seconds
         self._submission_lock = threading.RLock()
+        self._finalization_lock = threading.RLock()
         self._accepting = True
         self._joined = False
         self.handles_closed = True
@@ -246,6 +251,22 @@ class SerialDatabaseExecutor:
             conn = None
             self.handles_closed = not hasattr(_executor_local, "connection")
 
+    def _wait_for_operation(
+        self,
+        future: concurrent.futures.Future[Any],
+        operation_name: str,
+        timeout: float | None,
+    ) -> Any:
+        # Future.result(timeout) uses the same TimeoutError as a backend failure.
+        # Observe completion separately so backend errors retain their identity,
+        # even when the worker finishes at the caller's deadline boundary.
+        done, _ = concurrent.futures.wait((future,), timeout=timeout)
+        if future not in done:
+            raise DatabaseOperationTimeoutError(
+                f"Operation '{operation_name}' timed out"
+            )
+        return future.result()
+
     def prepare_connection(self, provider: Any) -> bool:
         """Check reconnect state on its owning thread without opening a connection.
 
@@ -254,7 +275,9 @@ class SerialDatabaseExecutor:
         """
         self._raise_if_db_unavailable_before_submit("connect")
         future = self._submit(provider._executor_prepare_connection)
-        return bool(future.result(timeout=self.resolve_timeout("connect")))
+        return bool(
+            self._wait_for_operation(future, "connect", self.resolve_timeout("connect"))
+        )
 
     def execute_sync(
         self,
@@ -301,15 +324,17 @@ class SerialDatabaseExecutor:
         future = self._submit(executor_operation)
         timeout_s = self.resolve_timeout(operation_name)
         try:
-            result = future.result(
-                timeout=None if operation_name == "disconnect" else timeout_s
+            result = self._wait_for_operation(
+                future,
+                operation_name,
+                None if operation_name == "disconnect" else timeout_s,
             )
-        except concurrent.futures.TimeoutError:
+        except DatabaseOperationTimeoutError:
             logger.error(
                 f"Database operation '{operation_name}' timed out after "
                 f"{timeout_s} seconds"
             )
-            raise TimeoutError(f"Operation '{operation_name}' timed out")
+            raise
 
         self._maybe_run_sampled_auto_compaction(provider, operation_name)
         return result
@@ -375,6 +400,11 @@ class SerialDatabaseExecutor:
 
     def disconnect_provider(self, provider: Any, skip_checkpoint: bool) -> None:
         """Drain queued work and close provider handles before joining the worker."""
+        with self._finalization_lock:
+            self._disconnect_provider(provider, skip_checkpoint)
+
+    def _disconnect_provider(self, provider: Any, skip_checkpoint: bool) -> None:
+        """One finalization attempt, serialized through worker join publication."""
         with self._submission_lock:
             if self._joined:
                 return
@@ -395,7 +425,12 @@ class SerialDatabaseExecutor:
                         self.clear_thread_local()  # This is the WORKER thread.
 
             # Final close alone bypasses ordinary admission/compaction/Rust guards.
-            if self._finalization is None or self._finalization.done():
+            if self._finalization is None or (
+                self._finalization.done() and not self.handles_closed
+            ):
+                # Only a retained handle needs another worker attempt. Reuse a
+                # completed successful future if an earlier caller was interrupted
+                # before joining; never resubmit after successful finalization.
                 self._finalization = self._db_executor.submit(finish)
             future = self._finalization
         try:
@@ -411,18 +446,19 @@ class SerialDatabaseExecutor:
         """Close executor-owned handles; providers must use disconnect_provider."""
         if not wait:
             raise ValueError("Database executor shutdown requires wait=True")
-        if self._joined:
-            return
-        with self._submission_lock:
-            self._accepting = False
-        try:
-            self._force_close_connections()
-        finally:
-            # Retained handles require a usable executor for cleanup retry.
-            if self.handles_closed:
-                self._db_executor.shutdown(wait=True)
-                self._joined = True
-                self.finalization_complete = True
+        with self._finalization_lock:
+            if self._joined:
+                return
+            with self._submission_lock:
+                self._accepting = False
+            try:
+                self._force_close_connections()
+            finally:
+                # Retained handles require a usable executor for cleanup retry.
+                if self.handles_closed:
+                    self._db_executor.shutdown(wait=True)
+                    self._joined = True
+                    self.finalization_complete = True
 
     def _force_close_connections(self) -> None:
         """Force close thread-local handles without hiding close failures."""
