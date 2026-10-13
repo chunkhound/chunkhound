@@ -3,12 +3,15 @@ use std::path::PathBuf;
 
 use duckdb::Connection;
 
-use crate::db::DbConfig;
+use crate::database_coordination::lease::Lease;
+use crate::db::{DbBackend, DbConfig};
 use crate::error::DbError;
 use crate::types::{BatchResult, DbFileEntry, DbWriterBatch};
 
 mod compaction;
 mod hnsw;
+#[cfg(test)]
+mod ownership_tests;
 mod read;
 mod recovery;
 mod schema;
@@ -16,9 +19,14 @@ mod write;
 
 pub(crate) use read::check_disk_usage_limit;
 
+#[cfg(test)]
+type CompactionClosedHook = Box<dyn Fn(&std::path::Path) + Send>;
+
 pub struct DuckDbHnswBackend {
     config: DbConfig,
     conn: Option<Connection>,
+    // Declaration order keeps the connection's implicit drop ahead of ownership release.
+    lease: Option<Lease>,
     has_vss: bool,
     hnsw_bulk_mode: bool,
     // Dims for which embeddings_N tables are known to exist in this session.
@@ -31,6 +39,8 @@ pub struct DuckDbHnswBackend {
     // so we can assert close() still restores HNSW after a partial drop.
     #[cfg(test)]
     fail_drop_after: Option<usize>,
+    #[cfg(test)]
+    compaction_closed_hook: Option<CompactionClosedHook>,
 }
 
 impl DuckDbHnswBackend {
@@ -38,12 +48,15 @@ impl DuckDbHnswBackend {
         DuckDbHnswBackend {
             config,
             conn: None,
+            lease: None,
             has_vss: false,
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
             saved_hnsw_metrics: HashMap::new(),
             #[cfg(test)]
             fail_drop_after: None,
+            #[cfg(test)]
+            compaction_closed_hook: None,
         }
     }
 
@@ -52,14 +65,8 @@ impl DuckDbHnswBackend {
             .as_ref()
             .ok_or_else(|| DbError::Other("not open".into()))
     }
-}
 
-impl crate::db::DbBackend for DuckDbHnswBackend {
-    fn open(&mut self) -> Result<(), DbError> {
-        // Idempotent: already open on Windows (exclusive file lock) would error on re-open.
-        if self.conn.is_some() {
-            return Ok(());
-        }
+    fn open_owned(&mut self) -> Result<(), DbError> {
         // Crash recovery: check for swap_intent file (Invariant 17)
         let db_path = PathBuf::from(&self.config.db_path);
         Self::preflight_index_formats(&db_path)?;
@@ -103,6 +110,26 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         self.ensure_all_hnsw_indexes()?;
         Ok(())
     }
+}
+
+impl crate::db::DbBackend for DuckDbHnswBackend {
+    fn open(&mut self) -> Result<(), DbError> {
+        if self.conn.is_some() {
+            return Ok(());
+        }
+        if self.lease.is_none() {
+            let lease = crate::database_coordination::lease::acquire_shared(std::path::Path::new(
+                &self.config.db_path,
+            ))?;
+            self.config.db_path = lease.target().to_string_lossy().into_owned();
+            self.lease = Some(lease);
+        }
+        let result = self.open_owned();
+        if result.is_err() {
+            let _ = self.close();
+        }
+        result
+    }
 
     fn close(&mut self) -> Result<(), DbError> {
         // Collect the first error encountered but always drop the connection so the
@@ -122,6 +149,7 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
             }
         }
         self.conn = None;
+        self.lease = None;
         result
     }
 
@@ -162,9 +190,14 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
     }
 
     fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
-        // Diff reads recover independently, before the writer's open checkpoint.
-        Self::preflight_index_formats(&PathBuf::from(&self.config.db_path))?;
-        read::read_file_states(self)
+        let lease = crate::database_coordination::lease::acquire_shared(std::path::Path::new(
+            &self.config.db_path,
+        ))?;
+        let mut config = self.config.clone();
+        config.db_path = lease.target().to_string_lossy().into_owned();
+        let reader = Self::new(config);
+        Self::preflight_index_formats(lease.target())?;
+        read::read_file_states(&reader)
     }
 }
 

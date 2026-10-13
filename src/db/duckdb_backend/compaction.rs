@@ -52,6 +52,10 @@ impl DuckDbHnswBackend {
 
         conn.execute_batch("CHECKPOINT")?;
         self.conn = None;
+        #[cfg(test)]
+        if let Some(hook) = &self.compaction_closed_hook {
+            hook(&db_path);
+        }
 
         // A previous crashed compact can leave .old / .compact that would
         // make Windows rename(live→.old) fail. Live is the good copy here.

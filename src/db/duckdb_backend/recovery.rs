@@ -738,6 +738,8 @@ mod crash_recovery_tests {
 
         std::fs::write(&compact_path, "incomplete compact").expect("write compact");
         std::fs::write(&intent_path, "phase1").expect("write intent");
+        // The .old fixture's lease is distinct; baseline the primary stable file too.
+        drop(crate::database_coordination::lease::acquire_shared(&db_path).expect("primary lease"));
         let before = snapshot_files(tmp.path());
 
         let mut backend = DuckDbHnswBackend::new(super::super::test_support::config(

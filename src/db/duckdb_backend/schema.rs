@@ -438,6 +438,8 @@ mod format_tests {
     }
 
     fn assert_refused_unchanged(root: &Path, live: &Path, expected: &str) {
+        // Include the mandatory stable coordination file in the no-mutation baseline.
+        drop(crate::database_coordination::lease::acquire_shared(live).expect("primary lease"));
         let before = snapshot(root);
         let mut backend = DuckDbHnswBackend::new(config(live.to_string_lossy().into_owned()));
         let message = backend
@@ -476,6 +478,8 @@ mod format_tests {
         }
         checkpointed(&sidecar(&live, ".old"), 2);
         std::fs::write(sidecar(&live, ".swap_intent"), "phase2").expect("intent");
+        // Direct reads acquire the primary lease before any recovery inspection.
+        drop(crate::database_coordination::lease::acquire_shared(&live).expect("primary lease"));
         let before = snapshot(tmp.path());
         let backend = DuckDbHnswBackend::new(config(live.to_string_lossy().into_owned()));
         let result = backend.read_file_states();
@@ -886,6 +890,8 @@ mod format_tests {
         let candidate = sidecar(&live, ".compact");
         native_process("produce", &candidate, "hnsw_create", true, None);
         std::fs::write(sidecar(&live, ".swap_intent"), "phase2").expect("intent");
+        // This outer baseline must include the stable file too, not only the helper's.
+        drop(crate::database_coordination::lease::acquire_shared(&live).expect("primary lease"));
         let before = snapshot(&originals);
         // Disposable copies are ONLY a fixture-health proof, never production recovery.
         let copy = tmp.path().join("disposable.db");
