@@ -6,6 +6,7 @@ by Rust.
 """
 
 import atexit
+import contextvars
 import functools
 import multiprocessing
 import os
@@ -66,8 +67,8 @@ def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
     closed on the *same* loop they were bound to, via
     ``loop.run_until_complete`` -- which requires this thread to have no
     running loop of its own. The sole caller, ``run_rust_pipeline()``,
-    guarantees that by invoking this via ``asyncio.to_thread()``, which
-    always runs on a fresh worker thread.
+    guarantees that by submitting this to the event loop's executor, off
+    the thread running the caller's event loop.
 
     Each provider's shutdown is individually bounded by
     ``_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS`` -- a hung close (e.g. a
@@ -694,8 +695,8 @@ async def run_rust_pipeline(
 
     Called from IndexingCoordinator.process_directory() Phase 3. The Rust
     pipeline is the default path; set ``CHUNKHOUND_USE_RUST=0`` to opt out
-    and fall back to the Python path.  Offloads the call to
-    ``asyncio.to_thread`` so the event loop stays responsive.
+    and fall back to the Python path. Offloads the call to the event loop's
+    executor so the event loop stays responsive.
 
     Args:
         files_to_process: List of (path, content_hash) tuples from change detection.
@@ -723,8 +724,8 @@ async def run_rust_pipeline(
     )
 
     # Resolved here, on the calling task's own thread, before anything hands
-    # off to asyncio.to_thread or the Rust rayon pool -- contextvars cross
-    # asyncio Task boundaries but not OS thread boundaries, so this must be
+    # off to the executor or the Rust rayon pool -- the executor submission
+    # copies contextvars, but Rust-created threads do not, so this must be
     # read now, then threaded through explicitly from here on (both into
     # IndexingPipeline.run()'s own analytics_recorder/analytics_handle
     # params for the native embed path, and into embed_batch_callback's
@@ -878,9 +879,13 @@ async def run_rust_pipeline(
     try:
         pipeline = IndexingPipeline(config_dict)
 
-        # Run pipeline in thread pool — pipeline releases the GIL internally
-        worker = asyncio.create_task(
-            asyncio.to_thread(
+        # Retain the executor completion future, not a to_thread Task: shutdown
+        # cancels all Tasks independently, without stopping their worker threads.
+        # Copy the caller's context just as to_thread does.
+        worker = asyncio.get_running_loop().run_in_executor(
+            None,
+            contextvars.copy_context().run,
+            functools.partial(
                 pipeline.run,
                 files=file_entries,
                 parse_batch_callback=functools.partial(
@@ -928,8 +933,11 @@ async def run_rust_pipeline(
         # _shutdown_embed_thread_resources. Passing embed_cache (rather than
         # a shared/global cache) ensures this can never close a
         # concurrently-running sibling run's providers/loops.
-        cleanup = asyncio.create_task(
-            asyncio.to_thread(_shutdown_embed_thread_resources, embed_cache)
+        cleanup = asyncio.get_running_loop().run_in_executor(
+            None,
+            contextvars.copy_context().run,
+            _shutdown_embed_thread_resources,
+            embed_cache,
         )
         await await_worker_completion(cleanup)
 

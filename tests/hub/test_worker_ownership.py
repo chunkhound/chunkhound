@@ -2,6 +2,7 @@
 
 import asyncio
 import concurrent.futures
+import contextvars
 import os
 import signal
 import subprocess
@@ -146,6 +147,156 @@ async def test_native_cancellation_drains_before_reconnect(
         provider.close()
 
 
+@pytest.mark.parametrize("paused_stage", ["parse", "cleanup"])
+def test_asyncio_shutdown_drains_native_handoff_before_reconnect(
+    tmp_path, monkeypatch, paused_stage
+):
+    """asyncio.run cancels every Task, not just the indexing owner."""
+    import chunkhound.pipeline_bridge as bridge
+    from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
+
+    path, source = tmp_path / "chunks.db", tmp_path / "example.py"
+    source.write_text("def example():\n    return 42\n")
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    started, release = threading.Event(), threading.Event()
+    parsed, cleaned = threading.Event(), threading.Event()
+    resource_loop = asyncio.new_event_loop()
+    failures, handoff_states, cleanup_states = [], [], []
+    actual_parse = bridge.parse_batch_callback
+    actual_cleanup = bridge._shutdown_embed_thread_resources
+
+    def parse(*args, **kwargs):
+        if paused_stage == "parse":
+            started.set()
+            assert release.wait(20)
+        try:
+            return actual_parse(*args, **kwargs)
+        finally:
+            parsed.set()
+
+    def cleanup(cache):
+        cleanup_states.append(parsed.is_set())
+        # A real per-run event loop must remain open until cleanup completes.
+        cache.loops[threading.get_ident()] = resource_loop
+        if paused_stage == "cleanup":
+            started.set()
+            assert release.wait(20)
+        try:
+            actual_cleanup(cache)
+        finally:
+            cleaned.set()
+
+    monkeypatch.setattr(bridge, "parse_batch_callback", parse)
+    monkeypatch.setattr(bridge, "_shutdown_embed_thread_resources", cleanup)
+
+    async def owner():
+        try:
+            await run_rust_indexing_phase(
+                db=provider,
+                config=None,
+                embedding_provider=None,
+                progress=None,
+                files_to_process=[(source, None)],
+                directory=tmp_path,
+                force_reindex=True,
+                do_cleanup=True,
+                diff_task=None,
+                parse_task=None,
+            )
+        finally:
+            handoff_states.append(
+                (parsed.is_set(), cleaned.is_set(), resource_loop.is_closed())
+            )
+
+    def probe(loop, task, remaining):
+        try:
+            assert task.cancelling(), "asyncio.run must have begun shutdown"
+            assert not task.done(), "owner returned while its worker was blocked"
+            assert provider.is_rust_pipeline_in_progress()
+            assert not provider.is_connected
+            assert not cleaned.is_set() and not resource_loop.is_closed()
+            if paused_stage == "parse":
+                assert not cleanup_states, "cleanup overlapped the native run"
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+            if remaining:
+                # Repeat shutdown-style cancellation, including any worker Tasks.
+                for pending in asyncio.all_tasks(loop):
+                    pending.cancel()
+                loop.call_later(0.02, probe, loop, task, remaining - 1)
+                return
+        except BaseException as error:
+            failures.append(error)
+        release.set()
+
+    async def main():
+        task = asyncio.create_task(owner())
+        assert await asyncio.to_thread(started.wait, 15)
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.02, probe, loop, task, 2)
+        # Returning triggers real asyncio.run all-Tasks cancellation.
+        return task
+
+    try:
+        task = asyncio.run(main())
+        if failures:
+            raise failures[0]
+        assert task.cancelled()
+        assert cleanup_states == [True]
+        assert handoff_states == [(True, True, True)]
+        assert provider.is_connected and not provider.is_rust_pipeline_in_progress()
+        assert provider.get_stats()["files"] == 1
+    finally:
+        release.set()
+        resource_loop.close()
+        provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()
+
+
+@pytest.mark.asyncio
+async def test_native_progress_and_resource_shutdown_keep_caller_context(
+    tmp_path, monkeypatch
+):
+    import chunkhound.pipeline_bridge as bridge
+
+    source = tmp_path / "example.py"
+    source.write_text("def example():\n    return 42\n")
+    request = contextvars.ContextVar("indexing_request", default=None)
+    observed = {}
+    actual_cleanup = bridge._shutdown_embed_thread_resources
+
+    class Client:
+        async def shutdown(self):
+            observed["shutdown"] = request.get()
+
+    def cleanup(cache):
+        # Stand in only for the external HTTP client; cleanup and loop are real.
+        tid = threading.get_ident()
+        cache.providers[tid] = Client()
+        cache.loops[tid] = asyncio.new_event_loop()
+        actual_cleanup(cache)
+
+    def progress(phase, *_):
+        if phase == "done":  # Native calls this on the submitting worker thread.
+            observed["progress"] = request.get()
+
+    monkeypatch.setattr(bridge, "_shutdown_embed_thread_resources", cleanup)
+    token = request.set("caller-request")
+    try:
+        result = await bridge.run_rust_pipeline(
+            [(source, None)],
+            db_path=tmp_path,
+            project_root=tmp_path,
+            skip_embeddings=True,
+            progress_callback=progress,
+        )
+    finally:
+        request.reset(token)
+    assert result["total_files"] == 1
+    assert observed == {"progress": "caller-request", "shutdown": "caller-request"}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="SIGKILL owner/child contract")
 def test_parser_worker_does_not_inherit_owner_lease(tmp_path):
     script = tmp_path / "owner.py"
@@ -220,7 +371,7 @@ async def test_worker_completion_preserves_result_or_error(tmp_path, worker_fail
         return 42
 
     try:
-        worker = asyncio.create_task(asyncio.to_thread(work))
+        worker = asyncio.get_running_loop().run_in_executor(None, work)
         if worker_fails:
             with pytest.raises(OSError) as caught:
                 await await_worker_completion(worker)

@@ -7,7 +7,12 @@ T = TypeVar("T")
 
 
 async def await_worker_completion(future: asyncio.Future[T]) -> T:
-    """Drain retained worker; cancellation wins after retrieving its result/error."""
+    """Drain retained worker; cancellation wins after retrieving its result/error.
+
+    Pass an executor completion future, not an independently cancellable Task
+    (e.g. to_thread): a cancelled Task need not mean its thread has stopped.
+    Keep the future private; all awaiting owners must use this shielded drain.
+    """
     cancellation: asyncio.CancelledError | None = None
     while not future.done():
         try:

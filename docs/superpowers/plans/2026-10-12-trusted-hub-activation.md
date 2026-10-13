@@ -2114,11 +2114,18 @@ return await await_worker_completion(future)
 
 Ordinary sync execute/prepare retain deadlines and lease after timeout; disconnect drains without timeout.
 
-- [ ] **T5.5 Keep native run/cache cleanup inside the cancellation-safe boundary and preserve typed failures.** Import the helper in `pipeline_bridge.py`. Inside `run_rust_pipeline` import the four native exception classes alongside `IndexingPipeline`. Change `report = await asyncio.to_thread(` to `worker = asyncio.create_task(asyncio.to_thread(`, keep the complete existing native call arguments, close with `))`, then add:
+- [ ] **T5.5 Keep native run/cache cleanup inside the cancellation-safe boundary and preserve typed failures.** Import `contextvars` and the helper in `pipeline_bridge.py`. Inside `run_rust_pipeline` import the four native exception classes alongside `IndexingPipeline`. Retain the actual executor completion future for both native run and cleanup, not `create_task(to_thread(...))`: `asyncio.run` shutdown independently cancels all Tasks without stopping their threads. Copy the caller's context to preserve `to_thread` semantics. Submit `pipeline.run` with its complete existing arguments via `functools.partial`:
 
 ```python
+worker = asyncio.get_running_loop().run_in_executor(
+    None,
+    contextvars.copy_context().run,
+    functools.partial(pipeline.run, ...),  # Preserve all existing native arguments.
+)
 report = await await_worker_completion(worker)
 ```
+
+This user-approved I1 correction supersedes the original retained-Task prescription. Do not fix it with another shield around a cancellable Task. Add real `asyncio.run` all-Tasks shutdown contracts at native run and cleanup boundaries: cleanup cannot overlap native work, and runner reconnect/resource release cannot precede actual cleanup completion. Preserve repeated cancellation, cancellation outcome and caller-context propagation.
 
 Before its generic exception wrapper add:
 
@@ -2135,8 +2142,11 @@ except (
 Leave generic non-coordination failures as the existing `RustPipelineError`. Replace cleanup await with:
 
 ```python
-cleanup = asyncio.create_task(
-    asyncio.to_thread(_shutdown_embed_thread_resources, embed_cache)
+cleanup = asyncio.get_running_loop().run_in_executor(
+    None,
+    contextvars.copy_context().run,
+    _shutdown_embed_thread_resources,
+    embed_cache,
 )
 await await_worker_completion(cleanup)
 ```
