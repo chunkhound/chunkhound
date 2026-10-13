@@ -4,6 +4,7 @@
 // fires in the proc-macro expansion, not in the function's textual body. Fixed upstream in PyO3 0.23+.
 #![allow(clippy::useless_conversion)]
 mod analytics;
+mod database_coordination;
 mod db;
 mod embed;
 mod error;
@@ -474,6 +475,7 @@ fn chunkhound_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<pipeline::PipelineReport>()?;
     m.add_class::<pipeline::ParseCallConfig>()?;
     m.add_class::<analytics::AnalyticsRecorder>()?;
+    database_coordination::python::register(m)?;
 
     Ok(())
 }
