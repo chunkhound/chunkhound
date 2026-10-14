@@ -134,9 +134,36 @@ Settings are resolved in this order (highest priority first):
 
 Global defaults let you maintain shared settings (e.g. embedding provider + API key, common exclude patterns, LLM roles) in a single file so you do not need to copy `.chunkhound.json` into every project. Any project-local `.chunkhound.json` (or explicit config/CLI) overrides values from the global layer. Nested objects (embedding, llm, research, database, ...) are deep-merged: specify only the keys you want to change and siblings from global survive. Lists such as `indexing.exclude` / `include` from a higher layer fully replace lower ones (built-in defaults are still applied on top; see Global Defaults above for details and examples).
 
-## Central Indexing Hub (Client Foundation)
+## Central Indexing Hub
 
-The hub client foundation accepts a full manifest URL in `hub.url` or `CHUNKHOUND_HUB__URL`. **Pull/install activation is not enabled yet**; setting this URL alone does not download or replace a local index.
+Configure a full manifest URL in `hub.url` or `CHUNKHOUND_HUB__URL` to use a
+trusted organization-operated base index. `chunkhound pull [path] --version
+latest|-1|-2` explicitly downloads, verifies and installs the selected compatible
+base; it installs only. A subsequent `chunkhound index [path]` overlays local
+changes.
+
+With a hub configured and a usable embedding identity, normal `chunkhound index`
+may automatically download and replace an absent or embedding-misaligned local
+index before ordinary indexing. An aligned index makes no hub request. MCP,
+search, simulation, ignore checking and no-embeddings indexing never initiate
+pulls. Configuring a URL does not itself perform a download, but it **enables
+this automatic replacement on a later normal index command**.
+
+**Replacement can discard local index work and require re-indexing.** DuckDB is
+the operational pull-then-overlay backend. LanceDB overlay is
+nonoperational/deferred because changed-file updates can leave stale chunks
+searchable; its ownership, installation, no-pull and interruption/recovery
+contracts remain supported. Format/checksum validation does not establish
+publisher content freshness, and re-pulling an arbitrary validated base is not
+a repair for stale LanceDB data.
+
+If installation is interrupted, ordinary opens and automatic indexing refuse
+mixed state. Stop database users, then use explicit `chunkhound pull [path]` to
+download and verify a fresh recovery candidate; local work may need re-indexing.
+Do not delete coordination files or restore arbitrary quarantine contents.
+See [Hub client operation and recovery](https://github.com/chunkhound/chunkhound/blob/main/docs/hub-client.md)
+for directory-layout, cooperative-locking, recovery and platform limitations.
+There is no atomic multi-file or power-loss rollback guarantee.
 
 ```json
 {

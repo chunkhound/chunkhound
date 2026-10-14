@@ -281,11 +281,15 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         and config.hub.url
     ):
         from chunkhound.hub.client import pull
-        from chunkhound.hub.errors import HubDatabaseMismatch, HubInstallationInterrupted
+        from chunkhound.hub.errors import (
+            HubDatabaseMismatch,
+            HubInstallationInterrupted,
+            HubReaderCloseError,
+        )
 
         try:
             await pull(config, automatic=True)
-        except (HubDatabaseMismatch, HubInstallationInterrupted):
+        except (HubDatabaseMismatch, HubInstallationInterrupted, HubReaderCloseError):
             raise SystemExit(1) from None
 
     # MCP has no interactive layer and must not write to stdout, so it gets no

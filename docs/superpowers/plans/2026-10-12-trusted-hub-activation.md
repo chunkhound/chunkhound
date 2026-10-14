@@ -33,6 +33,17 @@ Source of truth: `docs/superpowers/specs/2026-10-12-trusted-hub-activation-desig
 
 ---
 
+## Approved whole-branch correction amendment — R1–R3
+
+The user approved this narrow amendment after the final review of `976529d087a25c8ce9d09a56432adf90f7cbe73e`. T1–T9 and Gate A are complete, with the explicit LanceDB deferral; NEVER replay them. Task T10 below is the single coupled correction wave before Gate B. Its authority supersedes conflicting historical task snippets without rewriting them.
+
+- **R1:** MCP invokes authoritative provider final close irrespective of manager-derived connectivity. The caller contract is one IN-FLIGHT attempt, successful-result reuse and retry after completed failure, with bounded daemon-thread waits and no fallback disconnect after close failure. No provider lifetime/ownership rewrite.
+- **R2:** Persistent retained-reader shutdown failure is a distinct sanitized fatal hub category in both modes, including initial inspection, exclusive recheck and candidate verification. Preserve the exact original error/owner and safe retry; no raw CLI trace or automatic fallback. Ordinary unreadable identity remains soft/no-request. Fatal-over-cancellation selection occurs only after full actual-worker drainage and remains hub-local. Candidate verification must not relabel reader-close uncertainty as manifest mismatch.
+- **R3:** Correct the published website hub section's false disabled/no-replacement assurance; document current triggers, replacement/re-index consequences, recovery/support and operational DuckDB versus nonoperational/deferred LanceDB overlay. Preserve all approved HTTP/HTTPS/TLS/URL/DEBUG limitations.
+- **M1/M2:** Add real unreadable-local/no-request preservation and default nonverbose success-log contracts alongside R2. **M3:** the immutable acceptance file's original 92-character E501 at `49:89` is an intentional diagnostic exception mandated by byte preservation, not a new production regression or scoped lint pass. SHA256 remains `6ac28823846f5669b5936f748f3f62aec422c139ecd9cb276e3f6719df993f2a`; exactly its two LanceDB moved-checkout failures stay visible and unsuppressed.
+- M4–M7 authorize no unrelated cleanup. Preserve the accepted SIGKILL five-semaphore diagnostic and living-child exclusive-acquisition probe; no warning suppression, Lance deletion correction, Rust edits, shared `await_worker_completion` redesign, AGENTS/version/push/merge/release.
+- ONE sole production fixer handles all corrections with real RED/GREEN, affected/full-hub/smoke and exact full Ruff/mypy baseline reconciliation (current debt 803/999, not clean). Then independent full correction-range review `976529d087a25c8ce9d09a56432adf90f7cbe73e..fixHEAD`, whole-branch rereview `29b137712346a5f539dc75f08fecf685ee897f95..HEAD`, and parent Gate B. Pending planner/parent doc amendments may be committed with the correction after smoke.
+
 ## Execution order and delegation
 
 This is one coupled lifecycle deliverable, not three independently activatable features. Tasks expose testable internal contracts before activation.
@@ -48,7 +59,8 @@ This is one coupled lifecycle deliverable, not three independently activatable f
 | T6 | Native marker/quarantine installation and process interruption | Gate A; sole native writer |
 | T7 | Python verified-candidate installation and auto recheck policy | T2 + T5 + T6; sole hub writer |
 | T8 | Explicit pull CLI and pre-registry index hook | T7; sole CLI writer |
-| T9 | Actual search/overlay/recovery acceptance and operator docs | T8; sole acceptance writer |
+| T9 | Actual search/overlay/recovery acceptance and operator docs | T8; complete with explicit LanceDB deferral |
+| T10 | Approved R1–R3 whole-branch lifecycle/error/website correction | T9; ONE sole fixer, independent correction-range and whole-branch rereviews |
 | Gate B | Regression/type/platform evidence and human integration checkpoint | No push/merge authorization |
 
 For subagent execution, dispatch one fresh implementer per task with this plan, the approved spec and only its predecessor interfaces. Keep one writer at a time (T3/T5 and T7/T8 share files). After each task, review spec compliance then code quality before the next writer. Independent read-only reviewers can work in parallel after writes stop; neither spawns further agents. Delegate noisy backend/platform verification separately if needed. The parent performs the final plan self-review itself. Do not activate T7/T8 while Gate A has unresolved lifetime defects.
@@ -72,6 +84,9 @@ Tasks are commit-sized review units. Within a long numbered implementation step,
 | `chunkhound/api/cli/parsers/pull_parser.py`, `commands/pull.py`, `main.py`, `commands/run.py`, `utils/rich_output.py` | CLI registration, exits, one pre-registry hook and safe logs (T8) |
 | `tests/hub/activation_support.py`, `tests/hub/test_*ownership.py`, `test_native_{leases,install}.py`, `test_activation_{client,cli,acceptance}.py` | Real backend/subprocess contracts; exact per-task lists below |
 | `docs/hub-client.md`, `README.md` | Operator lifecycle, support boundaries and recovery (T9) |
+| `chunkhound/mcp_server/base.py`, `tests/test_mcp_initialization_invariant.py` | Final-close caller integration and real native-exclusion regressions (T10/R1) |
+| `chunkhound/hub/{errors,client,artifact}.py`, CLI `commands/{run,pull}.py`, activation client/CLI tests | Fatal retained-reader category, exact retry capability, public CLI diagnostics and controls (T10/R2/M1/M2) |
+| `site/src/pages/docs/configuration.md`, approved plan/spec | Published activation/recovery correction and governing amendments (T10/R3/M3) |
 
 ## Shared interface contract
 
@@ -2738,9 +2753,9 @@ local_needs_pull(target: Path, key: MatchKey, *,
 async def pull(config: Config, rel: str = "latest", automatic: bool = False) -> bool
 ```
 
-`pull`: True only if this invocation committed an install; False for skipped/soft unavailable. Fatal mismatch/interruption are logged once then raised, not returned False. Explicit CLI maps False and fatal categories to exit 1. Callable recheck is supplied only for automatic mode; the adapter rejects interruption before invoking it.
+`pull`: True only if this invocation committed an install; False for skipped/soft unavailable. Fatal mismatch/interruption, plus retained-reader shutdown failure under the approved T10/R2 amendment, are logged once then raised, not returned False. Explicit CLI maps False and fatal categories to exit 1. Callable recheck is supplied only for automatic mode; the adapter rejects interruption before invoking it.
 
-**Approved T7 I1 amendment:** After fully draining actual worker completion, fatal hub mismatch/interruption takes precedence over concurrent cancellation, including native interruption from initial inspection. A successfully completed worker still reports cancellation; soft failure behavior is unchanged. Keep the shared T5 `await_worker_completion` helper unchanged and apply this outcome selection locally to both T7 worker boundaries. Retain private executor completion Futures with copied contextvars, not independently cancellable `to_thread` Tasks. Neither repeated cancellation nor `asyncio.run` shutdown may release leases or staging before the actual worker finishes. Add a runtime RED/GREEN regression using real native interruption at the initial inspection and installation/recheck boundaries, asserting one sanitized fatal diagnostic, marker retention and completed drainage/staging/lease lifetime; retain successful-worker cancellation coverage.
+**Approved T7 I1 amendment (extended by T10/R2):** After fully draining actual worker completion, fatal hub mismatch/interruption or retained-reader shutdown failure takes precedence over concurrent cancellation, including native interruption from initial inspection. A successfully completed worker still reports cancellation; soft failure behavior is unchanged. Keep the shared T5 `await_worker_completion` helper unchanged and apply this outcome selection locally to both T7 worker boundaries. Retain private executor completion Futures with copied contextvars, not independently cancellable `to_thread` Tasks. Neither repeated cancellation nor `asyncio.run` shutdown may release leases or staging before the actual worker finishes. Add a runtime RED/GREEN regression using real native interruption at the initial inspection and installation/recheck boundaries, asserting one sanitized fatal diagnostic, marker retention and completed drainage/staging/lease lifetime; retain successful-worker cancellation coverage.
 
 - [ ] **T7.1 Add fixture support and failing real installation contracts.** In `tests/hub/artifacts.py`, extend `build_database` with trailing `symbol_prefix: str = "function"`; replace only its chunk code and symbol expressions:
 
@@ -4183,7 +4198,7 @@ git add tests/hub/test_activation_acceptance.py docs/hub-client.md README.md doc
 git commit -m "test: retain hub acceptance and document deferred LanceDB overlay"
 ```
 
-Run both regression commands and record actual totals and exit codes. Expected hub and acceptance+CLI runs exit nonzero with exactly the two deferred LanceDB failures above; smoke must PASS. Do not report the failing suites as GREEN. Run scoped acceptance-test lint, full Ruff and mypy; compare exact diagnostic/file output against the 803-error Ruff baseline (`activation-T9-ruff-before.log`) and 999-error T8 mypy baseline (`activation-client-c2-mypy.log`, comparison `activation-T8-mypy-comparison.log`). No introduced diagnostics are expected. Existing unrelated baseline failures are debt, not passing static commands. Verify unchanged acceptance bytes and only the five authorized files staged before the smoke-guarded commit. Native/lifetime commits already ran `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; rerun those before any combined Rust-change commit. Existing `.github/workflows/ci.yml` tests the full suite with built native extension on Ubuntu/macOS/Windows; these tests must collect there, with no local-only skip or xfail replacing required coverage. Review actual platform results before claiming cross-platform support.
+Run both regression commands and record actual totals and exit codes. Expected hub and acceptance+CLI runs exit nonzero with exactly the two deferred LanceDB failures above; smoke must PASS. Do not report the failing suites as GREEN. Run scoped acceptance-test lint, full Ruff and mypy; compare exact diagnostic/file output against the 803-error Ruff baseline (`activation-T9-ruff-before.log`) and 999-error T8 mypy baseline (`activation-client-c2-mypy.log`, comparison `activation-T8-mypy-comparison.log`). No introduced production diagnostics are expected. The immutable acceptance file's original 92-character E501 at `49:89` is an intentional byte-preservation diagnostic exception (M3), not a new production regression or a scoped clean result. Existing unrelated baseline failures are debt, not passing static commands. Verify unchanged acceptance bytes and only the five authorized files staged before the smoke-guarded commit. Native/lifetime commits already ran `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; rerun those before any combined Rust-change commit. Existing `.github/workflows/ci.yml` tests the full suite with built native extension on Ubuntu/macOS/Windows; these tests must collect there, with no local-only skip or xfail replacing required coverage. Review actual platform results before claiming cross-platform support.
 
 Before a later authorized PR push (not authorized here), run:
 
@@ -4193,9 +4208,699 @@ UV_NO_SYNC=1 uv run pytest tests/ -v
 
 Record pinned-runtime/full-suite failures as remaining validation debt, not erased by this trusted-publisher scope. No push follows this command in this plan.
 
+### Task T10: Coupled whole-branch R1–R3 correction and real public regressions
+
+**Authority:** User-approved final-review amendment after T9, based on review of `976529d0`. ONE sole fixer handles this coupled correction, followed by independent full correction-range and whole-branch rereviews. T1–T9/Gate A are complete; do not replay their historical code. Read `.superpowers/sdd/activation-final-parent-adjudication-976529d0.md` and FULL `.superpowers/sdd/activation-final-review-976529d0.md`; their requests for approval are historical and now approved. The isolated sole-fixer brief is `.superpowers/sdd/activation-final-fix-brief.md`, but this tracked task is self-contained. No new approval is needed unless a genuine scope/design conflict arises.
+
+**Files:**
+- Modify `chunkhound/mcp_server/base.py`: R1 authoritative close and completed-failure retry.
+- Modify `chunkhound/hub/{errors,client,artifact}.py`: R2 fatal reader category, original retry capability, classification and post-drain precedence.
+- Modify `chunkhound/api/cli/commands/{run,pull}.py`: catch that fatal category before generic CLI traceback rendering. Do NOT change `main.py` or add a sink.
+- Modify `tests/test_mcp_initialization_invariant.py` (or a new dedicated real MCP contract file), `tests/hub/test_activation_{client,cli}.py`; existing relevant `tests/hub/test_artifact.py` coverage only as needed.
+- Modify only the hub section of `site/src/pages/docs/configuration.md` for R3.
+- Include the approved plan/spec amendments in the smoke-guarded correction commit. No acceptance-file edit, provider ownership rewrite, shared worker-helper redesign, Rust change or Lance deletion correction.
+
+**Consumed interfaces:** existing async `MCPServerBase.cleanup(self) -> None`, `_close_provider_in_background(self) -> asyncio.Future[None]`; `DatabaseReaderCloseError(ownership: DatabaseOwnership)`, `.ownership`, `.retry_close() -> None`; `DatabaseOwnership.assert_covers(path: Path | str) -> None`, `.close_readers() -> None`; `local_needs_pull(target: Path, key: MatchKey, *, ownership: DatabaseOwnership | None = None) -> bool`; async `pull(config: Config, rel: str = "latest", automatic: bool = False) -> bool`; `verify_candidate(path: Path, selected: Selected) -> None`; native `acquire_install_lease(target: str, backend: str) -> InstallLease` and `acquire_database_lease(path: str) -> DatabaseLease`.
+
+**Produced interface:** `HubReaderCloseError(RuntimeError)` in `chunkhound.hub.errors`, holding the exact escaping `DatabaseReaderCloseError` as public `reader_error`, exposing its exact `ownership` via a property and delegating `retry_close()`. Public `pull()` logs one fixed sanitized message and raises this fatal category; CLI modes translate it to exit 1 without rendering its raw capability/traceback.
+
+**Root cause / implementation boundary:** MCP's manager-only connectivity gate omits a live executor, and its permanently cached failed future omits retry. `local_needs_pull` currently treats reader-close uncertainty as ordinary unreadability; the acquired owner then retries close during scope exit and raises a fresh raw reader error. Translate only AFTER all inspection/install scopes unwind so the error retains its final release-on-retry policy. The exclusive recheck's enclosing owner may likewise replace the escaping error during failed full unwind. Candidate `verify_candidate` currently wraps every exception as mismatch: deliberately preserve reader shutdown failure there and translate at public `pull`. Do not reconstruct the original error, release borrowed ownership or fall back to indexing. Keep existing `prepare` staging cleanup and the shared worker helper unchanged.
+
+- [ ] **T10.1 Establish baselines and add real MCP contracts (R1 RED).**
+
+```bash
+cd /home/e119870/views/g/my_chunkhound/.worktrees/hub-client
+export UV_NO_SYNC=1
+export DUCKDB_LIB_DIR=/tmp/duckdb-1.5.4
+export DUCKDB_INCLUDE_DIR=/tmp/duckdb-1.5.4
+export LD_LIBRARY_PATH=/tmp/duckdb-1.5.4${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+test -f "$DUCKDB_LIB_DIR/libduckdb.so"
+git rev-parse HEAD
+git status --short
+sha256sum tests/hub/test_activation_acceptance.py
+UV_NO_SYNC=1 uv run ruff check chunkhound > .superpowers/sdd/activation-final-fix-ruff-before.log 2>&1
+UV_NO_SYNC=1 uv run ruff check chunkhound --output-format json > .superpowers/sdd/activation-final-fix-ruff-before.json 2> .superpowers/sdd/activation-final-fix-ruff-before.stderr
+UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/activation-final-fix-mypy-before.log 2>&1
+```
+
+Record each nonzero exit without aborting subsequent commands. Expected current debt is 803 Ruff/999 mypy, NOT clean; compare exact diagnostics with retained `activation-T9-ruff-before.log` and `activation-final-mypy-976529d0.log` before editing. Preserve intentional pending governing-doc amendments. BASE is `976529d087a25c8ce9d09a56432adf90f7cbe73e`; immutable acceptance SHA256 is `6ac28823846f5669b5936f748f3f62aec422c139ecd9cb276e3f6719df993f2a`. Missing native runtime or a new baseline mismatch is not a valid RED.
+
+Append to `tests/test_mcp_initialization_invariant.py`; add imports `duckdb`, `chunkhound_native as native`, `Config` from `chunkhound.core.config.config`, and `DuckDBProvider` from its existing provider module. Existing `ConcreteMCPServer`, `SimpleNamespace`, pytest and asyncio are available. The service holder contains a REAL provider; the manager is used only to establish partial-backend state, not mocked cleanup behavior.
+
+```python
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial_manager", [True, False])
+async def test_mcp_cleanup_releases_partial_or_retried_database_ownership(
+    tmp_path, monkeypatch, partial_manager
+):
+    directory = tmp_path / "database"
+    directory.mkdir()
+    target = directory / "chunks.db"
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": directory},
+        analytics={"enabled": False},
+        skip_layers={"global", "env", "local_config", "config_file", "cli"},
+    )
+    monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(tmp_path / "mcp.log"))
+    provider = DuckDBProvider(target, base_directory=tmp_path)
+    provider.connect()
+    server = ConcreteMCPServer(config)
+    server.services = SimpleNamespace(provider=provider)
+    manager = provider.connection
+    real_close = duckdb.DuckDBPyConnection.close
+    failed = False
+
+    def fail_manager_once(conn):
+        nonlocal failed
+        if conn is manager and not failed:
+            failed = True
+            raise OSError("one-time manager close failure")
+        return real_close(conn)
+
+    try:
+        if partial_manager:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+            assert not provider.is_connected
+            assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+            await server.cleanup()
+        else:
+            with monkeypatch.context() as fault:
+                fault.setattr(duckdb.DuckDBPyConnection, "close", fail_manager_once)
+                await server.cleanup()
+                assert failed
+                with pytest.raises(native.DatabaseBusyError):
+                    native.acquire_install_lease(str(target), "duckdb")
+                await server.cleanup()  # Retry completed failure via real caller.
+        native.acquire_install_lease(str(target), "duckdb").close()
+        await server.cleanup()  # Successful closure stays idempotent.
+        native.acquire_install_lease(str(target), "duckdb").close()
+    finally:
+        provider.close()  # Also safely cleans up a failing RED run.
+```
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/test_mcp_initialization_invariant.py -k mcp_cleanup_releases -v
+```
+Expected runtime RED: both cases retain `DatabaseBusyError` after public MCP cleanup. The probes `.superpowers/sdd/activation-final-{mcp,cli}-probe-976529d0.py` are reproducible starting evidence, not tests to copy wholesale. Preserve all existing timeout/responsiveness/inflight/idempotence/no-fallback/closed-loop contracts.
+
+- [ ] **T10.2 Apply minimal MCP caller correction and run R1 GREEN.**
+
+In `_close_provider_in_background`, replace only the initial unconditional cached-future return:
+
+```python
+        previous = self._provider_close_future
+        if previous is not None:
+            if not previous.done() or previous.cancelled():
+                # Cancellation is not proof the daemon thread has stopped.
+                return previous
+            if previous.exception() is None:
+                return previous
+            # A completed failure permits the provider's public close retry.
+```
+
+Change only `cleanup`'s provider gate:
+
+```python
+        if self.services is not None:
+```
+
+Update the helper docstring and cleanup docstring respectively:
+
+```python
+        """Start/reuse one in-flight close; retry a completed failed attempt."""
+```
+
+```python
+        """Clean resources with at most one in-flight provider close attempt.
+
+        Each caller waits only up to the cleanup deadline. A blocking close keeps
+        running on its daemon thread and is reused by later calls. Successful
+        closure is reused; a completed failed attempt may be retried.
+        """
+```
+
+Keep synchronous same-loop creation/caching without an intervening await, daemon thread, shielded bounded waits, completion callbacks and `close()`-preferred/no-fallback behavior. The future is private, shielded from caller cancellation; do not add public cancellation or a second thread while unfinished. No provider fields or leases change here.
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/test_mcp_initialization_invariant.py -v
+```
+Expected PASS. If an old assertion actually enforces “one attempt forever,” replace only that conflicting assertion, never weaken deadline/inflight/no-fallback checks.
+
+- [ ] **T10.3 Add public pull lifetime/cancellation contracts and unreadable control (R2/M1 RED).**
+
+Append these helpers/tests to `tests/hub/test_activation_client.py`. Add imports `contextmanager` from `contextlib`, `weakref`, `duckdb`, `chunkhound.hub.errors as hub_errors`, `DatabaseOwnership`, `DatabaseReaderCloseError` from `chunkhound.providers.database.ownership`, and `configured_key` from `chunkhound.hub.manifest`; import public `local_needs_pull` alongside `pull`. Existing `TemporaryDirectory`, asyncio, threading, Path, logger, real fixtures and snapshot are used.
+
+Faults are only at external DuckDB shutdown and candidate-workspace filesystem cleanup. The candidate cleanup refusal retains the ORIGINAL lock inode for a valid native contention probe; never recreate a deleted lock and call acquisition of a new inode proof of exclusion. It models an OS refusing deletion of a live candidate without changing production staging policy. A second sanitized staging-cleanup diagnostic is allowed, but the reader-fatal message appears once. No Windows runtime claim follows from this fixture. The error-chain walker is safe pre-fix teardown support, not production plumbing or a private-call assertion; never use the global failed-owner registry.
+
+```python
+@contextmanager
+def reader_close_fault(monkeypatch, wants_path, *, entered=None, release=None):
+    readers = []
+    real_exit = duckdb.DuckDBPyConnection.__exit__
+    real_close = duckdb.DuckDBPyConnection.close
+    paused = False
+    held_workspaces = []
+    real_cleanup = TemporaryDirectory.cleanup
+
+    def fail_candidate_cleanup(workspace):
+        if any(Path(workspace.name) in path.parents for _, path in readers):
+            held_workspaces.append(workspace)
+            raise OSError("retained candidate is still open")
+        return real_cleanup(workspace)
+
+    def fail_exit(conn, *args):
+        paths = [
+            Path(row[0])
+            for row in conn.execute(
+                "SELECT path FROM system.main.duckdb_databases() "
+                "WHERE NOT internal AND path IS NOT NULL"
+            ).fetchall()
+        ]
+        selected = next((path for path in paths if wants_path(path)), None)
+        if selected is not None:
+            readers.append((weakref.ref(conn), selected))
+            raise OSError("raw-reader-detail?token=REVIEW_SECRET")
+        return real_exit(conn, *args)
+
+    def fail_close(conn):
+        nonlocal paused
+        if any(ref() is conn for ref, _ in readers):
+            if entered is not None and not paused:
+                paused = True
+                entered.set()
+                assert release.wait(20)
+            raise OSError("raw-close-detail?token=REVIEW_SECRET")
+        return real_close(conn)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(duckdb.DuckDBPyConnection, "__exit__", fail_exit)
+        fault.setattr(duckdb.DuckDBPyConnection, "close", fail_close)
+        fault.setattr(TemporaryDirectory, "cleanup", fail_candidate_cleanup)
+        # Restore faults, retry original error, THEN remove these workspaces.
+        yield readers, held_workspaces
+
+
+def retained_reader_error(error):
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, DatabaseReaderCloseError):
+            return current
+        pending.extend([
+            current.__cause__, current.__context__,
+            getattr(current, "reader_error", None),
+        ])
+    raise AssertionError("Expected a retained-reader capability in failure chain")
+
+
+@pytest.mark.parametrize("boundary,automatic,cancel", [
+    ("initial", True, False),
+    ("recheck", True, False),
+    ("candidate", True, False),
+    ("candidate", False, False),
+    ("initial", True, True),
+    ("recheck", True, True),
+])
+async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
+    tmp_path, hub_http, monkeypatch, boundary, automatic, cancel
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = config.database.get_db_path()
+    before = []
+    if boundary != "recheck":
+        build_database(config.database.path, model="old-model")
+        before.append(snapshot(target))
+    competitor = build_database(tmp_path / "competitor", model="old-model")
+    publish(hub_http, build_database(tmp_path / "published"))
+    sidecar = target.with_name(target.name + ".root.json")
+    sidecar.write_text("local root must survive")
+    if boundary == "recheck":
+        def install_race_winner(route):
+            if route.startswith("/base.tar.gz"):
+                lease = native.acquire_install_lease(str(target), "duckdb")
+                try:
+                    lease.install(str(competitor))
+                finally:
+                    lease.close()
+                sidecar.write_text("local root must survive")
+                before.append(snapshot(target))
+        hub_http.before_get = install_race_winner
+
+    def wants_path(path):
+        if boundary == "candidate":
+            return any(p.name.startswith(".chunkhound-pull-") for p in path.parents)
+        return path.resolve() == target.resolve()
+
+    entered, release = threading.Event(), threading.Event()
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    original = None
+    task = None
+    held_workspaces = []
+    try:
+        with reader_close_fault(
+            monkeypatch, wants_path,
+            entered=entered if cancel else None, release=release,
+        ) as (readers, held_workspaces):
+            task = asyncio.create_task(pull(config, automatic=automatic))
+            try:
+                if cancel:
+                    assert await asyncio.to_thread(entered.wait, 20)
+                    for _ in range(3):
+                        task.cancel()
+                        await asyncio.sleep(0)
+                        assert not task.done()
+                    assert not any("Cannot close hub" in text for text in messages)
+                    with pytest.raises(native.DatabaseBusyError):
+                        native.acquire_install_lease(str(target), "duckdb")
+                    if boundary == "recheck":
+                        assert list(target.parent.glob(".chunkhound-pull-*"))
+            finally:
+                release.set()
+            try:
+                await task
+            except BaseException as error:
+                failure = error
+                original = retained_reader_error(error)
+            else:
+                raise AssertionError("Pull unexpectedly returned after close failure")
+            # Execute real pull before looking up the new type: runtime RED.
+            assert isinstance(failure, hub_errors.HubReaderCloseError)
+            assert failure.reader_error is original
+            assert failure.ownership is original.ownership
+            held_target = readers[0][1]
+            original.ownership.assert_covers(held_target)
+            assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(held_target), "duckdb")
+            with pytest.raises(DatabaseReaderCloseError):
+                failure.retry_close()
+        # These scopes requested full unwind. Preserve original release policy.
+        failure.retry_close()
+        failure.retry_close()
+        native.acquire_install_lease(str(held_target), "duckdb").close()
+        assert snapshot(target) == before[0]
+        assert sidecar.read_text() == "local root must survive"
+        assert len(hub_http.requests) == (0 if boundary == "initial" else 2)
+        diagnostic = str(failure)
+        assert messages.count(diagnostic) == 1
+        assert not any("identity is unreadable" in text for text in messages)
+        assert not any("continuing local indexing" in text for text in messages)
+        assert "REVIEW_SECRET" not in "\n".join(messages)
+        assert "raw-close-detail" not in diagnostic
+    finally:
+        release.set()
+        if task is not None:
+            results = await asyncio.gather(task, return_exceptions=True)
+            if original is None and isinstance(results[0], BaseException):
+                original = retained_reader_error(results[0])
+        if original is not None:
+            original.retry_close()
+        for workspace in held_workspaces:
+            workspace.cleanup()
+        logger.remove(sink)
+
+
+async def test_unreadable_local_identity_is_soft_no_request_and_preserves_files(
+    tmp_path, hub_http
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = build_database(config.database.path, model="old-model")
+    target.with_name(target.name + ".embedding.json").write_text("{")
+    before = snapshot(target.parent)
+    assert not await pull(config, automatic=True)
+    assert hub_http.requests == []
+    assert snapshot(target.parent) == before
+    native.acquire_install_lease(str(target), "duckdb").close()
+
+
+def test_local_reader_retry_does_not_release_borrowed_exclusive_owner(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = build_database(config.database.path)
+    owner = DatabaseOwnership(native.acquire_install_lease(str(target), "duckdb"))
+    original = None
+    try:
+        with reader_close_fault(
+            monkeypatch, lambda path: path.resolve() == target.resolve()
+        ):
+            with pytest.raises(DatabaseReaderCloseError) as raised:
+                local_needs_pull(target, configured_key(config), ownership=owner)
+            original = raised.value
+            assert original.ownership is owner
+        original.retry_close()
+        owner.assert_covers(target)
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(target), "duckdb")
+    finally:
+        if original is not None:
+            original.retry_close()
+        owner.close()  # This test IS the complete enclosing lifecycle.
+    native.acquire_install_lease(str(target), "duckdb").close()
+```
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/hub/test_activation_client.py -k 'reader_failure or unreadable_local or local_reader_retry' -v
+```
+Expected R2 runtime RED at the new category/no-unreadable assertion or borrowed propagation; M1 already passes. Teardown restores external faults before safe retry even on RED. Preserve all existing successful-worker/repeated-cancellation/all-Tasks-shutdown contracts. Do not replace public tests with private helper mocks.
+
+- [ ] **T10.4 Add actual CLI sink contracts and default-success coverage (R2/M2 RED).**
+
+Append to `tests/hub/test_activation_cli.py`, adding `ROOT` to the existing `activation_support` imports. The subprocess invokes actual `main()` with its actual CLI sink; it does not call `pull_command` alone or mock the logger. Reuse the just-added external fault/teardown helpers. The JSON report is test evidence, not another log sink, so an assertion crash cannot masquerade as required exit 1. Explicitly add repository ROOT to the child import path because its cwd is the checkout fixture.
+
+```python
+@pytest.mark.parametrize("boundary,mode", [
+    ("initial", "index"), ("recheck", "index"),
+    ("candidate", "index"), ("candidate", "pull"),
+])
+def test_cli_reader_failure_has_sanitized_exit_without_fallback(
+    tmp_path, hub_http, embedding_http, boundary, mode
+):
+    project = tmp_path / "checkout"
+    write_config(
+        project, "duckdb", hub_http.url + "/catalogue?token=secret",
+        embedding_http.url,
+    )
+    (project / "local.py").write_text("def must_not_index(): return 42\n")
+    target = project / ".chunkhound" / "db" / "chunks.db"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    before = []
+    if boundary != "recheck":
+        build_database(target.parent, model="old-model")
+        before.append(snapshot(target))
+    competitor = build_database(tmp_path / "competitor", model="old-model")
+    publish(hub_http, build_database(tmp_path / "published"))
+    sidecar = target.with_name(target.name + ".root.json")
+    retained_root = json.dumps({"version": 1, "indexed_root_path": project.as_posix()})
+    sidecar.write_text(retained_root)
+    if boundary == "recheck":
+        def install_race_winner(route):
+            if route.startswith("/base.tar.gz"):
+                lease = native.acquire_install_lease(str(target), "duckdb")
+                try:
+                    lease.install(str(competitor))
+                finally:
+                    lease.close()
+                sidecar.write_text(retained_root)
+                before.append(snapshot(target))
+        hub_http.before_get = install_race_winner
+    report = tmp_path / "cli-reader-report.json"
+    script = r'''
+import json
+import sys
+from pathlib import Path
+root, boundary, target_text, report_text, mode, project = sys.argv[1:]
+sys.path.insert(0, root)
+import pytest
+import chunkhound_native as native
+from chunkhound.api.cli.main import main
+from tests.hub.test_activation_client import reader_close_fault, retained_reader_error
+
+target, report = Path(target_text), Path(report_text)
+def wants_path(path):
+    if boundary == "candidate":
+        return any(p.name.startswith(".chunkhound-pull-") for p in path.parents)
+    return path.resolve() == target.resolve()
+sys.argv = ["chunkhound", mode, project, "--verbose"]
+original = None
+outcome = None
+held_workspaces = []
+try:
+    with reader_close_fault(pytest.MonkeyPatch(), wants_path) as fault_state:
+        readers, held_workspaces = fault_state
+        try:
+            main()
+        except SystemExit as error:
+            outcome = error
+        assert outcome is not None and outcome.code == 1
+        original = retained_reader_error(outcome)
+        held_target = readers[0][1]
+        original.ownership.assert_covers(held_target)
+        assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(held_target), "duckdb")
+    original.retry_close()
+    original.retry_close()
+    native.acquire_install_lease(str(held_target), "duckdb").close()
+    report.write_text(json.dumps({"actual_exit": outcome.code,
+                                  "retained_then_retried": True}))
+finally:
+    if original is not None:
+        original.retry_close()
+    for workspace in held_workspaces:
+        workspace.cleanup()
+raise outcome
+'''
+    result = subprocess.run(
+        ["uv", "run", "python", "-c", script, str(ROOT), boundary, str(target),
+         str(report), mode, str(project)],
+        cwd=project, env=cli_env(project), capture_output=True, text=True,
+        timeout=180,
+    )
+    text = result.stdout + result.stderr
+    assert report.exists(), text
+    assert json.loads(report.read_text()) == {
+        "actual_exit": 1, "retained_then_retried": True,
+    }
+    assert result.returncode == 1, text
+    assert text.count("Cannot close hub database inspection reader") == 1
+    for forbidden in (
+        "REVIEW_SECRET", "raw-close-detail", "raw-reader-detail",
+        "Traceback", "Full error details", "continuing local indexing",
+        "identity is unreadable", "token=secret",
+    ):
+        assert forbidden not in text
+    assert snapshot(target) == before[0]
+    assert sidecar.read_text() == retained_root
+    assert embedding_http.requests == []
+    assert len(hub_http.requests) == (0 if boundary == "initial" else 2)
+    search = cli(project, "search", "must_not_index", project, "--regex")
+    assert search.returncode == 0, search.stdout + search.stderr
+    assert "No results found" in search.stdout + search.stderr
+```
+
+M2: in existing `test_explicit_relative_version_is_installed_and_searchable`, replace only the explicit pull invocation and add this success-visibility assertion; retain all six backend/version cases and existing search/request/zero-embedding assertions:
+
+```python
+    result = cli(project, "pull", project, "--version", rel)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Hub base installed; run index to overlay local changes" in (
+        result.stdout + result.stderr
+    )
+```
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/hub/test_activation_cli.py -k 'reader_failure or explicit_relative' -v
+```
+Expected initial/recheck runtime RED with raw sentinel/traceback or absent new diagnostic; candidate cases RED because mismatch is not the correct category. M2 should already PASS. A missing report/environment error is not the intended RED.
+
+- [ ] **T10.5 Integrate the distinct retained-reader fatal category (R2 GREEN).**
+
+In `chunkhound/hub/errors.py`, import `DatabaseOwnership, DatabaseReaderCloseError` from `chunkhound.providers.database.ownership` and add:
+
+```python
+class HubReaderCloseError(RuntimeError):
+    """Fatal inspection shutdown failure retaining the original safe retry."""
+
+    def __init__(self, reader_error: DatabaseReaderCloseError) -> None:
+        super().__init__(
+            "Cannot close hub database inspection reader; database ownership "
+            "is retained. Stop this database user and retry; local indexing "
+            "was not started"
+        )
+        self.reader_error = reader_error
+
+    @property
+    def ownership(self) -> DatabaseOwnership:
+        return self.reader_error.ownership
+
+    def retry_close(self) -> None:
+        self.reader_error.retry_close()
+```
+
+In `client.py`, import the new hub category and original `DatabaseReaderCloseError`; make these body-preserving exact-symbol changes:
+
+1. Immediately before `local_needs_pull`'s `except _NATIVE_ERRORS`:
+
+```python
+        except DatabaseReaderCloseError:
+            raise
+```
+
+2. Extend `_await_pull_worker`'s existing fatal `isinstance` tuple with the two reader types:
+
+```python
+                HubDatabaseMismatch,
+                HubInstallationInterrupted,
+                native.DatabaseInterruptedError,
+                DatabaseReaderCloseError,
+                HubReaderCloseError,
+```
+
+Keep the shared helper call and the fully-drained `except asyncio.CancelledError` structure. Worker exceptions may still be original reader errors because translation occurs AFTER ownership unwind. No shared helper change or cancellation-driven early cleanup.
+
+3. Immediately before `pull`'s inner `except _NATIVE_ERRORS`:
+
+```python
+        except DatabaseReaderCloseError as exc:
+            raise HubReaderCloseError(exc) from None
+```
+
+4. Immediately before `pull`'s outer fatal mismatch handler:
+
+```python
+    except HubReaderCloseError as exc:
+        logger.bind(hub_client=True).error("{}", str(exc))
+        raise
+```
+
+The original capability is stored as `reader_error`; `from None` controls display, not lifetime. Never construct a substitute `DatabaseReaderCloseError`, discard the original object, parse engine strings, retry automatically to enable fallback, or make ordinary unreadable identity fatal.
+
+In `artifact.py`, import `DatabaseReaderCloseError` and insert immediately before `verify_candidate`'s broad `except Exception`:
+
+```python
+    except DatabaseReaderCloseError:
+        # Shutdown uncertainty is not evidence of a manifest contradiction.
+        raise
+```
+
+Leave validation/extraction and `prepare` cleanup/commit-state behavior intact. Candidate inspection currently executes synchronously inside `prepare`; do not introduce a new worker architecture. This preserves the already-unwound acquired-scope error to public `pull`.
+
+In both `commands/run.py`'s auto hook and `commands/pull.py`, import `HubReaderCloseError` and change only the fatal handler tuple (using each function's indentation):
+
+```python
+        except (HubDatabaseMismatch, HubInstallationInterrupted, HubReaderCloseError):
+            raise SystemExit(1) from None
+```
+
+The public hub logs once; the CLI only translates to exit 1 before `main.py`'s generic `logger.exception`. Do not add global suppression or a second sink.
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/hub/test_activation_client.py tests/hub/test_activation_cli.py tests/hub/test_artifact.py -v
+UV_NO_SYNC=1 uv run pytest tests/hub/test_inspection_ownership.py tests/hub/test_provider_ownership.py tests/hub/test_worker_ownership.py -v
+```
+Expected GREEN. Verify initial/exclusive-recheck/candidate routes, both modes, exact original owner/retry, borrowed lease retention and fatal-over-cancellation only after drain. Ordinary malformed-sidecar M1 remains soft/no-request; default success M2 remains visible. Preserve interruption, successful cancellation and actual all-Tasks shutdown tests.
+
+- [ ] **T10.6 Correct only website hub activation guidance (R3).**
+
+Replace `## Central Indexing Hub (Client Foundation)` and its immediately following foundation-only paragraph in `site/src/pages/docs/configuration.md` with:
+
+```markdown
+## Central Indexing Hub
+
+Configure a full manifest URL in `hub.url` or `CHUNKHOUND_HUB__URL` to use a
+trusted organization-operated base index. `chunkhound pull [path] --version
+latest|-1|-2` explicitly downloads, verifies and installs the selected compatible
+base; it installs only. A subsequent `chunkhound index [path]` overlays local
+changes.
+
+With a hub configured and a usable embedding identity, normal `chunkhound index`
+may automatically download and replace an absent or embedding-misaligned local
+index before ordinary indexing. An aligned index makes no hub request. MCP,
+search, simulation, ignore checking and no-embeddings indexing never initiate
+pulls. Configuring a URL does not itself perform a download, but it **enables
+this automatic replacement on a later normal index command**.
+
+**Replacement can discard local index work and require re-indexing.** DuckDB is
+the operational pull-then-overlay backend. LanceDB overlay is
+nonoperational/deferred because changed-file updates can leave stale chunks
+searchable; its ownership, installation, no-pull and interruption/recovery
+contracts remain supported. Format/checksum validation does not establish
+publisher content freshness, and re-pulling an arbitrary validated base is not
+a repair for stale LanceDB data.
+
+If installation is interrupted, ordinary opens and automatic indexing refuse
+mixed state. Stop database users, then use explicit `chunkhound pull [path]` to
+download and verify a fresh recovery candidate; local work may need re-indexing.
+Do not delete coordination files or restore arbitrary quarantine contents.
+See [Hub client operation and recovery](https://github.com/chunkhound/chunkhound/blob/main/docs/hub-client.md)
+for directory-layout, cooperative-locking, recovery and platform limitations.
+There is no atomic multi-file or power-loss rollback guarantee.
+```
+
+Preserve the existing JSON example and ALL subsequent HTTP/HTTPS/TLS/opaque-URL/DEBUG limitation paragraphs byte-for-byte. The repository-absolute link is deliberate: a relative link to the repository docs directory would not be a published site route. Verify the target repository file exists, without claiming the unmerged file is deployed. No brittle string-only test or unrun website-build claim.
+
+```bash
+rg -n 'Central Indexing Hub|activation is not enabled|does not download or replace|operational|recovery|HTTPS-to-HTTP|DEBUG' site/src/pages/docs/configuration.md
+test -f docs/hub-client.md
+git diff -- site/src/pages/docs/configuration.md
+git diff --check
+```
+Expected old false assurance absent; current triggers/replacement/recovery/backend qualification present; transport paragraphs unchanged.
+
+- [ ] **T10.7 Run covering/static/smoke gates and commit the one correction wave.**
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/test_mcp_initialization_invariant.py tests/hub/test_activation_client.py tests/hub/test_activation_cli.py tests/hub/test_artifact.py tests/hub/test_inspection_ownership.py tests/hub/test_provider_ownership.py tests/hub/test_worker_ownership.py -v > .superpowers/sdd/activation-final-fix-covering.log 2>&1
+UV_NO_SYNC=1 uv run pytest tests/hub/ -v > .superpowers/sdd/activation-final-fix-hub.log 2>&1
+UV_NO_SYNC=1 uv run ruff check chunkhound > .superpowers/sdd/activation-final-fix-ruff-after.log 2>&1
+UV_NO_SYNC=1 uv run ruff check chunkhound --output-format json > .superpowers/sdd/activation-final-fix-ruff-after.json 2> .superpowers/sdd/activation-final-fix-ruff-after.stderr
+UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/activation-final-fix-mypy-after.log 2>&1
+UV_NO_SYNC=1 uv run ruff check tests/test_mcp_initialization_invariant.py tests/hub/test_activation_client.py tests/hub/test_activation_cli.py > .superpowers/sdd/activation-final-fix-tests-ruff.log 2>&1
+UV_NO_SYNC=1 uv run ruff check tests/hub/test_activation_acceptance.py > .superpowers/sdd/activation-final-fix-immutable-ruff.log 2>&1
+UV_NO_SYNC=1 uv run pytest tests/test_smoke.py -v -n auto > .superpowers/sdd/activation-final-fix-smoke.log 2>&1
+sha256sum tests/hub/test_activation_acceptance.py
+git diff --check
+git diff --stat
+git status --short
+```
+
+Record actual exits/totals for every command, including expected nonzero. Covering/smoke must PASS; full hub may fail ONLY the two immutable user-deferred moved-checkout `[0-lancedb]`/`[1-lancedb]` tests at line 72 (33 stale changed-file chunks). Their downstream assertions remain unexecuted, not passing. No skip/xfail/weakening/suppression or GREEN claim. Include any permitted dedicated MCP test file in commands if chosen.
+
+Compare exact diagnostic/file/code/message multiplicity, including mypy notes, NOT just 803/999 totals. Preserve raw positional comparisons first; reconcile every location-only shift using this correction's actual diff. Do not globally remove positions and claim exact equality. A touched import may remove an existing Ruff I001; explicitly record removals rather than silently redefining unchanged debt. No unrelated baseline cleanup. The immutable original 92-character E501 is M3's intentional diagnostic exception, not scoped clean or new production regression. Reproducible initial comparison:
+
+```bash
+diff -u .superpowers/sdd/activation-final-fix-ruff-before.log .superpowers/sdd/activation-final-fix-ruff-after.log > .superpowers/sdd/activation-final-fix-ruff-raw.diff || true
+UV_NO_SYNC=1 uv run python - <<'PY'
+from pathlib import Path
+import difflib
+import re
+root = Path('.superpowers/sdd')
+pattern = re.compile(r'^.+:\d+(?::\d+)?: (?:error|note):')
+for stage in ('before', 'after'):
+    lines = (root / f'activation-final-fix-mypy-{stage}.log').read_text().splitlines()
+    selected = sorted(line for line in lines if pattern.match(line))
+    (root / f'activation-final-fix-mypy-{stage}.diagnostics').write_text(
+        '\n'.join(selected) + '\n'
+    )
+before = (root / 'activation-final-fix-mypy-before.diagnostics').read_text().splitlines(True)
+after = (root / 'activation-final-fix-mypy-after.diagnostics').read_text().splitlines(True)
+(root / 'activation-final-fix-mypy-raw.diff').write_text(
+    ''.join(difflib.unified_diff(before, after, fromfile='before', tofile='after'))
+)
+PY
+```
+
+Use Ruff JSON to enumerate changed file/code/message/row/column records and map only confirmed unchanged source lines through the correction diff. Every added diagnostic blocks until fixed or exactly classified by the parent; equal totals can hide different errors. Full checks retain their actual nonzero exits even with equivalent baselines. Keep M4–M7 limitations, accepted SIGKILL diagnostic and living-child exclusion probe unchanged. No warning suppression.
+
+After smoke passes and scope/hash are verified, stage and commit the approved amendments with the correction:
+
+```bash
+git add chunkhound/mcp_server/base.py chunkhound/hub/errors.py chunkhound/hub/client.py chunkhound/hub/artifact.py chunkhound/api/cli/commands/run.py chunkhound/api/cli/commands/pull.py tests/test_mcp_initialization_invariant.py tests/hub/test_activation_client.py tests/hub/test_activation_cli.py site/src/pages/docs/configuration.md docs/superpowers/plans/2026-10-12-trusted-hub-activation.md docs/superpowers/specs/2026-10-12-trusted-hub-activation-design.md
+git diff --cached --stat
+git diff --cached --check
+git commit -m "fix: close MCP owners and sanitize fatal hub reader failures"
+```
+
+Adjust staged test paths only if the permitted new MCP file or existing artifact coverage was used. Never stage the immutable acceptance file or ignored reports. No Rust changes: retained Rust evidence is not a fresh run. Host evidence remains Linux/Python 3.12.12 with Python DuckDB 1.4.4/native 1.5.4, not pinned-runtime/Python-range/MSRV/Windows/macOS validation. Full suite before a future authorized PR push only: `UV_NO_SYNC=1 uv run pytest tests/ -v`. No push/merge/release/version/AGENTS action is authorized.
+
+- [ ] **T10.8 Return evidence for independent correction-range and whole-branch rereview; parent owns Gate B.**
+
+Write ignored `.superpowers/sdd/activation-final-fix-report.md` with BASE/fixHEAD, file scope, all new RED/GREEN evidence, covering/full-hub/smoke totals/exits, immutable hash, exact static reconciliation/M3 and remaining runtime/platform/Lance limitations. Include candidate category/retry and actual CLI sink evidence, not only direct `pull` tests. This child does not edit notebooks/todos/ledger or spawn reviewers.
+
+Parent dispatches independent read-only review of FULL `976529d087a25c8ce9d09a56432adf90f7cbe73e..fixHEAD` including governing docs, then independent FULL whole-branch rereview `29b137712346a5f539dc75f08fecf685ee897f95..HEAD`. Reconcile cannot-verifies and repeat parent verification before Gate B. Neither self-review nor per-task results replace those gates. Stop after reporting; no integration action.
+
 ## Gate B: Evidence and human execution/integration checkpoint
 
-Report each task's targeted tests, the last smoke result, Rust fmt/clippy/test results, introduced-versus-baseline mypy/ruff diagnostics, and available platform results. Do not infer a pass from a plan command or isolated dependency probe. Do not push, merge or release. If the full suite/platform jobs are not run or have existing failures, record that explicitly before requesting any later integration approval.
+After T10's independent full correction-range review and full whole-branch rereview, report each task's targeted tests, the last smoke result, retained versus fresh Rust fmt/clippy/test results, introduced-versus-baseline mypy/ruff diagnostics (including the intentional immutable M3 exception), and available platform results. Do not infer a pass from a plan command or isolated dependency probe. Do not push, merge or release. If the full suite/platform jobs are not run or have existing failures, record that explicitly before requesting any later integration approval.
 
 ## Author's inline self-review
 
@@ -4215,11 +4920,13 @@ This section records plan coverage, not implementation/test success.
 | Cleanup warning only after commit; no rollback/power-loss claim | T6 native warning code; T7 commit state before staging cleanup; T9 operator wording |
 | Cold/replacement pull and retained relative versions | T7 real backend replacement/search; T8 CLI latest/-1/-2 selection and explicit exit contracts |
 | Auto missing/misaligned before pinning; aligned/no-request exclusions | T8 real subprocess backend/Rust-mode matrix; no-embedding/simulate/ignore checks; T9 MCP/search exclusion |
-| Soft download/checksum/archive/space/preinstall busy; fatal mismatch/interruption | T7 preservation/category tests; T8 subprocess exits/fallback and sanitized diagnostics; T9 interrupted auto refusal |
+| Soft download/checksum/archive/space/preinstall busy; fatal mismatch/interruption/retained reader | T7 preservation/category tests; T8 subprocess exits/fallback; T9 interrupted auto refusal; T10 exact retained-reader capability, actual CLI sink/no-fallback, candidate distinction and post-drain cancellation |
+| MCP partial/failing authoritative close; website activation safety | T10 real live-executor/one-time-close-failure native exclusion regressions; website triggers/replacement/recovery/transport-preserving correction |
+| Ordinary unreadable/no-request, nonverbose success, immutable lint exception | T10 M1/M2 real public controls and M3 explicit diagnostic disposition |
 | Live Python/native work, two pulls and cold opener | T1 shared-owner tests; T3/T4 holder tests; T6 paused installer probes; T7 concurrent pull/provider contract |
 | Actual search and moved-checkout unchanged/new/changed/deleted overlay | T9 preserves real acceptance for both backends/Rust settings; DuckDB overlay is operational, LanceDB overlay nonoperational/deferred with exactly two visible stale changed-file failures. LanceDB later deleted-negative/semantic/inventory assertions are not passing evidence; verified ownership/install/no-pull/interruption contracts remain intact |
 | Testing/regression/platform/delegation requirements | Per-task RED/GREEN/smoke; Rust gates; baseline static-check comparison; T9 full-suite/platform gate; single-writer delegation table and Gate A |
 
 Self-review corrections applied inline: root-sidecar isolation/assertions are DuckDB-only (LanceDB neighbors are not cleanup targets); added explicit symlink-leaf refusal, competing pulls/cold opener, and failed re-download preservation coverage. Public native names, ownership keyword types and worker completion signatures match across all tasks. No task depends on the ignored planning fragments: exact implementation/test content is contained here.
 
-Plan checks: nine ordered tasks; placeholder scan clear; 77 complete Python blocks parse. Eight additional Python-labelled blocks are deliberately interface signatures or exact insertion fragments (`with`/`except`/`elif`/function header), not standalone modules. These checks do not compile Rust, typecheck the proposed implementation or establish backend test success. Implementation remains unstarted.
+Historical initial-plan checks: nine ordered tasks; 77 complete Python blocks parsed and eight Python-labelled blocks were deliberate interface/insertion fragments. T1–T9/Gate A are now complete, with explicitly deferred LanceDB acceptance failures. The approved T10 amendment adds one coupled correction task and its own code/contract checks; planning syntax/source review is not runtime GREEN, static cleanliness, platform validation or integration approval.

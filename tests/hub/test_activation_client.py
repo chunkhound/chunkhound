@@ -2,19 +2,28 @@ import asyncio
 import json
 import shutil
 import threading
+import weakref
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import duckdb
 import pytest
 from loguru import logger
 
+import chunkhound.hub.errors as hub_errors
 import chunkhound_native as native
-from chunkhound.hub.client import pull
+from chunkhound.hub.client import local_needs_pull, pull
 from chunkhound.hub.errors import HubDatabaseMismatch, HubInstallationInterrupted
 from chunkhound.hub.inspect import inspect_database
+from chunkhound.hub.manifest import configured_key
 from chunkhound.providers.database import ownership
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+from chunkhound.providers.database.ownership import (
+    DatabaseOwnership,
+    DatabaseReaderCloseError,
+)
 from tests.hub.activation_support import config_for, publish
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import snapshot
@@ -498,3 +507,222 @@ def test_asyncio_shutdown_waits_for_install_and_workspace_cleanup(
         assert inspect_database(target, "duckdb").groups
     finally:
         release.set()
+
+
+@contextmanager
+def reader_close_fault(monkeypatch, wants_path, *, entered=None, release=None):
+    readers = []
+    real_exit = duckdb.DuckDBPyConnection.__exit__
+    real_close = duckdb.DuckDBPyConnection.close
+    paused = False
+    held_workspaces = []
+    real_cleanup = TemporaryDirectory.cleanup
+
+    def fail_candidate_cleanup(workspace):
+        # Emulate a filesystem refusing removal of a still-open candidate.
+        # Keep its ORIGINAL lock inode and workspace alive for the real probe.
+        if any(Path(workspace.name) in path.parents for _, path in readers):
+            held_workspaces.append(workspace)
+            raise OSError("retained candidate is still open")
+        return real_cleanup(workspace)
+
+    def fail_exit(conn, *args):
+        paths = [
+            Path(row[0])
+            for row in conn.execute(
+                "SELECT path FROM system.main.duckdb_databases() "
+                "WHERE NOT internal AND path IS NOT NULL"
+            ).fetchall()
+        ]
+        selected = next((path for path in paths if wants_path(path)), None)
+        if selected is not None:
+            readers.append((weakref.ref(conn), selected))
+            raise OSError("raw-reader-detail?token=REVIEW_SECRET")
+        return real_exit(conn, *args)
+
+    def fail_close(conn):
+        nonlocal paused
+        if any(ref() is conn for ref, _ in readers):
+            if entered is not None and not paused:
+                paused = True
+                entered.set()
+                assert release.wait(20)
+            raise OSError("raw-close-detail?token=REVIEW_SECRET")
+        return real_close(conn)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(duckdb.DuckDBPyConnection, "__exit__", fail_exit)
+        fault.setattr(duckdb.DuckDBPyConnection, "close", fail_close)
+        fault.setattr(TemporaryDirectory, "cleanup", fail_candidate_cleanup)
+        # Caller restores faults, retries the original error, then explicitly
+        # cleans these retained workspaces; do not delete their lock beforehand.
+        yield readers, held_workspaces
+
+
+def retained_reader_error(error):
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, DatabaseReaderCloseError):
+            return current
+        pending.extend([
+            current.__cause__, current.__context__,
+            getattr(current, "reader_error", None),
+        ])
+    raise AssertionError("Expected a retained-reader capability in failure chain")
+
+
+@pytest.mark.parametrize("boundary,automatic,cancel", [
+    ("initial", True, False),
+    ("recheck", True, False),
+    ("candidate", True, False),
+    ("candidate", False, False),
+    ("initial", True, True),
+    ("recheck", True, True),
+])
+async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
+    tmp_path, hub_http, monkeypatch, boundary, automatic, cancel
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = config.database.get_db_path()
+    before = []
+    if boundary != "recheck":
+        build_database(config.database.path, model="old-model")
+        before.append(snapshot(target))
+    competitor = build_database(tmp_path / "competitor", model="old-model")
+    publish(hub_http, build_database(tmp_path / "published"))
+    sidecar = target.with_name(target.name + ".root.json")
+    sidecar.write_text("local root must survive")
+    if boundary == "recheck":
+        def install_race_winner(route):
+            if route.startswith("/base.tar.gz"):
+                lease = native.acquire_install_lease(str(target), "duckdb")
+                try:
+                    lease.install(str(competitor))
+                finally:
+                    lease.close()
+                sidecar.write_text("local root must survive")
+                before.append(snapshot(target))
+        hub_http.before_get = install_race_winner
+
+    def wants_path(path):
+        if boundary == "candidate":
+            return any(p.name.startswith(".chunkhound-pull-") for p in path.parents)
+        return path.resolve() == target.resolve()
+
+    entered, release = threading.Event(), threading.Event()
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    original = None
+    task = None
+    held_workspaces = []
+    try:
+        with reader_close_fault(
+            monkeypatch, wants_path,
+            entered=entered if cancel else None, release=release,
+        ) as (readers, held_workspaces):
+            task = asyncio.create_task(pull(config, automatic=automatic))
+            try:
+                if cancel:
+                    assert await asyncio.to_thread(entered.wait, 20)
+                    for _ in range(3):
+                        task.cancel()
+                        await asyncio.sleep(0)
+                        assert not task.done()
+                    assert not any("Cannot close hub" in text for text in messages)
+                    with pytest.raises(native.DatabaseBusyError):
+                        native.acquire_install_lease(str(target), "duckdb")
+                    if boundary == "recheck":
+                        assert list(target.parent.glob(".chunkhound-pull-*"))
+            finally:
+                release.set()
+            try:
+                await task
+            except BaseException as error:
+                failure = error
+                original = retained_reader_error(error)
+            else:
+                raise AssertionError("Pull unexpectedly returned after close failure")
+            # Run real pull before looking up the new type, so baseline RED is
+            # a runtime contract failure rather than an import/collection error.
+            assert isinstance(failure, hub_errors.HubReaderCloseError)
+            assert failure.reader_error is original
+            assert failure.ownership is original.ownership
+            held_target = readers[0][1]
+            original.ownership.assert_covers(held_target)
+            assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(held_target), "duckdb")
+            with pytest.raises(DatabaseReaderCloseError):
+                failure.retry_close()
+        # All three failing scopes have requested full unwind. Delegate to the
+        # ORIGINAL error; constructing another error would lose that policy.
+        failure.retry_close()
+        failure.retry_close()
+        native.acquire_install_lease(str(held_target), "duckdb").close()
+        assert snapshot(target) == before[0]
+        assert sidecar.read_text() == "local root must survive"
+        assert len(hub_http.requests) == (0 if boundary == "initial" else 2)
+        diagnostic = str(failure)
+        assert messages.count(diagnostic) == 1
+        assert not any("identity is unreadable" in text for text in messages)
+        assert not any("continuing local indexing" in text for text in messages)
+        assert "REVIEW_SECRET" not in "\n".join(messages)
+        assert "raw-close-detail" not in diagnostic
+    finally:
+        release.set()
+        if task is not None:
+            results = await asyncio.gather(task, return_exceptions=True)
+            if original is None and isinstance(results[0], BaseException):
+                original = retained_reader_error(results[0])
+        if original is not None:
+            original.retry_close()
+        for workspace in held_workspaces:
+            workspace.cleanup()
+        logger.remove(sink)
+
+
+async def test_unreadable_local_identity_is_soft_no_request_and_preserves_files(
+    tmp_path, hub_http
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = build_database(config.database.path, model="old-model")
+    target.with_name(target.name + ".embedding.json").write_text("{")
+    before = snapshot(target.parent)
+    assert not await pull(config, automatic=True)
+    assert hub_http.requests == []
+    assert snapshot(target.parent) == before
+    native.acquire_install_lease(str(target), "duckdb").close()
+
+
+def test_local_reader_retry_does_not_release_borrowed_exclusive_owner(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = build_database(config.database.path)
+    owner = DatabaseOwnership(native.acquire_install_lease(str(target), "duckdb"))
+    original = None
+    try:
+        with reader_close_fault(
+            monkeypatch, lambda path: path.resolve() == target.resolve()
+        ):
+            with pytest.raises(DatabaseReaderCloseError) as raised:
+                local_needs_pull(target, configured_key(config), ownership=owner)
+            original = raised.value
+            assert original.ownership is owner
+        original.retry_close()
+        owner.assert_covers(target)
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(target), "duckdb")
+    finally:
+        if original is not None:
+            original.retry_close()
+        # This test is itself the complete enclosing lifecycle, not a borrower.
+        owner.close()
+    native.acquire_install_lease(str(target), "duckdb").close()

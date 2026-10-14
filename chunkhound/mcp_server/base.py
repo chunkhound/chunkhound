@@ -1099,9 +1099,15 @@ class MCPServerBase(ABC):
                 raise
 
     def _close_provider_in_background(self) -> asyncio.Future[None]:
-        """Start or reuse the provider close attempt on a daemon thread."""
-        if self._provider_close_future is not None:
-            return self._provider_close_future
+        """Start/reuse one in-flight close; retry a completed failed attempt."""
+        previous = self._provider_close_future
+        if previous is not None:
+            if not previous.done() or previous.cancelled():
+                # Cancellation is not proof the daemon thread has stopped.
+                return previous
+            if previous.exception() is None:
+                return previous
+            # A completed failure must permit the provider's public close retry.
 
         if self.services is None:
             raise RuntimeError("Services not initialized")
@@ -1158,12 +1164,11 @@ class MCPServerBase(ABC):
         return future
 
     async def cleanup(self) -> None:
-        """Clean up resources and start at most one provider close attempt.
+        """Clean resources with at most one in-flight provider close attempt.
 
-        The timeout only bounds how long each cleanup call waits. A blocking
-        synchronous provider close keeps running on its daemon thread, and later
-        cleanup calls reuse that same in-flight attempt instead of starting a
-        second one.
+        Each caller waits only up to the cleanup deadline. A blocking close keeps
+        running on its daemon thread and is reused by later calls. Successful
+        closure is reused; a completed failed attempt may be retried.
         """
         if (
             self._deferred_start_task is not None
@@ -1201,10 +1206,7 @@ class MCPServerBase(ABC):
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
 
-        if self.services and (
-            self.services.provider.is_connected
-            or self._provider_close_future is not None
-        ):
+        if self.services is not None:
             self.debug_log("Closing database connection")
             # Run sync provider cleanup on a dedicated daemon thread so cleanup()
             # never depends on asyncio's default executor shutdown behavior.

@@ -6,7 +6,7 @@ import pytest
 
 import chunkhound_native as native
 from chunkhound.hub.inspect import inspect_database
-from tests.hub.activation_support import cli, cli_env, publish, write_config
+from tests.hub.activation_support import ROOT, cli, cli_env, publish, write_config
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import snapshot
 
@@ -29,8 +29,11 @@ def test_explicit_relative_version_is_installed_and_searchable(
     manifest["embeddings"][0]["versions"] = versions
     hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
     prefix = names[rel]
-    result = cli(project, "pull", project, "--version", rel, "--verbose")
+    result = cli(project, "pull", project, "--version", rel)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "Hub base installed; run index to overlay local changes" in (
+        result.stdout + result.stderr
+    )
     assert embedding_http.requests == []  # Explicit pull installs only.
     search = cli(project, "search", prefix + "_0", project, "--regex")
     assert search.returncode == 0, search.stdout + search.stderr
@@ -223,3 +226,113 @@ def test_preinstall_busy_is_explicit_failure_and_auto_soft(
 
 def test_zero_is_not_a_relative_version(tmp_path):
     assert cli(tmp_path, "pull", "--version", "0").returncode == 2
+
+
+@pytest.mark.parametrize("boundary,mode", [
+    ("initial", "index"), ("recheck", "index"),
+    ("candidate", "index"), ("candidate", "pull"),
+])
+def test_cli_reader_failure_has_sanitized_exit_without_fallback(
+    tmp_path, hub_http, embedding_http, boundary, mode
+):
+    project = tmp_path / "checkout"
+    write_config(
+        project, "duckdb", hub_http.url + "/catalogue?token=secret",
+        embedding_http.url,
+    )
+    (project / "local.py").write_text("def must_not_index(): return 42\n")
+    target = project / ".chunkhound" / "db" / "chunks.db"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    before = []
+    if boundary != "recheck":
+        build_database(target.parent, model="old-model")
+        before.append(snapshot(target))
+    competitor = build_database(tmp_path / "competitor", model="old-model")
+    publish(hub_http, build_database(tmp_path / "published"))
+    sidecar = target.with_name(target.name + ".root.json")
+    retained_root = json.dumps({"version": 1, "indexed_root_path": project.as_posix()})
+    sidecar.write_text(retained_root)
+    if boundary == "recheck":
+        def install_race_winner(route):
+            if route.startswith("/base.tar.gz"):
+                lease = native.acquire_install_lease(str(target), "duckdb")
+                try:
+                    lease.install(str(competitor))
+                finally:
+                    lease.close()
+                sidecar.write_text(retained_root)
+                before.append(snapshot(target))
+        hub_http.before_get = install_race_winner
+    report = tmp_path / "cli-reader-report.json"
+    script = r'''
+import json
+import sys
+from pathlib import Path
+root, boundary, target_text, report_text, mode, project = sys.argv[1:]
+sys.path.insert(0, root)
+import pytest
+import chunkhound_native as native
+from chunkhound.api.cli.main import main
+from tests.hub.test_activation_client import reader_close_fault, retained_reader_error
+
+target, report = Path(target_text), Path(report_text)
+def wants_path(path):
+    if boundary == "candidate":
+        return any(p.name.startswith(".chunkhound-pull-") for p in path.parents)
+    return path.resolve() == target.resolve()
+sys.argv = ["chunkhound", mode, project, "--verbose"]
+original = None
+outcome = None
+held_workspaces = []
+try:
+    with reader_close_fault(pytest.MonkeyPatch(), wants_path) as fault_state:
+        readers, held_workspaces = fault_state
+        try:
+            main()
+        except SystemExit as error:
+            outcome = error
+        assert outcome is not None and outcome.code == 1
+        original = retained_reader_error(outcome)
+        held_target = readers[0][1]
+        original.ownership.assert_covers(held_target)
+        assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(held_target), "duckdb")
+    original.retry_close()
+    original.retry_close()
+    native.acquire_install_lease(str(held_target), "duckdb").close()
+    report.write_text(json.dumps({"actual_exit": outcome.code,
+                                  "retained_then_retried": True}))
+finally:
+    if original is not None:
+        original.retry_close()
+    for workspace in held_workspaces:
+        workspace.cleanup()
+raise outcome
+'''
+    result = subprocess.run(
+        ["uv", "run", "python", "-c", script, str(ROOT), boundary, str(target),
+         str(report), mode, str(project)],
+        cwd=project, env=cli_env(project), capture_output=True, text=True,
+        timeout=180,
+    )
+    text = result.stdout + result.stderr
+    assert report.exists(), text
+    assert json.loads(report.read_text()) == {
+        "actual_exit": 1, "retained_then_retried": True,
+    }
+    assert result.returncode == 1, text
+    assert text.count("Cannot close hub database inspection reader") == 1
+    for forbidden in (
+        "REVIEW_SECRET", "raw-close-detail", "raw-reader-detail",
+        "Traceback", "Full error details", "continuing local indexing",
+        "identity is unreadable", "token=secret",
+    ):
+        assert forbidden not in text
+    assert snapshot(target) == before[0]
+    assert sidecar.read_text() == retained_root
+    assert embedding_http.requests == []
+    assert len(hub_http.requests) == (0 if boundary == "initial" else 2)
+    search = cli(project, "search", "must_not_index", project, "--regex")
+    assert search.returncode == 0, search.stdout + search.stderr
+    assert "No results found" in search.stdout + search.stderr

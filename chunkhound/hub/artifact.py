@@ -18,6 +18,7 @@ from chunkhound.hub.errors import HubDatabaseMismatch, HubUnavailable
 from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.manifest import Selected
 from chunkhound.hub.transport import CHUNK, download, require_space
+from chunkhound.providers.database.ownership import DatabaseReaderCloseError
 
 _DEVICES = {"CON", "PRN", "AUX", "NUL"} | {
     f"{prefix}{i}" for prefix in ("COM", "LPT") for i in "123456789¹²³"
@@ -214,6 +215,9 @@ def verify_candidate(path: Path, selected: Selected) -> None:
             key.dims,
         ):
             raise ValueError("identity")
+    except DatabaseReaderCloseError:
+        # This is shutdown uncertainty, not evidence of a manifest contradiction.
+        raise
     except Exception:
         raise HubDatabaseMismatch(
             "Downloaded database open, format, or embedding identity "

@@ -17,6 +17,7 @@ from chunkhound.hub.artifact import PreparationState, prepare
 from chunkhound.hub.errors import (
     HubDatabaseMismatch,
     HubInstallationInterrupted,
+    HubReaderCloseError,
     HubUnavailable,
     safe_label,
 )
@@ -28,7 +29,11 @@ from chunkhound.hub.install import (
 )
 from chunkhound.hub.manifest import MatchKey, configured_key, select_manifest
 from chunkhound.hub.transport import fetch_manifest
-from chunkhound.providers.database.ownership import DatabaseOwnership, ownership_scope
+from chunkhound.providers.database.ownership import (
+    DatabaseOwnership,
+    DatabaseReaderCloseError,
+    ownership_scope,
+)
 from chunkhound.utils.async_worker import await_worker_completion
 
 _NATIVE_ERRORS = (
@@ -54,6 +59,8 @@ def local_needs_pull(
             sidecar = active_model_path(target)
             active = read_active_model(sidecar) if sidecar is not None else None
             indexed = resolve_indexed_model(inventory.groups, active)
+        except DatabaseReaderCloseError:
+            raise
         except _NATIVE_ERRORS:
             raise
         except Exception:
@@ -83,6 +90,8 @@ async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
                 HubDatabaseMismatch,
                 HubInstallationInterrupted,
                 native.DatabaseInterruptedError,
+                DatabaseReaderCloseError,
+                HubReaderCloseError,
             ),
         ):
             raise failure from None
@@ -147,11 +156,16 @@ async def pull(config: Config, rel: str = "latest", automatic: bool = False) -> 
     try:
         try:
             return await _pull(config, rel, automatic)
+        except DatabaseReaderCloseError as exc:
+            raise HubReaderCloseError(exc) from None
         except _NATIVE_ERRORS as exc:
             # Initial ordinary inspection can fail before install.py is entered.
             raise installation_failure(exc) from None
         except OSError:
             raise HubUnavailable("Hub local filesystem is unavailable") from None
+    except HubReaderCloseError as exc:
+        logger.bind(hub_client=True).error("{}", str(exc))
+        raise
     except HubDatabaseMismatch:
         logger.bind(hub_client=True).error(
             "Downloaded database contradicts the hub manifest; local index retained"
