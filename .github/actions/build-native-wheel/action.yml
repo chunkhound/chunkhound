@@ -187,9 +187,10 @@ runs:
           echo "Could not find the DuckDB shared library for auditwheel repair" >&2
           exit 1
         fi
-        # The explicit policy tag is the compatibility promise. auditwheel
-        # both bundles DuckDB and validates every ELF in the final wheel.
-        auditwheel repair --plat manylinux_2_27 --wheel-dir /out \
+        # Auditwheel's CLI requires the architecture-qualified PEP 600 policy
+        # name (for example, manylinux_2_27_aarch64), unlike maturin's base
+        # policy spelling. Repair both bundles DuckDB and validates every ELF.
+        auditwheel repair --plat "manylinux_2_27_$(uname -m)" --wheel-dir /out \
           --ldpaths "$(dirname "$duckdb_lib")" "${wheels[0]}"
         BUILD_SCRIPT
         chown -R "$HOST_UID:$HOST_GID" /build /out

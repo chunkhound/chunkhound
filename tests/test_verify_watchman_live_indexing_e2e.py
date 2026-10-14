@@ -197,10 +197,11 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     )
     assert "--max-glibc 2.27" in linux_build["run"]
     assert (
-        "auditwheel repair --plat manylinux_2_27 --wheel-dir /out" in linux_build["run"]
+        'auditwheel repair --plat "manylinux_2_27_$(uname -m)" --wheel-dir /out'
+        in linux_build["run"]
     )
     assert linux_build["run"].index("--max-glibc 2.27") < linux_build["run"].index(
-        "auditwheel repair --plat manylinux_2_27"
+        "auditwheel repair --plat"
     )
     assert '--out "${{ inputs.out-dir }}/"' in other_build_run
     assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
