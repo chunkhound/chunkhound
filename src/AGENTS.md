@@ -66,8 +66,8 @@ CPU/IO-bound work) are defined once in the root `AGENTS.md` under `RUST_RULES`
 
 **Threading model** (`pipeline/pipeline.rs:416-440`): three persistent OS
 threads — parse, embed, store — connected by two bounded `mpsc` channels
-(capacity 2 each). While the store thread writes batch N to DuckDB (and, on the
-final batch, rebuilds HNSW indexes and compacts), the embed thread is already
+(capacity 2 each). While the store thread writes batch N to DuckDB (and, after
+the final batch, rebuilds HNSW indexes or compacts), the embed thread is already
 embedding batch N+1 and the parse thread is already parsing batch N+2. The
 bounded channels provide backpressure since parsed/embedded batches are
 memory-heavy (source text, then float vectors). The caller must release the GIL
@@ -75,7 +75,8 @@ before entering `.run()`; each thread re-acquires the GIL independently via
 `Python::with_gil()`. The store thread reuses the existing HNSW "bulk mode"
 bracket (`drop_all_hnsw_indexes()` → N incremental writes →
 `ensure_all_hnsw_indexes()`) that the Python path already used, so no new
-DB-layer mechanism was needed for this.
+DB-layer mechanism was needed for this. A run with nothing to write, delete or
+compact skips the bracket and leaves the indexes in place.
 
 **Error handling**: `DbError`/`ScanError` (`error.rs`) always convert to
 `PyRuntimeError`. On the Python side, `chunkhound/pipeline_bridge.py` wraps any
