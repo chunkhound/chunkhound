@@ -342,7 +342,7 @@ The delta-only gate above relies on structured error codes returned by `Config.v
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-4-lite` | Set `model` to `voyage-code-4` for maximum code recall |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` (provider fallback) | Set `model` to `voyage-code-4` for maximum code recall. The configurator emits `voyage-4-lite` + `rerank-3-lite` explicitly |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
 
 ### VoyageAI Models
@@ -354,9 +354,9 @@ All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. Chun
 | `voyage-code-4` | 32K | 320K | Code-specialized, built for coding-agent retrieval. Recommended for code search |
 | `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
 | `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
-| `voyage-4-lite` | 32K | 1M | Default. General purpose, lowest cost and latency |
+| `voyage-4-lite` | 32K | 1M | Configurator recommendation. General purpose, lowest cost and latency |
 | `voyage-code-3` | 32K | 120K | Previous-generation code model |
-| `voyage-3.5` | 32K | 320K | Previous-generation general purpose |
+| `voyage-3.5` | 32K | 320K | Provider fallback when `embedding.model` is unset. Previous-generation general purpose |
 | `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
 | `voyage-3-large` | 32K | 120K | Previous-generation large |
 | `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
@@ -387,7 +387,7 @@ To adopt a new model deliberately, accept the prompt. To change dimensions, or t
 
 For models in the bundled upgrade map, an interactive `chunkhound index` prints a one-line suggestion naming an alternative. This print-only hint does not mean that the suggested model is better for every workload. It never changes the model or re-embeds on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
-`voyage-4-lite` is the default for both the homepage configurator and the VoyageAI provider.
+When `embedding.model` is unset, the VoyageAI provider falls back to `voyage-3.5` (and `rerank-2.5` for reranking). The homepage configurator does not rely on that fallback: it recommends and emits `voyage-4-lite` + `rerank-3-lite` explicitly. Existing configs that omit `model` keep the fallback, so nothing changes for them. Omitting `embedding.rerank_model` likewise keeps SDK reranking enabled with the provider default `rerank-2.5`. There is no config flag to switch SDK reranking off on the official endpoint; pointing `embedding` at a custom `base_url` disables it (`supports_reranking()` returns `False` unless a `rerank_url` is set).
 
 ### Embedding Options
 
