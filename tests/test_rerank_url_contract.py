@@ -1,5 +1,7 @@
 """Backend URL contracts independent of the site and Node runtime."""
 
+from inspect import signature
+
 import pytest
 
 from chunkhound.core.config.embedding_config import EmbeddingConfig
@@ -115,3 +117,103 @@ async def test_rerank_requests_reach_the_configured_endpoint(
     results = await client.rerank("query", ["document"])
     assert [(result.index, result.score) for result in results] == [(0, 0.9)]
     assert len(reranker.requests) == 1
+
+
+def _voyage_config(**overrides):
+    config = dict(
+        provider="voyageai",
+        api_key="local-test-key",
+        model="local-embedding-model",
+        rerank_format="auto",
+    )
+    config.update(overrides)
+    return EmbeddingConfig(**config)
+
+
+def _default_rerank_model():
+    """Read the provider default instead of hardcoding a model string."""
+    return (
+        signature(VoyageAIEmbeddingProvider.__init__).parameters["rerank_model"].default
+    )
+
+
+def _cohere_scenario(name):
+    return MockRerankScenario(
+        name=name,
+        query="query",
+        documents=["document"],
+        results=[MockRerankResult(index=0, score=0.9)],
+        response_format="cohere",
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_default_model_relative_url_resolves_against_base_url(reranker):
+    """auto + omitted model + relative rerank_url + base_url reaches the endpoint."""
+    reranker.set_scenarios([_cohere_scenario("auto-default-relative")])
+    client = EmbeddingProviderFactory.create_provider(
+        _voyage_config(base_url=reranker.base_url, rerank_url="/rerank")
+    )
+    assert client._rerank_url is not None
+    assert client._rerank_url.startswith("http")
+    results = await client.rerank("query", ["document"])
+    assert [(result.index, result.score) for result in results] == [(0, 0.9)]
+    assert len(reranker.requests) == 1
+
+
+def test_auto_default_model_relative_url_without_base_url_does_not_block_load():
+    """auto + omitted model + relative rerank_url with no base_url still loads.
+
+    The relative path cannot resolve, so it is treated as an unused endpoint: the
+    frozen contract is that an inactive rerank_url never blocks config load.
+    """
+    config = _voyage_config(rerank_url="/rerank")
+    assert config.rerank_url == "/rerank"
+    EmbeddingProviderFactory.create_provider(config)
+
+
+@pytest.mark.asyncio
+async def test_auto_default_model_absolute_url_uses_default_and_cohere_body(reranker):
+    """auto + omitted model + absolute rerank_url keeps the provider default model."""
+    reranker.set_scenarios([_cohere_scenario("auto-default-absolute")])
+    client = EmbeddingProviderFactory.create_provider(
+        _voyage_config(rerank_url=f"{reranker.base_url}/rerank")
+    )
+    assert client._rerank_url is not None
+    assert client._rerank_url.startswith("http")
+    results = await client.rerank("query", ["document"])
+    assert [(result.index, result.score) for result in results] == [(0, 0.9)]
+    body = reranker.requests[0]
+    assert body["documents"] == ["document"]
+    assert body["model"] == _default_rerank_model()
+
+
+def test_voyage_factory_drops_malformed_rerank_url():
+    """A malformed rerank_url never blocks Voyage provider creation: the
+    factory drops it and the provider keeps SDK reranking with no endpoint."""
+    client = EmbeddingProviderFactory.create_provider(
+        _voyage_config(rerank_url="ftp://host/rerank")
+    )
+    assert client._rerank_url is None
+
+
+def test_voyage_direct_relative_url_without_base_leaves_no_endpoint():
+    """Direct construction mirrors the factory: a relative rerank_url with
+    no base_url resolves to no endpoint instead of a stored relative path."""
+    client = VoyageAIEmbeddingProvider(
+        api_key="local-test-key",
+        model="local-embedding-model",
+        rerank_url="/rerank",
+    )
+    assert client._rerank_url is None
+
+
+@pytest.mark.parametrize("bad_url", ["ftp://host/rerank", "//host/rerank"])
+def test_voyage_direct_malformed_url_leaves_no_endpoint(bad_url):
+    """Direct construction drops malformed endpoints like the factory."""
+    client = VoyageAIEmbeddingProvider(
+        api_key="local-test-key",
+        model="local-embedding-model",
+        rerank_url=bad_url,
+    )
+    assert client._rerank_url is None

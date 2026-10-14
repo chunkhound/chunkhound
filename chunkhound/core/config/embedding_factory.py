@@ -199,7 +199,7 @@ class EmbeddingProviderFactory:
             }
             if base_url is not None:
                 kwargs["base_url"] = base_url
-            if "rerank_model" in config:
+            if rerank_model is not None:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
@@ -207,12 +207,19 @@ class EmbeddingProviderFactory:
                 kwargs["output_dims"] = output_dims
             if client_side_truncation:
                 kwargs["client_side_truncation"] = True
-            # An omitted model uses Voyage's default; an explicit None disables it.
-            if rerank_url and (
-                "rerank_model" not in config or rerank_model or rerank_format == "tei"
-            ):
-                rerank_url = normalize_rerank_url(rerank_url)
-            # Preserve the factory's SDK fallback for relative URLs without a base.
+            # Normalize the scheme, dropping malformed endpoints so an unused
+            # external endpoint cannot block provider creation.
+            if rerank_url:
+                try:
+                    rerank_url = normalize_rerank_url(rerank_url)
+                except ValueError as exc:
+                    logger.warning(
+                        f"Dropping invalid rerank_url={rerank_url} for VoyageAI "
+                        f"provider: {exc}"
+                    )
+                    rerank_url = None
+            # Forward absolute URLs and relative paths with a base_url; the
+            # provider resolves the latter against the base.
             if rerank_url and (
                 base_url or rerank_url.startswith(("http://", "https://"))
             ):

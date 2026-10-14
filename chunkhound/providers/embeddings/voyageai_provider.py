@@ -328,10 +328,20 @@ class VoyageAIEmbeddingProvider:
         self._max_tokens = max_tokens or model_config["context_length"]
         self._api_key = api_key
         self._base_url = base_url
-        if rerank_url and (rerank_model or rerank_format == "tei"):
-            rerank_url = normalize_rerank_url(rerank_url)
-            if base_url:
-                rerank_url = resolve_rerank_url(rerank_url, base_url, join=True)
+        # Same contract as the factory: an unusable endpoint must not break
+        # construction and must not silently become an HTTP rerank target, so
+        # dropping it leaves the VoyageAI SDK reranker in charge.
+        if rerank_url:
+            try:
+                rerank_url = normalize_rerank_url(rerank_url)
+            except ValueError:
+                rerank_url = None
+            else:
+                if base_url:
+                    rerank_url = resolve_rerank_url(rerank_url, base_url, join=True)
+                elif not rerank_url.startswith(("http://", "https://")):
+                    # A relative path needs base_url to resolve against.
+                    rerank_url = None
         self._rerank_url = rerank_url
         self._rerank_format = rerank_format
         self._model_config = model_config
