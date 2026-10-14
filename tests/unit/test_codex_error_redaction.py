@@ -18,6 +18,10 @@ async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
 
     # Force availability
     monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     # Deterministic overlay path
     overlay_dir = tmp_path / "overlay-home"

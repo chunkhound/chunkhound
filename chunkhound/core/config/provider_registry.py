@@ -21,7 +21,9 @@ To add a new OpenAI-compatible provider you must also touch:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from chunkhound.interfaces.llm_provider import OutputLimitCapability
 
@@ -44,6 +46,8 @@ class OpenAICompatibleSpec:
             supports omitting its output-token cap
         docs_url: External API documentation URL
         auth_url: Authentication portal URL
+        structured_reasoning_disable_extra_body: Extra request body sent only
+            for structured calls when the canonical endpoint accepts it
     """
 
     name: str
@@ -55,6 +59,7 @@ class OpenAICompatibleSpec:
     output_limit_omission: OutputLimitCapability = OutputLimitCapability.UNKNOWN
     docs_url: str = ""
     auth_url: str = ""
+    structured_reasoning_disable_extra_body: Mapping[str, Any] | None = None
 
 
 # ── Provider specs ─────────────────────────────────────────────────────────
@@ -88,6 +93,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         max_tokens_param_name="max_tokens",
         synthesis_concurrency=10,
         output_limit_omission=OutputLimitCapability.SUPPORTED,
+        structured_reasoning_disable_extra_body={"reasoning": {"enabled": False}},
         docs_url="https://openrouter.ai/docs",
         auth_url="https://openrouter.ai",
     ),

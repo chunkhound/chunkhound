@@ -753,6 +753,14 @@ class SerialDatabaseProvider(ABC):
             f"{self.__class__.__name__} does not support compaction"
         )
 
+    async def drop_all_hnsw_indexes_async(self) -> None:
+        """Compatibility no-op for providers without standalone HNSW indexes."""
+        pass
+
+    async def ensure_all_hnsw_indexes_async(self) -> None:
+        """Compatibility no-op for providers without standalone HNSW indexes."""
+        pass
+
     async def compact_database_async(self) -> int:
         """Async variant of compact_database."""
         return await asyncio.get_running_loop().run_in_executor(
