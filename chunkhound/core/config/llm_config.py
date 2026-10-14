@@ -216,6 +216,8 @@ class LLMConfig(BaseSettings):
         CHUNKHOUND_LLM_CODEX_REASONING_EFFORT=medium
         CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY=low
         CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS=high
+        CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT=file
+        CHUNKHOUND_LLM_CLAUDE_TEMP_DIR=/var/tmp/chunkhound
     """
 
     model_config = SettingsConfigDict(
@@ -307,6 +309,28 @@ class LLMConfig(BaseSettings):
         description=(
             "Reasoning effort override for synthesis-stage operations "
             "(codex-cli, grok, openai, opencode-cli)"
+        ),
+    )
+
+    claude_append_system_prompt: Literal["file", "inline"] = Field(
+        default="file",
+        description=(
+            "How claude-code-cli passes research instructions. One mode "
+            "cannot fit every machine: 'file' (default) uses "
+            "--append-system-prompt-file so instructions stay in the system "
+            "prompt, off the Windows command line, and beside a wrapper's "
+            "--append-system-prompt. 'inline' uses --append-system-prompt "
+            "when the wrapper uses the file flag or Claude Code is older "
+            "than 2.0.34. Ignored by every other provider."
+        ),
+    )
+    claude_temp_dir: str | None = Field(
+        default=None,
+        description=(
+            "Optional directory for claude-code-cli temp files (system-prompt "
+            "file and MCP config). The default is the system temp directory. "
+            "Set this for a special case such as Docker or a limited user. "
+            "Ignored by every other provider."
         ),
     )
 
@@ -781,6 +805,21 @@ class LLMConfig(BaseSettings):
             return v.strip().lower()
         raise ValueError(f"Expected str or None, got {type(v).__name__}")
 
+    @field_validator("claude_append_system_prompt", mode="before")
+    def normalize_claude_append_system_prompt(cls, v: object) -> object:  # noqa: N805
+        """Accept any letter case for the Claude append mode."""
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
+    @field_validator("claude_temp_dir", mode="before")
+    def normalize_claude_temp_dir(cls, v: object) -> object:  # noqa: N805
+        """Treat a blank temp directory as unset."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            return stripped or None
+        return v
+
     @field_validator("gemini_thinking_level")
     def validate_gemini_thinking_level(cls, v: str | None) -> str | None:  # noqa: N805
         """Reject unsupported Gemini thinking levels during config validation."""
@@ -872,6 +911,11 @@ class LLMConfig(BaseSettings):
                 config["thinking_level"] = self.gemini_thinking_level
             if self.gemini_thinking_budget is not None:
                 config["thinking_budget"] = self.gemini_thinking_budget
+
+        if provider == "claude-code-cli":
+            config["append_system_prompt"] = self.claude_append_system_prompt
+            if self.claude_temp_dir:
+                config["temp_dir"] = self.claude_temp_dir
 
         return config
 
@@ -1466,6 +1510,11 @@ class LLMConfig(BaseSettings):
                 "output_limit_fallback", fallback_raw
             )
 
+        if claude_append := os.getenv("CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT"):
+            config["claude_append_system_prompt"] = claude_append.strip().lower()
+        if claude_temp := os.getenv("CHUNKHOUND_LLM_CLAUDE_TEMP_DIR"):
+            if claude_temp.strip():
+                config["claude_temp_dir"] = claude_temp.strip()
         if codex_effort := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT"):
             config["codex_reasoning_effort"] = codex_effort.strip().lower()
         if codex_effort_util := os.getenv(

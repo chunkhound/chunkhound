@@ -191,6 +191,13 @@ class LLMManager:
                 if (thinking_budget := config.get("thinking_budget")) is not None:
                     provider_kwargs["thinking_budget"] = thinking_budget
 
+            elif provider_name == "claude-code-cli":
+                provider_kwargs["append_system_prompt"] = config.get(
+                    "append_system_prompt", "file"
+                )
+                if temp_dir := config.get("temp_dir"):
+                    provider_kwargs["temp_dir"] = temp_dir
+
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:
