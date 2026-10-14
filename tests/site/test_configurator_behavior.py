@@ -259,6 +259,7 @@ console.log(JSON.stringify({ configured, retained, switched }));
     assert '"rerank_format"' not in rendered["switched"]["copy"]
     assert "tei.example.com" not in rendered["switched"]["output"]
     assert '"model": "voyage-4-lite"' in rendered["switched"]["copy"]
+    assert '"rerank_model": "rerank-3-lite"' in rendered["switched"]["copy"]
     assert rendered["switched"]["research"] is True
     assert rendered["switched"]["agent"] is True
 
@@ -501,7 +502,15 @@ console.log(JSON.stringify({ initialCopy, initialOpenReveals, outputBefore, afte
 
     # The `.selected` class is ignored: with no `:checked` radio the selection
     # falls back to the preset defaults, not to the class-marked provider.
+    # Rerank side read from the site's single source; the literal model pin
+    # above keeps the UX check.
     assert "voyage-4-lite" in rendered["initialCopy"]
+    recommended_rerank = run_tsx_json(
+        "import { RECOMMENDED_VOYAGE_RERANK_MODEL "
+        "} from './site/src/components/configurator/index.ts';\n"
+        "console.log(JSON.stringify(RECOMMENDED_VOYAGE_RERANK_MODEL));"
+    )
+    assert recommended_rerank in rendered["initialCopy"]
     assert rendered["initialOpenReveals"] == 0
     assert rendered["afterChange"]["defaultChecked"] is False
     assert rendered["afterChange"]["newChecked"] is True

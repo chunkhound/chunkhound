@@ -13,6 +13,13 @@ export const PROVIDER_GROUP_ORDER: readonly ConfiguratorProviderGroup[] = [
 ];
 
 export const DEFAULT_AGENT = "pi";
+// Site-owned VoyageAI model recommendations. These are deliberately decoupled
+// from the backend's frozen runtime fallback (`VOYAGE_DEFAULT_MODEL` /
+// `VOYAGE_DEFAULT_RERANK_MODEL`): the fallback keeps existing configs stable,
+// while the configurator pins the current recommended models explicitly so new
+// users adopt them without changing anyone's runtime default.
+export const RECOMMENDED_VOYAGE_EMBEDDING_MODEL = "voyage-4-lite";
+export const RECOMMENDED_VOYAGE_RERANK_MODEL = "rerank-3-lite";
 // Default to VoyageAI for the strongest out-of-box retrieval results, ROI, and
 // setup ease; Ollama and vLLM remain explicit choices for a local data boundary.
 export const DEFAULT_RETRIEVAL = "voyageai";

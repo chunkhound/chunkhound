@@ -1,10 +1,12 @@
 """Cross-checks between the configurator's presets and the product/docs.
 
-The site must not keep its own copy of a product default: the recommended
-embedder has to equal the provider code's default, and every
-"configurator defaults to X" claim in the docs has to equal the preset the
-configurator actually emits. Kept out of test_configurator_contract.py so this
-coupling is checked without pulling in the heavy config-validation imports.
+The configurator owns its model recommendations and must write them
+explicitly: an emitted config never relies on the provider's runtime fallback,
+so the site can move to newer recommended models without changing the behavior
+of existing configs. Every "configurator defaults to X" claim in the docs has
+to equal the preset the configurator actually emits. Kept out of
+test_configurator_contract.py so this coupling is checked without pulling in the
+heavy config-validation imports.
 """
 
 from __future__ import annotations
@@ -13,7 +15,10 @@ import re
 from pathlib import Path
 
 from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import (
+    VOYAGE_DEFAULT_MODEL,
+    VOYAGE_DEFAULT_RERANK_MODEL,
+)
 from tests.site.tsx_runner import run_tsx_json
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,19 +49,53 @@ def _llm_models_by_provider() -> dict[str, str]:
     return run_tsx_json(_LLM_MODELS_SCRIPT)
 
 
-def test_voyageai_default_matches_the_product_constant() -> None:
-    """The site's recommended embedder and the provider code's default are one
-    decision; a copied string would let them drift."""
+def test_voyageai_preset_emits_explicit_recommended_models() -> None:
+    """The configurator writes both VoyageAI models explicitly so a generated
+    config never depends on the provider's runtime fallback. The emitted values
+    are the site's own recommendation constants — one source, so a copied
+    string cannot drift from the preset."""
     script = """
-import { embeddingProviders } from './site/src/components/configurator/index.ts';
+import {
+  RECOMMENDED_VOYAGE_EMBEDDING_MODEL,
+  RECOMMENDED_VOYAGE_RERANK_MODEL,
+  embeddingProviders,
+} from './site/src/components/configurator/index.ts';
 const provider = embeddingProviders.find(({ id }) => id === 'voyageai');
 if (!provider) throw new Error('missing voyageai preset');
-console.log(JSON.stringify(provider.config));
+console.log(JSON.stringify({
+  config: provider.config,
+  recommendedEmbedding: RECOMMENDED_VOYAGE_EMBEDDING_MODEL,
+  recommendedRerank: RECOMMENDED_VOYAGE_RERANK_MODEL,
+}));
 """
-    config = run_tsx_json(script)
+    rendered = run_tsx_json(script)
+    config = rendered["config"]
 
     assert config["provider"] == "voyageai"
-    assert config["model"] == VOYAGE_DEFAULT_MODEL
+    assert config["model"] == rendered["recommendedEmbedding"]
+    assert config["model"], "model must be explicit, not left to the runtime fallback"
+    assert config["rerank_model"] == rendered["recommendedRerank"]
+    assert config["rerank_model"], "rerank_model must be explicit"
+
+
+def test_runtime_fallback_differs_from_configurator_recommendation() -> None:
+    """The backend's frozen fallback must not track the site's recommendation:
+    existing configs keep the fallback while new users get the recommended
+    models explicitly. Both sides are read from their single source."""
+    script = """
+import {
+  RECOMMENDED_VOYAGE_EMBEDDING_MODEL,
+  RECOMMENDED_VOYAGE_RERANK_MODEL,
+} from './site/src/components/configurator/index.ts';
+console.log(JSON.stringify({
+  embedding: RECOMMENDED_VOYAGE_EMBEDDING_MODEL,
+  rerank: RECOMMENDED_VOYAGE_RERANK_MODEL,
+}));
+"""
+    rendered = run_tsx_json(script)
+
+    assert VOYAGE_DEFAULT_MODEL != rendered["embedding"]
+    assert VOYAGE_DEFAULT_RERANK_MODEL != rendered["rerank"]
 
 
 def test_configuration_docs_match_configurator_llm_defaults() -> None:

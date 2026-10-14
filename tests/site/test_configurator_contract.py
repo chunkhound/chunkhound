@@ -436,14 +436,16 @@ def test_relative_rerank_url_with_base_url_round_trips(
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "omitted_field"),
+    ("field", "value", "expected"),
     [
-        ("model", "voyage-rerank-2.0", "rerank_format"),
-        ("format", "cohere", "rerank_model"),
+        ("model", "voyage-rerank-2.0", "voyage-rerank-2.0"),
+        # The preset ships an explicit model, so a format-only override keeps
+        # it (cohere needs a model anyway).
+        ("format", "cohere", "rerank-3-lite"),
     ],
 )
 def test_voyageai_url_less_reranker_overrides_round_trip(
-    tmp_path, clean_environment, field, value, omitted_field
+    tmp_path, clean_environment, field, value, expected
 ) -> None:
     """SDK-based reranking accepts model-only and format-only overrides
     without an external endpoint or its model requirement."""
@@ -451,11 +453,12 @@ def test_voyageai_url_less_reranker_overrides_round_trip(
     config_field = f"rerank_{field}"
 
     assert config["embedding"][config_field] == value
+    assert config["embedding"]["rerank_model"] == expected
     assert "rerank_url" not in config["embedding"]
-    assert omitted_field not in config["embedding"]
 
     validated = Config(target_dir=tmp_path, **config)
     assert getattr(validated.embedding, config_field) == value
+    assert validated.embedding.rerank_model == expected
     assert validated.embedding.rerank_url is None
 
 
@@ -613,6 +616,7 @@ def test_recommended_route_emits_voyage_4_lite_and_vercel() -> None:
     assert config["embedding"] == {
         "provider": "voyageai",
         "model": "voyage-4-lite",
+        "rerank_model": "rerank-3-lite",
         "api_key": "<YOUR_VOYAGE_API_KEY>",
     }
     assert config["llm"] == {
@@ -635,6 +639,14 @@ def test_recommended_route_config_round_trips_through_backend_config(
 
     assert config.embedding is not None
     assert config.embedding.model == "voyage-4-lite"
+    # Rerank side read from the site's single source so the preset and the
+    # assertion cannot drift; the literal model pin above keeps the UX check.
+    recommended_rerank = run_tsx_json(
+        "import { RECOMMENDED_VOYAGE_RERANK_MODEL "
+        "} from './site/src/components/configurator/index.ts';\n"
+        "console.log(JSON.stringify(RECOMMENDED_VOYAGE_RERANK_MODEL));"
+    )
+    assert config.embedding.rerank_model == recommended_rerank
     assert config.llm is not None
     assert config.llm.model == "poolside/laguna-s-2.1"
     assert config.llm.provider == "vercel"

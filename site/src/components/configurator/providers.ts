@@ -19,7 +19,11 @@ import {
   VLLM_SVG,
   VOYAGEAI_SVG,
 } from "./icons.ts";
-import { PROVIDER_GROUP_ORDER } from "./constants.ts";
+import {
+  PROVIDER_GROUP_ORDER,
+  RECOMMENDED_VOYAGE_EMBEDDING_MODEL,
+  RECOMMENDED_VOYAGE_RERANK_MODEL,
+} from "./constants.ts";
 import { requirements } from "./requirements.ts";
 
 export const editors: ConfiguratorEditor[] = [
@@ -159,7 +163,11 @@ export const embeddingProviders: ConfiguratorEmbeddingProviderOption[] = [
     name: "VoyageAI",
     svg: VOYAGEAI_SVG,
     description: "VoyageAI neural embeddings with built-in reranking",
-    config: { provider: "voyageai", model: "voyage-4-lite" },
+    config: {
+      provider: "voyageai",
+      model: RECOMMENDED_VOYAGE_EMBEDDING_MODEL,
+      rerank_model: RECOMMENDED_VOYAGE_RERANK_MODEL,
+    },
     apiKeyPlaceholder: "<YOUR_VOYAGE_API_KEY>",
     group: "cloud",
     requirements: [requirements.voyageApiKey, requirements.voyageTrainingOptOut],
