@@ -10,11 +10,16 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from threading import RLock
 
 from loguru import logger
 
 from chunkhound.core.embedding_model_drift import resolve_indexed_model
-from chunkhound.hub.errors import HubDatabaseMismatch, HubUnavailable
+from chunkhound.hub.errors import (
+    HubDatabaseMismatch,
+    HubReaderCloseError,
+    HubUnavailable,
+)
 from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.manifest import Selected
 from chunkhound.hub.transport import CHUNK, download, require_space
@@ -232,6 +237,37 @@ class PreparationState:
     committed: bool = False
 
 
+_deferred_workspace_lock = RLock()
+
+
+class _DeferredWorkspace:
+    """Keep a failed candidate's original lock pathname alive until safe retry."""
+
+    def __init__(self, workspace: TemporaryDirectory[str]) -> None:
+        self._workspace: TemporaryDirectory[str] | None = workspace
+        with _deferred_workspace_lock:
+            _deferred_workspaces.add(self)
+
+    def cleanup(self) -> None:
+        """Called only after reader shutdown; failed removal remains retryable."""
+        with _deferred_workspace_lock:
+            if self._workspace is None:
+                return
+            try:
+                self._workspace.cleanup()
+            except OSError:
+                raise HubUnavailable(
+                    "Hub staging workspace could not be removed"
+                ) from None
+            self._workspace = None
+            _deferred_workspaces.discard(self)
+
+
+# Exception GC is not proof of reader shutdown. Abandoned failures conservatively
+# retain staging until process exit, independently of the provider's reader owner.
+_deferred_workspaces: set[_DeferredWorkspace] = set()
+
+
 @asynccontextmanager
 async def prepare(
     selected: Selected,
@@ -239,8 +275,9 @@ async def prepare(
     *,
     state: PreparationState | None = None,
 ) -> AsyncIterator[Path]:
-    """Yield one verified candidate, closing readers first and always removing work.
+    """Yield a verified candidate; defer cleanup if its reader cannot close.
 
+    Failed candidate readers retain staging until successful public close retry.
     Caller exceptions are not hub failures and retain their original category.
     No path is rewritten or installed by this context manager.
     """
@@ -249,6 +286,7 @@ async def prepare(
     except OSError:
         raise HubUnavailable("Hub staging workspace is unavailable") from None
     failed = False
+    deferred = False
     try:
         try:
             directory = Path(workspace.name)
@@ -258,7 +296,12 @@ async def prepare(
             stage = directory / "stage"
             stage.mkdir()
             candidate = extract(archive, stage, selected.variant.db_provider)
-            verify_candidate(candidate, selected)
+            try:
+                verify_candidate(candidate, selected)
+            except DatabaseReaderCloseError as error:
+                retained = _DeferredWorkspace(workspace)
+                deferred = True
+                raise HubReaderCloseError(error, cleanup=retained.cleanup) from None
         except OSError:
             raise HubUnavailable("Hub staging workspace is unavailable") from None
         yield candidate
@@ -266,19 +309,20 @@ async def prepare(
         failed = True
         raise
     finally:
-        try:
-            workspace.cleanup()
-        except OSError:
-            if state is not None and state.committed:
-                logger.bind(hub_client=True).warning(
-                    "Hub base installed; staging cleanup could not be completed"
-                )
-            elif failed:
-                # Preserve a caller failure/fatal mismatch/cancellation category.
-                logger.bind(hub_client=True).error(
-                    "Hub staging workspace could not be removed"
-                )
-            else:
-                raise HubUnavailable(
-                    "Hub staging workspace could not be removed"
-                ) from None
+        if not deferred:
+            try:
+                workspace.cleanup()
+            except OSError:
+                if state is not None and state.committed:
+                    logger.bind(hub_client=True).warning(
+                        "Hub base installed; staging cleanup could not be completed"
+                    )
+                elif failed:
+                    # Preserve a caller failure/fatal mismatch/cancellation category.
+                    logger.bind(hub_client=True).error(
+                        "Hub staging workspace could not be removed"
+                    )
+                else:
+                    raise HubUnavailable(
+                        "Hub staging workspace could not be removed"
+                    ) from None

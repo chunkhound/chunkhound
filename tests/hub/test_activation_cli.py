@@ -273,6 +273,7 @@ sys.path.insert(0, root)
 import pytest
 import chunkhound_native as native
 from chunkhound.api.cli.main import main
+from chunkhound.hub.errors import HubReaderCloseError
 from tests.hub.test_activation_client import reader_close_fault, retained_reader_error
 
 target, report = Path(target_text), Path(report_text)
@@ -282,6 +283,7 @@ def wants_path(path):
     return path.resolve() == target.resolve()
 sys.argv = ["chunkhound", mode, project, "--verbose"]
 original = None
+failure = None
 outcome = None
 held_workspaces = []
 try:
@@ -293,18 +295,28 @@ try:
             outcome = error
         assert outcome is not None and outcome.code == 1
         original = retained_reader_error(outcome)
+        failure = outcome.__context__
+        assert isinstance(failure, HubReaderCloseError)
+        assert failure.reader_error is original
+        assert failure.ownership is original.ownership
         held_target = readers[0][1]
         original.ownership.assert_covers(held_target)
         assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
         with pytest.raises(native.DatabaseBusyError):
             native.acquire_install_lease(str(held_target), "duckdb")
-    original.retry_close()
-    original.retry_close()
-    native.acquire_install_lease(str(held_target), "duckdb").close()
+    failure.retry_close()
+    failure.retry_close()
+    if boundary == "candidate":
+        assert not held_target.parent.exists()
+    else:
+        native.acquire_install_lease(str(held_target), "duckdb").close()
+    assert not list(target.parent.glob(".chunkhound-pull-*"))
     report.write_text(json.dumps({"actual_exit": outcome.code,
                                   "retained_then_retried": True}))
 finally:
-    if original is not None:
+    if failure is not None:
+        failure.retry_close()
+    elif original is not None:
         original.retry_close()
     for workspace in held_workspaces:
         workspace.cleanup()

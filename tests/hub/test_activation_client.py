@@ -1,7 +1,9 @@
 import asyncio
+import gc
 import json
 import shutil
 import threading
+import traceback
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
@@ -510,7 +512,9 @@ def test_asyncio_shutdown_waits_for_install_and_workspace_cleanup(
 
 
 @contextmanager
-def reader_close_fault(monkeypatch, wants_path, *, entered=None, release=None):
+def reader_close_fault(
+    monkeypatch, wants_path, *, entered=None, release=None, refuse_cleanup=False
+):
     readers = []
     real_exit = duckdb.DuckDBPyConnection.__exit__
     real_close = duckdb.DuckDBPyConnection.close
@@ -553,9 +557,10 @@ def reader_close_fault(monkeypatch, wants_path, *, entered=None, release=None):
     with monkeypatch.context() as fault:
         fault.setattr(duckdb.DuckDBPyConnection, "__exit__", fail_exit)
         fault.setattr(duckdb.DuckDBPyConnection, "close", fail_close)
-        fault.setattr(TemporaryDirectory, "cleanup", fail_candidate_cleanup)
-        # Caller restores faults, retries the original error, then explicitly
-        # cleans these retained workspaces; do not delete their lock beforehand.
+        if refuse_cleanup:
+            fault.setattr(TemporaryDirectory, "cleanup", fail_candidate_cleanup)
+        # Ordinary cleanup is deliberately unpatched unless refusal is requested.
+        # Callers must retry reader shutdown before removing any held workspace.
         yield readers, held_workspaces
 
 
@@ -573,6 +578,173 @@ def retained_reader_error(error):
             getattr(current, "reader_error", None),
         ])
     raise AssertionError("Expected a retained-reader capability in failure chain")
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize("refuse_cleanup", [False, True])
+async def test_candidate_workspace_survives_reader_failure_until_retry(
+    tmp_path, hub_http, monkeypatch, automatic, refuse_cleanup
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = config.database.get_db_path()
+    publish(hub_http, build_database(tmp_path / "published"))
+    failure = None
+    held = []
+    try:
+        with reader_close_fault(
+            monkeypatch,
+            lambda path: any(
+                p.name.startswith(".chunkhound-pull-") for p in path.parents
+            ),
+            refuse_cleanup=refuse_cleanup,
+        ) as (readers, held):
+            with pytest.raises(hub_errors.HubReaderCloseError) as caught:
+                await pull(config, automatic=automatic)
+            failure = caught.value
+            candidate = readers[0][1]
+            workspace = next(
+                p for p in candidate.parents if p.name.startswith(".chunkhound-pull-")
+            )
+            assert candidate.exists()
+            assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
+            failure.ownership.assert_covers(candidate)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(candidate), "duckdb")
+            with pytest.raises(DatabaseReaderCloseError):
+                failure.retry_close()
+            assert candidate.exists()
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(candidate), "duckdb")
+            assert not target.exists()
+        failure.retry_close()
+        failure.retry_close()
+        assert not workspace.exists()
+        assert not target.exists()
+    finally:
+        if failure is not None:
+            failure.retry_close()
+        for retained in held:
+            retained.cleanup()
+
+
+async def test_candidate_workspace_survives_abandoned_error_gc(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = config.database.get_db_path()
+    publish(hub_http, build_database(tmp_path / "published"))
+    original = None
+    workspace = None
+
+    async def abandon_wrapper():
+        with pytest.raises(hub_errors.HubReaderCloseError) as caught:
+            await pull(config)
+        failure = caught.value
+        original = failure.reader_error
+        wrapper_ref = weakref.ref(failure)
+        # Only the raw retry capability escapes; no traceback/context keeps the
+        # hub error, preparation frame, or its TemporaryDirectory alive.
+        pending, seen = [failure], set()
+        while pending:
+            error = pending.pop()
+            if error is None or id(error) in seen:
+                continue
+            seen.add(id(error))
+            pending.extend([error.__cause__, error.__context__])
+            if error.__traceback__ is not None:
+                traceback.clear_frames(error.__traceback__)
+            error.__traceback__ = None
+            error.__cause__ = None
+            error.__context__ = None
+        return original, wrapper_ref
+
+    try:
+        with reader_close_fault(
+            monkeypatch,
+            lambda path: any(
+                p.name.startswith(".chunkhound-pull-") for p in path.parents
+            ),
+        ) as (readers, _):
+            original, wrapper_ref = await abandon_wrapper()
+            candidate = readers[0][1]
+            workspace = next(
+                p for p in candidate.parents if p.name.startswith(".chunkhound-pull-")
+            )
+            gc.collect()
+            assert wrapper_ref() is None
+            assert candidate.exists()
+            assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
+            original.ownership.assert_covers(candidate)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(candidate), "duckdb")
+            assert not target.exists()
+        original.retry_close()
+        native.acquire_install_lease(str(candidate), "duckdb").close()
+    finally:
+        if original is not None:
+            original.retry_close()
+            # An abandoned wrapper may retain staging until process exit. Only
+            # after proven shutdown may test teardown remove the private path.
+            if workspace is not None and workspace.exists():
+                shutil.rmtree(workspace)
+
+
+async def test_candidate_workspace_cleanup_refusal_is_sanitized_and_retryable(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = config.database.get_db_path()
+    publish(hub_http, build_database(tmp_path / "published"))
+    failure = None
+    real_rmtree = shutil.rmtree
+    try:
+        with reader_close_fault(
+            monkeypatch,
+            lambda path: any(
+                p.name.startswith(".chunkhound-pull-") for p in path.parents
+            ),
+        ) as (readers, _):
+            with pytest.raises(hub_errors.HubReaderCloseError) as caught:
+                await pull(config)
+            failure = caught.value
+            original = failure.reader_error
+            candidate = readers[0][1]
+            workspace = next(
+                p for p in candidate.parents if p.name.startswith(".chunkhound-pull-")
+            )
+            assert candidate.exists()
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(candidate), "duckdb")
+        # Direct original retry remains safe; the public retry later finishes
+        # deferred staging cleanup without replacing the original capability.
+        original.retry_close()
+        native.acquire_install_lease(str(candidate), "duckdb").close()
+        assert candidate.exists()
+
+        def refuse_workspace(path, *args, **kwargs):
+            if Path(path) == workspace:
+                raise PermissionError("raw-cleanup-detail?token=REVIEW_SECRET")
+            return real_rmtree(path, *args, **kwargs)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(shutil, "rmtree", refuse_workspace)
+            for _ in range(2):
+                with pytest.raises(hub_errors.HubUnavailable) as cleanup_error:
+                    failure.retry_close()
+                assert str(cleanup_error.value) == (
+                    "Hub staging workspace could not be removed"
+                )
+                assert cleanup_error.value.__suppress_context__
+                assert candidate.exists()
+                assert failure.reader_error is original
+                assert failure.ownership is original.ownership
+        failure.retry_close()
+        failure.retry_close()
+        assert not workspace.exists()
+        assert not target.exists()
+    finally:
+        if failure is not None:
+            failure.retry_close()
 
 
 @pytest.mark.parametrize("boundary,automatic,cancel", [
@@ -661,11 +833,17 @@ async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
                 native.acquire_install_lease(str(held_target), "duckdb")
             with pytest.raises(DatabaseReaderCloseError):
                 failure.retry_close()
+            if boundary == "recheck":
+                assert not list(target.parent.glob(".chunkhound-pull-*"))
         # All three failing scopes have requested full unwind. Delegate to the
         # ORIGINAL error; constructing another error would lose that policy.
         failure.retry_close()
         failure.retry_close()
-        native.acquire_install_lease(str(held_target), "duckdb").close()
+        if boundary == "candidate":
+            assert not held_target.parent.exists()
+        else:
+            native.acquire_install_lease(str(held_target), "duckdb").close()
+        assert not list(target.parent.glob(".chunkhound-pull-*"))
         assert snapshot(target) == before[0]
         assert sidecar.read_text() == "local root must survive"
         assert len(hub_http.requests) == (0 if boundary == "initial" else 2)

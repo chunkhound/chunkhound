@@ -1,6 +1,7 @@
 """Hub failure categories and safe diagnostic labels."""
 
 import json
+from collections.abc import Callable
 
 from chunkhound.providers.database.ownership import (
     DatabaseOwnership,
@@ -23,13 +24,19 @@ class HubInstallationInterrupted(RuntimeError):  # noqa: N818 - public hub categ
 class HubReaderCloseError(RuntimeError):
     """Fatal inspection shutdown failure retaining the original safe retry."""
 
-    def __init__(self, reader_error: DatabaseReaderCloseError) -> None:
+    def __init__(
+        self,
+        reader_error: DatabaseReaderCloseError,
+        *,
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__(
             "Cannot close hub database inspection reader; database ownership "
             "is retained. Stop this database user and retry; local indexing "
             "was not started"
         )
         self.reader_error = reader_error
+        self._cleanup = cleanup
 
     @property
     def ownership(self) -> DatabaseOwnership:
@@ -37,6 +44,8 @@ class HubReaderCloseError(RuntimeError):
 
     def retry_close(self) -> None:
         self.reader_error.retry_close()
+        if self._cleanup is not None:
+            self._cleanup()
 
 
 def safe_label(value: object) -> str:

@@ -4224,7 +4224,7 @@ Record pinned-runtime/full-suite failures as remaining validation debt, not eras
 
 **Produced interface:** `HubReaderCloseError(RuntimeError)` in `chunkhound.hub.errors`, holding the exact escaping `DatabaseReaderCloseError` as public `reader_error`, exposing its exact `ownership` via a property and delegating `retry_close()`. Public `pull()` logs one fixed sanitized message and raises this fatal category; CLI modes translate it to exit 1 without rendering its raw capability/traceback.
 
-**Root cause / implementation boundary:** MCP's manager-only connectivity gate omits a live executor, and its permanently cached failed future omits retry. `local_needs_pull` currently treats reader-close uncertainty as ordinary unreadability; the acquired owner then retries close during scope exit and raises a fresh raw reader error. Translate only AFTER all inspection/install scopes unwind so the error retains its final release-on-retry policy. The exclusive recheck's enclosing owner may likewise replace the escaping error during failed full unwind. Candidate `verify_candidate` currently wraps every exception as mismatch: deliberately preserve reader shutdown failure there and translate at public `pull`. Do not reconstruct the original error, release borrowed ownership or fall back to indexing. Keep existing `prepare` staging cleanup and the shared worker helper unchanged.
+**Root cause / implementation boundary:** MCP's manager-only connectivity gate omits a live executor, and its permanently cached failed future omits retry. `local_needs_pull` currently treats reader-close uncertainty as ordinary unreadability; the acquired owner then retries close during scope exit and raises a fresh raw reader error. Translate only AFTER all inspection/install scopes unwind so the error retains its final release-on-retry policy. The exclusive recheck's enclosing owner may likewise replace the escaping error during failed full unwind. Candidate `verify_candidate` currently wraps every exception as mismatch: deliberately preserve reader shutdown failure there and translate at public `pull`. Do not reconstruct the original error, release borrowed ownership or fall back to indexing. Keep the shared worker helper unchanged. The approved T10 candidate-lifetime follow-up below supersedes the former unchanged-`prepare` staging instruction: retain a failed candidate reader's original workspace/coordination inode until shutdown is proven, then safely finish deferred cleanup.
 
 - [ ] **T10.1 Establish baselines and add real MCP contracts (R1 RED).**
 
@@ -4351,7 +4351,7 @@ Expected PASS. If an old assertion actually enforces “one attempt forever,” 
 
 Append these helpers/tests to `tests/hub/test_activation_client.py`. Add imports `contextmanager` from `contextlib`, `weakref`, `duckdb`, `chunkhound.hub.errors as hub_errors`, `DatabaseOwnership`, `DatabaseReaderCloseError` from `chunkhound.providers.database.ownership`, and `configured_key` from `chunkhound.hub.manifest`; import public `local_needs_pull` alongside `pull`. Existing `TemporaryDirectory`, asyncio, threading, Path, logger, real fixtures and snapshot are used.
 
-Faults are only at external DuckDB shutdown and candidate-workspace filesystem cleanup. The candidate cleanup refusal retains the ORIGINAL lock inode for a valid native contention probe; never recreate a deleted lock and call acquisition of a new inode proof of exclusion. It models an OS refusing deletion of a live candidate without changing production staging policy. A second sanitized staging-cleanup diagnostic is allowed, but the reader-fatal message appears once. No Windows runtime claim follows from this fixture. The error-chain walker is safe pre-fix teardown support, not production plumbing or a private-call assertion; never use the global failed-owner registry.
+Faults are only at external DuckDB shutdown and candidate-workspace filesystem cleanup. The candidate cleanup refusal retains the ORIGINAL lock inode for a valid native contention probe; never recreate a deleted lock and call acquisition of a new inode proof of exclusion. This historical fixture models an OS refusing deletion of a live candidate; it is not proof for normal Linux cleanup. The approved T10 candidate-lifetime follow-up changes production staging lifetime and requires default-cleanup coverage as well. A second sanitized staging-cleanup diagnostic is allowed, but the reader-fatal message appears once. No Windows runtime claim follows from this fixture. The error-chain walker is safe pre-fix teardown support, not production plumbing or a private-call assertion; never use the global failed-owner registry.
 
 ```python
 @contextmanager
@@ -4897,6 +4897,136 @@ Adjust staged test paths only if the permitted new MCP file or existing artifact
 Write ignored `.superpowers/sdd/activation-final-fix-report.md` with BASE/fixHEAD, file scope, all new RED/GREEN evidence, covering/full-hub/smoke totals/exits, immutable hash, exact static reconciliation/M3 and remaining runtime/platform/Lance limitations. Include candidate category/retry and actual CLI sink evidence, not only direct `pull` tests. This child does not edit notebooks/todos/ledger or spawn reviewers.
 
 Parent dispatches independent read-only review of FULL `976529d087a25c8ce9d09a56432adf90f7cbe73e..fixHEAD` including governing docs, then independent FULL whole-branch rereview `29b137712346a5f539dc75f08fecf685ee897f95..HEAD`. Reconcile cannot-verifies and repeat parent verification before Gate B. Neither self-review nor per-task results replace those gates. Stop after reporting; no integration action.
+
+### T10 follow-up: Approved candidate staging-lifetime correction
+
+Read this first: this is the approved correction's requirements. Work ONLY in `/home/e119870/views/g/my_chunkhound/.worktrees/hub-client`, with explicit cd. BASE `0c25399c5279ab6bba034be4b06834cce30c22fd`. T1–T9/Gate A and T10 R1–R3 are implemented: do not replay them. User APPROVED this narrow lifetime amendment; no repeat approval needed. Read the spec's `Approved T10 candidate staging-lifetime correction` and the independent finding `.superpowers/sdd/activation-final-fix-review-0c25399c.md`. The prior blocked wording in review/adjudication is historical.
+
+## Goal / scope
+
+Retain original candidate workspace and coordination inode until its failed inspection reader demonstrably closes, under ordinary Linux cleanup as well as filesystem refusal. The original error and exact ownership capability stay intact; fatal both modes, no destination mutation/fallback. Scope: `chunkhound/hub/artifact.py`, `chunkhound/hub/errors.py`, `tests/hub/test_activation_client.py`, `tests/hub/test_artifact.py` if needed, `tests/hub/test_activation_cli.py` only narrow adaptations required by cleanup semantics, and already pending approved tracked plan/spec amendments. Do not change provider ownership, Rust, shared worker helper, MCP R1 behavior, transport, website, immutable acceptance, AGENTS/version or other sources. No push/merge/release. No child notebook/todo/ledger edits. One sole writer.
+
+## Root cause and constraints
+
+`prepare` always calls TemporaryDirectory.cleanup while native retained-reader ownership outlives the context. Normal Linux rmtree removes the lock pathname despite a live reader/lease. Existing `reader_close_fault` patches cleanup to refuse removal and hides this case. Parent scratch `.superpowers/sdd/activation-final-candidate-parent-probe.py` confirms the real bug (its 1 pass means defect observation, not GREEN).
+
+- Retain workspace strongly independently of exception graphs. Keeping only an attribute on the escaping error is insufficient because dropping/clearing errors must not unlink a still-owned candidate.
+- Do not delete then recreate a candidate parent or its lock to test contention. While reader is live, candidate exists and native exact-path exclusive acquisition raises DatabaseBusyError.
+- `HubReaderCloseError.reader_error` remains the exact original DatabaseReaderCloseError; `.ownership` remains exact. Public retry first delegates original safe retry, then attempts deferred workspace cleanup only if reader shutdown succeeded. Failed reader retry leaves workspace untouched. Successful/repeated public retry removes workspace and stays idempotent.
+- Direct original-error retry remains safe and need not immediately remove staging; subsequent public retry finishes cleanup. An abandoned fatal error retains staging until process exit rather than risking GC-based unlink. No periodic cleaner/global provider redesign.
+- Ordinary success and unrelated prepare failures clean immediately. Destination recheck failures are not candidate-reader failures and do not unnecessarily retain staging. Postcommit staging cleanup failure remains warning/success.
+- Deferred workspace cleanup failure after reader shutdown must be sanitized and retryable, not overwrite reader-fatal policy with raw filesystem detail. Use fixed `HubUnavailable("Hub staging workspace could not be removed") from None` at retry if needed; this retry API is not automatic-index fallback. Keep retained workspace registered until cleanup succeeds.
+
+## Implementation outline (minimal hub-local mechanism)
+
+One small hub-local deferred-workspace holder in artifact.py may use a strong module set plus RLock and the existing TemporaryDirectory instance. Register only a failed candidate verification workspace. This is temporary failure lifetime management, not a permanent artifact cache. Optional callback on HubReaderCloseError permits cleanup after original retry without altering DatabaseReaderCloseError/provider ownership. Concrete interface:
+
+```python
+# errors.py; imports Callable from collections.abc
+class HubReaderCloseError(RuntimeError):
+    def __init__(self, reader_error: DatabaseReaderCloseError,
+                 *, cleanup: Callable[[], None] | None = None) -> None:
+        # Preserve the existing fixed message, reader_error and ownership property.
+        self._cleanup = cleanup
+
+    def retry_close(self) -> None:
+        self.reader_error.retry_close()
+        if self._cleanup is not None:
+            self._cleanup()
+```
+
+Body-preserving insertion: existing super().__init__ and self.reader_error lines remain unchanged. A cleanup callable is idempotent, serializes its own cleanup, keeps a strong registered workspace through failed cleanup, and deregisters only after success. Avoid forward-reference annotations unless genuinely needed. Register and construct the HubReaderCloseError inside the narrow `verify_candidate` DatabaseReaderCloseError catch, then skip immediate workspace cleanup only for that transferred workspace. Existing public pull already recognizes/logs HubReaderCloseError. Do not mistake an exception from the yielded install body for a failed candidate verification. Update prepare's inaccurate always-remove docstring. Implementation details may be simplified if all contracts hold; report departures, no unrelated abstraction.
+
+## Steps / real TDD
+
+1. Establish environment/baseline and inspect bounded files. Parent doc changes are intentional and must be preserved/committed with fix.
+
+```bash
+cd /home/e119870/views/g/my_chunkhound/.worktrees/hub-client
+export UV_NO_SYNC=1 DUCKDB_LIB_DIR=/tmp/duckdb-1.5.4 DUCKDB_INCLUDE_DIR=/tmp/duckdb-1.5.4
+export LD_LIBRARY_PATH=/tmp/duckdb-1.5.4${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+git rev-parse HEAD
+git status --short
+sha256sum tests/hub/test_activation_acceptance.py
+UV_NO_SYNC=1 uv run ruff check chunkhound --output-format json > .superpowers/sdd/activation-final-candidate-ruff-before.json
+UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/activation-final-candidate-mypy-before.log 2>&1
+```
+Expected static debt 801 Ruff/999 mypy, not clean. Exact compare required, not counts. Keep individual nonzero exits rather than aborting later commands.
+
+2. Write real public tests before production edits. Add an option to `reader_close_fault` to leave TemporaryDirectory.cleanup UNPATCHED, default ordinary cleanup, preserving separate opt-in refusal coverage if useful. Existing tests may need conditional post-retry assertions: after successful public candidate retry the original private parent is gone, so do NOT recreate it to acquire a new lease and claim proof; destination owner tests still prove release normally. Existing CLI raw-original retry may retain staging; use public retry when available to complete cleanup without changing exact-error assertions. Never weaken live-reader exclusion or fatal output assertions.
+
+Core regression skeleton using existing imports/fixtures (adapt fixture mechanics only):
+
+```python
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_candidate_workspace_survives_reader_failure_until_retry(
+    tmp_path, hub_http, monkeypatch, automatic
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = config.database.get_db_path()
+    publish(hub_http, build_database(tmp_path / "published"))
+    failure = None
+    try:
+        with reader_close_fault(
+            monkeypatch,
+            lambda path: any(p.name.startswith(".chunkhound-pull-")
+                             for p in path.parents),
+        ) as (readers, held):
+            with pytest.raises(hub_errors.HubReaderCloseError) as caught:
+                await pull(config, automatic=automatic)
+            failure = caught.value
+            candidate = readers[0][1]
+            workspace = next(p for p in candidate.parents
+                             if p.name.startswith(".chunkhound-pull-"))
+            assert candidate.exists()
+            assert readers[0][0]().execute("SELECT 42").fetchone() == (42,)
+            failure.ownership.assert_covers(candidate)
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(candidate), "duckdb")
+            with pytest.raises(DatabaseReaderCloseError):
+                failure.retry_close()
+            assert candidate.exists()
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(candidate), "duckdb")
+            assert not target.exists()
+        failure.retry_close()
+        failure.retry_close()
+        assert not workspace.exists()
+        assert not target.exists()
+    finally:
+        if failure is not None:
+            failure.retry_close()
+```
+
+Add a GC variant: hold only original raw retry capability (not hub wrapper/tracebacks); clear exception frames/context as necessary, delete HubReaderCloseError and force gc.collect. Assert live query and original path native contention still hold before releasing the original reader. Then safely tear down after successful raw retry. It is acceptable for this intentionally abandoned workspace to remain until process exit per approved policy; cleanup it only AFTER confirmed shutdown in test teardown. Do not read private retention registries or assert adapter internals.
+
+Add a filesystem-boundary retry cleanup refusal control: allow reader shutdown, inject rmtree failure for only the candidate workspace, call public retry, assert sanitized diagnostic and retained workspace, restore FS boundary, retry succeeds and removes workspace. Use real reader+HTTP/native business flow, not mocks of our cleanup callback. Preserve existing postcommit warning control.
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/hub/test_activation_client.py -k 'candidate_workspace' -v > .superpowers/sdd/activation-final-candidate-red.log 2>&1
+```
+Expected genuine runtime RED at candidate existence/exclusive exclusion (not import/env/collection failure). Show exact output. Then implement minimal outlined policy and run same command GREEN, plus existing retained-reader contracts to catch integration assertions.
+
+3. Covering, full-hub, static, smoke once final code settles:
+
+```bash
+UV_NO_SYNC=1 uv run pytest tests/test_mcp_initialization_invariant.py tests/hub/test_activation_client.py tests/hub/test_activation_cli.py tests/hub/test_artifact.py tests/hub/test_inspection_ownership.py tests/hub/test_provider_ownership.py tests/hub/test_worker_ownership.py -v > .superpowers/sdd/activation-final-candidate-covering.log 2>&1
+UV_NO_SYNC=1 uv run pytest tests/hub/ -v > .superpowers/sdd/activation-final-candidate-hub.log 2>&1
+UV_NO_SYNC=1 uv run ruff check chunkhound --output-format json > .superpowers/sdd/activation-final-candidate-ruff-after.json
+UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/activation-final-candidate-mypy-after.log 2>&1
+UV_NO_SYNC=1 uv run ruff check chunkhound/hub/artifact.py chunkhound/hub/errors.py tests/hub/test_activation_client.py tests/hub/test_activation_cli.py > .superpowers/sdd/activation-final-candidate-scoped-ruff.log 2>&1
+UV_NO_SYNC=1 uv run pytest tests/test_smoke.py -v -n auto > .superpowers/sdd/activation-final-candidate-smoke.log 2>&1
+sha256sum tests/hub/test_activation_acceptance.py
+git diff --check
+```
+
+Covering/smoke must pass. Full hub ONLY the 2 explicitly user-deferred Lance acceptance failures allowed: `test_moved_checkout_overlays_unchanged_new_changed_and_deleted_files[0-lancedb]`/`[1-lancedb]`, line72,33OLD_CHANGED_BASE rows. No skip/xfail/weakening. Immutable SHA `6ac28823846f5669b5936f748f3f62aec422c139ecd9cb276e3f6719df993f2a`. Later Lance assertions not reached. Record exact Ruff/mypy code/file/message multiplicity and every positional shift matched to source diff, preserving raw comparison first; report any removed diagnostics. Existing comparison script `.superpowers/sdd/activation-final-fix-static-compare.py` is a reference, not permission to overwrite prior evidence. Accepted intentional SIGKILL five-semaphore warning remains visible. No Rust changes means retained, not fresh, Rust evidence. Linux Python3.12.12/PythonDuckDB1.4.4/native1.5.4 only; no pinned/runtime-range/platform/fullsuite claims.
+
+4. Self-review completeness/lifetime/GC/retry/fatal behavior and test quality. Commit only allowed scope plus pending plan/spec AFTER successful smoke. Suggested subject `fix: retain hub candidate staging until reader shutdown`. Write report `.superpowers/sdd/activation-final-candidate-fix-report.md`: BASE/HEAD, files, exact RED/GREEN/cover/fullhub/static/smoke commands+exits+totals, log paths, diagnostic reconciliation, immutable SHA, limitations/concerns. Return under15lines status/commit/tests/concerns/report path. Parent alone owns ledger and reviews.
+
+## Delegation / final gates
+
+ONE sole fixer for this amendment. Independent read-only task reviewer receives the entire T10 range `976529d087a25c8ce9d09a56432adf90f7cbe73e..newHEAD`, original R1–R3 brief/report plus this amendment/report and review package. Then independent wholebranch reviewer receives `29b137712346a5f539dc75f08fecf685ee897f95..HEAD` and minor rollup. Parent reconciles cannot-verifies, fresh verification and plan self-review before Gate B. No merge readiness claim while user-deferred or unvalidated debts remain.
 
 ## Gate B: Evidence and human execution/integration checkpoint
 
