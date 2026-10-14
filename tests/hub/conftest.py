@@ -1,5 +1,6 @@
 """Local HTTP(S) publisher used only at the transport's external boundary."""
 
+import json
 import socket
 import ssl
 import subprocess
@@ -105,6 +106,52 @@ def hub_server(context: ssl.SSLContext | None = None) -> Iterator[SimpleNamespac
 def hub_http() -> Iterator[SimpleNamespace]:
     with hub_server() as server:
         yield server
+
+
+@pytest.fixture
+def embedding_http() -> Iterator[SimpleNamespace]:
+    state = SimpleNamespace(requests=[], url="")
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib HTTP handler API
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state.requests.append(body)
+            if self.path != "/v1/embeddings":
+                self.send_error(404)
+                return
+            texts = body["input"]
+            if isinstance(texts, str):
+                texts = [texts]
+            dims = body.get("dimensions", 8)
+            payload = {
+                "object": "list",
+                "model": body["model"],
+                "data": [
+                    {"object": "embedding", "index": i, "embedding": [0.25] * dims}
+                    for i in range(len(texts))
+                ],
+                "usage": {"prompt_tokens": len(texts), "total_tokens": len(texts)},
+            }
+            encoded = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.url = f"http://127.0.0.1:{server.server_port}/v1"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 @pytest.fixture(scope="session")

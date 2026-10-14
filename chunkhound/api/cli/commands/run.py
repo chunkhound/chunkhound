@@ -274,6 +274,20 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     if not _validate_run_arguments(args, formatter, config):
         sys.exit(1)
 
+    if (
+        not _mcp_mode()
+        and not getattr(args, "no_embeddings", False)
+        and not config.embeddings_disabled
+        and config.hub.url
+    ):
+        from chunkhound.hub.client import pull
+        from chunkhound.hub.errors import HubDatabaseMismatch, HubInstallationInterrupted
+
+        try:
+            await pull(config, automatic=True)
+        except (HubDatabaseMismatch, HubInstallationInterrupted):
+            raise SystemExit(1) from None
+
     # MCP has no interactive layer and must not write to stdout, so it gets no
     # decision hook at all; the registry then keeps the indexed model and logs
     # the reason to stderr.

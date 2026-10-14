@@ -3568,13 +3568,13 @@ def test_explicit_relative_version_is_installed_and_searchable(
     prefix = names[rel]
     result = cli(project, "pull", project, "--version", rel, "--verbose")
     assert result.returncode == 0, result.stdout + result.stderr
+    assert embedding_http.requests == []  # Explicit pull installs only.
     search = cli(project, "search", prefix + "_0", project, "--regex")
     assert search.returncode == 0, search.stdout + search.stderr
     assert "source.py" in search.stdout + search.stderr
     assert "No results found" not in search.stdout + search.stderr
     assert hub_http.requests == [("/catalogue?token=secret", None),
                                  (f"/{prefix}.tar.gz?token=secret", None)]
-    assert embedding_http.requests == []  # Explicit pull installs only.
     assert "token=secret" not in result.stdout + result.stderr
     assert "/catalogue?" not in result.stdout + result.stderr
 
