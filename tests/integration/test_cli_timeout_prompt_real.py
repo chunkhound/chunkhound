@@ -26,6 +26,7 @@ async def test_cli_timeout_prompt_real(tmp_path: Path, monkeypatch: pytest.Monke
     # Ensure prompt is shown and accepted
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.delenv("CHUNKHOUND_NO_PROMPTS", raising=False)
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
     monkeypatch.setattr("builtins.input", lambda *_: "y")
 
     # Force timeout path, apply to all sizes, and reindex regardless of unchanged
