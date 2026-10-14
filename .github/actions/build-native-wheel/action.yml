@@ -147,7 +147,11 @@ runs:
             x86_64|aarch64) uv_arch="$(uname -m)" ;;
             *) echo "Unsupported Linux arch for uv: $(uname -m)" >&2; exit 1 ;;
           esac
-          curl -LsSf "https://github.com/astral-sh/uv/releases/download/$MANYLINUX_UV_VERSION/uv-${uv_arch}-unknown-linux-gnu.tar.gz" \
+          # The glibc-gnu release build requires glibc 2.28+ (statx), newer
+          # than this container's 2.27 -- the exact problem this build
+          # floors for chunkhound_native itself. Use the statically linked
+          # musl build instead; it has no glibc floor at all.
+          curl -LsSf "https://github.com/astral-sh/uv/releases/download/$MANYLINUX_UV_VERSION/uv-${uv_arch}-unknown-linux-musl.tar.gz" \
             | tar -xz --strip-components=1 -C /build/uv
         fi
         if ! command -v rustup >/dev/null; then
