@@ -87,7 +87,10 @@ def validate_rerank_configuration(
     if rerank_format in ("cohere", "voyage") and not rerank_model:
         raise ValueError(RERANK_MODEL_REQUIRED)
 
-    # If using reranking (model set or TEI format with URL), validate URL config
+    # If using reranking (model set or TEI format with URL), validate URL config.
+    # An inactive rerank_url is tolerated so switching reranking off never blocks
+    # config load (see CHANGELOG: "An unused rerank_url no longer blocks"); the
+    # factory drops an unresolvable relative path instead of forwarding it.
     is_using_reranking = rerank_model or (rerank_format == "tei" and rerank_url)
 
     if is_using_reranking and rerank_url:
@@ -395,8 +398,9 @@ class EmbeddingConfig(BaseSettings):
             base_config["azure_deployment"] = self.azure_deployment
 
         # Add rerank configuration if available
-        # Preserve an inactive external endpoint instead of enabling Voyage's default.
-        if self.rerank_model or self.rerank_url:
+        # Emit rerank_model only when set: an omitted model must stay absent so
+        # the provider's default reranking model can apply.
+        if self.rerank_model is not None:
             base_config["rerank_model"] = self.rerank_model
         base_config["rerank_url"] = self.rerank_url
         base_config["rerank_format"] = self.rerank_format
