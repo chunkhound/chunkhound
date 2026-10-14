@@ -120,6 +120,9 @@ runs:
         # aarch64 image runs natively there.
         BUILD_CACHE="$RUNNER_TEMP/manylinux-build"
         mkdir -p "$BUILD_CACHE/home" "$OUT_DIR"
+        # Resolve relative inputs against the workspace, then mount the output
+        # separately so callers may also provide an absolute out-dir.
+        OUT_DIR="$(realpath "$OUT_DIR")"
         # maturin treats a sibling pyproject.toml as authoritative package metadata
         # ("mixed" Rust/Python project support), which misnames this wheel as
         # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
@@ -157,11 +160,11 @@ runs:
         # --auditwheel repair bundles DuckDB's shared library into the wheel
         # and rewrites the extension's link path to resolve it relative to
         # itself.
-        maturin build --release --auditwheel repair --out "/work/$OUT_DIR/"
+        maturin build --release --auditwheel repair --out /out/
         shopt -s nullglob
-        wheels=("/work/$OUT_DIR"/chunkhound_native-*.whl)
+        wheels=(/out/chunkhound_native-*.whl)
         if [[ ${#wheels[@]} -ne 1 ]]; then
-          echo "Expected exactly one chunkhound_native wheel in $OUT_DIR" >&2
+          echo "Expected exactly one chunkhound_native wheel in /out" >&2
           exit 1
         fi
         python /work/scripts/finalize_manylinux_wheel.py "${wheels[0]}" --max-glibc 2.28
@@ -170,10 +173,10 @@ runs:
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$(pwd)":/work \
+          -v "$OUT_DIR":/out \
           -v "$BUILD_CACHE":/build \
           -v "$RUNNER_TEMP/build-manylinux-2-28.sh":/tmp/build-manylinux-2-28.sh:ro \
           -e DUCKDB_DOWNLOAD_LIB \
-          -e OUT_DIR \
           -e MANYLINUX_RUST_TOOLCHAIN \
           -e MANYLINUX_MATURIN_VERSION \
           -e RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN' \

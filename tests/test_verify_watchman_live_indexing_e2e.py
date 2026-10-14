@@ -182,11 +182,13 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     linux_build = steps["Build native wheel (Linux, manylinux_2_28 container)"]
     other_build_run = runs["Build native wheel (macOS/Windows)"]
     smoke_run = runs["Smoke test native wheel API"]
-    # The Linux build runs maturin inside the manylinux_2_28 container, whose
-    # /work bind mount is the repo root; OUT_DIR is forwarded from
-    # inputs.out-dir. The macOS/Windows build writes --out on the host.
+    # The Linux build resolves inputs.out-dir on the host and bind-mounts it
+    # separately at /out, supporting both workspace-relative and absolute
+    # values. The macOS/Windows build writes --out on the host.
     assert linux_build["env"]["OUT_DIR"] == "${{ inputs.out-dir }}"
-    assert '--out "/work/$OUT_DIR/"' in linux_build["run"]
+    assert 'OUT_DIR="$(realpath "$OUT_DIR")"' in linux_build["run"]
+    assert '-v "$OUT_DIR":/out' in linux_build["run"]
+    assert 'maturin build --release --auditwheel repair --out /out/' in linux_build["run"]
     assert '--out "${{ inputs.out-dir }}/"' in other_build_run
     assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
 
