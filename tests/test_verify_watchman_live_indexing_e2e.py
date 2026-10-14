@@ -179,7 +179,7 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
 
     steps = {step["name"]: step for step in action["runs"]["steps"]}
     runs = {name: step.get("run", "") for name, step in steps.items()}
-    linux_build = steps["Build native wheel (Linux, manylinux_2_28 container)"]
+    linux_build = steps["Build native wheel (Linux, manylinux_2_27 container)"]
     other_build_run = runs["Build native wheel (macOS/Windows)"]
     smoke_run = runs["Smoke test native wheel API"]
     # The Linux build resolves inputs.out-dir on the host and bind-mounts it
@@ -188,7 +188,11 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     assert linux_build["env"]["OUT_DIR"] == "${{ inputs.out-dir }}"
     assert 'OUT_DIR="$(realpath "$OUT_DIR")"' in linux_build["run"]
     assert '-v "$OUT_DIR":/out' in linux_build["run"]
-    assert 'maturin build --release --auditwheel repair --out /out/' in linux_build["run"]
+    assert (
+        '--compatibility manylinux_2_27 --auditwheel repair --out /out/'
+        in linux_build["run"]
+    )
+    assert '--max-glibc 2.27' in linux_build["run"]
     assert '--out "${{ inputs.out-dir }}/"' in other_build_run
     assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
 
