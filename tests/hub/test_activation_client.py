@@ -12,6 +12,7 @@ import chunkhound_native as native
 from chunkhound.hub.client import pull
 from chunkhound.hub.errors import HubDatabaseMismatch, HubInstallationInterrupted
 from chunkhound.hub.inspect import inspect_database
+from chunkhound.providers.database import ownership
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 from tests.hub.activation_support import config_for, publish
@@ -247,6 +248,102 @@ async def test_repeated_cancellation_waits_for_install_and_workspace_cleanup(
     assert target.exists()
     assert not list(target.parent.glob(".chunkhound-pull-*"))
     assert inspect_database(target, "duckdb").groups
+
+
+@pytest.mark.parametrize("boundary", ["initial_inspection", "installation_recheck"])
+async def test_cancelled_pull_reports_interruption_after_worker_drains(
+    tmp_path, hub_http, monkeypatch, boundary
+):
+    config = config_for(tmp_path / "private-checkout", hub_http)
+    target = config.database.get_db_path()
+    marker = target.with_name(target.name + ".chunkhound-install.json")
+    entered, release, completed = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    acquire_install = native.acquire_install_lease
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("hub_client", False)
+        and record["level"].name == "ERROR",
+    )
+
+    if boundary == "initial_inspection":
+        marker.write_bytes(b"{")
+        acquire_database = ownership.acquire_database_lease
+
+        def pause_native_inspection(path):
+            try:
+                # Real native marker detection raises before any backend opens.
+                return acquire_database(path)
+            finally:
+                entered.set()
+                assert release.wait(20)
+                completed.set()
+
+        monkeypatch.setattr(
+            ownership, "acquire_database_lease", pause_native_inspection
+        )
+    else:
+        publish(hub_http, build_database(tmp_path / "published"))
+
+        def pause_native_install(path, backend):
+            # A surviving marker appeared after the initial cold-state check.
+            marker.write_bytes(b"{")
+            lease = acquire_install(path, backend)
+            try:
+                entered.set()
+                assert release.wait(20)
+                return lease
+            except BaseException:
+                lease.close()
+                raise
+            finally:
+                completed.set()
+
+        monkeypatch.setattr(native, "acquire_install_lease", pause_native_install)
+
+    task = asyncio.create_task(pull(config, automatic=True))
+    try:
+        try:
+            assert await asyncio.to_thread(entered.wait, 20)
+            for _ in range(3):
+                task.cancel()
+                await asyncio.sleep(0)
+                assert not task.done()
+                assert not completed.is_set()
+                assert messages == []
+                if boundary == "installation_recheck":
+                    assert list(target.parent.glob(".chunkhound-pull-*"))
+                    with pytest.raises(native.DatabaseBusyError):
+                        acquire_install(str(target), "duckdb")
+                else:
+                    assert hub_http.requests == []
+        finally:
+            release.set()
+        with pytest.raises(HubInstallationInterrupted) as failure:
+            await task
+        assert completed.is_set()
+        assert marker.read_bytes() == b"{"
+        assert not target.exists()
+        assert not list(target.parent.glob(".chunkhound-pull-*"))
+        diagnostic = (
+            "Hub installation was interrupted; run explicit chunkhound pull again. "
+            "Local work may require re-indexing"
+        )
+        assert messages == [diagnostic]
+        assert str(failure.value) == diagnostic
+        # Ownership ends only after completion; the marker still refuses readers.
+        lease = acquire_install(str(target), "duckdb")
+        lease.close()
+        with pytest.raises(native.DatabaseInterruptedError):
+            native.acquire_database_lease(str(target))
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        logger.remove(sink)
 
 
 @pytest.mark.parametrize("layout", ["memory", "read_only", "explicit", "legacy"])

@@ -2740,6 +2740,8 @@ async def pull(config: Config, rel: str = "latest", automatic: bool = False) -> 
 
 `pull`: True only if this invocation committed an install; False for skipped/soft unavailable. Fatal mismatch/interruption are logged once then raised, not returned False. Explicit CLI maps False and fatal categories to exit 1. Callable recheck is supplied only for automatic mode; the adapter rejects interruption before invoking it.
 
+**Approved T7 I1 amendment:** After fully draining actual worker completion, fatal hub mismatch/interruption takes precedence over concurrent cancellation, including native interruption from initial inspection. A successfully completed worker still reports cancellation; soft failure behavior is unchanged. Keep the shared T5 `await_worker_completion` helper unchanged and apply this outcome selection locally to both T7 worker boundaries. Retain private executor completion Futures with copied contextvars, not independently cancellable `to_thread` Tasks. Neither repeated cancellation nor `asyncio.run` shutdown may release leases or staging before the actual worker finishes. Add a runtime RED/GREEN regression using real native interruption at the initial inspection and installation/recheck boundaries, asserting one sanitized fatal diagnostic, marker retention and completed drainage/staging/lease lifetime; retain successful-worker cancellation coverage.
+
 - [ ] **T7.1 Add fixture support and failing real installation contracts.** In `tests/hub/artifacts.py`, extend `build_database` with trailing `symbol_prefix: str = "function"`; replace only its chunk code and symbol expressions:
 
 ```python
@@ -3304,6 +3306,7 @@ Only this adapter deals with exclusive native handles. It never removes sidecars
 """Trusted hub selection and automatic-index policy, independent of registry."""
 
 import asyncio
+import contextvars
 from pathlib import Path
 
 import chunkhound_native as native
@@ -3365,6 +3368,26 @@ def local_needs_pull(
         ) != (key.provider, key.model, key.dims)
 
 
+async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
+    """Drain actual completion, preserving fatal hub outcomes over cancellation."""
+    try:
+        return await await_worker_completion(worker)
+    except asyncio.CancelledError:
+        # The shared helper has fully drained this private executor Future.
+        # Keep its cancellation policy except when recovery/fatal reporting is due.
+        failure = worker.exception()
+        if isinstance(
+            failure,
+            (
+                HubDatabaseMismatch,
+                HubInstallationInterrupted,
+                native.DatabaseInterruptedError,
+            ),
+        ):
+            raise failure from None
+        raise
+
+
 async def _pull(config: Config, rel: str, automatic: bool) -> bool:
     if automatic and (config.embeddings_disabled or not config.hub.url):
         return False
@@ -3373,8 +3396,11 @@ async def _pull(config: Config, rel: str, automatic: bool) -> bool:
     key = configured_key(config)  # Offline; do not let drift pinning run first.
     target = installation_target(config)
     if automatic:
-        worker = asyncio.create_task(asyncio.to_thread(local_needs_pull, target, key))
-        if not await await_worker_completion(worker):
+        # Keep actual executor completion private: shutdown cancels Tasks, not threads.
+        worker = asyncio.get_running_loop().run_in_executor(
+            None, contextvars.copy_context().run, local_needs_pull, target, key
+        )
+        if not await _await_pull_worker(worker):
             return False
     selected = select_manifest(await fetch_manifest(config.hub.url), key, rel)
     logger.bind(hub_client=True).info(
@@ -3394,8 +3420,10 @@ async def _pull(config: Config, rel: str, automatic: bool) -> bool:
                 )) if automatic else None,
             )
 
-        worker = asyncio.create_task(asyncio.to_thread(commit))
-        installed = await await_worker_completion(worker)
+        worker = asyncio.get_running_loop().run_in_executor(
+            None, contextvars.copy_context().run, commit
+        )
+        installed = await _await_pull_worker(worker)
     if installed:
         logger.bind(hub_client=True).info(
             "Hub base installed; run index to overlay local changes"
@@ -3436,7 +3464,7 @@ The broad local inventory catch is only a **skip** before replacement, not permi
 - [ ] **T7.6 GREEN and commit checkpoint.**
 
 ```bash
-UV_NO_SYNC=1 uv run pytest tests/hub/test_activation_client.py tests/hub/test_artifact.py tests/hub/test_inspection_ownership.py -v
+UV_NO_SYNC=1 uv run pytest tests/hub/test_activation_client.py tests/hub/test_artifact.py tests/hub/test_inspection_ownership.py tests/hub/test_worker_ownership.py -v
 UV_NO_SYNC=1 uv run ruff check chunkhound/hub tests/hub/activation_support.py tests/hub/test_activation_client.py
 UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/activation-client-c1-mypy.log 2>&1
 UV_NO_SYNC=1 uv run pytest tests/test_smoke.py -v -n auto

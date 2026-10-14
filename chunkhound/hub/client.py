@@ -69,6 +69,26 @@ def local_needs_pull(
         ) != (key.provider, key.model, key.dims)
 
 
+async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
+    """Drain actual completion, preserving fatal hub outcomes over cancellation."""
+    try:
+        return await await_worker_completion(worker)
+    except asyncio.CancelledError:
+        # The shared helper has fully drained this private executor Future.
+        # Keep its cancellation policy except when recovery/fatal reporting is due.
+        failure = worker.exception()
+        if isinstance(
+            failure,
+            (
+                HubDatabaseMismatch,
+                HubInstallationInterrupted,
+                native.DatabaseInterruptedError,
+            ),
+        ):
+            raise failure from None
+        raise
+
+
 async def _pull(config: Config, rel: str, automatic: bool) -> bool:
     if automatic and (config.embeddings_disabled or not config.hub.url):
         return False
@@ -81,7 +101,7 @@ async def _pull(config: Config, rel: str, automatic: bool) -> bool:
         worker = asyncio.get_running_loop().run_in_executor(
             None, contextvars.copy_context().run, local_needs_pull, target, key
         )
-        if not await await_worker_completion(worker):
+        if not await _await_pull_worker(worker):
             return False
     selected = select_manifest(await fetch_manifest(config.hub.url), key, rel)
     logger.bind(hub_client=True).info(
@@ -115,7 +135,7 @@ async def _pull(config: Config, rel: str, automatic: bool) -> bool:
         worker = asyncio.get_running_loop().run_in_executor(
             None, contextvars.copy_context().run, commit
         )
-        installed = await await_worker_completion(worker)
+        installed = await _await_pull_worker(worker)
     if installed:
         logger.bind(hub_client=True).info(
             "Hub base installed; run index to overlay local changes"
