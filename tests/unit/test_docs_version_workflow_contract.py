@@ -559,6 +559,7 @@ class TestDocsVersionWorkflowContract:
             "site-build-validation",
             "watchman-rollout-gate",
             "native-wheel-smoke-arm64",
+            "old-linux-wheel-smoke",
             "native-dev-macos",
         ]
         assert job["if"] == "github.ref == 'refs/heads/main'"
@@ -567,12 +568,27 @@ class TestDocsVersionWorkflowContract:
         assert upload_step["with"]["path"] == "site/dist/"
         assert permissions["contents"] == "read"
 
+    def test_old_linux_native_wheel_smoke_contract(self) -> None:
+        job = _job(".github/workflows/ci.yml", "old-linux-wheel-smoke")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        smoke_step = next(
+            step
+            for step in steps
+            if step["name"] == "Smoke test native wheel on Ubuntu 18.04 (glibc 2.27)"
+        )
+
+        assert job["needs"] == "watchman-runtime-validation"
+        assert "ubuntu:18.04@sha256:" in smoke_step["run"]
+        assert "--python 3.12" in smoke_step["run"]
+        assert "chunkhound_native-*.whl" in smoke_step["run"]
+
     def test_workflow_concurrency_contract(self) -> None:
         workflow = _load_workflow(".github/workflows/ci.yml")
         concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
 
         assert concurrency["group"] == (
-            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}"
+            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' "
+            "|| github.run_id }}"
         )
         assert concurrency["cancel-in-progress"] is False
 

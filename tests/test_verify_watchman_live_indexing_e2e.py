@@ -177,12 +177,33 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     assert out_dir["required"] is False
     assert out_dir["default"] == "dist"
 
-    runs = {step["name"]: step.get("run", "") for step in action["runs"]["steps"]}
-    build_run = runs["Build native wheel"]
+    steps = {step["name"]: step for step in action["runs"]["steps"]}
+    runs = {name: step.get("run", "") for name, step in steps.items()}
+    linux_build = steps["Build native wheel (Linux, manylinux_2_27 container)"]
+    other_build_run = runs["Build native wheel (macOS/Windows)"]
     smoke_run = runs["Smoke test native wheel API"]
-    assert build_run.count('--out "${{ inputs.out-dir }}/"') == 2, (
-        "both Linux and non-Linux maturin invocations must write into out-dir"
+    # The Linux build resolves inputs.out-dir on the host and bind-mounts it
+    # separately at /out, supporting both workspace-relative and absolute
+    # values. The macOS/Windows build writes --out on the host.
+    assert linux_build["env"]["OUT_DIR"] == "${{ inputs.out-dir }}"
+    assert 'OUT_DIR="$(realpath "$OUT_DIR")"' in linux_build["run"]
+    assert '-v "$OUT_DIR":/out' in linux_build["run"]
+    # The weak Rust statx/getrandom symbol versions are finalized before
+    # auditwheel validates the explicit manylinux_2_27 policy; otherwise
+    # auditwheel rejects the unpatched statx@GLIBC_2.28 reference.
+    assert (
+        "--compatibility linux --auditwheel skip --out /out/unrepaired/"
+        in linux_build["run"]
     )
+    assert "--max-glibc 2.27" in linux_build["run"]
+    assert (
+        'auditwheel repair --plat "manylinux_2_27_$(uname -m)" --wheel-dir /out'
+        in linux_build["run"]
+    )
+    assert linux_build["run"].index("--max-glibc 2.27") < linux_build["run"].index(
+        "auditwheel repair --plat"
+    )
+    assert '--out "${{ inputs.out-dir }}/"' in other_build_run
     assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
 
 

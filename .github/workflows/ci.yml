@@ -224,6 +224,75 @@ jobs:
         with:
           skip-tag-version-patch: 'true'
 
+  # Installs the wheels already built by watchman-runtime-validation's
+  # ubuntu-latest leg on hosts with no Rust toolchain:
+  # - ubuntu:18.04 (glibc 2.27): the repaired native wheel alone, exercising
+  #   the manylinux_2_27 floor at runtime (the build also enforces it
+  #   statically via scripts/finalize_manylinux_wheel.py).
+  # - ubuntu:22.04 + Python 3.10: main + native wheel together, the way a
+  #   user on a common LTS installs them. The main wheel is installed with
+  #   its PyPI dependencies first, then the branch native wheel replaces the
+  #   PyPI chunkhound-native with --no-deps -- CI native wheels keep
+  #   Cargo.toml's placeholder version, which can't satisfy the main wheel's
+  #   chunkhound-native>=X pin (same approach as
+  #   scripts/verify_watchman_live_indexing_e2e.py).
+  old-linux-wheel-smoke:
+    needs: watchman-runtime-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download native + main wheels built by watchman-runtime-validation
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '{repaired-native-wheel-ubuntu-latest,watchman-wheel-ubuntu-latest}'
+          path: old-linux-dist
+          merge-multiple: true
+
+      - name: Smoke test native wheel on Ubuntu 18.04 (glibc 2.27)
+        run: |
+          cat > "$RUNNER_TEMP/glibc-2-27-smoke.sh" <<'CONTAINER_SCRIPT'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq ca-certificates curl
+          curl -LsSf https://astral.sh/uv/install.sh \
+            | env UV_UNMANAGED_INSTALL=/tmp/uv sh
+          /tmp/uv/uv run --no-project --python 3.12 \
+            --with /dist/chunkhound_native-*.whl \
+            python /work/scripts/smoke_test_native_wheel.py
+          CONTAINER_SCRIPT
+          docker run --rm \
+            -v "$(pwd)":/work:ro \
+            -v "$(pwd)/old-linux-dist":/dist:ro \
+            -v "$RUNNER_TEMP/glibc-2-27-smoke.sh":/tmp/smoke.sh:ro \
+            -w /tmp \
+            ubuntu:18.04@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98 \
+            bash /tmp/smoke.sh
+
+      - name: Install main + native wheels on Ubuntu 22.04 + Python 3.10 and smoke test
+        run: |
+          cat > "$RUNNER_TEMP/ubuntu-22-04-smoke.sh" <<'CONTAINER_SCRIPT'
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq python3.10 python3.10-venv
+          python3.10 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --no-cache-dir /dist/chunkhound-*.whl
+          /tmp/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps /dist/chunkhound_native-*.whl
+          /tmp/venv/bin/python /work/scripts/smoke_test_native_wheel.py
+          /tmp/venv/bin/chunkhound --version
+          CONTAINER_SCRIPT
+          docker run --rm \
+            -v "$(pwd)":/work:ro \
+            -v "$(pwd)/old-linux-dist":/dist:ro \
+            -v "$RUNNER_TEMP/ubuntu-22-04-smoke.sh":/tmp/smoke.sh:ro \
+            -w /tmp \
+            ubuntu:22.04 \
+            bash /tmp/smoke.sh
+
   # Run the public Makefile contract once on macOS rather than only checking
   # its printed commands. Other platforms exercise the equivalent native build
   # through the test matrix without multiplying this expensive build.
@@ -272,6 +341,7 @@ jobs:
       - site-build-validation
       - watchman-rollout-gate
       - native-wheel-smoke-arm64
+      - old-linux-wheel-smoke
       - native-dev-macos
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
