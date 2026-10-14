@@ -202,6 +202,15 @@ ChunkHound is especially useful for:
 - local-only or security-sensitive environments
 - engineering teams that want agents, support, and product questions grounded in the same code index
 
+## Central base indexes
+
+Use DuckDB with `chunkhound pull [path] --version latest|-1|-2` to install a
+compatible organization-hosted base, then `chunkhound index [path]` to overlay
+local changes. LanceDB overlay is nonoperational/deferred because changed-file
+updates can leave stale chunks searchable.
+See [Hub client operation and recovery](docs/hub-client.md) for configuration,
+automatic-index behavior, ownership requirements and interruption recovery.
+
 ## Community
 
 ChunkHound is MIT licensed, open source, and community built.

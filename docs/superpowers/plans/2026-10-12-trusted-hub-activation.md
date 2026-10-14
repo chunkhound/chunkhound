@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver trusted-hub pull, searchable installed bases and local overlay while excluding installation during current-version database use and refusing interrupted mixed state.
+**Goal:** Deliver trusted-hub pull, searchable installed bases and DuckDB local overlay while excluding installation during current-version database use and refusing interrupted mixed state. LanceDB overlay is nonoperational/deferred due to known stale changed-file chunks; its verified ownership, installation, no-pull and interruption/recovery contracts remain in scope.
 
 **Architecture:** Retain the completed Python manifest/HTTP/archive/inspection foundation. One Rust advisory-lease implementation protects Python and native database lifetimes; a scoped exclusive native handle owns marker/quarantine installation. Python retains selection, backend knowledge, CLI policy, automatic recheck and cancellation-safe orchestration.
 
@@ -3855,11 +3855,11 @@ Expected targeted/smoke PASS; no new mypy errors. Real drift/no-request tests ar
 
 ### Task T9: Pull/search/overlay acceptance, recovery exits and operator documentation
 
-**Files:** Create `tests/hub/test_activation_acceptance.py`, `docs/hub-client.md`; modify `README.md`. No indexing/diff engine source modifications are planned. If acceptance reveals a real defect, stop and report the failing contract before expanding this task's source scope.
+**Files:** Preserve and commit `tests/hub/test_activation_acceptance.py` unchanged; create `docs/hub-client.md`; modify `README.md` and narrowly amend this plan and `docs/superpowers/specs/2026-10-12-trusted-hub-activation-design.md` for the approved LanceDB deferral. Keep the ignored T9 brief aligned. No production changes, new deletion tests, dependency/environment changes or broader LanceDB disabling are authorized. Unexpected acceptance failures remain blocking pending exact classification; do not expand source scope.
 
 **Consumes:** T7/T8 public CLI, real artifact/HTTP/embedding fixtures; existing `SubprocessJsonRpcClient` for real MCP; T1–T6 already own process-kill, direct native holders, provider reconnect/alias/handoff race and native cleanup fault tests.
 
-**Produces:** End-to-end evidence for actual installed-base search, unchanged/new/changed/deleted overlay across a moved checkout, no hub requests from MCP/search, fatal interrupted auto-index and explicit re-pull recovery. User-facing documentation with no unsupported durability/platform claim.
+**Produces:** End-to-end evidence for actual installed-base search, operational DuckDB unchanged/new/changed/deleted overlay across a moved checkout, no hub requests from MCP/search, fatal interrupted auto-index and explicit re-pull recovery. Preserve visible failing LanceDB overlay contracts without skips, xfails or weaker assertions; LanceDB overlay is nonoperational/deferred, not GREEN. Its verified ownership, installation, no-pull and interruption/recovery contracts are not downgraded. User-facing documentation must distinguish interruption recovery from content freshness and make no unsupported durability/platform claim.
 
 - [ ] **T9.1 Add real acceptance contracts.** Create `tests/hub/test_activation_acceptance.py`:
 
@@ -4030,7 +4030,14 @@ A marker-only CLI fixture checks policy wiring, not the whole crash protocol. T6
 UV_NO_SYNC=1 uv run pytest tests/hub/test_activation_acceptance.py -v
 ```
 
-Before T7/T8 this must fail at pull; after T8 it may pass immediately because T9 primarily supplies acceptance/docs, not a production behavior change. Do not manufacture a red by weakening working code. If it fails now, retain exact output and stop for a bounded defect plan/review; do not rewrite overlay or add mock-only assertions.
+Before T7/T8 this must fail at pull; after T8 it may pass immediately because T9 primarily supplies acceptance/docs, not a production behavior change. Do not manufacture a red by weakening working code.
+
+**Approved T9 continuation:** The original failure stop was honored, followed by bounded diagnosis and independent correction-plan review. The user explicitly deferred the LanceDB fix because it is not operational yet. Only these two failures are accepted as deferred:
+
+- `tests/hub/test_activation_acceptance.py::test_moved_checkout_overlays_unchanged_new_changed_and_deleted_files[0-lancedb]`
+- `tests/hub/test_activation_acceptance.py::test_moved_checkout_overlays_unchanged_new_changed_and_deleted_files[1-lancedb]`
+
+Both fail at test line 72: `OLD_CHANGED_BASE` still returns 33 `changed.py` chunks. Keep the acceptance code and file byte-for-byte unchanged (SHA256 `6ac28823846f5669b5936f748f3f62aec422c139ecd9cb276e3f6719df993f2a`), preserve exact output and report FAIL, not GREEN. LanceDB deleted-negative, semantic and final-inventory assertions after line 72 were not reached and are not passing evidence. The diagnosed missing Lance batch-delete executor correction remains deferred, not authorized. Any other failure requires an exact classification and a stop; do not broaden this waiver or rewrite overlay.
 
 - [ ] **T9.3 Write operator documentation and README link.** Complete `docs/hub-client.md`:
 
@@ -4042,9 +4049,17 @@ hub. The publisher is trusted; the client still verifies checksums, safely
 extracts the archive, and checks stored backend/format/embedding identity.
 ChunkHound never publishes an index.
 
-Configure a full manifest URL in `.chunkhound.json`:
+Use DuckDB for the pull-then-overlay workflow below; it is the operational
+local-overlay target. LanceDB overlay is nonoperational/deferred: changed-file
+updates can leave stale chunks searchable. This does not disable LanceDB or
+remove its verified ownership, installation, no-pull and interruption/recovery
+contracts. Format and checksum verification establish compatibility and artifact
+integrity, not that publisher content is free of stale rows.
 
-    {"hub": {"url": "https://hub.example/catalogue?branch=main"}}
+Configure DuckDB and a full manifest URL in `.chunkhound.json`, alongside your
+existing embedding configuration:
+
+    {"database": {"provider": "duckdb"}, "hub": {"url": "https://hub.example/catalogue?branch=main"}}
 
 Or set `CHUNKHOUND_HUB__URL`. The URL is opaque: the client appends no path.
 Manifest v2 supplies full artifact URLs. HTTP and HTTPS are supported without
@@ -4066,17 +4081,19 @@ Azure/openai storage-identity ambiguity cannot select a base. Metadata such as
 project/revision is diagnostic, not a selection shortcut.
 
 Explicit pull installs only. It exits 1 if it cannot install a matching base.
-It replaces local index state, so local work may need re-indexing. A subsequent
-ordinary index overlays changed/new/deleted local files and keeps unchanged
-base content through existing hash-based indexing. Moved checkouts are
-supported by existing relative-path indexing, not a new hub diff engine.
+It replaces local index state, so local work may need re-indexing. With DuckDB,
+a subsequent ordinary index overlays changed/new/deleted local files and keeps
+unchanged base content through existing hash-based indexing. Moved checkouts
+use existing relative-path indexing, not a new hub diff engine. Do not rely on
+LanceDB overlay for fresh changed-file content while its correction is deferred.
 
 `index` considers automatic pull only with a configured hub and known usable
 embedding identity, when the target is missing or embedding-misaligned. It
 runs before registry initialization and model-drift pinning. An aligned index
 makes no hub request. Simulation, ignore checking, no-embeddings indexing,
-MCP and search do not pull. Auto-index continues into ordinary local overlay
-following installation. Download/selection/checksum/archive/space/pre-install
+MCP and search do not pull. Auto-index continues into ordinary local indexing
+following installation; the same LanceDB overlay limitation applies.
+Download/selection/checksum/archive/space/pre-install
 busy failures log and follow existing local behavior; that behavior can still
 fail if another process owns an incompatible backend connection. A downloaded
 database contradicting its manifest is fatal and leaves the old target alone.
@@ -4128,12 +4145,15 @@ leaves the marker and files alone. Local index work may be lost and require
 re-indexing. Never replay an old WAL against a new base or restore a quarantine
 by guessing. Abandoned quarantines may remain for operator removal after
 stopping database users; they are never automatically selected for recovery.
+This is interruption recovery, not a content-freshness guarantee or a repair
+for stale LanceDB rows in a publisher's base; the overlay correction is deferred.
 
 Cleanup failure after commit is a warning, not a failed pull: the new base is
 usable even if old quarantine or staging work remains. Interrupted awaits wait
 for their filesystem worker to finish before releasing leases/staging. There
-is no permanent artifact cache. Windows/POSIX support is verified by the
-project's platform CI; a local Linux run alone does not establish it.
+is no permanent artifact cache. Cross-platform support claims require actual
+passing Windows/POSIX platform CI results; a local Linux run alone does not
+establish them. This documentation does not claim that platform CI has passed.
 ```
 
 In `README.md`, insert this short paragraph immediately before the existing `## Community` heading (currently line 205), without moving other content:
@@ -4141,8 +4161,10 @@ In `README.md`, insert this short paragraph immediately before the existing `## 
 ```markdown
 ## Central base indexes
 
-Use `chunkhound pull [path] --version latest|-1|-2` to install a compatible
-organization-hosted base, then `chunkhound index [path]` to overlay local changes.
+Use DuckDB with `chunkhound pull [path] --version latest|-1|-2` to install a
+compatible organization-hosted base, then `chunkhound index [path]` to overlay
+local changes. LanceDB overlay is nonoperational/deferred because changed-file
+updates can leave stale chunks searchable.
 See [Hub client operation and recovery](docs/hub-client.md) for configuration,
 automatic-index behavior, ownership requirements and interruption recovery.
 ```
@@ -4156,11 +4178,12 @@ UV_NO_SYNC=1 uv run ruff check chunkhound > .superpowers/sdd/activation-client-r
 UV_NO_SYNC=1 uv run mypy chunkhound > .superpowers/sdd/activation-client-mypy-after.log 2>&1
 UV_NO_SYNC=1 uv run pytest tests/test_smoke.py -v -n auto
 git diff --check
-git add tests/hub/test_activation_acceptance.py docs/hub-client.md README.md
-git commit -m "test: prove hub pull search overlay and document recovery"
+sha256sum tests/hub/test_activation_acceptance.py
+git add tests/hub/test_activation_acceptance.py docs/hub-client.md README.md docs/superpowers/plans/2026-10-12-trusted-hub-activation.md docs/superpowers/specs/2026-10-12-trusted-hub-activation-design.md
+git commit -m "test: retain hub acceptance and document deferred LanceDB overlay"
 ```
 
-Expected hub/acceptance/smoke PASS, no introduced mypy/ruff errors. Existing unrelated baseline failures must be distinguished by exact diagnostic/file; do not claim all static checks passed if only the introduced-diagnostic comparison did. Native/lifetime commits already ran `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; rerun those before any combined Rust-change commit. Existing `.github/workflows/ci.yml` tests the full suite with built native extension on Ubuntu/macOS/Windows; these tests must collect there, with no local-only skip or xfail replacing required coverage. Review actual platform results before claiming cross-platform support.
+Run both regression commands and record actual totals and exit codes. Expected hub and acceptance+CLI runs exit nonzero with exactly the two deferred LanceDB failures above; smoke must PASS. Do not report the failing suites as GREEN. Run scoped acceptance-test lint, full Ruff and mypy; compare exact diagnostic/file output against the 803-error Ruff baseline (`activation-T9-ruff-before.log`) and 999-error T8 mypy baseline (`activation-client-c2-mypy.log`, comparison `activation-T8-mypy-comparison.log`). No introduced diagnostics are expected. Existing unrelated baseline failures are debt, not passing static commands. Verify unchanged acceptance bytes and only the five authorized files staged before the smoke-guarded commit. Native/lifetime commits already ran `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; rerun those before any combined Rust-change commit. Existing `.github/workflows/ci.yml` tests the full suite with built native extension on Ubuntu/macOS/Windows; these tests must collect there, with no local-only skip or xfail replacing required coverage. Review actual platform results before claiming cross-platform support.
 
 Before a later authorized PR push (not authorized here), run:
 
@@ -4194,7 +4217,7 @@ This section records plan coverage, not implementation/test success.
 | Auto missing/misaligned before pinning; aligned/no-request exclusions | T8 real subprocess backend/Rust-mode matrix; no-embedding/simulate/ignore checks; T9 MCP/search exclusion |
 | Soft download/checksum/archive/space/preinstall busy; fatal mismatch/interruption | T7 preservation/category tests; T8 subprocess exits/fallback and sanitized diagnostics; T9 interrupted auto refusal |
 | Live Python/native work, two pulls and cold opener | T1 shared-owner tests; T3/T4 holder tests; T6 paused installer probes; T7 concurrent pull/provider contract |
-| Actual search and moved-checkout unchanged/new/changed/deleted overlay | T9 existing indexing paths with HTTP embedding boundary and actual regex/semantic search, both backends/Rust settings |
+| Actual search and moved-checkout unchanged/new/changed/deleted overlay | T9 preserves real acceptance for both backends/Rust settings; DuckDB overlay is operational, LanceDB overlay nonoperational/deferred with exactly two visible stale changed-file failures. LanceDB later deleted-negative/semantic/inventory assertions are not passing evidence; verified ownership/install/no-pull/interruption contracts remain intact |
 | Testing/regression/platform/delegation requirements | Per-task RED/GREEN/smoke; Rust gates; baseline static-check comparison; T9 full-suite/platform gate; single-writer delegation table and Gate A |
 
 Self-review corrections applied inline: root-sidecar isolation/assertions are DuckDB-only (LanceDB neighbors are not cleanup targets); added explicit symlink-leaf refusal, competing pulls/cold opener, and failed re-download preservation coverage. Public native names, ownership keyword types and worker completion signatures match across all tasks. No task depends on the ignored planning fragments: exact implementation/test content is contained here.

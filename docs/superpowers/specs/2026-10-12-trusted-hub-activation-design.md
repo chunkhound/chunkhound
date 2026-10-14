@@ -8,7 +8,9 @@ This addendum supersedes the always-blocked installation proposal in Tasks 8–9
 
 ## Goal and boundaries
 
-Deliver the normal lifecycle: select a matching base, download, validate, install, search, and overlay local changes through existing indexing.
+Deliver the normal lifecycle: select a matching base, download, validate, install, search, and overlay local changes through existing indexing. DuckDB is the operational pull-then-overlay target.
+
+**Approved T9 deferral:** After the required acceptance stop, bounded diagnosis and independent correction-plan review, the user deferred the LanceDB correction because it is not operational yet. LanceDB overlay is nonoperational/deferred due to stale changed-file chunks; do not advertise a fresh local overlay for that backend. Preserve its already verified ownership, installation, no-pull and interruption/recovery contracts. This is a support qualification, not authorization to disable LanceDB, change CLI behavior, modify production code or weaken acceptance. Format/checksum validation does not establish that publisher content has no stale rows.
 
 Hubs are private, organization-operated and trusted. Keep checksum verification, bounded safe archive extraction, database-format and embedding compatibility checks, TLS verification, and existing sanitized hub diagnostics. Do not pursue deliberately crafted catalog/collation attacks as release blockers.
 
@@ -92,7 +94,7 @@ The multi-file operation is not called an atomic swap. The lease prevents partic
 
 If a marker survives, normal database opens refuse before backend recovery/migration, with guidance to run explicit `chunkhound pull` again. Do not guess which quarantined database is best, replay an old WAL against a new database, or let auto-index silently create a database over partial state. This refusal is an intentional exception to ordinary automatic-pull fallback: continuing local indexing would be unsafe.
 
-Explicit re-pull may recover by first downloading and verifying a fresh candidate, then acquiring exclusive ownership and isolating any partial current target/recognized sidecars before completing the same protocol. Failed re-download leaves the marker and existing files alone. Abandoned quarantine contents are not automatically restored; diagnostics explain that local work may need re-indexing. Do not require an intact old index to recover.
+Explicit re-pull may recover by first downloading and verifying a fresh candidate, then acquiring exclusive ownership and isolating any partial current target/recognized sidecars before completing the same protocol. Failed re-download leaves the marker and existing files alone. Abandoned quarantine contents are not automatically restored; diagnostics explain that local work may need re-indexing. Do not require an intact old index to recover. This restores installation state, not a content-freshness guarantee: a validated publisher base may itself contain stale rows. Do not present re-pull as a repair for stale LanceDB data; its overlay correction remains deferred.
 
 Tests cover process interruption and ordinary filesystem errors. Power-loss durability across platforms/filesystems is not guaranteed by a marker or rename. Keep incomplete or ambiguous marker state as a refusal during ordinary opens, never a license for unrestricted cleanup. Explicit re-pull uses only the target-derived recognized paths and a fresh quarantine, not cleanup paths read from a possibly incomplete marker. Old abandoned quarantines may remain for manual removal; they are never candidates for backend recovery.
 
@@ -105,7 +107,7 @@ Tests cover process interruption and ordinary filesystem errors. Power-loss dura
 - A downloaded database contradicting its manifest is fatal for both modes; the old target and its sidecars remain untouched.
 - Errors after installation starts retain the interruption marker unless the commit point was reached. They must not be swallowed as ordinary fallback followed by a provider open.
 - Use typed native error categories at the Python boundary; do not parse engine exception text or expose raw paths/URLs through new diagnostic causes.
-- Explicit pull installs only. A subsequent normal index overlays local changes; auto-index continues into that overlay in the same command. Search operates unchanged on the installed base.
+- Explicit pull installs only. A subsequent normal index overlays local changes; auto-index continues into ordinary indexing in the same command. DuckDB is the operational overlay target; LanceDB overlay remains nonoperational/deferred because changed-file updates can leave stale chunks searchable. This qualification does not alter command behavior. Search operates unchanged on the installed base.
 
 ## Verification contracts
 
@@ -113,14 +115,16 @@ Prefer real backends and subprocesses, with fakes only for external HTTP/embeddi
 
 1. Cold pull and explicit replacement followed by actual search for DuckDB and LanceDB; relative versions select the requested retained build.
 2. Auto-index absent/misaligned installation before drift pinning; aligned index makes no request; MCP/search/no-embeddings paths make no request.
-3. Moved-checkout overlay preserves unchanged base content and incorporates new, changed and deleted files through existing indexing logic.
+3. DuckDB moved-checkout overlay preserves unchanged base content and incorporates new, changed and deleted files through existing indexing logic. Preserve the same LanceDB acceptance assertions unchanged and visibly failing while its overlay correction is deferred; do not skip, xfail or weaken them.
 4. Common download, checksum, archive, space and candidate-mismatch failures have the promised exits/fallback and preserve the pre-install target/sidecars.
 5. Live Python DuckDB/LanceDB users and direct native work prevent installation. Compatible same-process providers/reconnect remain usable. Python/native handoff has no installation window. Two pulls and a concurrent cold opener cannot observe partial state.
 6. Kill the installer after marker creation, during old-file isolation, and after candidate rename but before marker removal: normal open refuses; explicit re-pull restores a searchable index. Kill after marker removal: the new index remains usable even if quarantine cleanup was incomplete.
 7. Normal relative/symlink-parent aliases coordinate; unrelated neighboring files survive success and failure. Native database entry points reject aliases to non-UTF-8 canonical targets with typed layout errors before preflight/recovery/read/write, even for empty pipeline input, without mutating original or replacement-character neighboring files or retaining leases. UTF-8 Unicode targets and memory remain supported; raw filename-byte fixtures are Unix-only. OS exit releases leases without manual lock-file deletion.
 8. Exercise Rust-enabled and Python-pipeline indexing. Run platform CI for supported Windows/POSIX lock and rename behavior before claiming cross-platform support.
 
-Run targeted contracts, Rust fmt/clippy/tests for Rust changes, and smoke before each commit. Run mypy and distinguish existing baseline errors from introduced errors. Full suite before any future PR push. Existing pinned-runtime/full-suite validation debt is not erased by trusting the publisher.
+Run targeted contracts, Rust fmt/clippy/tests for Rust changes, and smoke before each commit. Run full Ruff and mypy and distinguish exact existing diagnostic/file baselines from introduced errors; unchanged debt is not a passing static command. Full suite before any future PR push. Existing pinned-runtime/full-suite and platform validation debt is not erased by trusting the publisher.
+
+For T9, run both the complete hub suite and acceptance+CLI regression commands and report actual totals/exit codes. Only `tests/hub/test_activation_acceptance.py::test_moved_checkout_overlays_unchanged_new_changed_and_deleted_files[0-lancedb]` and `[1-lancedb]` of that same test are accepted deferred failures. Both fail at line 72 because `OLD_CHANGED_BASE` still returns 33 `changed.py` chunks. Keep the acceptance file byte-for-byte unchanged and retain exact output; these are failures, not GREEN. LanceDB deleted-negative, semantic and final-inventory assertions after that point were not reached and are not passing evidence. Any other failure remains blocking pending exact classification. The reviewed missing batch-delete executor correction and new deletion tests are not authorized in this continuation.
 
 ## Implementation planning and delegation
 
