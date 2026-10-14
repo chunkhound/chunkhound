@@ -177,16 +177,16 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     assert out_dir["required"] is False
     assert out_dir["default"] == "dist"
 
-    runs = {step["name"]: step.get("run", "") for step in action["runs"]["steps"]}
-    linux_build_run = runs["Build native wheel (Linux, manylinux_2_28 container)"]
+    steps = {step["name"]: step for step in action["runs"]["steps"]}
+    runs = {name: step.get("run", "") for name, step in steps.items()}
+    linux_build = steps["Build native wheel (Linux, manylinux_2_28 container)"]
     other_build_run = runs["Build native wheel (macOS/Windows)"]
     smoke_run = runs["Smoke test native wheel API"]
-    # The Linux build writes --out inside the manylinux_2_28 container (path
-    # prefixed with /work/, the container's bind-mounted repo root) while
-    # still deriving it from inputs.out-dir; the macOS/Windows build writes
-    # --out directly on the host runner.
-    assert '--out "/work/${OUT_DIR}/"' in linux_build_run
-    assert 'OUT_DIR="${{ inputs.out-dir }}"' in linux_build_run
+    # The Linux build runs maturin inside the manylinux_2_28 container, whose
+    # /work bind mount is the repo root; OUT_DIR is forwarded from
+    # inputs.out-dir. The macOS/Windows build writes --out on the host.
+    assert linux_build["env"]["OUT_DIR"] == "${{ inputs.out-dir }}"
+    assert '--out "/work/$OUT_DIR/"' in linux_build["run"]
     assert '--out "${{ inputs.out-dir }}/"' in other_build_run
     assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
 
@@ -453,7 +453,7 @@ def test_source_tree_copy_ignore_excludes_transient_repo_state() -> None:
 def test_main_runs_host_compatible_wheels_and_source_fallback(
     tmp_path: Path, monkeypatch
 ) -> None:
-    linux_wheel = tmp_path / "chunkhound-0.0.0-py3-none-manylinux_2_28_x86_64.whl"
+    linux_wheel = tmp_path / "chunkhound-0.0.0-py3-none-manylinux_2_34_x86_64.whl"
     windows_wheel = tmp_path / "chunkhound-0.0.0-py3-none-win_amd64.whl"
     linux_wheel.write_text("wheel", encoding="utf-8")
     windows_wheel.write_text("wheel", encoding="utf-8")

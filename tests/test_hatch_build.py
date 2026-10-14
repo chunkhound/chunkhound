@@ -73,12 +73,12 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     monkeypatch.setattr(
         hatch_build,
         "_allowed_wheel_platform_tags_for_build_host",
-        lambda **_: {"manylinux_2_28_x86_64"},
+        lambda **_: {"manylinux_2_34_x86_64"},
     )
     monkeypatch.setattr(
         hatch_build,
         "_platform_only_tag",
-        lambda allowed_platform_tags=None: "py3-none-manylinux_2_28_x86_64",
+        lambda allowed_platform_tags=None: "py3-none-manylinux_2_34_x86_64",
     )
 
     build_data: dict[str, object] = {}
@@ -162,14 +162,14 @@ def test_platform_only_tag_prefers_declared_runtime_contract(
         lambda: iter(
             [
                 Tag("py3", "none", "manylinux_2_39_x86_64"),
-                Tag("py3", "none", "manylinux_2_28_x86_64"),
+                Tag("py3", "none", "manylinux_2_34_x86_64"),
             ]
         ),
     )
 
     assert (
-        hatch_build._platform_only_tag({"manylinux_2_28_x86_64"})
-        == "py3-none-manylinux_2_28_x86_64"
+        hatch_build._platform_only_tag({"manylinux_2_34_x86_64"})
+        == "py3-none-manylinux_2_34_x86_64"
     )
 
 
@@ -182,8 +182,8 @@ def test_platform_only_tag_rejects_when_declared_runtime_tag_is_unavailable(
         lambda: iter([Tag("py3", "none", "manylinux_2_39_x86_64")]),
     )
 
-    with pytest.raises(RuntimeError, match="manylinux_2_28_x86_64"):
-        hatch_build._platform_only_tag({"manylinux_2_28_x86_64"})
+    with pytest.raises(RuntimeError, match="manylinux_2_34_x86_64"):
+        hatch_build._platform_only_tag({"manylinux_2_34_x86_64"})
 
 
 def test_custom_build_hook_skips_packaged_runtime_when_release_env_is_absent(
