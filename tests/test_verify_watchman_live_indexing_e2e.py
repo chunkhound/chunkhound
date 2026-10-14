@@ -188,11 +188,20 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     assert linux_build["env"]["OUT_DIR"] == "${{ inputs.out-dir }}"
     assert 'OUT_DIR="$(realpath "$OUT_DIR")"' in linux_build["run"]
     assert '-v "$OUT_DIR":/out' in linux_build["run"]
+    # The weak Rust statx/getrandom symbol versions are finalized before
+    # auditwheel validates the explicit manylinux_2_27 policy; otherwise
+    # auditwheel rejects the unpatched statx@GLIBC_2.28 reference.
     assert (
-        '--compatibility manylinux_2_27 --auditwheel repair --out /out/'
+        "--compatibility linux --auditwheel skip --out /out/unrepaired/"
         in linux_build["run"]
     )
-    assert '--max-glibc 2.27' in linux_build["run"]
+    assert "--max-glibc 2.27" in linux_build["run"]
+    assert (
+        "auditwheel repair --plat manylinux_2_27 --wheel-dir /out" in linux_build["run"]
+    )
+    assert linux_build["run"].index("--max-glibc 2.27") < linux_build["run"].index(
+        "auditwheel repair --plat manylinux_2_27"
+    )
     assert '--out "${{ inputs.out-dir }}/"' in other_build_run
     assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
 

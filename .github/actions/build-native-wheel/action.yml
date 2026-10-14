@@ -167,16 +167,30 @@ runs:
           "maturin[patchelf]==$MANYLINUX_MATURIN_VERSION" "auditwheel==6.8.2"
         cd /work
         cargo clean -p chunkhound_native --release
-        # The policy tag is an explicit compatibility promise, not inferred
-        # from the build host. repair bundles DuckDB and rewrites its lookup.
-        maturin build --release --compatibility manylinux_2_27 --auditwheel repair --out /out/
+        # Rust std emits weak statx/getrandom references with a symbol version
+        # from the compiler's build host. Build an un-repaired wheel first so
+        # the finalizer can remove that non-requirement before auditwheel
+        # validates the requested manylinux_2_27 policy. Running auditwheel
+        # through maturin first would reject statx@GLIBC_2.28 before the
+        # finalizer gets a chance to patch it.
+        mkdir -p /out/unrepaired
+        maturin build --release --compatibility linux --auditwheel skip --out /out/unrepaired/
         shopt -s nullglob
-        wheels=(/out/chunkhound_native-*.whl)
+        wheels=(/out/unrepaired/chunkhound_native-*.whl)
         if [[ ${#wheels[@]} -ne 1 ]]; then
-          echo "Expected exactly one chunkhound_native wheel in /out" >&2
+          echo "Expected exactly one un-repaired chunkhound_native wheel" >&2
           exit 1
         fi
         python /work/scripts/finalize_manylinux_wheel.py "${wheels[0]}" --max-glibc 2.27
+        duckdb_lib="$(find "$CARGO_TARGET_DIR" -type f -name libduckdb.so -print -quit)"
+        if [[ -z "$duckdb_lib" ]]; then
+          echo "Could not find the DuckDB shared library for auditwheel repair" >&2
+          exit 1
+        fi
+        # The explicit policy tag is the compatibility promise. auditwheel
+        # both bundles DuckDB and validates every ELF in the final wheel.
+        auditwheel repair --plat manylinux_2_27 --wheel-dir /out \
+          --ldpaths "$(dirname "$duckdb_lib")" "${wheels[0]}"
         BUILD_SCRIPT
         chown -R "$HOST_UID:$HOST_GID" /build /out
         CONTAINER_SCRIPT
