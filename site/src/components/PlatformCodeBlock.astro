@@ -1,5 +1,5 @@
 ---
-import { DEFAULT_PLATFORM, platformOptions } from "./configurator-data";
+import { DEFAULT_PLATFORM, PLATFORM_OPTIONS } from "./configurator/index.ts";
 import { COPY_SVG } from '../lib/shiki-config.js';
 
 interface Props {
@@ -7,20 +7,30 @@ interface Props {
     ariaLabel?: string;
     dataCopy?: string;
     class?: string;
+    /** True only when the slot supplies one tabpanel per platform tab
+        (ids `${idPrefix}-panel-<id>`). Single-panel blocks use switcher
+        semantics (aria-pressed) so tabs never carry dangling aria-controls. */
+    hasPanels?: boolean;
+    /** Prefix for generated tab/panel IDs — must be unique per instance
+        on the same page to avoid duplicate HTML IDs. */
+    idPrefix?: string;
 }
 
-const { copyBtnId, ariaLabel = "Copy", dataCopy = "", class: className } = Astro.props;
+const { copyBtnId, ariaLabel = "Copy setup", dataCopy = "", class: className, hasPanels = false, idPrefix = "platform" } = Astro.props;
 ---
 
-<div class:list={["platform-code-block", className]}>
+<div class:list={["platform-code-block", className]} data-platform-mode={hasPanels ? "tabs" : "switcher"}>
     <div class="code-header">
-        <div class="platform-tabs" role="tablist" aria-label="Choose your shell">
-            {platformOptions.map((p) => (
+        <div class="platform-tabs" role={hasPanels ? "tablist" : "group"} aria-label="Choose your shell">
+            {PLATFORM_OPTIONS.map((p) => (
                 <button
-                    role="tab"
+                    role={hasPanels ? "tab" : undefined}
                     type="button"
+                    id={`${idPrefix}-tab-${p.id}`}
+                    aria-controls={hasPanels ? `${idPrefix}-panel-${p.id}` : undefined}
                     data-platform-option={p.id}
-                    aria-selected={p.id === DEFAULT_PLATFORM ? "true" : "false"}
+                    aria-selected={hasPanels ? p.id === DEFAULT_PLATFORM : undefined}
+                    aria-pressed={!hasPanels ? p.id === DEFAULT_PLATFORM : undefined}
                     tabindex={p.id === DEFAULT_PLATFORM ? "0" : "-1"}
                     class="header-tab"
                 >
@@ -28,12 +38,21 @@ const { copyBtnId, ariaLabel = "Copy", dataCopy = "", class: className } = Astro
                 </button>
             ))}
         </div>
-        <button type="button" class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy} set:html={COPY_SVG} />
+        <div class="copy-controls">
+            <span class="copy-status" data-copy-status role="status" aria-live="polite"></span>
+            <button type="button" class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy}>
+                <span aria-hidden="true" set:html={COPY_SVG} />
+                <span>Copy setup</span>
+            </button>
+        </div>
     </div>
     <slot />
 </div>
 
 <script>
+// Pill interactivity (platform switching) is owned by
+// scripts/configurator/platform-state.ts via configurator.ts — this script
+// only wires the copy button, so the pills never get two controllers.
 import '../scripts/copy-handler.js';
 </script>
 
@@ -77,7 +96,8 @@ import '../scripts/copy-handler.js';
         transition: color 0.2s, border-color 0.2s;
     }
 
-    .header-tab[aria-selected="true"] {
+    .header-tab[aria-selected="true"],
+    .header-tab[aria-pressed="true"] {
         color: var(--code-text);
         border-bottom-color: var(--primary);
     }
@@ -86,20 +106,29 @@ import '../scripts/copy-handler.js';
         color: var(--text-secondary);
     }
 
+    .copy-controls {
+        padding-right: var(--space-1);
+    }
+
+    .copy-status {
+        min-width: 3.5rem;
+    }
+
     .copy-btn {
-        width: 32px;
-        height: 36px;
-        display: flex;
+        min-height: 36px;
+        display: inline-flex;
         align-items: center;
-        justify-content: center;
+        gap: var(--space-1);
+        padding: 0 var(--space-2);
         border: none;
         border-radius: var(--radius-md);
         background: transparent;
         color: var(--text-tertiary);
+        font: inherit;
+        font-size: var(--text-xs);
+        font-weight: 600;
         cursor: pointer;
-        margin-right: var(--space-1);
         transition: color 0.2s, background 0.2s;
-        padding: 0;
     }
 
     .copy-btn:hover {

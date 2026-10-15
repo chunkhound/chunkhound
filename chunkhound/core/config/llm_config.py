@@ -141,6 +141,7 @@ LLMProviderLiteral = Literal[
     "grok",
     "openrouter",
     "orcarouter",
+    "vercel",
     "requesty",
     "opencode-cli",
 ]
@@ -181,6 +182,7 @@ CLI_PROVIDER_CHOICES = (
     "grok",
     "openrouter",
     "orcarouter",
+    "vercel",
     "requesty",
     "opencode-cli",
 )

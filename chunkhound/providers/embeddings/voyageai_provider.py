@@ -16,6 +16,7 @@ from chunkhound.core.exceptions.embedding import (
     EmbeddingProviderError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
+from chunkhound.core.utils.rerank_url import normalize_rerank_url, resolve_rerank_url
 from chunkhound.core.utils.voyageai_utils import (
     OFFICIAL_VOYAGEAI_BASE_V1,
     is_official_voyageai_endpoint,
@@ -236,7 +237,7 @@ def _classify_voyageai_error(e: Exception) -> str | None:
 
 
 class VoyageAIEmbeddingProvider:
-    """VoyageAI embedding provider using voyage-3.5 by default."""
+    """VoyageAI embedding provider; defaults to VOYAGE_DEFAULT_MODEL."""
 
     # Recommended concurrent batches for VoyageAI API
     # Aggressive value (40) leverages VoyageAI's high rate limits:
@@ -327,6 +328,20 @@ class VoyageAIEmbeddingProvider:
         self._max_tokens = max_tokens or model_config["context_length"]
         self._api_key = api_key
         self._base_url = base_url
+        # Same contract as the factory: an unusable endpoint must not break
+        # construction and must not silently become an HTTP rerank target, so
+        # dropping it leaves the VoyageAI SDK reranker in charge.
+        if rerank_url:
+            try:
+                rerank_url = normalize_rerank_url(rerank_url)
+            except ValueError:
+                rerank_url = None
+            else:
+                if base_url:
+                    rerank_url = resolve_rerank_url(rerank_url, base_url, join=True)
+                elif not rerank_url.startswith(("http://", "https://")):
+                    # A relative path needs base_url to resolve against.
+                    rerank_url = None
         self._rerank_url = rerank_url
         self._rerank_format = rerank_format
         self._model_config = model_config

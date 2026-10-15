@@ -20,6 +20,10 @@ from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
 )
+from chunkhound.core.utils.rerank_url import (
+    RERANK_BASE_URL_REQUIRED,
+    normalize_rerank_url,
+)
 from chunkhound.core.utils.voyageai_utils import is_official_voyageai_endpoint
 
 from ._utils import _parse_env_bool
@@ -29,8 +33,8 @@ RERANK_MODEL_REQUIRED = (
     "rerank_model is required when using rerank_format='cohere' or 'voyage'. "
     "Either provide rerank_model or use rerank_format='tei'."
 )
-RERANK_BASE_URL_REQUIRED = (
-    "rerank_model or rerank_format requires base_url or explicit rerank_url"
+RERANK_FORMAT_VOYAGE_UNSUPPORTED = (
+    "rerank_format='voyage' is only supported by provider='voyageai'"
 )
 
 
@@ -82,20 +86,23 @@ def validate_rerank_configuration(
     if provider == "voyageai" and not rerank_url:
         return
 
+    # Voyage format is only supported by the VoyageAI provider
+    if rerank_format == "voyage" and provider != "voyageai":
+        raise ValueError(RERANK_FORMAT_VOYAGE_UNSUPPORTED)
+
     # Cohere and Voyage-native formats both require an explicit rerank_model
     if rerank_format in ("cohere", "voyage") and not rerank_model:
         raise ValueError(RERANK_MODEL_REQUIRED)
 
-    # If using reranking (model set or TEI format with URL), validate URL config
+    # If using reranking (model set or TEI format with URL), validate URL config.
+    # An inactive rerank_url is tolerated so switching reranking off never blocks
+    # config load (see CHANGELOG: "An unused rerank_url no longer blocks"); the
+    # factory drops an unresolvable relative path instead of forwarding it.
     is_using_reranking = rerank_model or (rerank_format == "tei" and rerank_url)
 
-    if is_using_reranking:
-        # For relative URLs, we need base_url
-        if (
-            rerank_url
-            and not rerank_url.startswith(("http://", "https://"))
-            and not base_url
-        ):
+    if is_using_reranking and rerank_url:
+        normalized = normalize_rerank_url(rerank_url)
+        if not normalized.startswith(("http://", "https://")) and not base_url:
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
@@ -318,6 +325,8 @@ class EmbeddingConfig(BaseSettings):
             rerank_url=self.rerank_url,
             base_url=self.base_url,
         )
+        if self.rerank_url and (self.rerank_model or self.rerank_format == "tei"):
+            self.rerank_url = normalize_rerank_url(self.rerank_url)
         return self
 
     @model_validator(mode="after")
@@ -396,7 +405,9 @@ class EmbeddingConfig(BaseSettings):
             base_config["azure_deployment"] = self.azure_deployment
 
         # Add rerank configuration if available
-        if self.rerank_model:
+        # Emit rerank_model only when set: an omitted model must stay absent so
+        # the provider's default reranking model can apply.
+        if self.rerank_model is not None:
             base_config["rerank_model"] = self.rerank_model
         base_config["rerank_url"] = self.rerank_url
         base_config["rerank_format"] = self.rerank_format
@@ -499,7 +510,7 @@ class EmbeddingConfig(BaseSettings):
         parser.add_argument(
             "--model",
             "--embedding-model",
-            help="Embedding model (default: text-embedding-3-small)",
+            help="Embedding model (default: per provider)",
         )
 
         parser.add_argument(

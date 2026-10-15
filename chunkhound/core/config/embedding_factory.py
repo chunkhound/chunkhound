@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from chunkhound.core.utils.rerank_url import normalize_rerank_url
+
 from .embedding_config import EmbeddingConfig
 
 if TYPE_CHECKING:
@@ -205,16 +207,22 @@ class EmbeddingProviderFactory:
                 kwargs["output_dims"] = output_dims
             if client_side_truncation:
                 kwargs["client_side_truncation"] = True
-            # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
-            if (
-                rerank_url
-                and base_url
-                and not rerank_url.startswith(("http://", "https://"))
+            # Normalize the scheme, dropping malformed endpoints so an unused
+            # external endpoint cannot block provider creation.
+            if rerank_url:
+                try:
+                    rerank_url = normalize_rerank_url(rerank_url)
+                except ValueError as exc:
+                    logger.warning(
+                        f"Dropping invalid rerank_url={rerank_url} for VoyageAI "
+                        f"provider: {exc}"
+                    )
+                    rerank_url = None
+            # Forward absolute URLs and relative paths with a base_url; the
+            # provider resolves the latter against the base.
+            if rerank_url and (
+                base_url or rerank_url.startswith(("http://", "https://"))
             ):
-                from urllib.parse import urljoin
-
-                rerank_url = urljoin(base_url.rstrip("/") + "/", rerank_url.lstrip("/"))
-            if rerank_url and rerank_url.startswith(("http://", "https://")):
                 kwargs["rerank_url"] = rerank_url
                 kwargs["rerank_format"] = rerank_format
                 if rerank_ssl_verify is not None:

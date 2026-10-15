@@ -38,7 +38,8 @@ _DIMS_ONLY = ModelDrift(
     configured_model="voyage-code-3",
     configured_dims=512,
 )
-_HINT = "voyage-code-4 supersedes voyage-code-3"
+_HINT = "voyage-code-4 is the newer model ChunkHound maps from voyage-code-3"
+_SUPPRESSED = "maps from"
 
 
 def _coordinator() -> AsyncMock:
@@ -215,13 +216,13 @@ async def test_upgrade_hint_is_silenced_by_env(tmp_path, monkeypatch):
         env={"CHUNKHOUND_NO_MODEL_SUGGESTIONS": "1"},
     )
 
-    assert "supersedes" not in run.output
+    assert _SUPPRESSED not in run.output
 
 
 async def test_upgrade_hint_is_not_shown_to_non_interactive_runs(tmp_path, monkeypatch):
     run = await _index(tmp_path, monkeypatch)
 
-    assert "supersedes" not in run.output
+    assert _SUPPRESSED not in run.output
 
 
 async def test_upgrade_hint_only_matches_its_own_provider(tmp_path, monkeypatch):
@@ -232,7 +233,7 @@ async def test_upgrade_hint_only_matches_its_own_provider(tmp_path, monkeypatch)
         embedding=("openai", "voyage-code-3"),
     )
 
-    assert "supersedes" not in run.output
+    assert _SUPPRESSED not in run.output
 
 
 async def test_upgrade_hint_is_suppressed_when_drift_was_reported(
@@ -242,4 +243,4 @@ async def test_upgrade_hint_is_suppressed_when_drift_was_reported(
         tmp_path, monkeypatch, drift=_MODEL_SWITCH, interactive=True, answer="n"
     )
 
-    assert "supersedes" not in run.output
+    assert _SUPPRESSED not in run.output

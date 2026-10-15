@@ -1,0 +1,16 @@
+# Explicitly welcome AI crawlers (default policy allows everything).
+# Agent-oriented docs substrate: https://chunkhound.ai/llms.txt
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: *
+Allow: /

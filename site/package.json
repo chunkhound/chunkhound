@@ -2,10 +2,14 @@
   "name": "chunkhound-site",
   "type": "module",
   "version": "0.0.1",
+  "engines": { "node": ">=22.18" },
   "scripts": {
+    "generate:llms-txt": "node scripts/generate-llms-txt.mjs",
     "generate:og-images": "node scripts/generate-og-images.mjs",
     "sync:changelog": "node scripts/sync-changelog.mjs",
-    "prepare:site": "npm run generate:og-images && npm run sync:changelog",
+    "sync:readme-positioning": "node scripts/sync-readme-positioning.mjs",
+    "check": "astro check",
+    "prepare:site": "npm run generate:og-images && npm run sync:changelog && npm run generate:llms-txt",
     "predev": "npm run prepare:site",
     "dev": "astro dev",
     "prebuild": "npm run prepare:site",
@@ -16,10 +20,13 @@
     "@phosphor-icons/webcomponents": "^2.1.5"
   },
   "devDependencies": {
+    "@astrojs/check": "^0.9.10",
     "@resvg/resvg-js": "^2.6.2",
-    "astro": "^6.3.7",
-    "mermaid": "^11.0.0",
-    "remark-gfm": "^4.0.0",
-    "tsx": "^4.8.1"
+    "@types/node": "^22.0.0",
+    "astro": "^7.3.1",
+    "happy-dom": "^20.14.0",
+    "playwright": "^1.63.0",
+    "tsx": "^4.8.1",
+    "typescript": "^6.0.3"
   }
 }

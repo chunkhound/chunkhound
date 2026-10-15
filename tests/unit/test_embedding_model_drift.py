@@ -250,7 +250,7 @@ class _Index:
     def configure(
         self,
         *,
-        model: str,
+        model: str | None = None,
         output_dims: int | None = None,
         on_model_drift: ModelDriftDecision | None = None,
         read_only: bool = False,
@@ -315,6 +315,20 @@ class TestConfigureKeepsTheIndexUsable:
 
         provider = registry.get_provider("embedding")
         assert (provider.model, provider.dims) == ("voyage-code-3", 1024)
+
+    def test_index_built_with_the_frozen_fallback_needs_no_pin(
+        self, index: _Index
+    ) -> None:
+        """The runtime fallback is frozen so an unset ``embedding.model`` keeps
+        resolving to the model the index was built with. No drift warning, no
+        prompt, no config rewrite: existing configs behave exactly as before."""
+        index.seed([("voyageai", "voyage-3.5", 1024)])
+
+        registry, config = index.configure()
+
+        assert registry.get_provider("embedding").model == "voyage-3.5"
+        assert config.embedding is not None
+        assert config.embedding.model is None
 
     def test_pin_reaches_providers_rebuilt_from_config(self, index: _Index):
         """``search`` and ``create_services`` build providers from config.
@@ -595,3 +609,11 @@ class TestUpgradeSuggestions:
         for superseded, successor in EMBEDDING_MODEL_UPGRADES["voyageai"].items():
             assert superseded in VOYAGE_MODEL_CONFIG
             assert successor in VOYAGE_MODEL_CONFIG
+
+    def test_every_successor_is_a_distinct_known_provider_model(self):
+        """A hint must name a model the provider knows and must actually move
+        off the superseded model. The successor is a recommendation, not
+        necessarily the runtime default, so it is not required to equal it."""
+        for superseded, successor in EMBEDDING_MODEL_UPGRADES["voyageai"].items():
+            assert successor in VOYAGE_MODEL_CONFIG
+            assert successor != superseded
