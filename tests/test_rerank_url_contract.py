@@ -71,6 +71,31 @@ def test_active_relative_rerank_url_requires_base_url(provider, base_url):
             EmbeddingConfig(**kwargs)
 
 
+def test_voyage_format_requires_voyageai_provider():
+    """The voyage rerank format is only supported by the voyageai provider.
+
+    Non-VoyageAI providers have no voyage request/response branch, so accepting
+    this format would emit a config that silently degrades at rerank time.
+    """
+    # OpenAI provider with voyage format must fail
+    with pytest.raises(ValueError, match="only supported by provider='voyageai'"):
+        EmbeddingConfig(
+            provider="openai",
+            rerank_format="voyage",
+            rerank_url="https://example.com/rerank",
+            rerank_model="test-model",
+        )
+
+    # VoyageAI provider with voyage format must succeed (when model is provided)
+    config = EmbeddingConfig(
+        provider="voyageai",
+        rerank_format="voyage",
+        rerank_model="rerank-3-lite",
+    )
+    assert config.rerank_format == "voyage"
+    assert config.rerank_model == "rerank-3-lite"
+
+
 def _provider(provider, entry, base_url, rerank_url):
     config = dict(
         api_key="local-test-key",

@@ -944,3 +944,38 @@ def test_rerank_format_parity_between_ts_and_python() -> None:
         f"Rerank formats desynced: Python accepts {py_formats}, "
         f"the TS guard accepts {accepted}."
     )
+
+
+def test_rerank_format_availability_is_provider_metadata() -> None:
+    """Only the VoyageAI preset may emit the native Voyage rerank format.
+
+    OpenAI-backed presets run through OpenAIEmbeddingProvider, which has no
+    Voyage request/response branch, so offering the format would emit a config
+    that fails at rerank time. Each preset declares its formats and the
+    validator refuses an unsupported pick.
+    """
+    script = """
+import { embeddingProviders } from './site/src/components/configurator/index.ts';
+import {
+  rerankFormatUnsupportedError,
+  rerankerValidationError,
+} from './site/src/components/configurator/rerank-validate.ts';
+console.log(JSON.stringify({
+  expected: rerankFormatUnsupportedError('voyage'),
+  rows: embeddingProviders.map((provider) => ({
+    id: provider.id,
+    formats: provider.reranker.formats,
+    error: rerankerValidationError(
+      provider, 'https://reranker.example.com/rerank', 'voyage', 'model'
+    )?.message ?? null,
+  })),
+}));
+"""
+    payload = run_tsx_json(script)
+    verdicts = {row["id"]: row for row in payload["rows"]}
+
+    assert "voyage" in verdicts["voyageai"]["formats"]
+    assert verdicts["voyageai"]["error"] is None
+    for preset in ("openai-embed", "ollama-embed", "vllm-embed"):
+        assert "voyage" not in verdicts[preset]["formats"], preset
+        assert verdicts[preset]["error"] == payload["expected"], preset
