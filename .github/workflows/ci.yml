@@ -263,6 +263,41 @@ jobs:
           skip-tag-version-patch: 'true'
           out-dir: native-dist
 
+  hnsw-contract-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CHUNKHOUND_REQUIRE_HNSW: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Build Rust extension
+        uses: ./.github/actions/build-rust-extension
+
+      - name: Install DuckDB VSS extension
+        run: uv run python -c "import duckdb; duckdb.connect().execute('INSTALL vss')"
+
+      - name: Run HNSW contract tests
+        run: |
+          uv run pytest \
+            tests/unit/test_duckdb_semantic_search_contracts.py \
+            tests/test_duckdb_compaction.py \
+            tests/integration/test_duckdb_failure_modes.py \
+            -m hnsw -v
 
   pages-artifact:
     needs:

@@ -47,6 +47,14 @@ class ChunkHoundError(Exception):
         return self
 
 
+class MaterializationLimitError(ValueError):
+    """Raised when a requested page exceeds the materializable result window."""
+
+    def __init__(self, message: str, *, guidance_present: bool = False) -> None:
+        super().__init__(message)
+        self.guidance_present = guidance_present
+
+
 class ValidationError(ChunkHoundError):
     """Raised when data validation fails.
 

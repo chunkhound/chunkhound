@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.api.cli.commands.search import _format_search_results
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.embeddings import LocalEmbeddingResult
+from chunkhound.mcp_server.tools import format_search_results_markdown
 from chunkhound.services.diff_aware_search_service import (
     DiffAwareSearchService,
     SearchServiceProtocol,
@@ -16,6 +18,23 @@ from chunkhound.services.diff_aware_search_service import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class RecordingFormatter:
+    """Capture the CLI output contract without coupling tests to Rich."""
+
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+
+    def info(self, message: str) -> None:
+        pass
+
+    def section_header(self, message: str) -> None:
+        pass
+
+    def warning(self, message: str) -> None:
+        self.warnings.append(message)
+
 
 def make_chunk(
     symbol: str,
@@ -67,25 +86,64 @@ def make_original(
     reg = regex_results or []
 
     original.search_semantic = AsyncMock(
-        return_value=(sem, {"offset": 0, "page_size": 10, "has_more": False, "next_offset": None, "total": len(sem)})
+        return_value=(
+            sem,
+            {
+                "offset": 0,
+                "page_size": 10,
+                "has_more": False,
+                "next_offset": None,
+                "total": len(sem),
+                "candidate_budget_exhausted": False,
+            },
+        )
     )
     original.search_regex = MagicMock(
-        return_value=(reg, {"offset": 0, "page_size": 10, "has_more": False, "next_offset": None, "total": len(reg)})
+        return_value=(
+            reg,
+            {
+                "offset": 0,
+                "page_size": 10,
+                "has_more": False,
+                "next_offset": None,
+                "total": len(reg),
+            },
+        )
     )
     original.search_regex_async = AsyncMock(
-        return_value=(reg, {"offset": 0, "page_size": 10, "has_more": False, "next_offset": None, "total": len(reg)})
+        return_value=(
+            reg,
+            {
+                "offset": 0,
+                "page_size": 10,
+                "has_more": False,
+                "next_offset": None,
+                "total": len(reg),
+            },
+        )
     )
     original.search_hybrid = AsyncMock(
-        return_value=([], {"offset": 0, "page_size": 10, "has_more": False, "next_offset": None, "total": 0})
+        return_value=(
+            [],
+            {
+                "offset": 0,
+                "page_size": 10,
+                "has_more": False,
+                "next_offset": None,
+                "total": 0,
+            },
+        )
     )
     original.get_chunk_context = MagicMock(return_value={"context": "data"})
     original.get_file_chunks = MagicMock(return_value=[])
+    original.semantic_result_window_cap = None
     return original
 
 
 # ---------------------------------------------------------------------------
 # Protocol check
 # ---------------------------------------------------------------------------
+
 
 def test_protocol_check():
     """DiffAwareSearchService should satisfy SearchServiceProtocol."""
@@ -96,12 +154,14 @@ def test_protocol_check():
 def test_search_service_satisfies_protocol():
     """SearchService must satisfy SearchServiceProtocol — catches interface drift."""
     from chunkhound.services.search_service import SearchService
+
     assert isinstance(SearchService(MagicMock()), SearchServiceProtocol)
 
 
 # ---------------------------------------------------------------------------
 # vector_source == "db"
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_db_mode_delegates_entirely():
@@ -121,6 +181,7 @@ async def test_db_mode_delegates_entirely():
 # vector_source == "diff"
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_diff_mode_returns_diff_results_not_original():
     """In diff mode, results come from diff chunks; original.search_semantic never called."""
@@ -139,9 +200,61 @@ async def test_diff_mode_returns_diff_results_not_original():
 
 
 @pytest.mark.asyncio
+async def test_diff_semantic_path_filter_matches_qualified_file_exactly():
+    """Qualified file filters exclude suffixes and same-named files elsewhere."""
+    chunks = [
+        make_chunk("module", file_path="src/module.py"),
+        make_chunk("backup", file_path="src/module.py.bak"),
+        make_chunk("outside", file_path="tests/module.py"),
+    ]
+    service = DiffAwareSearchService(
+        make_original(),
+        chunks,
+        [[1.0, 0.0, 0.0]] * len(chunks),
+        "diff",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    results, pagination = await service.search_semantic(
+        "query", path_filter="src/module.py"
+    )
+
+    assert [result["file_path"] for result in results] == ["src/module.py"]
+    assert pagination["total"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("offset", "page_size"), [(-1, 1), (0, 0), (0, -1)])
+async def test_diff_semantic_rejects_invalid_windows(
+    offset: int, page_size: int
+) -> None:
+    """Diff-only semantic search enforces basic pagination invariants."""
+    service = DiffAwareSearchService(
+        make_original(), [], [], "diff", make_embedding_manager([])
+    )
+
+    with pytest.raises(ValueError):
+        await service.search_semantic("query", offset=offset, page_size=page_size)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("offset", "page_size"), [(-1, 1), (0, 0), (0, -1)])
+async def test_diff_hybrid_rejects_invalid_windows(offset: int, page_size: int) -> None:
+    """Diff-only hybrid search enforces basic pagination invariants."""
+    service = DiffAwareSearchService(
+        make_original(), [], [], "diff", make_embedding_manager([])
+    )
+
+    with pytest.raises(ValueError):
+        await service.search_hybrid("query", offset=offset, page_size=page_size)
+
+
+@pytest.mark.asyncio
 async def test_diff_mode_empty_chunks_returns_empty():
     """diff mode with empty diff_chunks returns empty results, not DB fallback."""
-    original = make_original(semantic_results=[{"file_path": "b.py", "content": "y", "score": 0.5}])
+    original = make_original(
+        semantic_results=[{"file_path": "b.py", "content": "y", "score": 0.5}]
+    )
     manager = make_embedding_manager([])
 
     svc = DiffAwareSearchService(original, [], [], "diff", manager)
@@ -149,12 +262,133 @@ async def test_diff_mode_empty_chunks_returns_empty():
 
     original.search_semantic.assert_not_called()
     assert results == []
+    assert pagination == {
+        "offset": 0,
+        "page_size": 10,
+        "has_more": False,
+        "next_offset": None,
+        "total": 0,
+        "candidate_budget_exhausted": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_diff_mode_empty_chunks_reports_exact_total_despite_provider_cap():
+    """Diff-only search is complete in memory and is never provider-capped."""
+    original = make_original()
+    original.semantic_result_window_cap = 1000
+    svc = DiffAwareSearchService(original, [], [], "diff", make_embedding_manager([]))
+
+    results, pagination = await svc.search_semantic("query", offset=1000)
+
+    assert results == []
     assert pagination["total"] == 0
 
 
 # ---------------------------------------------------------------------------
 # vector_source == "both"
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_both_mode_respects_provider_semantic_window_cap():
+    """Both-mode DB fetches stay within an explicit provider result window."""
+    original = make_original()
+    original.semantic_result_window_cap = 1000
+    svc = DiffAwareSearchService(original, [], [], "both", make_embedding_manager([]))
+
+    await svc.search_semantic("query")
+
+    assert original.search_semantic.await_args.kwargs["page_size"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_both_mode_keeps_fetch_when_cap_is_none():
+    """Providers declaring no window cap (None) retain the 10,000-row DB fetch."""
+    original = make_original()  # semantic_result_window_cap defaults to None
+    svc = DiffAwareSearchService(original, [], [], "both", make_embedding_manager([]))
+
+    await svc.search_semantic("query")
+
+    assert svc.semantic_result_window_cap is None
+    assert original.search_semantic.await_args.kwargs["page_size"] == 10_000
+
+
+# ---------------------------------------------------------------------------
+# Both-mode semantic result-window cap enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_both_mode_rejects_window_crossing_cap():
+    """both mode raises ValueError when offset + page_size exceeds the window cap."""
+    original = make_original()
+    original.semantic_result_window_cap = 1000
+    svc = DiffAwareSearchService(original, [], [], "both", make_embedding_manager([]))
+
+    with pytest.raises(ValueError, match=r"exclusive \[0, 1000\)"):
+        await svc.search_semantic("query", page_size=10, offset=995)
+
+    original.search_semantic.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_diff_mode_accepts_windows_beyond_provider_cap():
+    """Diff-only pagination is exact even when the wrapped provider is capped."""
+    chunks = [
+        make_chunk(f"func_{index}", file_path=f"src/{index}.py", start_line=index + 1)
+        for index in range(1003)
+    ]
+    original = make_original()
+    original.semantic_result_window_cap = 1000
+    svc = DiffAwareSearchService(
+        original,
+        chunks,
+        [[1.0, 0.0, 0.0]] * len(chunks),
+        "diff",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    results, pagination = await svc.search_semantic("query", page_size=2, offset=1000)
+
+    assert len(results) == 2
+    assert pagination["total"] == 1003
+    assert pagination["next_offset"] == 1002
+
+
+@pytest.mark.asyncio
+async def test_both_mode_propagates_candidate_budget_warning_to_renderers():
+    """Both-mode HNSW exhaustion remains visible in CLI and MCP output."""
+    original = make_original(
+        semantic_results=[
+            {
+                "file_path": "src/db.py",
+                "content": "",
+                "start_line": 1,
+                "similarity": 0.5,
+                "score": 0.5,
+            }
+        ]
+    )
+    original.search_semantic.return_value[1]["candidate_budget_exhausted"] = True
+    service = DiffAwareSearchService(
+        original, [], [], "both", make_embedding_manager([])
+    )
+
+    results, pagination = await service.search_semantic("query")
+
+    assert pagination["candidate_budget_exhausted"] is True
+    formatter = RecordingFormatter()
+    _format_search_results(
+        formatter, {"results": results, "pagination": pagination}, "query", False
+    )
+    assert formatter.warnings == [
+        "Results may be incomplete; narrow the query or path filter."
+    ]
+    assert "results may be incomplete" in format_search_results_markdown(
+        results, pagination, "semantic"
+    )
+
 
 @pytest.mark.asyncio
 async def test_both_mode_merges_and_sorts_by_score():
@@ -167,7 +401,13 @@ async def test_both_mode_merges_and_sorts_by_score():
     diff_embeddings = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
     original = make_original(
         semantic_results=[
-            {"file_path": "src/db.py", "content": "db_result", "start_line": 30, "similarity": 0.5, "score": 0.5}
+            {
+                "file_path": "src/db.py",
+                "content": "db_result",
+                "start_line": 30,
+                "similarity": 0.5,
+                "score": 0.5,
+            }
         ]
     )
     manager = make_embedding_manager([[1.0, 0.0, 0.0]])
@@ -210,7 +450,9 @@ async def test_both_mode_deduplicates_on_file_and_start_line():
     results, _ = await svc.search_semantic("query")
 
     # Only one result for (src/a.py, 1)
-    matching = [r for r in results if r["file_path"] == "src/a.py" and r["start_line"] == 1]
+    matching = [
+        r for r in results if r["file_path"] == "src/a.py" and r["start_line"] == 1
+    ]
     assert len(matching) == 1
     # It should be the higher-score diff result (score ~1.0)
     assert matching[0]["score"] > 0.9
@@ -219,6 +461,7 @@ async def test_both_mode_deduplicates_on_file_and_start_line():
 # ---------------------------------------------------------------------------
 # Split fragment dedup safety
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_split_hunk_fragments_survive_both_mode_dedup():
@@ -239,7 +482,9 @@ async def test_split_hunk_fragments_survive_both_mode_dedup():
     results, _ = await svc.search_semantic("query", page_size=10)
 
     file_results = [r for r in results if r["file_path"] == "src/big.json"]
-    assert len(file_results) == 2, "both split fragments must survive — neither dropped by dedup"
+    assert len(file_results) == 2, (
+        "both split fragments must survive — neither dropped by dedup"
+    )
     start_lines = {r["start_line"] for r in file_results}
     assert start_lines == {1, 500}
 
@@ -251,9 +496,15 @@ async def test_single_line_split_fragments_all_survive_both_mode_dedup():
     The (file_path, start_line) dedup key collapses them to one.  The dedup must use
     a fragment-unique identity (chunk_id includes symbol) so all three survive.
     """
-    chunk_p1 = make_chunk("big.js:1 (part 1)", file_path="big.js", start_line=1, end_line=1)
-    chunk_p2 = make_chunk("big.js:1 (part 2)", file_path="big.js", start_line=1, end_line=1)
-    chunk_p3 = make_chunk("big.js:1 (part 3)", file_path="big.js", start_line=1, end_line=1)
+    chunk_p1 = make_chunk(
+        "big.js:1 (part 1)", file_path="big.js", start_line=1, end_line=1
+    )
+    chunk_p2 = make_chunk(
+        "big.js:1 (part 2)", file_path="big.js", start_line=1, end_line=1
+    )
+    chunk_p3 = make_chunk(
+        "big.js:1 (part 3)", file_path="big.js", start_line=1, end_line=1
+    )
     diff_embeddings = [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0], [0.8, 0.2, 0.0]]
 
     original = make_original(semantic_results=[])
@@ -274,9 +525,15 @@ async def test_single_line_split_fragments_all_survive_both_mode_dedup():
 @pytest.mark.asyncio
 async def test_single_line_split_fragments_survive_hybrid_merge():
     """Char-split fragments of a single overlong line must all appear in search_hybrid output."""
-    chunk_p1 = make_chunk("big.js:1 (part 1)", file_path="big.js", start_line=1, end_line=1)
-    chunk_p2 = make_chunk("big.js:1 (part 2)", file_path="big.js", start_line=1, end_line=1)
-    chunk_p3 = make_chunk("big.js:1 (part 3)", file_path="big.js", start_line=1, end_line=1)
+    chunk_p1 = make_chunk(
+        "big.js:1 (part 1)", file_path="big.js", start_line=1, end_line=1
+    )
+    chunk_p2 = make_chunk(
+        "big.js:1 (part 2)", file_path="big.js", start_line=1, end_line=1
+    )
+    chunk_p3 = make_chunk(
+        "big.js:1 (part 3)", file_path="big.js", start_line=1, end_line=1
+    )
     diff_embeddings = [[1.0, 0.0, 0.0], [0.9, 0.1, 0.0], [0.8, 0.2, 0.0]]
 
     original = make_original(semantic_results=[], regex_results=[])
@@ -298,6 +555,7 @@ async def test_single_line_split_fragments_survive_hybrid_merge():
 # Hybrid search: diff chunks must survive combine_search_results
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_diff_chunks_survive_hybrid_merge():
     """Diff chunks must appear in search_hybrid() output.
@@ -318,9 +576,89 @@ async def test_diff_chunks_survive_hybrid_merge():
     )
 
 
+@pytest.mark.asyncio
+async def test_diff_hybrid_ignores_provider_window_cap():
+    """Diff hybrid pagination continues beyond the wrapped provider's cap."""
+    chunks = [
+        make_chunk(f"func_{index}", file_path=f"src/{index}.py", start_line=index + 1)
+        for index in range(1002)
+    ]
+    original = make_original()
+    original.semantic_result_window_cap = 1000
+    service = DiffAwareSearchService(
+        original,
+        chunks,
+        [[1.0, 0.0, 0.0]] * len(chunks),
+        "diff",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    results, pagination = await service.search_hybrid("query", page_size=1, offset=1000)
+
+    assert len(results) == 1
+    assert pagination["next_offset"] == 1001
+
+
+@pytest.mark.asyncio
+async def test_both_hybrid_propagates_semantic_candidate_budget_exhaustion():
+    """Both-mode hybrid keeps the DB semantic branch's completeness warning."""
+    original = make_original(
+        semantic_results=[
+            {
+                "chunk_id": 1,
+                "file_path": "src/db.py",
+                "content": "result",
+                "start_line": 1,
+                "similarity": 0.9,
+                "score": 0.9,
+            }
+        ]
+    )
+    original.search_semantic.return_value[1]["candidate_budget_exhausted"] = True
+    service = DiffAwareSearchService(
+        original, [], [], "both", make_embedding_manager([])
+    )
+
+    _, pagination = await service.search_hybrid("query", page_size=1)
+
+    assert pagination["candidate_budget_exhausted"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("result_count", "has_more"), [(2, False), (3, True)])
+async def test_both_hybrid_continuation_requires_merged_surplus(
+    result_count: int, has_more: bool
+) -> None:
+    """Both-mode hybrid uses merged lookahead instead of exact-page guessing."""
+    db_results = [
+        {
+            "chunk_id": index,
+            "file_path": f"src/{index}.py",
+            "start_line": 1,
+            "similarity": 1.0 - index / 100,
+            "score": 1.0 - index / 100,
+        }
+        for index in range(1, result_count + 1)
+    ]
+    service = DiffAwareSearchService(
+        make_original(semantic_results=db_results),
+        [],
+        [],
+        "both",
+        make_embedding_manager([]),
+    )
+
+    results, pagination = await service.search_hybrid("query", page_size=2)
+
+    assert len(results) == 2
+    assert pagination["has_more"] is has_more
+    assert pagination["next_offset"] == (2 if has_more else None)
+
+
 # ---------------------------------------------------------------------------
 # Threshold filtering
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_threshold_filters_low_scores():
@@ -348,6 +686,7 @@ async def test_threshold_filters_low_scores():
 # Pagination
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_pagination_offset_and_page_size():
     """offset and page_size correctly slice diff results."""
@@ -368,11 +707,48 @@ async def test_pagination_offset_and_page_size():
     assert pagination["page_size"] == 2
     assert pagination["has_more"] is True
     assert pagination["next_offset"] == 4
+    assert pagination["total"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Capped pagination boundaries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_both_mode_page_at_window_boundary_has_no_next_offset():
+    """Both-mode searches never advertise the provider cap as an offset."""
+    chunks = [
+        make_chunk(f"func_{index}", file_path=f"src/{index}.py", start_line=index + 1)
+        for index in range(1001)
+    ]
+    original = make_original()
+    original.semantic_result_window_cap = 1000
+    svc = DiffAwareSearchService(
+        original,
+        chunks,
+        [[1.0, 0.0, 0.0]] * len(chunks),
+        "both",
+        make_embedding_manager([[1.0, 0.0, 0.0]]),
+    )
+
+    results, pagination = await svc.search_semantic("query", page_size=1, offset=999)
+
+    assert len(results) == 1
+    assert pagination == {
+        "offset": 999,
+        "page_size": 1,
+        "has_more": False,
+        "next_offset": None,
+        "total": None,
+        "candidate_budget_exhausted": False,
+    }
 
 
 # ---------------------------------------------------------------------------
 # search_regex_async always delegates
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_search_regex_async_delegates_regardless_of_vector_source():
@@ -393,6 +769,7 @@ async def test_search_regex_async_delegates_regardless_of_vector_source():
 # Cosine similarity with known unit vectors (B1)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_cosine_similarity_known_unit_vectors():
     """q=[1,0,0], chunk embeddings [1,0,0] and [0,1,0]: first scores ~1.0, second ~0.0."""
@@ -402,7 +779,9 @@ async def test_cosine_similarity_known_unit_vectors():
     manager = make_embedding_manager([[1.0, 0.0, 0.0]])
     original = make_original()
 
-    svc = DiffAwareSearchService(original, [chunk_a, chunk_b], diff_embeddings, "diff", manager)
+    svc = DiffAwareSearchService(
+        original, [chunk_a, chunk_b], diff_embeddings, "diff", manager
+    )
     results, _ = await svc.search_semantic("query")
 
     assert results[0]["file_path"] == "src/a.py"
@@ -421,7 +800,9 @@ async def test_b1_non_unit_query_gives_same_ranking_as_unit_query():
 
     # Unit query
     manager_unit = make_embedding_manager([[1.0, 0.0, 0.0]])
-    svc_unit = DiffAwareSearchService(original, [chunk_a, chunk_b], diff_embeddings, "diff", manager_unit)
+    svc_unit = DiffAwareSearchService(
+        original, [chunk_a, chunk_b], diff_embeddings, "diff", manager_unit
+    )
     results_unit, _ = await svc_unit.search_semantic("query")
 
     # Non-unit query (magnitude 3)
@@ -432,7 +813,9 @@ async def test_b1_non_unit_query_gives_same_ranking_as_unit_query():
     results_non_unit, _ = await svc_non_unit.search_semantic("query")
 
     # Same ranking order
-    assert [r["file_path"] for r in results_unit] == [r["file_path"] for r in results_non_unit]
+    assert [r["file_path"] for r in results_unit] == [
+        r["file_path"] for r in results_non_unit
+    ]
     # Scores should be equal (both normalised)
     for r_unit, r_non in zip(results_unit, results_non_unit):
         assert abs(r_unit["score"] - r_non["score"]) < 1e-4
@@ -441,6 +824,7 @@ async def test_b1_non_unit_query_gives_same_ranking_as_unit_query():
 # ---------------------------------------------------------------------------
 # G1: path_filter
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_g1_path_filter_excludes_non_matching():
@@ -451,7 +835,9 @@ async def test_g1_path_filter_excludes_non_matching():
     manager = make_embedding_manager([[1.0, 0.0, 0.0]])
     original = make_original()
 
-    svc = DiffAwareSearchService(original, [chunk_a, chunk_b], diff_embeddings, "diff", manager)
+    svc = DiffAwareSearchService(
+        original, [chunk_a, chunk_b], diff_embeddings, "diff", manager
+    )
     results, _ = await svc.search_semantic("query", path_filter="src/")
 
     file_paths = [r["file_path"] for r in results]
@@ -463,6 +849,7 @@ async def test_g1_path_filter_excludes_non_matching():
 # B3: "both" mode with distance-based DB results
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_b3_both_mode_handles_distance_based_db_results():
     """both mode works when DB returns distance-based results (has 'distance' key)."""
@@ -472,7 +859,12 @@ async def test_b3_both_mode_handles_distance_based_db_results():
     # DB returns distance-based results (no 'similarity' key)
     original = make_original(
         semantic_results=[
-            {"file_path": "src/db.py", "content": "db_result", "start_line": 5, "distance": 0.2}
+            {
+                "file_path": "src/db.py",
+                "content": "db_result",
+                "start_line": 5,
+                "distance": 0.2,
+            }
         ]
     )
     manager = make_embedding_manager([[1.0, 0.0, 0.0]])
@@ -491,11 +883,14 @@ async def test_b3_both_mode_handles_distance_based_db_results():
 # path_filter normalization — no partial directory name match
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_path_filter_does_not_match_partial_directory_name():
     """path_filter='src' must not match 'src_utils/foo.py'."""
     chunk_match = make_chunk("in_src", file_path="src/auth.py", start_line=1)
-    chunk_no_match = make_chunk("in_src_utils", file_path="src_utils/helper.py", start_line=1)
+    chunk_no_match = make_chunk(
+        "in_src_utils", file_path="src_utils/helper.py", start_line=1
+    )
     diff_embeddings = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
     manager = make_embedding_manager([[1.0, 0.0, 0.0]])
     original = make_original()
@@ -513,6 +908,7 @@ async def test_path_filter_does_not_match_partial_directory_name():
 # ---------------------------------------------------------------------------
 # "both" mode multi-page pagination correctness
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_both_mode_pagination_second_page_does_not_skip_results():
@@ -550,10 +946,19 @@ async def test_both_mode_pagination_second_page_does_not_skip_results():
 # Empty diff_embeddings with vector_source="both"
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_both_mode_empty_diff_embeddings_still_returns_db_results():
     """With empty diff_embeddings, both mode still returns DB results."""
-    db_results = [{"file_path": "src/db.py", "content": "result", "start_line": 1, "similarity": 0.7, "score": 0.7}]
+    db_results = [
+        {
+            "file_path": "src/db.py",
+            "content": "result",
+            "start_line": 1,
+            "similarity": 0.7,
+            "score": 0.7,
+        }
+    ]
     original = make_original(semantic_results=db_results)
     manager = make_embedding_manager([])
 

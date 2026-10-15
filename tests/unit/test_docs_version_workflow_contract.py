@@ -458,9 +458,7 @@ class TestDocsVersionWorkflowContract:
         assert resolve_index < consumer_index
 
     def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
-        contents = (ROOT / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
-        )
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
@@ -511,9 +509,7 @@ class TestDocsVersionWorkflowContract:
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(
             list[dict[str, Any]],
-            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
-                "include"
-            ],
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"]["include"],
         )
 
         assert all("pytest_timeout_minutes" in entry for entry in matrix)

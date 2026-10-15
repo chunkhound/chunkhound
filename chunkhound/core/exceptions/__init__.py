@@ -17,6 +17,7 @@ from chunkhound.core.exceptions.core import (
     DatabaseError,
     DiskUsageLimitExceededError,
     EmbeddingError,
+    MaterializationLimitError,
     ModelError,
     ParsingError,
     ProviderError,
@@ -34,6 +35,7 @@ __all__ = [
     "ChunkHoundError",
     # Domain-specific exceptions
     "ValidationError",
+    "MaterializationLimitError",
     "ModelError",
     "EmbeddingError",
     "ParsingError",

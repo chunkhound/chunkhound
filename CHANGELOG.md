@@ -7,11 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **Windows `.cmd` and `.bat` CLIs launch through `cmd.exe`** — An npm-only Claude Code, Codex, or OpenCode install can run research. A spaced shim path that cannot be shortened is rejected. Newlines, percent signs, quotes, and a command operator in an argument with no spaces are rejected. Addresses #118. The database `WinError 183` in that issue is unchanged.
+### Breaking Changes
+- **DuckDB semantic pagination is approximate** — Semantic pages now report
+  `total=None` instead of an exact count and must stay within the exclusive
+  `[0, 1000)` result window. Pages that start at or cross the endpoint are
+  rejected.
+- **DuckDB direct vector thresholds are similarity floors** —
+  `find_similar_chunks` and `search_by_embedding` now interpret `threshold`
+  as inclusive cosine similarity (`score >= threshold`), matching
+  `search_semantic`; callers previously using distance ceilings must convert
+  them with `1 - distance`.
+- **Read-only databases require HNSW indexes (when HNSW is enabled)** —
+  Read-only DuckDB databases created from interrupted indexing runs (missing
+  HNSW indexes) now fail explicitly instead of falling back to a brute-force
+  scan, **but only when `duckdb_hnsw_enabled` is `true`** (the default).
+  When HNSW is disabled via `--no-duckdb-hnsw`, exact linear scans work on
+  read-only databases without any persisted index.
+
+### Migration Guide
+
+**Python API consumers — semantic search pagination:** Code that paginates
+`search_semantic` results through the Python API must adapt to the new
+approximate pagination contract:
+
+- `pagination["total"]` is now `None` for semantic search — an exact result
+  count is no longer computed.
+- Terminate pagination loops with `pagination["has_more"]` instead of
+  comparing the accumulated page size against `total`.
+- Semantic result windows are capped at the exclusive `[0, 1000)` range;
+  pages that start at or cross that endpoint are rejected.
+- `pagination["candidate_budget_exhausted"]` is a new boolean field indicating
+  the HNSW candidate budget was reached before the page filled. When `true`,
+  the page is short due to approximate search, not table exhaustion.
+- Candidate-budget exhaustion can return a short page. `has_more=False` means
+  no next page was materialized, not that every match was examined; narrow the
+  query or path filter when this occurs.
+- **Multi-hop materialization limit (500 results)** — Multi-hop semantic search
+  accumulates results across hops and rejects pages whose `offset + page_size`
+  exceeds `min(semantic_result_window_cap, result_limit)`. With HNSW enabled the
+  provider cap is 1000 and the default `result_limit` is 500, so the effective
+  boundary is 500. Reduce `--page-size` or `--offset`, or increase
+  `multi_hop_result_limit` when a page exceeds that boundary.
+
+Semantic search also requires a cosine-compatible HNSW index; all vector
+search operations use cosine similarity (`l2sq` and `ip` metrics are not
+supported by the search API).
 
 ### Changed
 - **Claude Code CLI prompt delivery is configurable** — One mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses `file` (default, every OS) or `inline`. `file` uses `--append-system-prompt-file`: instructions stay in the system prompt, off the Windows command line, and beside a wrapper's `--append-system-prompt`. `inline` is for a wrapper that uses the file flag, or Claude Code older than 2.0.34. Those files use the system temp directory. `llm.claude_temp_dir` overrides it for a special case such as Docker or a limited user. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
+- **DuckDB HNSW is now configurable** — `database.duckdb_hnsw_enabled`
+  (`true` by default; CLI `--duckdb-hnsw` / `--no-duckdb-hnsw`; env
+  `CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED`) switches between approximate
+  HNSW search and exact linear scans. Disabled mode never creates or uses
+  HNSW indexes, drops the `[0, 1000)` result window, and lets read-only
+  search succeed without a persisted index.
+- **DuckDB vector search requires cosine HNSW** — `search_semantic`,
+  `find_similar_chunks`, and `search_by_embedding` require a cosine-compatible
+  HNSW index and emit a single-table candidate query eligible for HNSW scans.
+  DuckDB's optimizer may still choose a sequential scan for large candidate
+  windows. Post-filtered searches can return short pages when their candidate
+  budget is exhausted.
+- **HNSW search beam widened** — `hnsw_ef_search` increased from default 64
+  to 256 for better recall in the vector-candidate overfetch path.
+- **DuckDB vector metadata is consistent** — Results from every DuckDB vector
+  search entry point include parsed chunk metadata in the `metadata` mapping.
+- **Semantic search errors surface** — Database/provider errors during
+  semantic search now raise explicitly instead of returning empty result
+  pages.
+
+### Fixed
+- **`path_filter` behaves identically for diff and DB search** — Git-diff
+  searches (`--last-n`, `--commit-range`, `--commit-hash`) previously treated
+  every filter as a directory prefix, so a file filter such as
+  `path_filter="src/module.py"` silently matched nothing. Both layers now share
+  one normalizer: file filters are right-anchored, directory filters match at
+  any depth.
+- **Windows `.cmd` and `.bat` CLIs launch through `cmd.exe`** — An npm-only Claude Code, Codex, or OpenCode install can run research. A spaced shim path that cannot be shortened is rejected. Newlines, percent signs, quotes, and a command operator in an argument with no spaces are rejected. Addresses #118. The database `WinError 183` in that issue is unchanged.
 
 ## [6.0.0] - 2026-09-14
 
@@ -45,6 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hard 10-second wall-clock fetch budget on every invocation. Single attempt, no client-side cache — recoverable failures (timeout, network, non-2xx, JSON parse, envelope validation) log a WARNING and the invocation proceeds against what's on disk. Disk-write failures during backup or persist escalate to `sys.exit(1)` with the target path and errno on stderr.
   - Fetch ignores `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and netrc (`httpx` is built with `trust_env=False`) so a hostile env var cannot silently reroute the credentialed request or supply a MITM-friendly CA bundle. Operators needing a private CA must extend the system trust store.
 - **Structured config validation error codes** — Startup validation now emits stable `ConfigErrorCode` identifiers (`missing_required_config`, `llm_not_configured`, `llm_missing_role_config`, `embedding_not_configured`, `mcp_non_loopback_no_auth`, `mcp_cors_no_auth`, `db_readonly_wrong_command`, `db_readonly_non_duckdb`) alongside human-readable messages, enabling machine-parseable diagnostics and powering the remote-config delta-only validation gate.
+
 
 ### Fixed
 - **OpenAI token-limit error detection** — A third real-world phrasing of OpenAI's context-length error ("the input length exceeds the context length") is now recognized, triggering the existing split-and-retry path instead of failing the batch outright.
