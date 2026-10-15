@@ -63,8 +63,15 @@ async def test_launch_chrome_uses_budget_above_zendriver_defaults(
     # The cold-start budget must exceed them so a slow CI Chrome does not
     # trip the generic "Failed to connect" and force the urllib fallback.
     assert captured["browser_executable_path"] == "/usr/bin/google-chrome"
-    assert captured["browser_connection_timeout"] > 0.25
-    assert captured["browser_connection_max_tries"] > 10
+    # Require a minimum 15s connection budget. Merely exceeding
+    # zendriver's 0.25s/10 defaults is too weak: a 0.26s/11 regression would
+    # pass while recreating the original flaky launch window (see websearch_core
+    # _BROWSER_CONNECT_* comment).
+    budget = (
+        captured["browser_connection_timeout"]
+        * captured["browser_connection_max_tries"]
+    )
+    assert budget >= 15
 
 
 @pytest.mark.asyncio
