@@ -386,6 +386,11 @@ def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
         ("//tei.example.com/rerank", "ollama-embed", "tei", False, False),
         ("http://", "ollama-embed", "tei", False, False),
         ("http:///p", "ollama-embed", "tei", False, False),
+        # Backslashes make the effective host parser-dependent; the UI and the
+        # backend must reject them together (rerank_url.normalize_rerank_url).
+        (r"http://host\@evil/rerank", "ollama-embed", "tei", False, False),
+        (r"http://example.com/a\b", "ollama-embed", "tei", False, False),
+        (r"https://host\evil", "ollama-embed", "tei", False, False),
     ]
     ui_verdicts = {
         (verdict["url"], verdict["preset"]): verdict["error"] is None

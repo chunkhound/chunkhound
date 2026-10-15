@@ -13,7 +13,10 @@ RERANK_URL_SCHEME_INVALID = (
 
 def normalize_rerank_url(value: str) -> str:
     """Normalize only the scheme; preserve endpoint path, query, and fragment."""
-    if value.startswith("//") or any(char.isspace() for char in value):
+    # A literal backslash has no URL meaning and makes the effective host
+    # parser-dependent (WHATWG treats it as a path separator, httpx as an
+    # authority delimiter). Reject it so both layers agree on the target.
+    if value.startswith("//") or "\\" in value or any(c.isspace() for c in value):
         raise ValueError(RERANK_URL_SCHEME_INVALID)
     match = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):", value)
     if not match:

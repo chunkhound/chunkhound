@@ -31,6 +31,11 @@ def test_active_rerank_url_normalizes_scheme_only(provider, scheme):
         "https://",
         "//host/rerank",
         " https://host/rerank",
+        # A backslash makes the effective host parser-dependent, so both layers
+        # reject it instead of letting httpx target a host the UI never showed.
+        r"http://host\@evil/rerank",
+        r"http://example.com/a\b",
+        r"https://host\evil",
     ],
 )
 @pytest.mark.parametrize("active", [False, True])
