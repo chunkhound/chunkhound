@@ -33,6 +33,9 @@ RERANK_MODEL_REQUIRED = (
     "rerank_model is required when using rerank_format='cohere' or 'voyage'. "
     "Either provide rerank_model or use rerank_format='tei'."
 )
+RERANK_FORMAT_VOYAGE_UNSUPPORTED = (
+    "rerank_format='voyage' is only supported by provider='voyageai'"
+)
 
 
 def _validate_explicit_output_dims(v: object) -> int | None:
@@ -82,6 +85,10 @@ def validate_rerank_configuration(
     # VoyageAI uses SDK-based reranking when no rerank_url provided
     if provider == "voyageai" and not rerank_url:
         return
+
+    # Voyage format is only supported by the VoyageAI provider
+    if rerank_format == "voyage" and provider != "voyageai":
+        raise ValueError(RERANK_FORMAT_VOYAGE_UNSUPPORTED)
 
     # Cohere and Voyage-native formats both require an explicit rerank_model
     if rerank_format in ("cohere", "voyage") and not rerank_model:

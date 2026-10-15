@@ -1,6 +1,9 @@
 # ruff: noqa: E501  # Embedded JavaScript keeps browser-like expressions intact.
 from __future__ import annotations
 
+import json
+
+from chunkhound.core.config.embedding_config import EmbeddingConfig
 from tests.site.dom_helpers import browser_dom, dist_body
 from tests.site.tsx_runner import run_tsx_json
 
@@ -829,3 +832,80 @@ console.log(JSON.stringify({ motion, reduced }));
         assert result["deferredWorkChangedAnything"] is False, (
             f"{stage}: part of the pick was deferred out of the tick"
         )
+
+
+def test_rerank_format_options_follow_the_selected_preset(
+    built_site, clean_environment
+) -> None:
+    """The select must not advertise a format the preset's provider cannot run.
+
+    openai-embed runs through OpenAIEmbeddingProvider, which implements only
+    TEI and Cohere; offering Voyage would emit a config that fails at rerank
+    time, so the option is hidden and any forced pick is dropped.
+    """
+    script = (
+        browser_dom(dist_body(_GETTING_STARTED))
+        + _INIT
+        + _SELECTORS
+        + """
+const formatSelect = q('[data-rerank-format]');
+const visibleFormats = () =>
+  [...formatSelect.options]
+    .filter((option) => option.value && !option.hidden)
+    .map((option) => option.value);
+const voyageHintHidden = () =>
+  q('[data-rerank-voyage-hint]').hasAttribute('hidden');
+
+choose('data-retrieval', 'openai-embed');
+// Force the hidden value as a programmatic caller would, then repaint.
+rerankFormat.value = 'voyage';
+rerankFormat.dispatchEvent(new window.Event('change'));
+const copy = q('#config-copy-btn').getAttribute('data-copy') ?? '';
+const openai = {
+  formats: visibleFormats(),
+  voyageHidden: formatSelect.querySelector('option[value="voyage"]').hidden,
+  voyageHintHidden: voyageHintHidden(),
+  selected: rerankFormat.value,
+  copyHasVoyage: copy.includes('"rerank_format": "voyage"'),
+};
+
+choose('data-retrieval', 'voyageai');
+rerankFormat.value = 'voyage';
+rerankFormat.dispatchEvent(new window.Event('change'));
+rerankUrl.value = 'https://reranker.example.com/rerank';
+rerankUrl.dispatchEvent(new window.Event('input'));
+rerankModel.value = 'rerank-3-lite';
+rerankModel.dispatchEvent(new window.Event('input'));
+const copyButton = q('#config-copy-btn');
+const voyageai = {
+  formats: visibleFormats(),
+  voyageHintHidden: voyageHintHidden(),
+  voyageDisabled: formatSelect.querySelector('option[value="voyage"]').disabled,
+  selected: rerankFormat.value,
+  copyDisabled: copyButton.disabled,
+  copy: copyButton.getAttribute('data-copy'),
+};
+
+console.log(JSON.stringify({ openai, voyageai }));
+"""
+    )
+    rendered = run_tsx_json(script)
+
+    assert rendered["openai"]["formats"] == ["tei", "cohere"]
+    assert rendered["openai"]["voyageHidden"] is True
+    assert rendered["openai"]["voyageHintHidden"] is True
+    # The unsupported pick is dropped, so no emitted config can carry it.
+    assert rendered["openai"]["selected"] == ""
+    assert rendered["openai"]["copyHasVoyage"] is False
+    assert "voyage" in rendered["voyageai"]["formats"]
+    assert rendered["voyageai"]["voyageHintHidden"] is False
+    assert rendered["voyageai"]["voyageDisabled"] is False
+    assert rendered["voyageai"]["selected"] == "voyage"
+    assert rendered["voyageai"]["copyDisabled"] is False
+    command = rendered["voyageai"]["copy"]
+    payload, _ = json.JSONDecoder().raw_decode(command[command.index("{") :])
+    embedding = EmbeddingConfig(**payload["embedding"])
+    assert embedding.provider == "voyageai"
+    assert embedding.rerank_format == "voyage"
+    assert embedding.rerank_url == "https://reranker.example.com/rerank"
+    assert embedding.rerank_model == "rerank-3-lite"

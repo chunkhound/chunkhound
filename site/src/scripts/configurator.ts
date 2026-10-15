@@ -303,6 +303,29 @@ function placeReranker(section: Element): void {
   if (target && reranker.parentElement !== target) target.append(reranker);
 }
 
+/**
+ * A preset may only offer formats its backend provider executes. Hide the rest
+ * so the select cannot advertise a combination that fails at rerank time, and
+ * drop an unsupported selection that a programmatic caller may have set.
+ */
+function syncRerankFormatOptions(
+  section: Element,
+  retrieval: ConfiguratorEmbeddingProviderOption,
+): void {
+  const supported = new Set<string>(retrieval.reranker.formats);
+  const select = section.querySelector<HTMLSelectElement>("[data-rerank-format]");
+  select?.querySelectorAll<HTMLOptionElement>("option").forEach((option) => {
+    if (!option.value) return;
+    const allowed = supported.has(option.value);
+    option.hidden = !allowed;
+    option.disabled = !allowed;
+  });
+  if (select?.value && !supported.has(select.value)) select.value = "";
+  section
+    .querySelector<HTMLElement>("[data-rerank-voyage-hint]")
+    ?.toggleAttribute("hidden", !supported.has("voyage"));
+}
+
 function createRenderSelection(context: ConfiguratorCore): () => void {
   return () => {
     const retrieval = findEmbeddingProvider(context.state.retrievalId);
@@ -310,6 +333,7 @@ function createRenderSelection(context: ConfiguratorCore): () => void {
     // Relocate first: the reranker belongs to the checked row, and moving it
     // synchronously keeps it inside the reveal that opens this same tick.
     placeReranker(context.section);
+    syncRerankFormatOptions(context.section, retrieval);
     const reranker = context.reranker(retrieval);
     renderOutput(context, reranker);
     updateSetupCommands(context.section, retrieval.setupHint, research.setupHint);

@@ -119,7 +119,7 @@ const defaultRerankerStatus = rerankerStatus(defaultRetrieval);
                   <span>Reranker model</span>
                   <input data-rerank-model type="text" placeholder="Required for Cohere / Voyage" autocomplete="off" />
                 </label>
-                <p>TEI uses the model configured on its server. Cohere and Voyage require a model. Voyage is for native Voyage-compatible endpoints such as MongoDB Atlas (uses <code>top_k</code> and returns a <code>data</code> array).</p>
+                <p>TEI uses the model configured on its server. Cohere and Voyage require a model.<span data-rerank-voyage-hint> Voyage is for native Voyage-compatible endpoints such as MongoDB Atlas (uses <code>top_k</code> and returns a <code>data</code> array).</span></p>
                 <p data-rerank-url-error id="rerank-url-error" role="alert" hidden></p>
               </div>
             </details>

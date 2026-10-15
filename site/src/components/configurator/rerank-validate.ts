@@ -16,6 +16,13 @@ export const INCOMPLETE_URL_ERROR =
 const RELATIVE_NO_BASE_URL_ERROR =
   "A relative reranker URL requires this retrieval preset to have a base URL.";
 
+// The select is gated per preset (configurator.ts syncRerankFormatOptions), so
+// this fires only for programmatic or non-JS callers; it keeps the emitted
+// config from carrying a format the selected provider cannot execute.
+export function rerankFormatUnsupportedError(format: string): string {
+  return `The ${format} rerank format is not supported by this retrieval preset.`;
+}
+
 // An http(s)-like scheme that failed to parse is a typo'd URL, not a relative
 // path — say so instead of returning the generic "absolute URL" message.
 function incompleteSchemeUrlError(value: string): string | undefined {
@@ -41,6 +48,10 @@ export function rerankUrlValidationError(
   value = value.trim();
   if (!value) return undefined;
   if (/\s/.test(value)) return ABSOLUTE_URL_ERROR;
+  // A backslash has no URL meaning and makes the effective host parser-dependent
+  // (browsers treat it as a path separator, httpx as an authority delimiter), so
+  // reject it — mirroring normalize_rerank_url in the backend.
+  if (value.includes("\\")) return ABSOLUTE_URL_ERROR;
   // Protocol-relative URLs inherit the page scheme, so the fetch target is
   // ambiguous — reject them explicitly instead of treating them as relative.
   if (value.startsWith("//")) return PROTOCOL_RELATIVE_ERROR;
@@ -169,7 +180,7 @@ export function rerankerValidationError(
   if (retrieval.config.provider === "voyageai" && !url) {
     return undefined;
   }
-  return validateRerankerFields(effective);
+  return validateRerankerFields(effective, retrieval);
 }
 
 // Format/model checks for configs that cleared the URL checks (URL present,
@@ -177,10 +188,20 @@ export function rerankerValidationError(
 // chain of early returns.
 function validateRerankerFields(
   effective: EffectiveReranker,
+  retrieval: ConfiguratorEmbeddingProviderOption,
 ): RerankerValidation | undefined {
   if (!effective.hasFormat)
     return {
-      message: "Choose TEI, Cohere, or Voyage for the external reranker.",
+      message: "Choose a rerank format for the external reranker.",
+      field: "format",
+    };
+  if (
+    !retrieval.reranker.formats.includes(
+      effective.format as ConfiguratorRerankFormat,
+    )
+  )
+    return {
+      message: rerankFormatUnsupportedError(effective.format),
       field: "format",
     };
   return effective.requiresModel && !effective.hasModel

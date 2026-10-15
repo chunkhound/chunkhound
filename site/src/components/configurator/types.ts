@@ -38,6 +38,8 @@ export type StageOption = ConfiguratorEditor | ConfiguratorProviderOption;
 export interface ConfiguratorRerankerCapability {
   included: boolean;
   status?: string;
+  /** Rerank formats the preset's backend provider can actually execute. */
+  formats: ConfiguratorRerankFormat[];
 }
 
 export interface ConfiguratorEmbeddingProviderOption

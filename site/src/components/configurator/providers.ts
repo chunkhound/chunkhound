@@ -171,7 +171,13 @@ export const embeddingProviders: ConfiguratorEmbeddingProviderOption[] = [
     apiKeyPlaceholder: "<YOUR_VOYAGE_API_KEY>",
     group: "cloud",
     requirements: [requirements.voyageApiKey, requirements.voyageTrainingOptOut],
-    reranker: { included: true, status: "Included by VoyageAI." },
+    reranker: {
+      included: true,
+      status: "Included by VoyageAI.",
+      // The VoyageAI provider implements TEI, Cohere, and native Voyage
+      // (`top_k`/`data`) rerank shapes (voyageai_provider.py _RERANK_LIMIT_PARAM).
+      formats: ["tei", "cohere", "voyage"],
+    },
     // VoyageAI is recommended for the best out-of-box results, ROI, and setup
     // ease. Local providers remain an explicit choice when their data boundary
     // matters more; embeddings only set recall and its bundled reranker drives relevance.
@@ -191,7 +197,8 @@ export const embeddingProviders: ConfiguratorEmbeddingProviderOption[] = [
     apiKeyPlaceholder: "<YOUR_OPENAI_API_KEY>",
     group: "cloud",
     requirements: [requirements.openaiApiKey],
-    reranker: { included: false },
+    // OpenAIEmbeddingProvider implements only TEI and Cohere rerank shapes.
+    reranker: { included: false, formats: ["tei", "cohere"] },
   },
   {
     id: "ollama-embed",
@@ -206,7 +213,7 @@ export const embeddingProviders: ConfiguratorEmbeddingProviderOption[] = [
     setupHint: "ollama pull qwen3-embedding",
     group: "local",
     requirements: [requirements.ollama, requirements.ollamaEmbedModel],
-    reranker: { included: false },
+    reranker: { included: false, formats: ["tei", "cohere"] },
   },
   {
     id: "vllm-embed",
@@ -233,6 +240,7 @@ vllm serve Qwen/Qwen3-Reranker-0.6B --task score --hf-overrides '{"architectures
     reranker: {
       included: true,
       status: "Included by this preset — runs as a separate local vLLM service on port 8001.",
+      formats: ["tei", "cohere"],
     },
   },
 ];
