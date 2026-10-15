@@ -21,6 +21,7 @@ from chunkhound.core.exceptions.core import (
     ModelError,
     ParsingError,
     ProviderError,
+    RustPipelineError,
     ValidationError,
 )
 from chunkhound.core.exceptions.embedding import (
@@ -42,6 +43,7 @@ __all__ = [
     "ConfigurationError",
     "DiskUsageLimitExceededError",
     "ProviderError",
+    "RustPipelineError",
     # Embedding provider exceptions
     "EmbeddingProviderError",
     "EmbeddingDimensionError",

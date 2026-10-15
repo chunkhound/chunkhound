@@ -1,5 +1,9 @@
 name: RC Release
 
+# Pushing a valid pre-release tag is the maintainer gate for PyPI publication.
+# This workflow owns publication through its OIDC environments; do not publish
+# with uv manually. After the native package is published, update uv.lock in a
+# follow-up commit so local development resolves that release.
 on:
   push:
     tags:
@@ -9,20 +13,21 @@ on:
       # tag push by maintainer is the human gate (protected via tag ruleset)
 
 permissions:
-  id-token: write  # OIDC Trusted Publishing
+  contents: read  # default for build jobs; publish jobs elevate below
 
 jobs:
   validate-tag:
     runs-on: ubuntu-latest
-    environment: pypi
     timeout-minutes: 15
 
     steps:
       - name: Validate pre-release tag format (PEP 440)
         shell: python
+        env:
+          TAG_TO_VALIDATE: ${{ github.ref_name }}
         run: |
-          import re, sys
-          tag = "${{ github.ref_name }}"
+          import os, re, sys
+          tag = os.environ["TAG_TO_VALIDATE"]
           if not re.match(r'^v\d+\.\d+\.\d+(a|b|rc)\d+$', tag):
               print(f"::error::Tag {tag!r} is not a valid PEP 440 pre-release (expected vX.Y.Z(a|b|rc)N)")
               sys.exit(1)
@@ -34,7 +39,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # hatch-vcs requires full history for version derivation
 
@@ -50,6 +55,7 @@ jobs:
           name: release-rc-dist-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
+          overwrite: true
 
   build-runtime-wheels:
     needs: validate-tag
@@ -62,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0  # hatch-vcs requires full history for version derivation
 
@@ -80,6 +86,7 @@ jobs:
           name: release-rc-dist-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
 
   build-native-wheel:
     needs: validate-tag
@@ -88,63 +95,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      - name: Install Python 3.12  # abi3 wheel runs on Python 3.10+
-        run: uv python install 3.12
-
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
       - name: Build native wheel
-        shell: bash
-        run: |
-          # maturin build has no --set-version flag; it reads the wheel version from
-          # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
-          # before any pre-release suffix) while the git tag uses PEP 440 (no
-          # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
-          # Cargo version via pep440_rs, which normalizes the hyphenated form to
-          # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
-          export TAG_VERSION="${GITHUB_REF_NAME#v}"
-          uv run --no-project --python 3.12 python - <<'PYEOF'
-          import os, re, pathlib
-
-          tag_version = os.environ["TAG_VERSION"]
-          m = re.match(r"^(\d+\.\d+\.\d+)([a-zA-Z].*)?$", tag_version)
-          cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
-
-          path = pathlib.Path("Cargo.toml")
-          text = path.read_text()
-          new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
-          path.write_text(new_text)
-          PYEOF
-          # maturin treats a sibling pyproject.toml as authoritative package metadata
-          # ("mixed" Rust/Python project support), which misnames this wheel as
-          # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
-          # Python package's pyproject.toml for the build; nothing else in this job
-          # needs it (the uv commands above already use --no-project).
-          mv pyproject.toml pyproject.toml.hidden
-          uvx --python 3.12 maturin build --release --out dist/
-          mv pyproject.toml.hidden pyproject.toml
+        uses: ./.github/actions/build-native-wheel
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4
@@ -152,12 +115,72 @@ jobs:
           name: release-rc-dist-native-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
+          overwrite: true
+
+  validate-release:
+    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # macOS/arm64 excluded: runner cost. Coverage exists via native-dev-macos
+      # in ci.yml (source-level make dev) and build-native-wheel (wheel build).
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download matching main wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-rc-dist-${{ matrix.os }}
+          path: main-dist
+
+      - name: Download matching native wheel for validation
+        uses: actions/download-artifact@v4
+        with:
+          name: release-rc-dist-native-${{ matrix.os }}
+          path: native-dist
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Validate combined wheel installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          main_wheels=(main-dist/*.whl)
+          native_wheels=(native-dist/*.whl)
+          if [[ ${#main_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching main wheel, found ${#main_wheels[@]}"
+            exit 1
+          fi
+          if [[ ${#native_wheels[@]} -ne 1 ]]; then
+            echo "Expected exactly one matching native wheel, found ${#native_wheels[@]}"
+            exit 1
+          fi
+
+          uv python install 3.12
+          workspace_dir="$(pwd)"
+          validation_dir="$(mktemp -d)"
+          cd "$validation_dir"
+          uv run --no-project --python 3.12 \
+            --with "$workspace_dir/main-dist"/*.whl \
+            --with "$workspace_dir/native-dist"/*.whl \
+            python "$workspace_dir/scripts/smoke_test_native_wheel.py"
 
   publish-rc:
-    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    needs: [publish-rc-native, build-sdist, build-runtime-wheels]
     runs-on: ubuntu-latest
+    # PyPI must trust this repository's release-rc.yml workflow in the `pypi`
+    # environment for OIDC publishing to work.
     environment: pypi
     timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC Trusted Publishing
 
     steps:
       - name: Download main distribution artifacts
@@ -171,17 +194,27 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
 
   publish-rc-native:
-    needs: [publish-rc]
+    needs: [build-native-wheel, validate-release]
     runs-on: ubuntu-latest
     # Separate environment so this job carries an OIDC token scoped to the
     # chunkhound-native PyPI project (each project needs its own trusted-publisher
-    # entry referencing this environment name).
+    # entry referencing this environment name). Native publication is deliberately
+    # first so the main package cannot become installable before its required
+    # native wheels are available.
     environment: pypi-native
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write  # OIDC Trusted Publishing (chunkhound-native PyPI project)
+      issues: write    # gh issue create alert if publish-rc-native fails
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
       - name: Download native wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -189,7 +222,41 @@ jobs:
           path: dist-native
           merge-multiple: true
 
+      - name: Validate native wheel versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/validate_native_wheel_versions.py
+
       - name: Publish chunkhound-native to PyPI
+        id: publish-rc-native
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-native
+          skip-existing: true
+
+      - name: Alert on native publish failure
+        # Native publication runs before publish-rc, so a failure prevents the
+        # main package from being released. The alert still makes failures in
+        # publication or the pre-publish version gate visible to maintainers.
+        if: failure()
+        uses: ./.github/actions/alert-native-publish-failure
+        with:
+          tag: ${{ github.ref_name }}
+
+  alert-native-prepublish-failure:
+    needs: [build-native-wheel, validate-release]
+    if: ${{ always() && (needs['build-native-wheel'].result == 'failure' || needs['validate-release'].result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Alert on native build or validation failure
+        uses: ./.github/actions/alert-native-publish-failure
+        with:
+          tag: ${{ github.ref_name }}

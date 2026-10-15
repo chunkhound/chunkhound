@@ -9,3 +9,17 @@ VOYAGE_DEFAULT_RERANK_MODEL = "rerank-2.5"
 
 # Bounds HNSW candidate widening and the DB side of diff/DB merged search.
 HNSW_CANDIDATE_BUDGET = 10_000
+
+# Superseded embedding models mapped to their current replacement, per provider.
+# Surfaced as a suggestion only: adopting one re-embeds the whole index, so the
+# choice stays with the operator. Keyed by provider so a colliding model name on
+# another provider never picks up a suggestion. Code models point at the
+# code-specialized successor; general models keep to their own family.
+EMBEDDING_MODEL_UPGRADES: dict[str, dict[str, str]] = {
+    "voyageai": {
+        "voyage-code-3": "voyage-code-4",
+        "voyage-3.5": "voyage-4",
+        "voyage-3.5-lite": "voyage-4-lite",
+        "voyage-3-large": "voyage-4-large",
+    },
+}

@@ -18,6 +18,10 @@ async def test_codex_overlay_cleanup(monkeypatch, tmp_path: Path):
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
     # Force provider to consider Codex available
     monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     # Create a deterministic overlay directory
     overlay_dir = tmp_path / "overlay-home"

@@ -33,7 +33,7 @@ Example global config (`~/.config/chunkhound/chunkhound.json`):
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5"
+    "model": "voyage-code-4"
   },
   "llm": {
     "provider": "anthropic"
@@ -102,7 +102,7 @@ Example — project uses its own exclude list (replaces global's list at the raw
   },
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5",
+    "model": "voyage-code-4",
     "batch_size": 100
   },
   "indexing": {
@@ -134,12 +134,248 @@ Settings are resolved in this order (highest priority first):
 
 Global defaults let you maintain shared settings (e.g. embedding provider + API key, common exclude patterns, LLM roles) in a single file so you do not need to copy `.chunkhound.json` into every project. Any project-local `.chunkhound.json` (or explicit config/CLI) overrides values from the global layer. Nested objects (embedding, llm, research, database, ...) are deep-merged: specify only the keys you want to change and siblings from global survive. Lists such as `indexing.exclude` / `include` from a higher layer fully replace lower ones (built-in defaults are still applied on top; see Global Defaults above for details and examples).
 
+## Remote Configuration
+
+For fleet-wide deployments, ChunkHound can fetch a configuration envelope from an operator-controlled HTTPS endpoint (or `http://` to a loopback host for local development) at the start of every invocation, apply a list of rules to the on-disk global config, and seed the discovery-layer `remote_config.url` / `auth_header` into the global config file on the first successful fetch so subsequent runs continue fetching without needing the CLI flag or environment variable that triggered the initial run.
+
+Skip this feature for single-user setups — enabling it adds a synchronous fetch with a hard 10-second wall-clock budget to every command (`index`, `search`, `mcp`, etc.), and there is no client-side cache. The intended use case is centralized management across many machines, not local convenience.
+
+### Enabling remote fetch
+
+Two knobs, both operator-owned. They may be set via CLI, environment, or the global config file.
+
+> **Trust boundary.** A `remote_config` key inside a project-local `.chunkhound.json` or any file passed via `--config` is scrubbed at load time and a WARNING is logged — project-level files can never redirect the operator's URL, because a checked-in file could otherwise point first-run fetches at an attacker-controlled endpoint. To persist activation on a machine, place the values in the *global* config file (`~/.chunkhound.json` or `CHUNKHOUND_GLOBAL_CONFIG_FILE`), or leave it to self-registration (below) after a first run with CLI/env.
+
+| Setting | CLI flag | Environment variable |
+|---|---|---|
+| Remote-config URL | `--remote-config-url` | `CHUNKHOUND_REMOTE_CONFIG__URL` |
+| Authorization header | `--remote-config-auth-header` | `CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER` |
+
+```bash
+# Env-var activation (persists for the shell session)
+export CHUNKHOUND_REMOTE_CONFIG__URL="https://config.example.internal/chunkhound"
+export CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER='Bearer ${MY_TOKEN}'
+chunkhound index
+```
+
+```bash
+# One-shot flag activation
+chunkhound index \
+  --remote-config-url https://config.example.internal/chunkhound \
+  --remote-config-auth-header 'Bearer ${MY_TOKEN}'
+```
+
+### Envelope format
+
+The endpoint must return a JSON object:
+
+```json
+{
+  "version": 1,
+  "min_chunkhound_version": "5.3.0",
+  "rules": [
+    { "id": "embedding.model", "op": "set", "value": "voyage-3.5" }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `version` | integer | yes | Envelope schema version. Must equal `1`; any other value is rejected with `envelope_version_unsupported`. |
+| `min_chunkhound_version` | string | no | PEP 440 version. If the running client is older, the fetch is discarded so a payload targeted at a newer format never lands on an older binary. |
+| `rules` | array | no | Ordered list of rule objects (see below). Non-list values are rejected with `schema_error`. |
+
+### Rules
+
+Each rule mutates the working-copy config dict. Fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Dotted (`a.b.c`) or slash (`a/b/c`) path with an optional single leading `.` or `/`. Both forms accepted for copy-paste ergonomics. |
+| `op` | string | `merge` (default when omitted), `set`, or `remove`. |
+| `value` | any | Required for `merge` and `set`; ignored by `remove`. |
+| `when` | object | Optional predicates gating this rule. See [Predicates](#predicates) below. |
+| `min_chunkhound_version` | string | Optional PEP 440 gate applied per-rule. If the running client is older, the rule is skipped with a WARNING (the envelope as a whole is still applied). Unparseable values log a distinct WARNING. |
+
+Operation semantics:
+
+- **`merge`** — deep-merge dicts. Collapses to `set` when either the incoming value or the existing leaf isn't a dict (nothing to recurse into).
+- **`set`** — overwrite the leaf. Missing intermediate keys are created on write.
+- **`remove`** — delete the leaf. Missing paths are a no-op (logged).
+
+Rules apply in list order; later rules overwrite earlier ones at the same leaf. Multiple rules may share the same `id`, and failures are attributed by both 1-based ordinal position and path in log messages so duplicates remain distinguishable.
+
+```json
+{
+  "version": 1,
+  "rules": [
+    { "id": "embedding",         "op": "merge", "value": { "model": "voyage-3.5", "batch_size": 100 } },
+    { "id": "llm.timeout",       "op": "set",   "value": 180 },
+    { "id": "indexing.exclude",  "op": "remove" }
+  ]
+}
+```
+
+**Unknown-path handling.** Typos are surfaced, not absorbed:
+
+- Unknown top-level paths (e.g. `embeding.provider`) log `schema_error` and skip the rule.
+- Unknown depth-2 paths (e.g. `embedding.provder`) are also detected and skipped, because sub-model `extra="ignore"` semantics would otherwise silently swallow the typo.
+
+#### Predicates
+
+`when` gates a rule against runtime state. Predicates are evaluated against a **half-merged snapshot** — the on-disk global config as it was before any rule ran — so predicate results don't shift mid-loop as earlier rules mutate the working copy.
+
+| Key | Value | Meaning |
+|---|---|---|
+| `os` | string or list of strings | Matches against Python's `sys.platform` (`"linux"`, `"darwin"`, `"win32"`, ...). The rule applies iff the current platform is in the list. |
+| `existing` | string or list of paths (dotted or slash form) | Each path must resolve to a non-None value in the half-merged snapshot. Missing / null paths skip the rule. |
+
+Semantics:
+
+- All predicates must match (AND-logic). A single failing predicate skips the rule silently — the normal, non-error skip path, so log-scraping won't see spurious WARNINGs from platform-scoped envelopes.
+- **Unknown keys inside `when`** (e.g. an unsupported key like `arch`, or an `existng` typo of `existing`) surface as `schema_error` and skip the rule with a WARNING, so authoring typos don't quietly apply. Note: this check only fires for keys *inside* the `when` block — a typo of the outer key itself (e.g. `"wehn": {...}` at rule level) is indistinguishable from a rule that simply has no predicates, and applies unconditionally.
+
+```json
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "embedding.model",
+      "op": "set",
+      "value": "voyage-3.5-lite",
+      "when": { "os": ["linux", "darwin"] }
+    },
+    {
+      "id": "llm.timeout",
+      "op": "set",
+      "value": 300,
+      "when": { "existing": "llm.provider" },
+      "min_chunkhound_version": "5.3.0"
+    }
+  ]
+}
+```
+
+### Trust boundary and refused paths
+
+Some settings describe the local install and are protected against server override. After the rule loop, ChunkHound restores these paths from the pre-rules dict, regardless of what any rule did:
+
+- `database.path` — DB location is per-machine.
+- `target_dir` — the directory being indexed.
+- `embeddings_disabled` — operator kill-switch.
+- `local_config_file`, `global_config_file`, `config_file` — discovery inputs to the loader (allowing remote to override them would recurse).
+
+`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused wholesale — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable. One narrow guard applies: a rule-set `remote_config.url` that fails the fetcher's scheme rule (cleartext `http://` to a non-loopback host) is reverted to the pre-rules on-disk value — or removed if there is none — with a WARNING. Persisting such a URL would brick the next fetch, since the fetcher refuses to send credentials over cleartext to a non-loopback host. Every `https://` URL passes, so rotation to a new HTTPS origin is unrestricted; `remote_config.auth_header` has no scheme concept and is accepted verbatim.
+
+### Self-registration
+
+The first successful fetch seeds the effective `remote_config.url` and `remote_config.auth_header` (from the winning discovery layer — CLI > global > env, matching ChunkHound's overall config-layer precedence) into the global config file, so subsequent runs continue to fetch without needing the CLI flag or environment variable that triggered the initial run. Precedence:
+
+- If a rule in the envelope set `remote_config.url` or `remote_config.auth_header`, the rule's value wins and is persisted (server-driven URL/header rotation). For `remote_config.url` this requires the value to pass the fetcher's scheme rule; an unsafe URL rule (cleartext `http://` to a non-loopback host) is reverted to the on-disk value or removed with a WARNING before this step runs. When the revert leaves the slot empty, discovery-layer seeding still fires — a first-run CLI/env URL survives even when the same envelope also pushed a bad URL rule.
+- Otherwise, if the on-disk file has no value at that path (and no rule set one this run), the discovery-layer value is seeded.
+- If the on-disk file already carries a value at that path, it is left alone — self-registration is gap-fill only, never a rewrite.
+
+The target is:
+
+1. `CHUNKHOUND_GLOBAL_CONFIG_FILE` if set, else
+2. the first existing candidate from the global-config search path, else
+3. `~/.chunkhound.json` (created if absent).
+
+Writes are atomic (sibling `.tmp` + `replace()`), and any pre-existing target file is backed up as `<target>.bak` first.
+
+> **On-disk values are durable.** Once a URL or header is in the global config file — whether seeded by a first-time fetch, hand-edited by an operator, or written by an `op: set` rule — a later run with a differing `--remote-config-url` / `--remote-config-auth-header` (or env-var equivalent) will fetch against that transient value but will not overwrite what's on disk. This prevents a one-off invocation from silently replacing a fleet-wide URL. To change a persisted value, edit the global config file directly or push a rule that sets it.
+
+> **Warning:** A literal `auth_header` value lands on disk in plaintext under the user's account. ChunkHound restricts the file to the owning user where the OS supports it, but this is not an encryption boundary — anyone who can read the account's files (privileged local processes, backups, disk images) reads the token verbatim. To persist only a placeholder, use `${VAR}` interpolation:
+>
+> ```bash
+> chunkhound index --remote-config-auth-header 'Bearer ${MY_TOKEN}'
+> ```
+>
+> The raw templated string `Bearer ${MY_TOKEN}` is what gets stored; `${MY_TOKEN}` is resolved against `os.environ` at fetch time. If any referenced variable is unset or empty, the entire `Authorization` header is dropped and a WARNING is logged — a partial interpolation would leak the literal placeholder to the wire.
+
+### Delta-only validation gate
+
+After rules apply, the resulting config is snapshot-validated against the current command **and** every persistence-hazard command (currently `index`, `mcp`, and `research`). Each snapshot returns a set of structured `ConfigErrorCode` values (see [Startup validation](#startup-validation)). The pipeline compares pre-rules and post-rules error sets on **two substrates**; both must accept (`E_post ⊆ E_pre`) or the fetch is discarded:
+
+1. **Persisted global dict** — the JSON that would be written, with env / local / `--config` / CLI skipped, plus worst-case command substitutions (for example forcing `mcp.transport=http` so host/CORS guards enumerate). This stops a one-off `--auth-token`, a project-local `.chunkhound.json`, or a standing `CHUNKHOUND_MCP__*` env var from masking a newly written global hazard.
+2. **Active invocation** — every config layer of the current process (CLI, `--config`, local, global, env), plus the same worst-case substitutions. This stops a rule that is only unsafe in combination with this process's other sources.
+
+If either comparison introduces a new code, nothing is written and an ERROR is logged naming the substrate (`persisted` or `active`), the command, and the code.
+
+This prevents a well-intentioned rule change during a `search` invocation from silently breaking the next `mcp` startup or scheduled `research` run on the same machine, and prevents an overlay on the current process from laundering an unsafe value into the global file.
+
+### Fetch behavior and failure model
+
+- **Synchronous** on every invocation that goes through `create_validated_config`.
+- **Hard 10-second wall-clock budget** enforced by `asyncio.wait_for` on top of the per-phase `httpx` timeout, so a slow-drip server cannot stall startup indefinitely.
+- **Single attempt.** No retries. No client-side cache.
+- **Recoverable failures** (timeout, transport error, non-2xx response, JSON parse error, envelope validation, `min_chunkhound_version` gate) log a WARNING and the invocation proceeds against whatever is currently on disk. This is intentional — remote-config outages must not brick indexing or search.
+- **Disk-write failures during backup or persist escalate to `sys.exit(1)`** with the target path and errno on stderr. A silent write failure would leave the process running against a stale on-disk copy while advertising success.
+- **`httpx` runs with `trust_env=False`**, so `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `netrc` are ignored on the remote-config fetch. This is deliberate: a hostile `HTTPS_PROXY` could reroute the credentialed request, and a MITM proxy holding a system-trusted CA could terminate the tunnel and read the `Authorization` header. **Operational consequence** — an operator needing a private / internal CA must extend the **system** trust store (e.g. install the CA into `/etc/ssl/certs`, the OS keychain, or the process's baked-in bundle); pointing `SSL_CERT_FILE` at an internal bundle has no effect and the TLS handshake will fail. The failure looks like any other recoverable fetch WARNING ("Remote-config fetch failed"), which can be mistaken for a flaky server rather than an ignored CA bundle.
+
+### Startup validation
+
+The delta-only gate above relies on structured error codes returned by `Config.validate_for_command_structured()`. These are also surfaced in normal CLI startup errors alongside their human-readable messages, so log-scraping and monitoring can key off stable identifiers:
+
+| Code | Trigger |
+|---|---|
+| `missing_required_config` | Required top-level configuration is absent for the command. |
+| `llm_not_configured` | No LLM provider configured for a command that needs one. |
+| `llm_missing_role_config` | An LLM role (utility, synthesis, map_hyde, autodoc_cleanup) is missing its provider/model. |
+| `embedding_not_configured` | No embedding provider, or the provider is missing required fields for the command. |
+| `mcp_non_loopback_no_auth` | `mcp.host` binds to a non-loopback interface without `mcp.auth_token`. |
+| `mcp_cors_no_auth` | `mcp.cors` is enabled without `mcp.auth_token`. |
+| `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp` / `_quickresearch`. |
+| `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp`/`_quickresearch` commands hit `db_readonly_wrong_command` first.) |
+
 ## Embedding Providers
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Recommended for code search |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Set `model` to `voyage-code-4` for code search |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
+
+### VoyageAI Models
+
+All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. ChunkHound uses the per-batch token limit to size embedding requests, so picking a model with a larger limit means fewer round trips when indexing.
+
+| Model | Context | Tokens per batch | Notes |
+|---|---|---|---|
+| `voyage-code-4` | 32K | 320K | Code-specialized, built for coding-agent retrieval. Recommended for code search |
+| `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
+| `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
+| `voyage-4-lite` | 32K | 1M | General purpose, lowest cost and latency |
+| `voyage-code-3` | 32K | 120K | Previous-generation code model |
+| `voyage-3.5` | 32K | 320K | Default. Previous-generation general purpose |
+| `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
+| `voyage-3-large` | 32K | 120K | Previous-generation large |
+| `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
+| `voyage-law-2` | 16K | 120K | Legal domain, 1024 dims only |
+| `voyage-multilingual-2` | 32K | 120K | Multilingual, 1024 dims only |
+
+Models outside this list still work. ChunkHound discovers their dimensions at runtime and falls back to a conservative 320K token batch limit.
+
+### Changing the embedding model
+
+An index built with one embedding configuration cannot be searched with another. Search reads the stored vectors matching the query's dimensions and filters them by provider and model, so a different model, or the same model at a different `output_dims`, returns nothing. Re-indexing does not repair a dimensions change either, because chunks that already have vectors for the provider and model are skipped at any dimension. Re-embedding under a new model costs tokens and time, and the superseded vectors stay in the database until removed.
+
+The index therefore keeps the model and dimensions it was built with. Changing `embedding.model` or `embedding.output_dims` is a proposal, not an instruction:
+
+| Context | Behavior |
+|---|---|
+| Interactive `chunkhound index`, different model | Warns, shows the chunk count, and asks whether to re-embed. Declining keeps the indexed model and dimensions and asks again next run. |
+| Same model, different `output_dims` | Keeps the indexed dimensions without asking, since the change cannot be re-embedded in place. |
+| Non-interactive (CI, `CHUNKHOUND_NO_PROMPTS=1`) | Warns and keeps the indexed model and dimensions. Nothing is re-embedded. |
+| MCP server startup | Keeps the indexed model and dimensions silently, logging the reason to stderr. |
+| Different *provider* configured | Cannot be kept (credentials and dimensions differ), so the configured provider is used and every chunk is re-embedded. |
+
+If the index's dimensions are not valid for its model under the current settings, which can happen for an index built through a custom endpoint, ChunkHound keeps the model, warns that searches will not match, and still starts.
+
+Which model and dimensions an index uses is recorded in a small file beside the database (`chunks.db.embedding.json` for DuckDB, `lancedb.lancedb.embedding.json` for LanceDB). It is written the first time an index with vectors is opened and again when a switch is accepted, so a finished or interrupted switch is remembered rather than guessed from vector counts. It is never written for a read-only database. If the file cannot be read, ChunkHound warns, falls back to counting vectors, and leaves the file alone. Both DuckDB and LanceDB indexes are covered.
+
+To adopt a new model deliberately, accept the prompt. To change dimensions, or to start clean, delete the database directory and re-index. To stop being asked, set `embedding.model` and `embedding.output_dims` to whatever the index already holds.
+
+When a newer model supersedes the one in use, an interactive `chunkhound index` prints a one-line suggestion. It never acts on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
 
 ### Embedding Options
 
@@ -179,6 +415,25 @@ Fast analytical queries and efficient storage.
   }
 }
 ```
+
+#### DuckDB storage paths
+
+`database.path` normally names a directory; ChunkHound stores the database as
+`chunks.db` inside it. A path ending in `.db` or `.duckdb` is an explicit
+DuckDB file instead. An existing regular file is also kept as a direct database
+path for older installations. If no path is configured, the default is
+`<project-root>/.chunkhound/db/chunks.db`.
+
+> **Gotchas:**
+> - Prefer passing the project directory as a positional argument
+>   (`chunkhound search "query" /path/to/project`) so its `.chunkhound.json`
+>   resolves correctly.
+> - A `--db` path pointing at the wrong subpath silently returns 0 results — no
+>   error, just empty. Verify with a regex search first.
+> - Pre-v4 flat `.chunkhound` files block directory creation — move them aside
+>   before re-indexing.
+> - `--config` does not override a project-local `.chunkhound.json` for the DB
+>   path — use an explicit `--db` when the target project has its own config.
 
 ### LanceDB
 
@@ -251,10 +506,51 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
 | OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OpenRouter API. Registry providers require explicit `model`. |
+| OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OrcaRouter API. Registry providers require explicit `model`. |
+| Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Requesty API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, and OpenRouter) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, and Requesty) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+
+### OpenRouter structured reasoning negotiation
+
+OpenRouter can reject requests that disable reasoning for structured (`response_format` with `json_schema`) calls. ChunkHound probes this once per provider/model and caches the outcome:
+
+- **Accepted** (30-day lease): the reasoning-disable payload stays attached to every structured call for that provider/model, so reasoning is disabled there for the lease duration. Non-structured calls (`complete()`), including research synthesis, are unaffected.
+- **Rejected** (24-hour lease): structured calls omit the payload and re-probe once the lease expires. A long-running process enforces the lease in memory, so it re-probes without a restart.
+- **Unknown**: the first structured call optimistically sends the payload; a 400/422 response triggers one unflagged replay.
+
+Negotiation only happens for the built-in canonical OpenRouter endpoint. Setting `llm.base_url` — even to the canonical URL — routes through a generic backend and disables the probe and payload entirely, exactly like a proxy.
+
+Some models require reasoning and can still return empty `content` after the payload is dropped, so a `rejected` cache entry records only the HTTP outcome. When that happens, ChunkHound raises an error naming the provider, model, and capability state, and research results carry a caller-visible note (a `> **Note:**` blockquote advising a switch of `llm.utility_model`) plus a `metadata.warnings` entry.
+
+To reset a stale decision, delete the resolved capability cache file (default `~/.cache/chunkhound/llm-capabilities.json`, or `%LOCALAPPDATA%\ChunkHound\llm-capabilities.json` on Windows) and restart. Set `CHUNKHOUND_LLM_CAPABILITY_CACHE` to override the path. Constructing a provider does not renew a lease.
+
+On Windows, a `.cmd` or `.bat` install of Claude Code, Codex, or OpenCode runs through `cmd.exe`. A shim path that still has a space after the 8.3 short name is rejected. Arguments there cannot contain a newline, a percent sign, or a quote, and a value with no spaces cannot contain `&`, `|`, `<`, `>`, `^`, `(`, or `)`.
+
+### Claude Code CLI
+
+`provider: "claude-code-cli"` runs local `claude` in print mode. The user request goes to stdin. Research instructions go to the system prompt. `--tools` and an empty value stay last and disable Claude's built-in tools.
+
+One delivery mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses it. The default is `file` on every operating system: the instructions are written to a temp file and passed with `--append-system-prompt-file`. That keeps them in the system prompt, off the `cmd.exe` command line, and beside a wrapper that adds `--append-system-prompt` on Claude Code 2.1.283 or newer. The file flag alone works from 2.0.34.
+
+Set it to `inline` to pass `--append-system-prompt` when the wrapper uses the file flag, when it merges that inline text, or when Claude Code is older than 2.0.34. On a `.cmd` shim, `inline` still puts the text through `cmd.exe`, so quotes, percent signs, newlines, and a very long instruction fail that launch.
+
+A wrapper that uses the same form can drop ChunkHound's instructions. A wrapper that replaces stdin, or drops the empty `--tools` value, still breaks the call.
+
+Those files go in the system temp directory. `llm.claude_temp_dir` overrides that directory for a special case such as Docker or a limited user.
+
+```json
+{
+  "llm": {
+    "provider": "claude-code-cli",
+    "claude_append_system_prompt": "file"
+  }
+}
+```
+
+The environment variables are `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` and `CHUNKHOUND_LLM_CLAUDE_TEMP_DIR`. Both apply only when the provider is `claude-code-cli`.
 
 ### LLM Options
 
@@ -266,6 +562,8 @@ When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound
 | `max_retries` | `number` | `3` | Max retry attempts |
 | `output_limits_enabled` | `boolean` | `false` | Restore the exact legacy numeric output limits for research synthesis instead of provider-managed limits. |
 | `output_limit_fallback` | `number` | `64000` | Positive output-token fallback used when a synthesis provider cannot authoritatively omit a limit or declare one. |
+| `claude_append_system_prompt` | `string` | `file` | `file` or `inline`. One mode cannot fit every machine: `file` stays off `cmd.exe` and beside a wrapper's `--append-system-prompt`; `inline` is for a file-flag wrapper or Claude Code older than 2.0.34. |
+| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file and MCP config file, such as Docker or a limited user. |
 | `codex_reasoning_effort` | `string` | `null` | Default reasoning effort for Codex/OpenAI: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex_reasoning_effort_utility` | `string` | `null` | Reasoning effort override for utility stage |
 | `codex_reasoning_effort_synthesis` | `string` | `null` | Reasoning effort override for synthesis stage |
@@ -449,6 +747,8 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__READ_ONLY` | Open DB read-only (`true`/`1`/`yes`) |
 | `CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE` | LanceDB vector index type |
 | `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` | LanceDB fragment count to trigger optimize |
+| `CHUNKHOUND_REMOTE_CONFIG__URL` | URL to fetch remote configuration on startup (see [Remote Configuration](#remote-configuration)) |
+| `CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER` | Authorization header for the remote-config fetch; supports `${VAR}` interpolation against the environment at fetch time |
 | `CHUNKHOUND_LLM_PROVIDER` | LLM provider for research |
 | `CHUNKHOUND_LLM_MODEL` | LLM model shorthand that sets both utility and synthesis roles |
 | `CHUNKHOUND_LLM_UTILITY_MODEL` | LLM model for utility tasks (fast, lower cost) |
@@ -462,6 +762,8 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_LLM_MAX_RETRIES` | Max retry attempts (default: 3) |
 | `CHUNKHOUND_LLM_OUTPUT_LIMITS_ENABLED` | Restore exact legacy research synthesis output limits (`true`/`false`; default: `false`) |
 | `CHUNKHOUND_LLM_OUTPUT_LIMIT_FALLBACK` | Positive provider-managed synthesis fallback in output tokens (default: `64000`) |
+| `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` | `file` (default) or `inline`. See [Claude Code CLI](#claude-code-cli) |
+| `CHUNKHOUND_LLM_CLAUDE_TEMP_DIR` | Optional override for the Claude CLI temp directory. The default is the system temp directory |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` | Reasoning effort for Codex models (`minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY` | Reasoning effort override for utility stage |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS` | Reasoning effort override for synthesis stage |
@@ -578,9 +880,9 @@ Caveats:
 - **Concurrency throttled to 1 by default** when `base_url` is set, to respect Azure serverless rate limits. Override via `max_concurrent_batches` if your SKU permits.
 - **`api_key` still required.** The validator doesn't enforce it when `base_url` is present, but Azure-hosted endpoints still need their own key — supply it.
 
-### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter)
+### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty)
 
-The Anthropic, OpenAI, Grok, DeepSeek, and OpenRouter LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, and Requesty LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {

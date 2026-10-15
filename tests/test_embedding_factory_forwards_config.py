@@ -30,3 +30,13 @@ def test_openai_factory_defaults_when_unset():
     assert provider._timeout == 30
     assert provider._batch_size == 100
     assert provider._retry_attempts == 3
+
+
+def test_openai_factory_forwards_max_concurrent_batches():
+    provider = _make({"max_concurrent_batches": 50})
+    assert provider._max_concurrent_batches == 50
+
+
+def test_openai_factory_defaults_max_concurrent_batches_to_none():
+    provider = _make({})
+    assert provider._max_concurrent_batches is None

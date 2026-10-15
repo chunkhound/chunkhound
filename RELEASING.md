@@ -2,7 +2,20 @@
 
 `scripts/prepare_release.sh` is a deprecated local verification helper only; it
 does not publish anything and must not replace the GitHub Release workflow
-documented below.
+documented below. Do not publish with `uv publish`; CI owns every PyPI upload.
+
+## Release workflow
+
+Run the smoke suite before creating a release tag:
+
+```bash
+uv run pytest tests/test_smoke.py -v -n auto
+```
+
+A stable release is published when its GitHub Release is published. An
+alpha/beta/RC tag triggers `release-rc.yml` and publishes the pre-release to
+PyPI. Create tags only with `uv run scripts/update_version.py`; never edit
+version strings manually.
 
 ## Prerequisites (one-time setup)
 
@@ -73,6 +86,23 @@ git push origin v1.2.0rc1
 
 The `release-rc.yml` workflow builds and publishes to the real PyPI index (not TestPyPI) via OIDC, tagged as a pre-release. No manual approval needed — the tag push itself is the human gate (only maintainers can push `v*` tags).
 
+Both release workflows use the same publication order:
+
+1. Build the sdist, packaged runtime wheels, and all native wheels.
+2. Install the Linux and Windows main wheels with their matching native wheels
+   in clean temporary Python environments and exercise the native API.
+3. Validate that every native wheel has the tag's version, then publish
+   `chunkhound-native`.
+4. Publish `chunkhound` only after native publication succeeds.
+
+The shared native-wheel build smoke test exercises the same API contract on all
+native runners, including Linux ARM64 and macOS ARM64, which do not have
+matching packaged main runtime-wheel artifacts in this release matrix.
+
+The native wheel version check runs before any native upload. A missing,
+malformed, or mismatched wheel fails the workflow and skips both PyPI
+publication jobs.
+
 **Validate the RC:**
 ```bash
 pip install chunkhound==1.2.0rc1
@@ -110,23 +140,41 @@ If this fails with "no matching version found," the native wheels haven't finish
    gh release edit v1.2.0 --draft=false
    ```
 
-   Publishing triggers `release.yml`, which builds and publishes to PyPI via OIDC. The `pypi` environment requires maintainer approval before the publish step runs.
+   Publishing triggers `release.yml`, which builds and publishes to PyPI via OIDC. The `pypi-native` and `pypi` environments can require maintainer approval before their respective publication jobs run.
 
-4. **If the build or publish fails** — the cleanup step runs only if the main `chunkhound` publish fails; it deletes the GitHub Release and its tag so you can retry from step 1. If `publish-native` fails after the main package is already live, the GitHub Release remains published and cleanup does not run. In that case re-trigger `publish-native` manually via Actions (it is idempotent), or upload the native wheel directly with a PyPI token scoped to `chunkhound-native`.
+4. **If the native build, validation, or native publish fails** — no
+   `chunkhound` package is published. The native failure alert creates a
+   GitHub issue with the workflow URL, including when a prerequisite failure
+   skips the native publish job. Fix the problem and re-run the workflow/jobs;
+   native publication is idempotent for artifacts that were already uploaded,
+   and the publish steps skip those existing files. The main publish job
+   remains available to run after native publication succeeds.
 
-   **If `build-native-wheel` itself fails** (before `publish`/`publish-native` even start), cleanup
-   does *not* run either — it's gated on the `publish` job failing, and `publish` never starts if a
-   `needs` dependency failed. You'll be left with a published GitHub Release and tag pointing at a
-   broken build, with nothing actually shipped to PyPI. Recover by: fixing the issue, deleting the
-   release and tag (`gh release delete vX.Y.Z --cleanup-tag --yes`), then retrying from step 1 with
-   a new tag on the fixed commit. Common `build-native-wheel` failure modes (all fixed as of v5.2.0,
-   documented inline in `release.yml`/`release-rc.yml`'s `Build native wheel`/`Smoke test native
-   wheel` steps): `setup-uv@v3` dropping the `python-version` input, `maturin build` having no
-   `--set-version` flag (Cargo.toml's version must be patched directly), Cargo requiring strict
-   SemVer while git tags use PEP 440 (needs a hyphen before any pre-release suffix), maturin
-   misreading the repo's own `pyproject.toml` as authoritative package metadata, and the repo's
-   `chunkhound_native/__init__.py` dev-workflow stub shadowing the installed wheel during the smoke
-   test.
+   Failures in the sdist or packaged runtime-wheel builds also prevent
+   publication, but do not use the native failure alert because no native
+   failure occurred.
+
+   **If the main publish fails** after native publication succeeds, the GitHub
+   Release and tag are deliberately left in place. Re-run the failed downstream
+   jobs from Actions after addressing the failure; do not create another tag just
+   because the main upload needs a retry. A full workflow rerun is also safe:
+   release artifact uploads use `overwrite: true` for the same stable artifact
+   names, while PyPI uploads use `skip-existing: true`. The native job does not
+   need to be repeated unless its own upload failed.
+
+   **If a build fails** before the native job starts, nothing is published but
+   the GitHub Release and tag remain available for diagnosis and reruns. A full
+   workflow rerun replaces the prior GitHub Actions artifacts rather than
+   colliding with their names. If the
+   source must be changed, delete that release and tag explicitly and create a
+   new release from the fixed commit. Common `build-native-wheel` failure modes
+   (all fixed as of v5.2.0, documented inline in `release.yml`/`release-rc.yml`'s
+   `Build native wheel`/`Smoke test native wheel` steps) include
+   `setup-uv@v3` dropping the `python-version` input, `maturin build` having no
+   `--set-version` flag, Cargo requiring strict SemVer for PEP 440 prerelease
+   tags, maturin misreading the repository `pyproject.toml`, and the repository
+   `chunkhound_native/__init__.py` stub shadowing the installed wheel during
+   the smoke test.
 
 ---
 

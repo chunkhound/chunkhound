@@ -12,13 +12,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 import chunkhound.daemon.discovery as discovery_module
+import chunkhound.utils.atomic_write as atomic_write_module
 from chunkhound.daemon.discovery import (
     DaemonDiscovery,
     DaemonStartupHandle,
     _normalized_project_dir,
     _roots_overlap,
-    _write_json_atomically,
 )
+from chunkhound.utils.atomic_write import write_json_atomically
 
 _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
 _REGISTRY_DIR_ENV = "CHUNKHOUND_DAEMON_REGISTRY_DIR"
@@ -58,7 +59,7 @@ def _atomic_write_race_worker(
     start_event.wait()
     for index in range(200):
         try:
-            _write_json_atomically(path, {"worker": os.getpid(), "index": index})
+            write_json_atomically(path, {"worker": os.getpid(), "index": index})
         except Exception as exc:
             result_queue.put((type(exc).__name__, str(exc)))
             return
@@ -1089,10 +1090,10 @@ def test_write_json_atomically_retries_transient_windows_replace_error(
             raise PermissionError("transient windows replace contention")
         return original_replace(self, target)
 
-    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+    monkeypatch.setattr(atomic_write_module.sys, "platform", "win32")
     monkeypatch.setattr(Path, "replace", flaky_replace)
 
-    _write_json_atomically(target_path, {"value": 1})
+    write_json_atomically(target_path, {"value": 1})
 
     assert attempts["count"] == 1
     assert json.loads(target_path.read_text()) == {"value": 1}
@@ -1232,3 +1233,45 @@ def test_format_startup_failure_parses_prefixed_breadcrumbs_and_keeps_legacy_sup
     assert "Last known startup phase: watchman_watch_project" in message
     assert "Elapsed startup duration so far: 12.000s" in message
     assert "Last startup error: watchman session bootstrap exploded" in message
+
+
+def test_start_daemon_subprocess_scrubs_mcp_mode_from_child_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The MCP proxy sets CHUNKHOUND_MCP_MODE=1 in its own process to keep
+    startup logs off stdio. The daemon writes to a log file, not to a client,
+    and its log_if_not_mcp diagnostics (duckdb / realtime / compaction) must
+    not be silenced by an inherited flag. Locks the scrub at spawn time.
+    """
+    import argparse
+
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+
+    monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
+
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        pid = 12345
+
+        def poll(self) -> int | None:
+            return None
+
+    def fake_popen(cmd: object, **kwargs: object) -> _FakeProcess:
+        captured["env"] = kwargs.get("env")
+        return _FakeProcess()
+
+    monkeypatch.setattr(discovery_module.subprocess, "Popen", fake_popen)
+
+    args = argparse.Namespace(command="_daemon", verbose=False, debug=False)
+    discovery._start_daemon_subprocess(args, socket_path="tcp:127.0.0.1:54999")
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env.get("CHUNKHOUND_DAEMON_MODE") == "true"
+    assert "CHUNKHOUND_MCP_MODE" not in env, (
+        f"CHUNKHOUND_MCP_MODE leaked into daemon subprocess env: {env}"
+    )

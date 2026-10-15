@@ -7,10 +7,11 @@ instances, eliminating duplication across CLI commands and MCP servers.
 import argparse
 from pathlib import Path
 
-from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.config.mcp_config import MCPConfig
+from chunkhound.core.config.remote import run_remote_config_fetch
 from chunkhound.core.config.research_config import ResearchConfig
 
 
@@ -37,13 +38,16 @@ def _fallback_config(args: argparse.Namespace) -> Config:
     )
 
 
-def create_validated_config(
+async def create_validated_config(
     args: argparse.Namespace, command: str
 ) -> tuple[Config, list[str]]:
     """Create and validate config for a specific command.
 
     This centralizes the config loading pattern that was duplicated across
     main.py, run.py, and mcp_server.py.
+
+    Async so the remote-config pipeline can await inside without changing
+    callers.
 
     Args:
         args: Parsed command-line arguments
@@ -52,6 +56,12 @@ def create_validated_config(
     Returns:
         tuple: (config_instance, validation_errors)
     """
+    # Remote-config pre-step: may rewrite the global JSON on disk so the
+    # Config() call below observes the newly-fetched values. Silent on any
+    # recoverable failure — only disk-write failures escalate (via sys.exit).
+    # Internal subprocess commands are skipped inside the entry point itself.
+    await run_remote_config_fetch(args, command)
+
     try:
         config = Config(args=args)
     except ValueError as exc:

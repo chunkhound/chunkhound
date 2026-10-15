@@ -1,0 +1,44 @@
+name: 'Build Rust extension'
+description: >
+  Install Rust toolchain, cache build artifacts, and build chunkhound_native
+  via maturin build + install_native.py. install_native.py extracts only the
+  compiled extension (.so/.pyd), __init__.py, and bundled .libs/ files into
+  both the source tree and site-packages, deliberately skipping dist-info so
+  uv's auto-sync never reinstalls the stale PyPI wheel -- see _select_files in
+  scripts/install_native.py for the rationale. copy_duckdb_runtime.py then
+  places the local DuckDB runtime beside those extensions. Same install flow
+  as the Makefile's dev/dev-release targets.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Rust toolchain
+      if: hashFiles('Cargo.toml') != ''
+      uses: ./.github/actions/setup-rust-toolchain
+
+    - name: Cache DuckDB precompiled library
+      if: hashFiles('Cargo.toml') != ''
+      uses: ./.github/actions/cache-duckdb-lib
+
+    - name: Build Rust extension (maturin build + install_native.py)
+      if: hashFiles('Cargo.toml') != ''
+      shell: bash
+      env:
+        DUCKDB_DOWNLOAD_LIB: "1"
+      run: |
+        # Bake a self-relative RPATH into the extension at link time, so it
+        # resolves its DuckDB dependency next to wherever it ends up (dev
+        # tree or installed wheel) instead of an absolute build-machine path
+        # or an external environment variable. Windows has no RPATH concept;
+        # it's handled at import time instead by the os.add_dll_directory()
+        # guard in chunkhound_native/__init__.py.
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          export RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN'
+        elif [[ "$RUNNER_OS" == "macOS" ]]; then
+          export RUSTFLAGS='-C link-arg=-Wl,-rpath,@loader_path'
+        fi
+        rm -rf target/wheels/
+        cargo clean -p chunkhound_native --release
+        uv run --no-sync maturin build --release --out target/wheels/
+        uv run --no-sync python scripts/install_native.py
+        uv run --no-sync python scripts/copy_duckdb_runtime.py

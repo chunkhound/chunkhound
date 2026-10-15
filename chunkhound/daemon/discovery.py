@@ -26,6 +26,8 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.utils.atomic_write import write_json_atomically
+
 from .process import pid_alive
 
 # Runtime-scoped lock files keyed by canonical project root hash
@@ -64,12 +66,6 @@ _WINDOWS_PORT_SPAN = 16_384
 # Startup polling interval and timeout
 _STARTUP_POLL_INTERVAL = 0.1
 _STARTUP_TIMEOUT = float(os.environ.get("CHUNKHOUND_DAEMON_STARTUP_TIMEOUT", "60"))
-_WINDOWS_REPLACE_RETRIES = 20
-_WINDOWS_REPLACE_RETRY_DELAY = 0.01
-
-
-def _is_windows_platform() -> bool:
-    return sys.platform == "win32"
 
 
 def _canonical_project_dir(project_dir: Path) -> Path:
@@ -207,50 +203,6 @@ def _roots_overlap(root_a: Path, root_b: Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def _write_json_atomically(
-    path: Path,
-    data: dict[str, Any],
-    *,
-    private: bool = False,
-) -> None:
-    """Write JSON to *path* atomically using a sibling temp file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        text=True,
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        for attempt in range(_WINDOWS_REPLACE_RETRIES):
-            try:
-                tmp_path.replace(path)
-                break
-            except PermissionError:
-                if (
-                    not _is_windows_platform()
-                    or attempt >= _WINDOWS_REPLACE_RETRIES - 1
-                ):
-                    raise
-                time.sleep(_WINDOWS_REPLACE_RETRY_DELAY)
-    except Exception:
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
-        raise
-    if private and sys.platform != "win32":
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
 
 
 def _parse_startup_log_timestamp(line: str) -> datetime | None:
@@ -553,7 +505,7 @@ class DaemonDiscovery:
                 auth_token if auth_token is not None else secrets.token_hex(32)
             ),
         }
-        _write_json_atomically(lock_path, data, private=True)
+        write_json_atomically(lock_path, data, private=True)
 
     def remove_lock(self) -> None:
         """Remove the lock file, ignoring errors if it does not exist."""
@@ -764,7 +716,7 @@ class DaemonDiscovery:
             "lock_path": str(self.get_lock_path()),
             "started_at": time.time(),
         }
-        _write_json_atomically(self.get_registry_entry_path(), data)
+        write_json_atomically(self.get_registry_entry_path(), data)
 
     def remove_registry_entry(self) -> None:
         """Remove this daemon's registry entry if present."""
@@ -1076,10 +1028,25 @@ class DaemonDiscovery:
         daemon_parser = add_daemon_subparser(_tmp.add_subparsers())
         # project_dir and socket_path are daemon-specific positionals already
         # placed explicitly in the command; skip them here.
+        #
+        # remote_config_* flags are dropped even though the daemon parser
+        # accepts them: `_daemon` is in `_SUBPROCESS_SKIP`
+        # (chunkhound/core/config/remote/__init__.py) and never runs the
+        # remote-config fetch, so forwarding is pointless — and forwarding
+        # the auth header would expose the credential via `ps` /
+        # `/proc/<pid>/cmdline`. Env vars
+        # (CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER) still reach the daemon
+        # via env inheritance below and are unaffected.
         return build_forwarded_argv(
             daemon_parser,
             args,
-            skip_dests={"project_dir", "socket_path", "help"},
+            skip_dests={
+                "project_dir",
+                "socket_path",
+                "help",
+                "remote_config_url",
+                "remote_config_auth_header",
+            },
         )
 
     def _start_daemon_subprocess(
@@ -1119,6 +1086,14 @@ class DaemonDiscovery:
 
         env = os.environ.copy()
         env["CHUNKHOUND_DAEMON_MODE"] = "true"
+        # The MCP proxy sets CHUNKHOUND_MCP_MODE=1 in its own process (see
+        # async_main in chunkhound.api.cli.main) to keep startup logs off
+        # stdio. The daemon writes to a log file, not to a client —
+        # inheriting that flag would silence log_if_not_mcp call sites in
+        # duckdb / realtime / compaction code paths, exactly where
+        # diagnostics matter. Mirrors the scrub pattern used for the
+        # _quickresearch subprocess in chunkhound.mcp_server.tools.
+        env.pop("CHUNKHOUND_MCP_MODE", None)
 
         # Route daemon stdout/stderr to a log file so startup failures are
         # diagnosable (especially on Windows where the IPC transport may fail).

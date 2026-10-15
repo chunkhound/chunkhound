@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
+from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions.core import ConfigurationError
@@ -36,6 +37,7 @@ from chunkhound.interfaces.embedding_provider import (
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
+    DatabaseRustPipelineInProgressError,
 )
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
@@ -102,6 +104,15 @@ class MCPServerBase(ABC):
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
+
+        # Constructed once for this server process's lifetime (opt-in via
+        # config.analytics.enabled; always a safe, usable object -- see
+        # build_recorder()'s docstring). Every tool call shares this one
+        # recorder/buffer, matching the design's per-process buffer model.
+        self.analytics_recorder = ch_analytics.build_recorder(
+            getattr(config, "analytics", None),
+            getattr(config, "target_dir", None) or Path.cwd(),
+        )
 
         # Underlying MCP protocol server. Constructed lazily in
         # _register_common_tool_handlers() by subclasses that actually
@@ -1214,6 +1225,19 @@ class MCPServerBase(ABC):
             finally:
                 self._initialized = False
 
+        # Best-effort final flush, bounded so a slow/unreachable S3 endpoint
+        # can never hang server shutdown. Deliberately a plain synchronous
+        # call, not asyncio.to_thread: AnalyticsRecorder.shutdown() already
+        # bounds its own blocking time in Rust via timeout_ms, and
+        # asyncio.to_thread's own completion signaling depends on
+        # call_soon_threadsafe succeeding -- a dependency this path doesn't
+        # need and that can itself hang if the loop is already shutting down
+        # (see test_cleanup_ignores_closed_loop_race_when_close_thread_finishes,
+        # which mocks call_soon_threadsafe to fail for exactly this reason).
+        # A hard kill (SIGKILL) skips this entirely and relies on the orphan
+        # sweep on a subsequent process's startup instead.
+        ch_analytics.shutdown(self.analytics_recorder)
+
     async def ensure_tool_services(self, tool_name: str) -> DatabaseServices:
         """Return services for one tool without conflating daemon and DB lifecycles.
 
@@ -1235,16 +1259,20 @@ class MCPServerBase(ABC):
         Uses a lock to prevent concurrent connect() calls which would
         leak a DuckDB connection handle.
 
-        During DuckDB compaction the connection is temporarily closed
-        (is_connected \u2192 False).  Non-DB tools (daemon_status, websearch,
-        git history diff search) are handled by ensure_tool_services()
-        which skips reconnect for tools without *requires_db*.
+        During DuckDB compaction, or while the Rust indexing pipeline owns
+        write access to the database file, the connection is temporarily
+        closed (is_connected \u2192 False).  Non-DB tools (daemon_status,
+        websearch, git history diff search) are handled by
+        ensure_tool_services() which skips reconnect for tools without
+        *requires_db*.
 
-        For DB-backed tools the compaction guard in the provider raises
-        DatabaseCompactionInProgressError, which we re-raise so the
+        For DB-backed tools the compaction/Rust-pipeline guard in the
+        provider raises DatabaseCompactionInProgressError /
+        DatabaseRustPipelineInProgressError, which we re-raise so the
         calling MCP tool handler returns an explicit error instead of
-        silently returning empty results.  _compact_finalize() restores
-        the connection when compaction finishes.
+        silently returning empty results.  _compact_finalize() /
+        run_rust_indexing_phase() restore the connection when the
+        respective owner finishes.
         """
         if self.services.provider.is_connected:
             return
@@ -1258,6 +1286,14 @@ class MCPServerBase(ABC):
                         "info",
                         "Database compaction in progress \u2014 DB-backed MCP tools will be "
                         "unavailable until compaction finishes. "
+                        "Non-DB tools (daemon_status, websearch) are unaffected.",
+                    )
+                    raise
+                except DatabaseRustPipelineInProgressError:
+                    log_if_not_mcp(
+                        "info",
+                        "Rust indexing pipeline owns the database \u2014 DB-backed MCP "
+                        "tools will be unavailable until it finishes. "
                         "Non-DB tools (daemon_status, websearch) are unaffected.",
                     )
                     raise
@@ -1374,6 +1410,7 @@ class MCPServerBase(ABC):
                 llm_manager=self.llm_manager,
                 config=self.config,
                 ensure_services=self.ensure_tool_services,
+                analytics_recorder=self.analytics_recorder,
             )
             error_content = first_error_tool_content(text_contents)
             if error_content is not None:

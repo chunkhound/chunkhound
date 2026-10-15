@@ -1,0 +1,54 @@
+name: 'Set up Rust toolchain'
+description: >
+  Install the stable Rust toolchain and cache Cargo's registry/git checkouts
+  and the build output directory, keyed on Cargo.lock. Shared by
+  build-rust-extension, build-native-wheel, and ci.yml's rust-checks job,
+  which previously each carried their own copy of these two steps.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Resolve Python interpreter for cache key (Windows uv builds)
+      shell: bash
+      run: |
+        # actions/setup-python sets env.pythonLocation, which the cache key
+        # below uses to invalidate stale target/ output when the linked
+        # python3.lib path changes (see comment there). build-native-wheel's
+        # Windows release-wheel builds install Python via `uv python install`
+        # instead of actions/setup-python, which never sets pythonLocation --
+        # so on that path this key's Python segment was always empty and a
+        # uv-managed Python patch bump (e.g. 3.12.7 -> 3.12.8) silently kept
+        # reusing a cache with the old python3.lib path baked in. Ask uv
+        # directly what interpreter it resolved in that case. Scoped to
+        # Windows + pythonLocation-empty so every other caller (rust-checks,
+        # and build-rust-extension's Windows jobs, which already set
+        # pythonLocation via actions/setup-python) keeps today's exact key.
+        PY_KEY="${{ env.pythonLocation }}"
+        if [[ "$RUNNER_OS" == "Windows" && -z "$PY_KEY" ]] && command -v uv >/dev/null 2>&1; then
+          PY_KEY="$(uv python find 2>/dev/null || true)"
+        fi
+        echo "PYTHON_CACHE_KEY=$PY_KEY" >> "$GITHUB_ENV"
+
+    - name: Cache Rust build artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        # env.PYTHON_CACHE_KEY (see the "Resolve Python interpreter" step
+        # above) is folded into the key because pyo3's build script bakes
+        # the absolute path to the Python install (incl. patch version, e.g.
+        # .../Python/3.14.7/x64) into cached target/ build output on
+        # Windows, where linking the cdylib requires python3.lib. Without
+        # this, a routine patch bump of the Python that gets linked against
+        # leaves the old path baked into a restored target/ that cargo
+        # doesn't know to invalidate, so the linker fails with LNK1181:
+        # cannot open input file 'python3.lib'. Jobs that never link against
+        # libpython (e.g. rust-checks) get an empty segment here, which is
+        # fine.
+        key: ${{ runner.os }}-${{ runner.arch }}-py${{ env.PYTHON_CACHE_KEY }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-${{ runner.arch }}-py${{ env.PYTHON_CACHE_KEY }}-cargo-

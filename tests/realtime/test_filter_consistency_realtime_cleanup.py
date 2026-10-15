@@ -592,6 +592,27 @@ def test_realtime_path_filter_preserves_explicit_logical_nested_scope_root(
     assert junction_filter._root == logical_junction.absolute()
 
 
+def test_realtime_path_filter_admits_directory_anchored_unsupported_extension(
+    tmp_path: Path,
+) -> None:
+    """should_index() must admit a directory-anchored include pattern that
+    explicitly names an unsupported extension (e.g. `src/*.xyzunk`), the
+    same as the discovery-side contract. Regression test for PR #380 review
+    finding #5 -- the directory anchor is incidental to the request being
+    specific; only a bare wildcard tail (e.g. `src/**/*`) is a blanket sweep.
+    """
+    root = tmp_path / "workspace"
+    root.mkdir(parents=True)
+    (root / "src").mkdir()
+    unk_file = root / "src" / "data.xyzunk"
+    unk_file.write_text("binary\n")
+
+    settings = RealtimePathFilterSettings(include_patterns=("src/*.xyzunk",))
+    path_filter = RealtimePathFilter(config=None, root_path=root, settings=settings)
+
+    assert path_filter.should_index(unk_file) is True
+
+
 def test_cleanup_orphaned_files_keeps_logical_subtree_scope_when_resolved_outside_base(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -10,6 +10,18 @@ section: "manual"
 
 All ChunkHound commands and their options.
 
+## Global options
+
+These flags are accepted by every subcommand (`index`, `search`, `research`, `mcp`, `websearch`, `fetchurl`, `map`, `autodoc`, etc.):
+
+| Flag | Description |
+|---|---|
+| `--config PATH` | Path to an explicit configuration file (equivalent to `CHUNKHOUND_CONFIG_FILE`). |
+| `--remote-config-url URL` | URL to fetch remote configuration on startup. HTTPS required; `http://` is accepted only for loopback hosts. See [Remote Configuration](/docs/configuration/#remote-configuration). |
+| `--remote-config-auth-header VALUE` | Authorization header for the remote-config fetch. Supports `${VAR}` interpolation against the environment at fetch time. See [Remote Configuration](/docs/configuration/#remote-configuration). |
+| `--verbose` / `-v` | Enable verbose logging. |
+| `--debug` | Enable debug mode. |
+
 ## `chunkhound index`
 
 Index a directory for code search. Parses source files, generates embeddings, and stores chunks in the database.
@@ -77,6 +89,10 @@ chunkhound search <query> [path] [options]
 |---|---|
 | `query` | Search query (required) |
 | `path` | Project directory (default: `.`) |
+
+> **Tip:** pass the project directory as the positional `path` so its
+> `.chunkhound.json` resolves. A wrong `--db` subpath silently returns 0
+> results — verify with a regex search first.
 
 **Options:**
 
@@ -291,6 +307,10 @@ chunkhound mcp --transport http --host 0.0.0.0 --port 5173 --auth-token "$TOKEN"
 > **Note:** binding to a non-loopback `--host` without `--auth-token` is refused at startup.
 > `--cors` also requires `--auth-token` — without a token, any website open in the same
 > browser could read from the HTTP transport, even on the default loopback host.
+>
+> **Tip:** for a project with its own `.chunkhound.json`, pass the project
+> directory as the positional `path`. If you must use `--db`, use the exact
+> `database.path` from that file — a wrong subpath silently returns 0 results.
 
 ## `chunkhound map`
 
