@@ -49,6 +49,45 @@ def test_only_active_rerank_endpoints_are_validated(provider, url, active):
         assert EmbeddingConfig(**kwargs).rerank_url == url
 
 
+@pytest.mark.parametrize("codepoint", ["\u0085", "\u001c", "\u001f", "\t", "\u00a0"])
+def test_python_whitespace_class_is_rejected_in_active_urls(codepoint):
+    # Python str.isspace() includes NEL and C0 separators that JS `\s` misses.
+    with pytest.raises(ValueError, match="complete HTTP"):
+        EmbeddingConfig(
+            provider="openai",
+            rerank_format="tei",
+            rerank_model="test-model",
+            rerank_url=f"http://host/rer{codepoint}ank",
+        )
+
+
+def test_bom_character_is_not_whitespace():
+    # U+FEFF is not str.isspace(); the UI class must accept it too.
+    config = EmbeddingConfig(
+        provider="openai",
+        rerank_format="tei",
+        rerank_model="test-model",
+        rerank_url="http://host/rer\ufeffank",
+    )
+    assert "\ufeff" in config.rerank_url
+
+
+def test_full_python_whitespace_class_rejected_in_active_urls():
+    # Derive expected set from Python so future Unicode additions stay pinned.
+    rejected = [c for c in map(chr, range(0x3100)) if c.isspace()]
+    assert len(rejected) > 20  # sanity: NEL, C0, NBSP, Ogham, em spaces, etc.
+    for char in rejected:
+        with pytest.raises(ValueError, match="complete HTTP"):
+            EmbeddingConfig(
+                provider="openai",
+                rerank_format="tei",
+                rerank_model="test-model",
+                rerank_url=f"http://host/rer{char}ank",
+            )
+    # U+FEFF must stay accepted; it is not whitespace.
+    assert not "\ufeff".isspace()
+
+
 @pytest.mark.parametrize("provider", ["openai", "voyageai"])
 def test_unused_endpoint_does_not_prevent_provider_creation(provider):
     config = EmbeddingConfig(

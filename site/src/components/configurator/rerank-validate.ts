@@ -16,6 +16,13 @@ export const INCOMPLETE_URL_ERROR =
 const RELATIVE_NO_BASE_URL_ERROR =
   "A relative reranker URL requires this retrieval preset to have a base URL.";
 
+// Mirrors Python str.isspace(). JS `\s` omits NEL (U+0085) and C0 separators
+// (U+001C–U+001F) and adds U+FEFF, which Python accepts as URL content, not as
+// whitespace. Keep this class in sync with chunkhound/core/utils/rerank_url.py
+// via the shared acceptance matrix in tests/site/test_configurator_contract.py.
+const PYTHON_WHITESPACE_RE =
+  /[\t\n\v\f\r\x1c-\x1f\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+
 // The select is gated per preset (configurator.ts syncRerankFormatOptions), so
 // this fires only for programmatic or non-JS callers; it keeps the emitted
 // config from carrying a format the selected provider cannot execute.
@@ -47,7 +54,7 @@ export function rerankUrlValidationError(
   // a direct caller cannot misread a padded URL as a scheme fault.
   value = value.trim();
   if (!value) return undefined;
-  if (/\s/.test(value)) return ABSOLUTE_URL_ERROR;
+  if (PYTHON_WHITESPACE_RE.test(value)) return ABSOLUTE_URL_ERROR;
   // A backslash has no URL meaning and makes the effective host parser-dependent
   // (browsers treat it as a path separator, httpx as an authority delimiter), so
   // reject it — mirroring normalize_rerank_url in the backend.

@@ -391,6 +391,21 @@ def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
         (r"http://host\@evil/rerank", "ollama-embed", "tei", False, False),
         (r"http://example.com/a\b", "ollama-embed", "tei", False, False),
         (r"https://host\evil", "ollama-embed", "tei", False, False),
+        # Whitespace classes must agree with Python str.isspace(): JS \s omits
+        # NEL/C0 and includes U+FEFF, so pin the shared class explicitly.
+        ("http://tei.example.com/rer\u0085ank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u001cank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u001dank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u001fank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u00a0ank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u1680ank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u2000ank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u200aank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u2028ank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u202fank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u205fank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\u3000ank", "ollama-embed", "tei", False, False),
+        ("http://tei.example.com/rer\ufeffank", "ollama-embed", "tei", True, True),
     ]
     ui_verdicts = {
         (verdict["url"], verdict["preset"]): verdict["error"] is None
@@ -413,6 +428,19 @@ def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
             with pytest.raises(ValidationError):
                 Config(target_dir=tmp_path, **config)
         assert ui_verdicts[(url, preset)] is ui_ok, label
+
+
+def test_ui_rejects_every_python_whitespace_codepoint() -> None:
+    """The site classifier must agree with Python str.isspace() for every
+    codepoint, not only the readable sample in the acceptance matrix."""
+    whitespace = [c for c in map(chr, range(0x3100)) if c.isspace()]
+    verdicts = _rerank_url_ui_verdicts(
+        [(f"http://host/rer{c}ank", "ollama-embed") for c in whitespace]
+    )
+
+    assert len(verdicts) == len(whitespace)
+    for verdict in verdicts:
+        assert verdict["error"] is not None, verdict
 
 
 def test_rerank_url_validator_accepts_padded_canonical_urls() -> None:
