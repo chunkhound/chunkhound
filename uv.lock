@@ -466,6 +466,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
+    { name = "asyncio-atexit" },
     { name = "chunkhound-native" },
     { name = "duckdb" },
     { name = "google-genai" },
@@ -574,6 +575,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.12.15" },
     { name = "anthropic", specifier = ">=0.96.0,<1.0.0" },
+    { name = "asyncio-atexit", specifier = ">=1.0.1" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "chunkhound-native", specifier = ">=5.2.0" },
     { name = "duckdb", specifier = "==1.5.4" },

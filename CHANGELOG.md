@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **UTF-8-BOM config files now work consistently** for standard configuration loading, Code Mapper workspace overrides, remote-config persistence, and the CLI prompt that adds timeout exclusions. Files written by Windows tools are accepted, and non-UTF-8 input still fails — now with the friendly "Invalid JSON in config file" error instead of a raw decode traceback. The timeout-exclusion rewrite normalizes BOM files to plain UTF-8.
 - **An empty or whitespace-only `embedding.rerank_model` is treated as unset**, so the provider's default reranker applies instead of query-time failure under an empty model name.
+- **Chrome launch retries are bounded.** After Chrome is located, a Chrome process that never answers now costs at most the 20-second launch budget before the websearch/fetchurl path falls back to urllib, instead of two full connect budgets. The failure warning again names the Chrome version requirement.
 - **Windows `.cmd` and `.bat` CLIs launch through `cmd.exe`** — An npm-only Claude Code, Codex, or OpenCode install can run research. A spaced shim path that cannot be shortened is rejected. Newlines, percent signs, quotes, and a command operator in an argument with no spaces are rejected. Addresses #118. The database `WinError 183` in that issue is unchanged.
 
 ### Removed

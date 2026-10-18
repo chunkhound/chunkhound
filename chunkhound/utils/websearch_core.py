@@ -16,13 +16,15 @@ import html.parser
 import itertools
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -68,12 +70,22 @@ _CHROME_PATHS = [
 # (browser_connection_timeout=0.25, browser_connection_max_tries=10 -> ~2.5s)
 # are too tight for a cold first Chrome launch on CI runners, where the browser
 # can take several seconds to expose its DevTools endpoint; zendriver then kills
-# Chrome and raises a generic "Failed to connect" error. Budget ~15s per attempt
-# and retry once so a cold or transient miss does not force the urllib fallback.
+# Chrome and raises a generic "Failed to connect" error. Budget ~15s of connect
+# time per attempt, retry only when time remains, and cap launch at 20s total so
+# a cold or transient miss does not force the urllib fallback.
 _BROWSER_CONNECT_TIMEOUT_S = 0.5
 _BROWSER_CONNECT_MAX_TRIES = 30
 _BROWSER_LAUNCH_ATTEMPTS = 2
 _BROWSER_LAUNCH_BACKOFF_S = 1.0
+# Cap total launch time so a Chrome that never answers cannot cost the full
+# per-attempt budget twice. A cold start gets the full per-attempt budget;
+# only a fast failure leaves room for one retry.
+_BROWSER_LAUNCH_TOTAL_BUDGET_S = 20.0
+_BROWSER_LAUNCH_CLEANUP_RESERVE_S = 2.0
+# Cleanup must start even when the launch deadline already expired. Otherwise
+# wait_for(..., 0) cancels the cleanup coroutine before it reaps the killed
+# child or removes its profile.
+_BROWSER_LAUNCH_CLEANUP_MIN_S = 0.25
 
 
 _late_completion_guard_installed = False
@@ -223,44 +235,185 @@ def _resolve_chrome_path(
     return None
 
 
-async def _start_chrome(chrome_path: str) -> zd.Browser:
-    """One zendriver launch with a cold-start-tolerant connect budget."""
+def _new_chrome(chrome_path: str) -> zd.Browser:
+    """Own the browser before startup can spawn a process or be cancelled."""
     import zendriver as zd
 
     # Must run before any tab.send() creates a Transaction.
     _install_late_completion_guard()
-    return await zd.start(
-        headless=True,
-        browser_args=[
-            # New headless is required for the PDF path: legacy headless hands
-            # PDFs to Chrome's internal viewer and never exposes the response
-            # to _fetch_page.
-            "--headless=new",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-        ],
-        browser_executable_path=chrome_path,
-        browser_connection_timeout=_BROWSER_CONNECT_TIMEOUT_S,
-        browser_connection_max_tries=_BROWSER_CONNECT_MAX_TRIES,
+    return zd.Browser(
+        zd.Config(
+            headless=True,
+            browser_args=[
+                # Legacy headless hides PDF responses in Chrome's viewer.
+                "--headless=new",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+            browser_executable_path=chrome_path,
+            browser_connection_timeout=_BROWSER_CONNECT_TIMEOUT_S,
+            browser_connection_max_tries=_BROWSER_CONNECT_MAX_TRIES,
+        )
     )
 
 
-async def _launch_chrome(chrome_path: str) -> zd.Browser:
-    """Launch Chrome, retrying once to absorb a cold first-launch miss.
+def _launch_timeout() -> TimeoutError:
+    return TimeoutError(
+        f"Chrome launch exhausted {_BROWSER_LAUNCH_TOTAL_BUDGET_S:g}s budget "
+        "(including failed-start cleanup)"
+    )
 
-    Raises the last zendriver exception when every attempt fails; callers
-    decide whether to fall back to urllib.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(_BROWSER_LAUNCH_ATTEMPTS):
-        if attempt:
-            await asyncio.sleep(_BROWSER_LAUNCH_BACKOFF_S)
+
+def _remove_chrome_profile(browser: zd.Browser, deadline: float) -> None:
+    if browser.config.uses_custom_data_dir:
+        return
+    while True:
         try:
-            return await _start_chrome(chrome_path)
-        except Exception as e:
-            last_exc = e
-    assert last_exc is not None
-    raise last_exc
+            shutil.rmtree(browser.config.user_data_dir)
+            return
+        except FileNotFoundError:
+            return  # Browser.start may already have stopped and removed it.
+        except OSError:
+            if time.monotonic() + 0.05 >= deadline:
+                raise
+            time.sleep(0.05)  # Windows can release profile locks after process exit.
+
+
+def _reap_chrome(browser: zd.Browser, profile_deadline: float) -> None:
+    """Reap only this attempt; never use zendriver's global instance cleanup.
+
+    _abort_chrome kills the process first, so an unbounded wait cannot extend
+    the launch budget. The deadline bounds only profile removal, which retries
+    while Windows releases locks.
+    """
+    deadline = time.monotonic() + profile_deadline
+    process = browser._process
+    if process is not None:
+        process.wait()
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        browser._process = None
+        browser._process_pid = None
+    # Config creates its profile lazily; this also covers failures before spawn.
+    _remove_chrome_profile(browser, deadline)
+
+
+async def _close_aborted_chrome(browser: zd.Browser, remaining: float) -> None:
+    await asyncio.to_thread(_reap_chrome, browser, remaining)
+    if browser.connection is not None:
+        await browser.connection.aclose()
+
+
+@contextmanager
+def _killed_chrome(browser: zd.Browser) -> Iterator[None]:
+    """Kill only the owned process before closing CDP; always unregister it."""
+    from zendriver.core.util import get_registered_instances
+
+    process = browser._process
+    if process is not None and process.poll() is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass  # The owned process exited between poll and kill.
+    try:
+        yield
+    finally:
+        get_registered_instances().discard(browser)
+
+
+async def _abort_chrome(browser: zd.Browser, deadline: float) -> None:
+    """Kill before any CDP close, which can hang on an incomplete connection."""
+    with _killed_chrome(browser):
+        remaining = max(
+            _BROWSER_LAUNCH_CLEANUP_MIN_S,
+            deadline - asyncio.get_running_loop().time(),
+        )
+        await asyncio.wait_for(_close_aborted_chrome(browser, remaining), remaining)
+
+
+async def _cleanup_owned_chrome(browser: zd.Browser, deadline: float) -> None:
+    """Finish bounded cleanup even if the caller cancels again during teardown."""
+    task = asyncio.create_task(_abort_chrome(browser, deadline))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break  # Retrieve and report the cleanup failure below.
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("Chrome owned-browser cleanup failed: {!r}", task.exception())
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _cleanup_chrome_at_exit(browser: zd.Browser) -> None:
+    """Loop-close callbacks run after asyncio.run shuts down its executor."""
+    if browser._process is None and (
+        browser.connection is None or browser.connection.closed
+    ):
+        return  # Normal stop already reaped the process and removed its profile.
+    deadline = asyncio.get_running_loop().time() + _BROWSER_LAUNCH_CLEANUP_RESERVE_S
+    with _killed_chrome(browser):
+        # The executor is gone: reap the killed child and its profile directly.
+        _reap_chrome(browser, _BROWSER_LAUNCH_CLEANUP_RESERVE_S)
+        if browser.connection is not None:
+            remaining = max(
+                _BROWSER_LAUNCH_CLEANUP_MIN_S,
+                deadline - asyncio.get_running_loop().time(),
+            )
+            await asyncio.wait_for(browser.connection.aclose(), remaining)
+
+
+def _register_chrome_exit(browser: zd.Browser) -> None:
+    """Preserve Browser.create's exit safety net without losing startup ownership."""
+    import asyncio_atexit  # type: ignore[import-untyped]
+
+    async def cleanup() -> None:
+        try:
+            await _cleanup_chrome_at_exit(browser)
+        except Exception as exc:
+            logger.error("Chrome owned-browser cleanup failed: {!r}", exc)
+
+    asyncio_atexit.register(cleanup)
+
+
+async def _start_chrome(
+    chrome_path: str, deadline: float, reserve: float
+) -> zd.Browser:
+    browser = _new_chrome(chrome_path)
+    try:
+        remaining = deadline - asyncio.get_running_loop().time() - reserve
+        if remaining <= 0:
+            raise _launch_timeout()
+        await asyncio.wait_for(browser.start(), timeout=remaining)
+        _register_chrome_exit(browser)
+        return browser
+    except BaseException:
+        await _cleanup_owned_chrome(browser, deadline)
+        raise
+
+
+async def _launch_chrome(chrome_path: str) -> zd.Browser:
+    """Share one deadline across attempts, backoff, and failed-start cleanup."""
+    deadline = asyncio.get_running_loop().time() + _BROWSER_LAUNCH_TOTAL_BUDGET_S
+    reserve = min(_BROWSER_LAUNCH_CLEANUP_RESERVE_S, _BROWSER_LAUNCH_TOTAL_BUDGET_S / 4)
+    for attempt in range(_BROWSER_LAUNCH_ATTEMPTS):
+        delay = _BROWSER_LAUNCH_BACKOFF_S if attempt else 0
+        if asyncio.get_running_loop().time() + delay + reserve >= deadline:
+            raise _launch_timeout()
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await _start_chrome(chrome_path, deadline, reserve)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise _launch_timeout() from exc
+        except Exception:
+            if attempt + 1 == _BROWSER_LAUNCH_ATTEMPTS:
+                raise
+    raise _launch_timeout()
 
 
 @asynccontextmanager
@@ -291,7 +444,10 @@ async def _managed_browser(
             browser = await _launch_chrome(chrome_path)
         except Exception as e:
             if warning_callback:
-                warning_callback(f"Browser launch failed: {e}. Falling back to urllib.")
+                warning_callback(
+                    f"Browser launch failed: {e}. Falling back to urllib. "
+                    "(Verify Google Chrome >=124 is installed and working.)"
+                )
             browser = None
 
     try:
