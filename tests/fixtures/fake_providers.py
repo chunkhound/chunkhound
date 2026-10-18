@@ -12,8 +12,8 @@ from typing import Any
 
 import xxhash
 
-from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
@@ -219,7 +219,7 @@ class FakeEmbeddingProvider:
             model: Model name for identification
             dims: Embedding dimensions (native/full dimension)
             output_dims: Output dimension override for matryoshka testing
-            client_side_truncation: Truncate embeddings client-side (requires output_dims)
+            client_side_truncation: Truncate client-side (requires output_dims)
             batch_size: Maximum batch size
         """
         self._model = model
@@ -244,6 +244,15 @@ class FakeEmbeddingProvider:
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @property
+    def base_url(self) -> str:
+        """API base URL. Empty: the fake serves no HTTP endpoint.
+
+        Required because EmbeddingService is typed against APIEmbeddingProvider
+        and reads base_url unconditionally during token-aware batching.
+        """
+        return ""
 
     @property
     def dims(self) -> int:
@@ -356,9 +365,7 @@ class FakeEmbeddingProvider:
                     apply_client_side_truncation,
                 )
 
-                embeddings = apply_client_side_truncation(
-                    embeddings, self._output_dims
-                )
+                embeddings = apply_client_side_truncation(embeddings, self._output_dims)
             else:
                 # Server-side truncation: API returns output_dims-sized vectors
                 embeddings = [v[: self._output_dims] for v in embeddings]
@@ -572,14 +579,42 @@ class ConstantEmbeddingProvider(FakeEmbeddingProvider):
         return [value] * self._dims
 
 
+_EMBEDDING_HEADER_MARKERS = (
+    re.compile(r"\([\w+#.-]+\)"),  # language
+    re.compile(r"\[target:[^\]]+\]"),  # Makefile rule target
+    re.compile(r"\[[^\]]+=[^\]]*\]"),  # constants summary
+)
+# A path-only header has no marker: ``format_chunk_for_embedding`` emits
+# ``# path/to/file`` when the language is absent. One token means path, not
+# a code comment, on the first line of already-formatted embedding text.
+_PATH_ONLY_HEADER = re.compile(r"^# \S+$")
+
+
+def split_embedding_metadata(text: str) -> tuple[str | None, str]:
+    """Split formatted embedding text into its metadata header and body.
+
+    ``format_chunk_for_embedding`` prepends a single header line only when it
+    has metadata. Chunk-size limits apply to the body; token limits apply to
+    the full text the provider receives.
+    """
+    header, separator, body = text.partition("\n")
+    is_header = header.startswith("# ") and (
+        _PATH_ONLY_HEADER.match(header) is not None
+        or any(marker.search(header) for marker in _EMBEDDING_HEADER_MARKERS)
+    )
+    return (header, body) if separator and is_header else (None, text)
+
+
 class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
     """Embedding provider that validates chunk size constraints.
 
     Intercepts all texts sent to embed() and validates they conform
     to the min/max chunk size constraints:
-    - max_chunk_size: 1200 non-whitespace chars
-    - min_chunk_size: 25 non-whitespace chars (soft threshold)
-    - safe_token_limit: 6000 tokens (estimated as len(text) // 3)
+    - max_chunk_size: 1200 non-whitespace chars, body only (metadata header
+      excluded)
+    - min_chunk_size: 25 non-whitespace chars, body only (soft threshold)
+    - safe_token_limit: 6000 tokens (estimated as len(text) // 3, including
+      the metadata header)
 
     Use this for e2e tests that verify all parsers respect chunk size limits.
     """
@@ -614,24 +649,25 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
         }
 
     def _extract_language_from_header(self, text: str) -> str | None:
-        """Extract language from embedding header if present.
+        """Extract language from the embedding header, if present.
 
         Header format: "# path/to/file.py (python)\n"
         Returns language string (lowercase) or None if not found.
         """
-        if not text.startswith("# "):
+        header, _ = split_embedding_metadata(text)
+        if header is None:
             return None
-        # Look for language in parentheses within first 200 chars
-        match = re.search(r"\((\w+)\)\n", text[:200])
+        match = re.search(r"\(([\w+#.-]+)\)", header)
         return match.group(1).lower() if match else None
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings while validating chunk size constraints."""
         for text in texts:
             self.all_texts.append(text)
-            # Measure non-whitespace chars (same as ChunkMetrics.from_content)
-            non_ws_chars = len(re.sub(r"\s", "", text))
-            # Estimate tokens (conservative: len // 3)
+            # Chunk limits apply to the parser body; providers add the header.
+            _, body = split_embedding_metadata(text)
+            non_ws_chars = len(re.sub(r"\s", "", body))
+            # Token limits apply to the full provider input, header included.
             estimated_tokens = len(text) // 3
             # Extract language from header for violation tracking
             language = self._extract_language_from_header(text)

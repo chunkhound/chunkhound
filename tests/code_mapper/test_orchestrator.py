@@ -6,7 +6,9 @@ from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.core.config.config import Config
 
 
-def test_orchestrator_run_context_max_points(tmp_path: Path, clean_environment) -> None:
+def test_orchestrator_run_context_max_points(
+    tmp_path: Path, hermetic_environment
+) -> None:
     class Args:
         def __init__(self) -> None:
             self.comprehensiveness = "low"
@@ -26,7 +28,7 @@ def test_orchestrator_run_context_max_points(tmp_path: Path, clean_environment) 
     assert run_context.max_points == 5
 
 
-def test_orchestrator_resolve_scope_label(tmp_path: Path, clean_environment) -> None:
+def test_orchestrator_resolve_scope_label(tmp_path: Path, hermetic_environment) -> None:
     class Args:
         def __init__(self) -> None:
             self.comprehensiveness = "low"
@@ -51,7 +53,7 @@ def test_orchestrator_resolve_scope_label(tmp_path: Path, clean_environment) -> 
 
 
 def test_orchestrator_metadata_bundle_overview_only(
-    tmp_path: Path, clean_environment
+    tmp_path: Path, hermetic_environment
 ) -> None:
     class Args:
         def __init__(self) -> None:

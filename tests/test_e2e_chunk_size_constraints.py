@@ -14,27 +14,27 @@ Validates:
 """
 
 import logging
+import re
 
 import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
+from chunkhound.core.utils import format_chunk_for_embedding
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.parsers.chunk_splitter import CASTConfig
-from tests.fixtures.fake_providers import ValidatingEmbeddingProvider
+from tests.fixtures.fake_providers import (
+    ValidatingEmbeddingProvider,
+    split_embedding_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
 # Derive constraints from CASTConfig to avoid drift
 _config = CASTConfig()
-# Content limit is max_chunk_size non-ws chars, but embedded text includes
-# header overhead. Header format: "# {file_path} ({language})\n"
-# Components: "# " (2) + tmp_path (varies by OS, up to ~100) + "/" (1)
-# + filename (~20) + " (" (2) + language (~10) + ")\n" (2) ≈ 137 max.
-# Rounded to 150 for safety margin.
-HEADER_OVERHEAD = 150
-MAX_CHUNK_SIZE = _config.max_chunk_size + HEADER_OVERHEAD  # non-ws chars
+# Parser body limit excludes metadata; token validation includes the entire input.
+MAX_CHUNK_SIZE = _config.max_chunk_size
 # Intentionally lower than CASTConfig.min_chunk_size (50) — this is a soft
 # warning threshold for the test harness, not an enforcement limit. Using a
 # lower value avoids false-positive warnings from legitimate small chunks
@@ -271,8 +271,8 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         + _make_large_statements("    $x = 1")
         + "\n    return $x\n}",
         # Normal
-        'function Get-Greeting {\n'
-        '    param([string]$Name)\n'
+        "function Get-Greeting {\n"
+        "    param([string]$Name)\n"
         '    return "Hello, $Name"\n}',
     ),
     Language.BASH: (
@@ -398,9 +398,7 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         ".sql",
         # Large: many-column CREATE TABLE triggers splitting
         "CREATE TABLE large_table (\n"
-        + ",\n".join(
-            f"    col_{i} VARCHAR(255) NOT NULL DEFAULT ''" for i in range(80)
-        )
+        + ",\n".join(f"    col_{i} VARCHAR(255) NOT NULL DEFAULT ''" for i in range(80))
         + "\n);",
         # Normal: simple CREATE TABLE
         "CREATE TABLE users (\n"
@@ -422,9 +420,7 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
     Language.CSS: (
         ".css",
         # Large CSS with many rules
-        ".container {\n"
-        + _make_large_statements("  color: red;")
-        + "\n}",
+        ".container {\n" + _make_large_statements("  color: red;") + "\n}",
         # Normal
         ".container {\n  display: flex;\n  color: blue;\n}",
     ),
@@ -456,8 +452,9 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
     ),
     Language.GIT_DIFF: (
         ".patch",
-        # Large diff — in-memory pseudo-language, no file parser; uses same text fallback
-        "diff --git a/foo.py b/foo.py\n" + _make_large_statements("+    line of diff content"),
+        # In-memory pseudo-language; file parsing uses the text fallback.
+        "diff --git a/foo.py b/foo.py\n"
+        + _make_large_statements("+    line of diff content"),
         # Normal
         "diff --git a/foo.py b/foo.py\n+added line\n-removed line\n",
     ),
@@ -466,17 +463,22 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Large FUNCTION_BLOCK - triggers line-based split
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<TcPlcObject Version="1.1.0.1">\n'
-        '  <POU Name="FB_Large" Id="{00000000-0000-0000-0000-000000000001}" SpecialFunc="None">\n'
-        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Large\nVAR\nEND_VAR\n]]></Declaration>\n"
+        '  <POU Name="FB_Large" Id="{00000000-0000-0000-0000-000000000001}" '
+        'SpecialFunc="None">\n'
+        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Large\n"
+        "VAR\nEND_VAR\n]]></Declaration>\n"
         "    <Implementation>\n      <ST><![CDATA["
         + _make_large_statements("    nX := nX + 1;")
         + "]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
         # Normal - small FUNCTION_BLOCK, no over-splitting
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<TcPlcObject Version="1.1.0.1">\n'
-        '  <POU Name="FB_Greet" Id="{00000000-0000-0000-0000-000000000002}" SpecialFunc="None">\n'
-        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Greet\nVAR\nEND_VAR\n]]></Declaration>\n"
-        "    <Implementation>\n      <ST><![CDATA[nX := 1;\n]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
+        '  <POU Name="FB_Greet" Id="{00000000-0000-0000-0000-000000000002}" '
+        'SpecialFunc="None">\n'
+        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Greet\n"
+        "VAR\nEND_VAR\n]]></Declaration>\n"
+        "    <Implementation>\n      <ST><![CDATA[nX := 1;\n]]></ST>\n"
+        "    </Implementation>\n  </POU>\n</TcPlcObject>",
     ),
 }
 
@@ -506,7 +508,97 @@ async def validating_db(tmp_path):
     )
 
     services = create_services(db_path, config, embedding_manager)
-    yield services, validating_provider, tmp_path
+    try:
+        yield services, validating_provider, tmp_path
+    finally:
+        services.provider.disconnect()
+
+
+def _non_ws_size(text: str) -> int:
+    return len(re.sub(r"\s", "", text))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_depth", [0, 8], ids=["short-path", "long-path"])
+async def test_annotated_continuations_obey_body_limit(validating_db, path_depth):
+    """Path and rule-target metadata must not reduce the parser body budget."""
+    services, provider, root = validating_db
+    directory = root.joinpath(*(["nested_context_" + "x" * 70] * path_depth))
+    directory.mkdir(parents=True, exist_ok=True)
+    source = directory / "Makefile"
+    target = "install_" + "component_" * 16 + ": all"
+    source.write_text(
+        target + "\n" + _make_large_statements("\tcp package.dat /destination/", 150)
+    )
+    await services.indexing_coordinator.process_file(source, skip_embeddings=False)
+    _assert_annotated_continuations(provider, target)
+
+
+def _assert_annotated_continuations(provider, target):
+    texts = provider.all_texts
+    assert len(texts) > 1, "The real indexing path must produce continuation chunks"
+    headers = [split_embedding_metadata(text)[0] for text in texts]
+    bodies = [split_embedding_metadata(text)[1] for text in texts]
+    assert any(not body.startswith(target) for body in bodies)
+    assert all(
+        header is not None and f"[target: {target}]" in header for header in headers
+    )
+    assert all(_non_ws_size(body) <= MAX_CHUNK_SIZE for body in bodies)
+    assert any(_non_ws_size(text) > MAX_CHUNK_SIZE for text in texts)
+    assert not provider.get_violations_by_type("max_chars_exceeded")
+    assert not provider.get_violations_by_type("max_tokens_exceeded")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_size", [MAX_CHUNK_SIZE, MAX_CHUNK_SIZE + 1])
+async def test_embedding_metadata_does_not_hide_body_overshoots(body_size):
+    """Only a real body overshoot fails chars; full metadata still consumes tokens."""
+    provider = ValidatingEmbeddingProvider(safe_token_limit=MAX_CHUNK_SIZE // 3)
+    text = format_chunk_for_embedding(
+        "x" * body_size,
+        "nested/" * 40 + "Makefile",
+        "makefile",
+        constants=[{"name": "DESTDIR", "value": "/usr/local"}],
+        rule_target="install: all",
+    )
+    await provider.embed([text])
+    char_violations = provider.get_violations_by_type("max_chars_exceeded")
+    assert len(char_violations) == (body_size > MAX_CHUNK_SIZE)
+    if char_violations:
+        assert char_violations[0]["non_ws_chars"] == body_size
+        assert char_violations[0]["language"] == "makefile"
+    token_violations = provider.get_violations_by_type("max_tokens_exceeded")
+    assert len(token_violations) == 1
+    assert token_violations[0]["estimated_tokens"] == len(text) // 3
+    assert provider.chunk_stats["max_size"] == body_size
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"file_path": "src/a.py"},
+        {"file_path": "src/a.py", "language": "python"},
+        {"file_path": "Makefile", "rule_target": "install: all"},
+        {
+            "file_path": "config.py",
+            "language": "python",
+            "constants": [{"name": "MAX", "value": "1"}],
+        },
+    ],
+    ids=["none", "path-only", "path-language", "target", "constants"],
+)
+def test_split_embedding_metadata_matches_production_formatter(metadata):
+    """The test fixture must not drift from the production header grammar."""
+    body = "def foo(): pass"
+    text = format_chunk_for_embedding(body, **metadata)
+    header, split_body = split_embedding_metadata(text)
+    if metadata:
+        assert header is not None, text
+        assert split_body == body
+    else:
+        assert header is None
+        assert split_body == text == body
 
 
 @pytest.mark.asyncio
@@ -669,17 +761,15 @@ def test_large_samples_exceed_threshold():
     If samples don't exceed the threshold, they won't trigger split paths
     and the test won't be effective.
     """
-    import re
-
-    min_large_size = 1200  # Must exceed max_chunk_size to trigger split
+    min_large_size = MAX_CHUNK_SIZE
 
     undersized = []
     for language, (ext, large_sample, normal_sample) in LARGE_LANGUAGE_SAMPLES.items():
         if language in BINARY_CONTENT_LANGUAGES or large_sample is None:
             continue
 
-        non_ws_chars = len(re.sub(r"\s", "", large_sample))
-        if non_ws_chars < min_large_size:
+        non_ws_chars = _non_ws_size(large_sample)
+        if non_ws_chars <= min_large_size:
             undersized.append(
                 f"{language.name}: {non_ws_chars} chars (need {min_large_size}+)"
             )

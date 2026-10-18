@@ -5,7 +5,6 @@ File-backed providers only: DuckDB cannot persist an HNSW index in memory.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -105,7 +104,9 @@ def require_hnsw_index(provider: DuckDBProvider, dims: int = 3) -> None:
     """Require a real HNSW index, failing closed in the required CI lane."""
     if has_hnsw_index(provider, dims):
         return
-    if os.getenv("CHUNKHOUND_REQUIRE_HNSW") == "1":
+    from tests.helpers.isolation import run_control
+
+    if run_control("CHUNKHOUND_REQUIRE_HNSW") == "1":
         pytest.fail(
             f"CHUNKHOUND_REQUIRE_HNSW=1 but no HNSW index was created for {dims}D"
         )

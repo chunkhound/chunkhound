@@ -106,7 +106,7 @@ def test_output_limit_capability_uses_resolved_endpoint_route(
     resolved_url: str | None,
     expected_capability: OutputLimitCapability,
     monkeypatch: pytest.MonkeyPatch,
-    clean_environment,
+    hermetic_environment,
 ) -> None:
     """Capability classification and SDK construction use one selected route."""
     if environment_url is not None:
@@ -307,7 +307,7 @@ class TestOpenAILLMProvider:
         cap_field: str,
         mock_openai_client,
         monkeypatch: pytest.MonkeyPatch,
-        clean_environment,
+        hermetic_environment,
     ) -> None:
         """A custom environment route sends fallback caps in both API dialects."""
         monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")

@@ -55,7 +55,7 @@ class SubprocessJsonRpcClient:
 
     Example usage:
         proc = await asyncio.create_subprocess_exec(
-            "uv", "run", "chunkhound", "mcp", "stdio",
+            sys.executable, "-m", "chunkhound.api.cli.main", "mcp", "stdio",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE

@@ -61,6 +61,15 @@ supported by the search API).
   HNSW search and exact linear scans. Disabled mode never creates or uses
   HNSW indexes, drops the `[0, 1000)` result window, and lets read-only
   search succeed without a persisted index.
+- **Test suite runs hermetic and offline by default** — A session-scoped
+  isolation layer (``tests/helpers/isolation.py``) sandboxes HOME/cwd and
+  declared env inputs; ``tests/helpers/live.py`` blocks outbound sockets via
+  pytest-socket with an opt-in ``--run-live`` mode; Linux CI wraps pytest in
+  ``scripts/run_offline.sh`` network/PID namespaces with artifacts pre-materialized
+  by ``scripts/prepare_offline_tests.py``. The parse-pool singleton now exposes
+  ``shutdown_parse_pool`` (``chunkhound/pipeline_bridge.py``) so isolation can stop
+  workers that would otherwise carry stale cwd/env into later tests.
+  Literal-IP SSRF check classifies without resolver for offline determinism.
 - **DuckDB vector search requires cosine HNSW** — `search_semantic`,
   `find_similar_chunks`, and `search_by_embedding` require a cosine-compatible
   HNSW index and emit a single-table candidate query eligible for HNSW scans.

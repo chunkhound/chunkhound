@@ -133,13 +133,11 @@ async def test_deep_research_renders_resolved_startup_output_policy(
 @pytest.mark.asyncio
 async def test_custom_openai_environment_reports_fallback_policy(
     monkeypatch: pytest.MonkeyPatch,
-    clean_environment,
+    hermetic_environment,
 ) -> None:
     """Actual startup reporting uses the real custom-route provider policy."""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    with patch(
-        "chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"
-    ):
+    with patch("chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"):
         provider = OpenAILLMProvider(api_key="sk-test", model="gpt-5")
     provider.configure_synthesis_output_limit_policy(
         output_limits_enabled=False,

@@ -278,7 +278,7 @@ class _Index:
 
 
 @pytest.fixture
-def index(tmp_path: Path, clean_environment: None) -> Iterator[_Index]:
+def index(tmp_path: Path, hermetic_environment: Path) -> Iterator[_Index]:
     harness = _Index(tmp_path)
     yield harness
     harness.close_all()
@@ -470,7 +470,7 @@ class TestConfigureKeepsTheIndexUsable:
         assert registry.get_provider("embedding").model == "voyage-3.5"
 
     def test_provider_built_before_configure_is_held_to_the_index(
-        self, tmp_path: Path, clean_environment: None
+        self, tmp_path: Path, hermetic_environment: Path
     ):
         """The MCP server and ``research`` build their provider first.
 
@@ -502,7 +502,7 @@ class TestConfigureKeepsTheIndexUsable:
             services.provider.disconnect(skip_checkpoint=True)
 
     def test_config_without_embeddings_leaves_other_providers_alone(
-        self, tmp_path: Path, clean_environment: None
+        self, tmp_path: Path, hermetic_environment: Path
     ):
         """``create_services`` registers a caller's provider after configure().
 
@@ -525,7 +525,7 @@ class TestConfigureKeepsTheIndexUsable:
 
 class TestLanceDBIndex:
     def test_lancedb_index_keeps_its_model(
-        self, tmp_path: Path, clean_environment: None
+        self, tmp_path: Path, hermetic_environment: Path
     ):
         """Drift protection reads the index through the provider, so LanceDB,
         which has no SQL catalogue, is covered like DuckDB."""

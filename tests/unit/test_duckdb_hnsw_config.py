@@ -94,14 +94,14 @@ class TestConfigFileDuckdbHnsw:
         assert config.database.duckdb_hnsw_enabled is False
 
     def test_env_reaches_config(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch, clean_environment
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, hermetic_environment
     ) -> None:
         monkeypatch.setenv("CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED", "false")
         config = Config(target_dir=tmp_path)
         assert config.database.duckdb_hnsw_enabled is False
 
     def test_invalid_env_fails_explicitly(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch, clean_environment
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, hermetic_environment
     ) -> None:
         monkeypatch.setenv("CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED", "nope")
         with pytest.raises(ValueError, match="boolean"):

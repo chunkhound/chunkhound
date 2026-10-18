@@ -67,14 +67,19 @@ jobs:
         python: ["3.14"]
         split: [1, 2, 3]
         include:
+          # Only Linux gets native network isolation (run_offline.sh spins up a
+          # private netns); macOS/Windows leave offline_runner empty and rely
+          # on the Python socket guard for the offline contract.
           - os: ubuntu-latest
             job_timeout_minutes: 30
             pytest_timeout_minutes: 13
             pytest_timeout_seconds: 300
+            offline_runner: bash scripts/run_offline.sh
           - os: macos-latest
             job_timeout_minutes: 30
             pytest_timeout_minutes: 13
             pytest_timeout_seconds: 300
+            offline_runner: ""
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
@@ -82,6 +87,7 @@ jobs:
             pytest_timeout_minutes: 20
             pytest_timeout_seconds: 600
             pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
+            offline_runner: ""
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
@@ -122,8 +128,11 @@ jobs:
       - name: Build Rust extension
         uses: ./.github/actions/build-rust-extension
 
+      - name: Prepare offline native test artifacts
+        run: uv run python scripts/prepare_offline_tests.py
+
       - name: Test collection check
-        run: uv run pytest tests/ --collect-only -q --tb=no
+        run: ${{ matrix.offline_runner }} uv run --offline --no-sync pytest tests/ --collect-only -q --tb=no
 
       - name: Run tests
         id: tests
@@ -143,7 +152,7 @@ jobs:
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
           max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
+          command: ${{ matrix.offline_runner }} uv run --offline --no-sync pytest tests/ -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()
@@ -288,12 +297,12 @@ jobs:
       - name: Build Rust extension
         uses: ./.github/actions/build-rust-extension
 
-      - name: Install DuckDB VSS extension
-        run: uv run python -c "import duckdb; duckdb.connect().execute('INSTALL vss')"
+      - name: Prepare offline native test artifacts
+        run: uv run python scripts/prepare_offline_tests.py
 
       - name: Run HNSW contract tests
         run: |
-          uv run pytest \
+          bash scripts/run_offline.sh uv run --offline --no-sync pytest \
             tests/unit/test_duckdb_semantic_search_contracts.py \
             tests/test_duckdb_compaction.py \
             tests/integration/test_duckdb_failure_modes.py \
@@ -344,6 +353,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.14"]
+        include:
+          - os: ubuntu-latest
+            offline_runner: bash scripts/run_offline.sh
+          - os: windows-latest
+            offline_runner: ""
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -370,6 +384,9 @@ jobs:
       - name: Build Rust extension
         uses: ./.github/actions/build-rust-extension
 
+      - name: Prepare offline native test artifacts
+        run: uv run python scripts/prepare_offline_tests.py
+
       - name: Prepare Linux mount-aware Watchman fixture
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -390,7 +407,8 @@ jobs:
 
       - name: Run Watchman runtime validation tests
         run: >
-          uv run pytest
+          ${{ matrix.offline_runner }}
+          uv run --offline --no-sync pytest
           tests/
           -m requires_native_watchman
           -q

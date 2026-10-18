@@ -11,7 +11,6 @@ that is being wasted on filtered-out rows.
 from __future__ import annotations
 
 import math
-import os
 import statistics
 import time
 from collections.abc import Generator
@@ -29,6 +28,7 @@ from tests.helpers.duckdb_vector_fixtures import (
     insert_embeddings,
     require_hnsw_index,
 )
+from tests.helpers.isolation import run_control
 
 _ENABLE_ENV = "CHUNKHOUND_ENABLE_PERF_TESTS"
 _CORPUS_SIZE = 1_000
@@ -43,7 +43,7 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.hnsw,
     pytest.mark.skipif(
-        os.getenv(_ENABLE_ENV) != "1",
+        run_control(_ENABLE_ENV, "") != "1",
         reason=f"set {_ENABLE_ENV}=1 to run semantic-search performance guards",
     ),
 ]

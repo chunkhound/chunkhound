@@ -3,29 +3,13 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-
-def _run(
-    cmd: list[str], cwd: Path | None = None, timeout: int = 30
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["uv", "run", *cmd],
-        cwd=str(cwd) if cwd else None,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+from tests.helpers.cli import run_cli, run_command
 
 
 def _git(
     args: list[str], cwd: Path, timeout: int = 20
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+    return run_command(["git", *args], cwd=cwd, timeout=timeout)
 
 
 def test_git_discovery_skips_linked_worktree_under_parent_ignored_dir(
@@ -51,9 +35,8 @@ def test_git_discovery_skips_linked_worktree_under_parent_ignored_dir(
     assert (wt / ".git").is_file()
 
     db_path = ws / "chunks.duckdb"
-    proc = _run(
+    proc = run_cli(
         [
-            "chunkhound",
             "index",
             "--simulate",
             "--discovery-backend",
@@ -74,9 +57,8 @@ def test_git_discovery_skips_linked_worktree_under_parent_ignored_dir(
     # Also verify the Python walker path (repo-aware ignore engine) does not treat
     # the linked worktree as a boundary when its root directory is ignored by parent.
     db_path2 = ws / "chunks2.duckdb"
-    proc2 = _run(
+    proc2 = run_cli(
         [
-            "chunkhound",
             "index",
             "--simulate",
             "--discovery-backend",

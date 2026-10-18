@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+from tests.helpers.cli import init_git_repository, run_cli
 
 
 def test_simulate_isolates_sibling_gitignores(tmp_path: Path) -> None:
     root = tmp_path
 
-    (root / "repoA").mkdir()
-    (root / "repoB").mkdir()
+    init_git_repository(root / "repoA")
+    init_git_repository(root / "repoB")
 
     # repoA ignores *.txt
     (root / "repoA" / ".gitignore").write_text("*.txt\n")
@@ -27,7 +24,7 @@ def test_simulate_isolates_sibling_gitignores(tmp_path: Path) -> None:
     # Use gitignore-only mode for clarity
     (root / ".chunkhound.json").write_text('{"indexing": {"exclude": ".gitignore"}}\n')
 
-    proc = _run(["chunkhound", "index", "--simulate", str(root)])
+    proc = run_cli(["index", "--simulate", str(root)], cwd=root)
     assert proc.returncode == 0, proc.stderr
     out = set(proc.stdout.strip().splitlines())
 
@@ -38,4 +35,3 @@ def test_simulate_isolates_sibling_gitignores(tmp_path: Path) -> None:
     # repoB rules apply only under repoB
     assert "repoB/a.txt" in out
     assert "repoB/b.md" not in out
-

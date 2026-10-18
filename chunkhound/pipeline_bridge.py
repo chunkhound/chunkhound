@@ -198,6 +198,24 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
     return _parse_pool
 
 
+def shutdown_parse_pool() -> None:
+    """Stop the process-wide parse pool, if one exists.
+
+    The pool is a lazy singleton. Its workers inherit the caller's cwd and
+    environment, so a process that deletes or replaces either must stop the
+    pool first. Takes the creation lock so a concurrent first-use cannot
+    leave an untracked pool behind, and unregisters the matching atexit hook
+    so process exit does not shut the pool down twice.
+    """
+    global _parse_pool
+    with _parse_pool_lock:
+        pool, _parse_pool = _parse_pool, None
+    if pool is None:
+        return
+    atexit.unregister(pool.shutdown)
+    pool.shutdown(wait=True, cancel_futures=True)
+
+
 def parse_file_callback(
     file_path: str,
     detect_embedded_sql: bool = True,

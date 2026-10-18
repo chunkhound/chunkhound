@@ -86,14 +86,11 @@ console.log(JSON.stringify(buildChunkhoundConfig(embedding, llm)));
     return run_tsx_json(script)
 
 
-def test_configurator_local_openai_compatible_presets_round_trip_through_backend_config(
-) -> None:
-    ollama_config = Config(
-        **_build_chunkhound_config("ollama-embed", "ollama-llm")
-    )
-    vllm_config = Config(
-        **_build_chunkhound_config("vllm-embed", "vllm-llm")
-    )
+def test_configurator_local_openai_compatible_presets_round_trip_through_backend_config() -> (  # noqa: E501 -- test name documents contract
+    None
+):
+    ollama_config = Config(**_build_chunkhound_config("ollama-embed", "ollama-llm"))
+    vllm_config = Config(**_build_chunkhound_config("vllm-embed", "vllm-llm"))
 
     assert ollama_config.embedding is not None
     assert ollama_config.embedding.base_url == "http://localhost:11434/v1"
@@ -137,7 +134,7 @@ def _validated_config_errors(
 
 
 def test_ollama_generated_config_passes_index_validation(
-    tmp_path, clean_environment
+    tmp_path, hermetic_environment
 ) -> None:
     errors = _validated_config_errors(tmp_path, "index", "ollama-embed", "ollama-llm")
 
@@ -145,7 +142,7 @@ def test_ollama_generated_config_passes_index_validation(
 
 
 def test_ollama_generated_config_passes_research_validation(
-    tmp_path, clean_environment
+    tmp_path, hermetic_environment
 ) -> None:
     errors = _validated_config_errors(
         tmp_path, "research", "ollama-embed", "ollama-llm"
@@ -155,7 +152,7 @@ def test_ollama_generated_config_passes_research_validation(
 
 
 def test_vllm_generated_config_passes_index_validation(
-    tmp_path, clean_environment
+    tmp_path, hermetic_environment
 ) -> None:
     errors = _validated_config_errors(tmp_path, "index", "vllm-embed", "vllm-llm")
 
@@ -163,7 +160,7 @@ def test_vllm_generated_config_passes_index_validation(
 
 
 def test_vllm_generated_config_passes_research_validation(
-    tmp_path, clean_environment
+    tmp_path, hermetic_environment
 ) -> None:
     errors = _validated_config_errors(tmp_path, "research", "vllm-embed", "vllm-llm")
 
@@ -220,32 +217,24 @@ def test_gemini_llm_configurator_emits_model() -> None:
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_deepseek_config_passes_research_validation(
-    tmp_path, clean_environment
+    tmp_path, hermetic_environment
 ) -> None:
-    errors = _validated_config_errors(
-        tmp_path, "research", "voyageai", "deepseek"
-    )
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "deepseek")
 
     assert errors == []
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_grok_config_passes_research_validation(
-    tmp_path, clean_environment
-) -> None:
-    errors = _validated_config_errors(
-        tmp_path, "research", "voyageai", "grok"
-    )
+def test_grok_config_passes_research_validation(tmp_path, hermetic_environment) -> None:
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "grok")
 
     assert errors == []
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_config_passes_research_validation(
-    tmp_path, clean_environment
+    tmp_path, hermetic_environment
 ) -> None:
-    errors = _validated_config_errors(
-        tmp_path, "research", "voyageai", "gemini"
-    )
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "gemini")
 
     assert errors == []

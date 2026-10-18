@@ -17,11 +17,12 @@ inherently slower and more environment-sensitive::
 
 import importlib
 import pkgutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.cli import run_cli
 
 # Add parent directory to path to import chunkhound
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -102,9 +103,7 @@ class TestCLICommands:
     )
     def test_cli_help_commands(self, command):
         """Test that CLI help commands work without crashing."""
-        result = subprocess.run(
-            ["uv", "run"] + command, capture_output=True, text=True, timeout=5
-        )
+        result = run_cli(command[1:], timeout=5)
 
         # Help commands should exit with 0
         assert result.returncode == 0, (
@@ -186,7 +185,10 @@ class TestParserLoading:
 
         # SetupErrors should cause immediate test failure (critical issues)
         if setup_errors:
-            error_msg = "CRITICAL: Parser setup failures (version incompatibility or missing dependencies):\n"
+            error_msg = (
+                "CRITICAL: Parser setup failures (version incompatibility "
+                "or missing dependencies):\n"
+            )
             for language, error in setup_errors:
                 error_msg += f"  - {language}: {error}\n"
             pytest.fail(error_msg)
@@ -213,7 +215,7 @@ class TestTypeAnnotations:
         for py_file in glob.glob("chunkhound/**/*.py", recursive=True):
             if "/tests/" in py_file.replace("\\", "/"):
                 continue
-            with open(py_file, "r", encoding="utf-8") as f:
+            with open(py_file, encoding="utf-8") as f:
                 content = f.read()
 
             # Check for the problematic pattern: "ClassName" | None
@@ -225,7 +227,7 @@ class TestTypeAnnotations:
             if re.search(pattern, content):
                 # Found potential issue, let's verify it's not in a string
                 try:
-                    tree = ast.parse(content)
+                    ast.parse(content)
                     # This is where we'd do more sophisticated checking
                     # For now, just flag the file
                     problematic_files.append(py_file)
@@ -235,7 +237,7 @@ class TestTypeAnnotations:
 
         if problematic_files:
             pytest.fail(
-                f"Found problematic forward reference union patterns in:\n"
+                "Found problematic forward reference union patterns in:\n"
                 + "\n".join(f"  - {f}" for f in problematic_files)
             )
 

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.cli import cli_command
+
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 
 
@@ -46,17 +48,14 @@ def _simulate_with_profile(
     if include_patterns:
         env["CHUNKHOUND_INDEXING__INCLUDE"] = ",".join(include_patterns)
     p = subprocess.run(
-        [
-            "uv",
-            "run",
-            "chunkhound",
+        cli_command(
             "index",
             "--simulate",
             str(dir_path),
             "--profile-startup",
             "--sort",
             "path",
-        ],
+        ),
         capture_output=True,
         text=True,
         env=env,

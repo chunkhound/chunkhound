@@ -1,21 +1,23 @@
 """Integration tests for OpenCode CLI LLM provider.
 
 These tests exercise the real opencode subprocess and require the OpenCode CLI
-to be installed and authenticated. They are skipped automatically when the CLI
-is unavailable or no servable free models are found.
+to be installed. Pass --run-live and an absolute --live-config JSON file with
+opencode.models and optional explicit environment credentials.
 """
 
 import pytest
 
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
+pytestmark = pytest.mark.live
+
 
 @pytest.fixture
-async def opencode_provider(free_opencode_models):
-    """Create an OpenCodeCLIProvider using a real free model with optional fallback."""
+async def opencode_provider(opencode_models):
+    """Exercise the real CLI with declared model inputs."""
     provider = OpenCodeCLIProvider(
-        model=free_opencode_models[0],
-        fallback_model=free_opencode_models[1] if len(free_opencode_models) > 1 else None,
+        model=opencode_models[0],
+        fallback_model=opencode_models[1] if len(opencode_models) > 1 else None,
         timeout=30,
         max_retries=1,
     )

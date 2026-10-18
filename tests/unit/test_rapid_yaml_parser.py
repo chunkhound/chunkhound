@@ -8,8 +8,9 @@ import pytest
 
 from chunkhound.core.types.common import FileId, Language
 from chunkhound.parsers.parser_factory import ParserFactory
-from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 from chunkhound.parsers.rapid_yaml_parser import RapidYamlParser
+from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
+from tests.helpers.isolation import run_control
 
 
 def _build_fallback_parser() -> UniversalParser:
@@ -25,7 +26,7 @@ def _build_fallback_parser() -> UniversalParser:
 
 
 @pytest.mark.skipif(
-    os.environ.get("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
+    run_control("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
     reason="RapidYAML disabled via environment",
 )
 def test_rapid_yaml_parser_emits_chunks():
@@ -54,7 +55,7 @@ def test_rapid_yaml_parser_emits_chunks():
 
 
 @pytest.mark.skipif(
-    os.environ.get("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
+    run_control("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
     reason="RapidYAML disabled via environment",
 )
 def test_rapid_yaml_parser_handles_helm_templates():
@@ -93,7 +94,7 @@ def test_env_flag_disables_rapid_yaml(monkeypatch):
 
 
 @pytest.mark.skipif(
-    os.environ.get("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
+    run_control("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
     reason="RapidYAML disabled via environment",
 )
 def test_rapid_yaml_parser_denylist_memo(tmp_path):
@@ -121,7 +122,7 @@ def test_rapid_yaml_parser_denylist_memo(tmp_path):
 
 
 @pytest.mark.skipif(
-    os.environ.get("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
+    run_control("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
     reason="RapidYAML disabled via environment",
 )
 def test_summary_logged_on_cleanup(caplog):
@@ -135,7 +136,7 @@ def test_summary_logged_on_cleanup(caplog):
     caplog.clear()
     caplog.set_level("INFO")
     # Trigger a small sanitized parse
-    text = "metadata:\n  labels: {{- include \"chart.labels\" . | nindent 4 }}\n"
+    text = 'metadata:\n  labels: {{- include "chart.labels" . | nindent 4 }}\n'
     parser.parse_content(text, None, FileId(9))
     parser.cleanup()
     assert any("RapidYAML summary:" in rec.message for rec in caplog.records)

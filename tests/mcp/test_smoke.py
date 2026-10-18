@@ -19,6 +19,7 @@ import json
 import os
 import socket
 import subprocess  # noqa: F401  keep for potential use in subclasses
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.helpers.cli import cli_command
 from tests.utils import HttpMcpClient, SubprocessJsonRpcClient, SubprocessJsonRpcError
 from tests.utils.windows_compat import get_fs_event_timeout, windows_safe_tempdir
 from tests.utils.windows_subprocess import (
@@ -86,12 +88,7 @@ class TestMCPStdioHelp:
     async def test_mcp_stdio_server_help(self) -> None:
         """Test that MCP stdio server responds to help."""
         proc = await create_subprocess_exec_safe(
-            "uv",
-            "run",
-            "chunkhound",
-            "mcp",
-            "--no-daemon",
-            "--help",
+            *cli_command("mcp", "--no-daemon", "--help"),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=get_safe_subprocess_env(),
@@ -124,11 +121,9 @@ class TestMCPStartupImports:
             }
             config_path.write_text(json.dumps(config))
 
-            cwd_repr = repr(os.getcwd())
+            cwd_repr = repr(str(Path(__file__).resolve().parents[2]))
             proc = await create_subprocess_exec_safe(
-                "uv",
-                "run",
-                "python",
+                sys.executable,
                 "-c",
                 f"""
 import sys
@@ -169,7 +164,7 @@ sys.exit(asyncio.run(test()))
 
                 if proc.returncode != 0:
                     pytest.fail(
-                        f"MCP stdio server initialization failed with code {proc.returncode}\n"
+                        f"MCP stdio server initialization failed: {proc.returncode}\n"
                         f"stdout: {stdout.decode()}\n"
                         f"stderr: {stderr.decode()}"
                     )
@@ -218,12 +213,7 @@ class TestMCPProtocolHandshake:
                 mcp_env["CHUNKHOUND_EMBEDDING__API_KEY"] = api_key
 
             proc = await create_subprocess_exec_safe(
-                "uv",
-                "run",
-                "chunkhound",
-                "mcp",
-                "--no-daemon",
-                str(temp_path),
+                *cli_command("mcp", "--no-daemon", str(temp_path)),
                 cwd=str(temp_path),
                 env=mcp_env,
                 stdin=asyncio.subprocess.PIPE,
@@ -331,7 +321,7 @@ class TestMCPWebsearchStdio:
             }
             config_path.write_text(json.dumps(config))
 
-            helpers_dir = Path("tests/helpers").resolve()
+            helpers_dir = Path(__file__).resolve().parents[1] / "helpers"
             mcp_env = get_safe_subprocess_env(os.environ)
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
             mcp_env["CH_TEST_WEBSEARCH_STUB"] = "1"
@@ -340,13 +330,7 @@ class TestMCPWebsearchStdio:
             )
 
             proc = await create_subprocess_exec_safe(
-                "uv",
-                "run",
-                "chunkhound",
-                "mcp",
-                "--no-daemon",
-                "--no-embeddings",
-                str(temp_path),
+                *cli_command("mcp", "--no-daemon", "--no-embeddings", str(temp_path)),
                 cwd=str(temp_path),
                 env=mcp_env,
                 stdin=asyncio.subprocess.PIPE,
@@ -426,16 +410,15 @@ class TestMCPHttpTransport:
         mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
 
         args = [
-            "uv",
-            "run",
-            "chunkhound",
-            "mcp",
-            "--transport",
-            "http",
-            "--port",
-            str(port),
-            *(extra_args or []),
-            str(temp_path),
+            *cli_command(
+                "mcp",
+                "--transport",
+                "http",
+                "--port",
+                str(port),
+                *(extra_args or []),
+                str(temp_path),
+            )
         ]
 
         return await create_subprocess_exec_safe(

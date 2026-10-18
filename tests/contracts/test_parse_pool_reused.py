@@ -60,11 +60,12 @@ class TestParsePoolReused:
 
         monkeypatch.setattr(pipeline_bridge, "_parse_pool", None)
 
-        pool1 = pipeline_bridge._get_parse_pool(1)
-        pid_a = pool1.submit(_get_pid_probe, None).result()
-
-        pool2 = pipeline_bridge._get_parse_pool(1)
-        pid_b = pool2.submit(_get_pid_probe, None).result()
+        # monkeypatch restores the prior singleton before sandbox cleanup.
+        # This replacement therefore owns its worker teardown explicitly.
+        with pipeline_bridge._get_parse_pool(1) as pool1:
+            pid_a = pool1.submit(_get_pid_probe, None).result()
+            pool2 = pipeline_bridge._get_parse_pool(1)
+            pid_b = pool2.submit(_get_pid_probe, None).result()
 
         assert pid_a == pid_b, (
             "expected the same worker process to serve both calls "

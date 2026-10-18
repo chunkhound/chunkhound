@@ -1,20 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
+
+from tests.helpers.cli import run_cli
 
 
 def _run_simulate(path: Path) -> list[str]:
-    env = os.environ.copy()
-    env["CHUNKHOUND_NO_RICH"] = "1"
-    p = subprocess.run(
-        ["uv", "run", "chunkhound", "index", "--simulate", str(path), "--sort", "path"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
+    p = run_cli(
+        ["index", "--simulate", str(path), "--sort", "path"],
+        cwd=path,
         timeout=60,
     )
     assert p.returncode == 0, p.stderr
@@ -29,7 +24,7 @@ def test_dynamic_db_path_is_excluded_when_inside_target(tmp_path: Path) -> None:
     (ws / "src").mkdir(parents=True, exist_ok=True)
     (ws / "src" / "a.py").write_text("print('ok')\n", encoding="utf-8")
 
-    # Put database path inside workspace under a custom directory (not default .chunkhound)
+    # A custom database path must be excluded, like the default .chunkhound path.
     db_dir = ws / "mydbdir"
     db_dir.mkdir(parents=True, exist_ok=True)
     db_file = db_dir / "test.duckdb"  # let DuckDB create this

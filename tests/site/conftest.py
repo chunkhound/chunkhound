@@ -1,28 +1,29 @@
-import os
 import subprocess
 import sys
 from pathlib import Path
 
+# filelock coordinates site builds across xdist workers to prevent race
+# conditions when multiple workers try to build the site simultaneously.
 import pytest
+from filelock import FileLock
 
+from tests.helpers.isolation import ARTIFACTS_KEY
 from tests.site.tsx_runner import NPM, sanitized_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "site" / "dist"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def built_site() -> None:
-    """Build the site once per test session. Set CHUNKHOUND_USE_EXISTING_SITE_DIST=1 to skip and reuse an existing dist."""
-    if os.environ.get("CHUNKHOUND_USE_EXISTING_SITE_DIST") == "1":
-        if not DIST.exists():
-            raise RuntimeError(
-                f"Expected prebuilt site at {DIST}. "
-                f"Run 'npm run build --prefix site' first, or unset CHUNKHOUND_USE_EXISTING_SITE_DIST."
-            )
-        print(f"Reusing existing site dist at {DIST}")
-        return
+def _require_site_dist() -> None:
+    if not (DIST / "index.html").is_file():
+        raise RuntimeError(
+            f"Expected built site at {DIST / 'index.html'}. "
+            "Run 'npm run build --prefix site' first, or unset "
+            "CHUNKHOUND_USE_EXISTING_SITE_DIST."
+        )
 
+
+def _build_site() -> None:
     print(f"Building site for tests... ({DIST})")
     result = subprocess.run(
         [NPM, "run", "build", "--prefix", "site"],
@@ -36,5 +37,22 @@ def built_site() -> None:
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         result.check_returncode()
-    if not (DIST / "index.html").exists():
-        raise RuntimeError(f"Build succeeded but {DIST / 'index.html'} was not produced")
+    _require_site_dist()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def built_site(test_run_controls, pytestconfig) -> None:
+    """Publish one successful build to all workers; stale dist is not a run marker."""
+    if test_run_controls.get("CHUNKHOUND_USE_EXISTING_SITE_DIST") == "1":
+        _require_site_dist()
+        return
+
+    # The controller owns this unique directory and passes it to every worker.
+    state = pytestconfig.stash[ARTIFACTS_KEY] / "site-build"
+    state.mkdir(parents=True, exist_ok=True)
+    ready = state / "ready"
+    with FileLock(state / "build.lock", timeout=300):
+        if not ready.exists():
+            _build_site()
+            ready.touch()
+        _require_site_dist()

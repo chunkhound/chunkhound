@@ -118,7 +118,7 @@ async def test_async_main_skips_web_configurator_banner_for_non_tty(
 
 
 def test_create_validated_config_reports_custom_llm_endpoint_missing_model(
-    clean_environment,
+    hermetic_environment,
     tmp_path,
 ):
     """Custom OpenAI-compatible LLM endpoints should fail via command validation."""
@@ -150,8 +150,8 @@ def test_create_validated_config_reports_custom_llm_endpoint_missing_model(
 
     assert config.llm is not None
     assert any(
-        "llm.explicit model selection required for custom OpenAI-compatible endpoint roles"
-        in error
+        "llm.explicit model selection required for custom OpenAI-compatible "
+        "endpoint roles" in error
         for error in errors
     )
 
@@ -208,7 +208,9 @@ def test_create_validated_config_reports_removed_ollama_provider_from_config_fil
     assert any("ollama" in error and "base_url" in error for error in errors)
 
 
-def test_create_validated_config_preserves_fallback_state_on_invalid_json(tmp_path) -> None:
+def test_create_validated_config_preserves_fallback_state_on_invalid_json(
+    tmp_path,
+) -> None:
     config_path = tmp_path / "broken.json"
     config_path.write_text("{not-json", encoding="utf-8")
     args = SimpleNamespace(
@@ -229,7 +231,9 @@ def test_create_validated_config_preserves_fallback_state_on_invalid_json(tmp_pa
     assert any("Invalid JSON in config file" in error for error in errors)
 
 
-def test_create_validated_config_research_ignores_cleanup_only_override_requirements() -> None:
+def test_create_validated_config_research_ignores_cleanup_only_override_requirements() -> (  # noqa: E501 -- test name documents contract
+    None
+):
     args = SimpleNamespace(
         command="research",
         config=None,

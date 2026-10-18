@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.cli import cli_command, run_cli
 from tests.utils import (
     SubprocessJsonRpcClient,
     create_subprocess_exec_safe,
@@ -34,9 +35,6 @@ from tests.utils.windows_compat import get_fs_event_timeout, windows_safe_tempdi
 async def test_websearch_registry_isolation():
     async def run_index(temp_dir: Path, cfg_path: Path, db_path: Path) -> None:
         cmd = [
-            "uv",
-            "run",
-            "chunkhound",
             "index",
             str(temp_dir),
             "--no-embeddings",
@@ -45,15 +43,9 @@ async def test_websearch_registry_isolation():
             "--db",
             str(db_path),
         ]
-        proc = await create_subprocess_exec_safe(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=get_safe_subprocess_env(os.environ.copy()),
-        )
-        stdout, stderr = await proc.communicate()
-        assert proc.returncode == 0, (
-            f"indexing failed\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}"
+        result = await asyncio.to_thread(run_cli, cmd, cwd=temp_dir)
+        assert result.returncode == 0, (
+            f"indexing failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
     with windows_safe_tempdir() as temp_dir:
@@ -73,21 +65,20 @@ async def test_websearch_registry_isolation():
         }
         cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
 
-        helpers_dir = Path("tests/helpers").resolve()
+        helpers_dir = Path(__file__).resolve().parents[1] / "helpers"
         prior_pp = os.environ.get("PYTHONPATH", "")
-        env = get_safe_subprocess_env({
-            **os.environ,
-            "PYTHONPATH": f"{helpers_dir}{os.pathsep}{prior_pp}",
-            "CH_TEST_WEBSEARCH_STUB": "1",
-            "CHUNKHOUND_MCP_MODE": "1",
-        })
+        env = get_safe_subprocess_env(
+            {
+                **os.environ,
+                "PYTHONPATH": f"{helpers_dir}{os.pathsep}{prior_pp}",
+                "CH_TEST_WEBSEARCH_STUB": "1",
+                "CHUNKHOUND_MCP_MODE": "1",
+            }
+        )
 
         await run_index(temp_dir, cfg_path, db_path)
 
-        mcp_cmd = [
-            "uv",
-            "run",
-            "chunkhound",
+        mcp_cmd = cli_command(
             "mcp",
             str(temp_dir),
             "--stdio",
@@ -95,7 +86,7 @@ async def test_websearch_registry_isolation():
             "--no-embeddings",
             "--config",
             str(cfg_path),
-        ]
+        )
         proc = await create_subprocess_exec_safe(
             *mcp_cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -168,7 +159,7 @@ async def test_websearch_registry_isolation():
                 f"follow-up search returned no hits — registry may have been "
                 f"polluted by websearch: {search_text!r}"
             )
-            paths = re.findall(r'^## `([^`]+)`', search_text, re.MULTILINE)
+            paths = re.findall(r"^## `([^`]+)`", search_text, re.MULTILINE)
             assert any(p.endswith("app.py") for p in paths), (
                 f"follow-up search did not return the indexed project file; "
                 f"paths={paths!r}"

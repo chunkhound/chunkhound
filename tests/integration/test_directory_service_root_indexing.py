@@ -7,9 +7,9 @@ where include patterns that already start with "**/" were over-prefixed to
 """
 
 import json
-import os
-import pytest
 from pathlib import Path
+
+import pytest
 
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.types.common import Language
@@ -22,6 +22,7 @@ from chunkhound.providers.database.duckdb_provider import (
 )
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
+from tests.helpers.isolation import run_control
 
 
 class _DummyConfig:
@@ -30,7 +31,7 @@ class _DummyConfig:
 
 
 @pytest.mark.skipif(
-    os.environ.get("CHUNKHOUND_ALLOW_PROCESSPOOL", "0") != "1",
+    run_control("CHUNKHOUND_ALLOW_PROCESSPOOL", "0") != "1",
     reason="Requires ProcessPool-friendly environment (SemLock).",
 )
 @pytest.mark.asyncio
@@ -54,7 +55,9 @@ async def test_directory_service_indexes_root_file(tmp_path: Path):
     root_file.write_text("print('ok')\n")
 
     # Service with default config (includes patterns like "**/*.py")
-    svc = DirectoryIndexingService(indexing_coordinator=coordinator, config=_DummyConfig())
+    svc = DirectoryIndexingService(
+        indexing_coordinator=coordinator, config=_DummyConfig()
+    )
 
     # Act
     result = await svc._process_directory_files(
@@ -64,7 +67,11 @@ async def test_directory_service_indexes_root_file(tmp_path: Path):
     )
 
     # Assert: should have processed at least 1 file; failure previously manifested as 0
-    assert result.get("status") in {"complete", "success", "partial", "done", "ok", "no_files"} or True
+    assert (
+        result.get("status")
+        in {"complete", "success", "partial", "done", "ok", "no_files"}
+        or True
+    )
     assert result.get("files_processed", 0) >= 1, (
         f"Expected root file to be indexed, got: {result}"
     )
@@ -191,7 +198,8 @@ async def test_process_file_rejects_wrong_root_before_batch_processing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Step 108: `IndexingCoordinator.process_file(...)` must fail-closed before batching."""
+    """Step 108: `IndexingCoordinator.process_file(...)` must fail-closed
+    before batching."""
     db_path = tmp_path / "chunks.db"
     root_a = tmp_path / "root_a"
     root_b = tmp_path / "root_b"
@@ -229,7 +237,8 @@ async def test_process_file_rejects_wrong_root_before_batch_processing(
         async def _fail_batches(*args, **kwargs):  # pragma: no cover
             batch_invoked.append("called")
             raise AssertionError(
-                "_process_files_in_batches must not run when Step 108 guard refuses reuse"
+                "_process_files_in_batches must not run when Step 108 guard "
+                "refuses reuse"
             )
 
         monkeypatch.setattr(coordinator, "_process_files_in_batches", _fail_batches)
@@ -247,7 +256,8 @@ async def test_process_file_validates_indexed_root_only_once_per_coordinator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Step 108: single-file realtime mutations should cache root validation per coordinator."""
+    """Step 108: single-file realtime mutations should cache root validation
+    per coordinator."""
     db_path = tmp_path / "chunks.db"
     root = tmp_path / "root"
     root.mkdir()

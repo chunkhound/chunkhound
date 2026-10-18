@@ -28,14 +28,17 @@ class OfflineIndexingEmbeddings(FakeEmbeddingProvider):
 
 @pytest.fixture
 async def indexed_project(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_environment
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hermetic_environment
 ):
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
     config = Config(
-        database={"path": str(tmp_path / "index_test.duckdb")},
+        target_dir=tmp_path,
+        database={
+            "path": str(tmp_path / "index_test.duckdb"),
+            "duckdb_hnsw_enabled": True,
+        },
         indexing={"include": ["**/*.py"], "exclude": []},
     )
-    config.target_dir = tmp_path
     db = DuckDBProvider(config.database.path, base_directory=tmp_path)
     db.config = config.database
     manager = EmbeddingManager()

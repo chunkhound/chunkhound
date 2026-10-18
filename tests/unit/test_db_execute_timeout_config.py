@@ -38,9 +38,7 @@ class TestDatabaseConfigExecuteTimeout:
         config = DatabaseConfig.load_from_env()
         assert config["execute_timeout_seconds"] == 90.5
 
-    def test_load_from_env_legacy_alias(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_load_from_env_legacy_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(
             "CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS", raising=False
         )
@@ -101,7 +99,7 @@ class TestConfigFileExecuteTimeout:
         assert config.database.execute_timeout_seconds == 120.0
 
     def test_config_from_env_only_canonical(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch, clean_environment
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, hermetic_environment
     ) -> None:
         """Env-only deployments (e.g. MCP) must surface the canonical var."""
         monkeypatch.setenv("CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS", "75")
@@ -110,7 +108,7 @@ class TestConfigFileExecuteTimeout:
         assert config.database.execute_timeout_seconds == 75.0
 
     def test_config_from_env_only_legacy(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch, clean_environment
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, hermetic_environment
     ) -> None:
         """Legacy CHUNKHOUND_DB_EXECUTE_TIMEOUT still reaches Config."""
         monkeypatch.setenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT", "88")
