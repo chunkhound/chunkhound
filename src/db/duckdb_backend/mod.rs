@@ -20,6 +20,8 @@ pub struct DuckDbHnswBackend {
     config: DbConfig,
     conn: Option<Connection>,
     has_vss: bool,
+    /// Whether HNSW index creation is allowed (from `DbConfig.hnsw_enabled`).
+    hnsw_enabled: bool,
     hnsw_bulk_mode: bool,
     // Dims for which embeddings_N tables are known to exist in this session.
     known_dims: HashSet<u32>,
@@ -35,10 +37,12 @@ pub struct DuckDbHnswBackend {
 
 impl DuckDbHnswBackend {
     pub fn new(config: DbConfig) -> Self {
+        let hnsw_enabled = config.hnsw_enabled;
         DuckDbHnswBackend {
             config,
             conn: None,
             has_vss: false,
+            hnsw_enabled,
             hnsw_bulk_mode: false,
             known_dims: HashSet::new(),
             saved_hnsw_metrics: HashMap::new(),
@@ -159,6 +163,10 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         hnsw::ensure_all_hnsw_indexes(self)
     }
 
+    fn hnsw_enabled(&self) -> bool {
+        self.hnsw_enabled
+    }
+
     fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
         read::read_file_states(self)
     }
@@ -178,6 +186,15 @@ mod test_support {
             compaction_threshold: Some(0.30),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
+            hnsw_enabled: true,
+        }
+    }
+
+    /// Same as `config`, but with HNSW index creation disabled.
+    pub(super) fn config_with_hnsw_disabled(db_path: String) -> DbConfig {
+        DbConfig {
+            hnsw_enabled: false,
+            ..config(db_path)
         }
     }
 

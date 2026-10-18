@@ -17,6 +17,8 @@ from chunkhound.services.directory_indexing_service import DirectoryIndexingServ
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
+pytestmark = pytest.mark.hnsw
+
 _OPERATIONS = ["drop_all_hnsw_indexes", "ensure_all_hnsw_indexes"]
 
 

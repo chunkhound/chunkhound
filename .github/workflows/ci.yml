@@ -304,8 +304,10 @@ jobs:
         run: |
           bash scripts/run_offline.sh uv run --offline --no-sync pytest \
             tests/unit/test_duckdb_semantic_search_contracts.py \
+            tests/unit/test_rust_hnsw_disabled_contract.py \
             tests/test_duckdb_compaction.py \
             tests/integration/test_duckdb_failure_modes.py \
+            tests/integration/test_directory_indexing_hnsw.py \
             -m hnsw -v
 
   pages-artifact:

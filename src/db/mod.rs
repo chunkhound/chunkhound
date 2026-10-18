@@ -50,6 +50,14 @@ pub trait DbBackend: Send {
         Ok(())
     }
 
+    /// True when this backend maintains HNSW indexes. Defaults to true so
+    /// non-HNSW backends are unaffected. The pipeline consults it to decide
+    /// whether a run may skip the HNSW drop bracket: a disabled backend must
+    /// still drop stale indexes, so it can never skip the bracket.
+    fn hnsw_enabled(&self) -> bool {
+        true
+    }
+
     /// Snapshot every row of the `files` table for the pipeline's diff phase.
     /// Default: no-op (empty index / non-DuckDB backends treat every file as
     /// new). Deliberately `&self`, not `&mut self`, and does NOT go through
@@ -76,6 +84,10 @@ pub struct DbConfig {
     /// `indexing.db_batch_size`). Must be >= 1 — callers should clamp before
     /// constructing this struct, since `slice::chunks(0)` panics.
     pub insert_batch_size: usize,
+    /// Mirrors Python's `DatabaseConfig.duckdb_hnsw_enabled`. When false the
+    /// backend must never create HNSW indexes; existing indexes are still
+    /// dropped so a disabled run cleans up leftovers.
+    pub hnsw_enabled: bool,
 }
 
 pub fn create_backend(cfg: DbConfig) -> Box<dyn DbBackend> {

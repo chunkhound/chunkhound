@@ -108,6 +108,11 @@ pub(super) fn ensure_all_hnsw_indexes(backend: &mut DuckDbHnswBackend) -> Result
     // Reset first so that any error path (including early returns) leaves bulk
     // mode off — otherwise close() would retry in a partially-indexed state.
     backend.hnsw_bulk_mode = false;
+    // Disabled mode never creates indexes; the drop path (still active) is the
+    // cleanup. Mirrors Python's `_executor_ensure_all_hnsw_indexes` no-op.
+    if !backend.hnsw_enabled {
+        return Ok(());
+    }
     if !backend.has_vss {
         return Ok(());
     }
@@ -176,6 +181,68 @@ mod hnsw_tests {
     use crate::db::DbBackend;
 
     #[test]
+    fn disabled_backend_never_creates_hnsw_and_drop_cleans_up_leftovers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
+
+        // Seed an HNSW index the way an earlier enabled run would have.
+        {
+            let mut enabled =
+                DuckDbHnswBackend::new(super::super::test_support::config(db_path.clone()));
+            enabled.open().expect("open");
+            if !enabled.has_vss {
+                if std::env::var("CHUNKHOUND_REQUIRE_HNSW").is_ok() {
+                    panic!("VSS extension required (CHUNKHOUND_REQUIRE_HNSW set) but unavailable");
+                }
+                eprintln!("VSS extension unavailable, skipping");
+                return;
+            }
+            enabled
+                .write_batch(&super::super::test_support::embedding_batch("a", 8, 3))
+                .expect("write");
+            enabled.ensure_all_hnsw_indexes().expect("ensure");
+            enabled.close().expect("close");
+        }
+
+        // A disabled backend's drop clears the leftover index from the
+        // enabled run, and ensure_all_hnsw_indexes() must not resurrect it
+        // even though the embedding table now has data.
+        let mut disabled = DuckDbHnswBackend::new(
+            super::super::test_support::config_with_hnsw_disabled(db_path.clone()),
+        );
+        disabled.open().expect("open");
+        disabled.drop_all_hnsw_indexes().expect("drop");
+        disabled.ensure_all_hnsw_indexes().expect("ensure");
+        {
+            let conn = disabled.conn_or_err().expect("conn");
+            assert!(
+                DuckDbHnswBackend::discover_hnsw_indexes(conn)
+                    .expect("discover")
+                    .is_empty(),
+                "disabled backend must not create HNSW indexes"
+            );
+        }
+        disabled.close().expect("close");
+
+        // Crash recovery: a fresh disabled open() must not recreate the
+        // index either (mirrors open()'s ensure_all_hnsw_indexes() call).
+        let mut reopened = DuckDbHnswBackend::new(
+            super::super::test_support::config_with_hnsw_disabled(db_path.clone()),
+        );
+        reopened.open().expect("open");
+        {
+            let conn = reopened.conn_or_err().expect("conn");
+            assert!(
+                DuckDbHnswBackend::discover_hnsw_indexes(conn)
+                    .expect("discover")
+                    .is_empty(),
+                "disabled open() must not recreate HNSW indexes"
+            );
+        }
+        reopened.close().expect("close");
+    }
+
+    #[test]
     fn ensure_all_hnsw_indexes_preserves_non_cosine_metric() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("test.db").to_string_lossy().into_owned();
@@ -184,11 +251,15 @@ mod hnsw_tests {
             compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
+            hnsw_enabled: true,
         };
         let mut backend = DuckDbHnswBackend::new(config);
         backend.open().expect("open");
 
         if !backend.has_vss {
+            if std::env::var("CHUNKHOUND_REQUIRE_HNSW").is_ok() {
+                panic!("VSS extension required (CHUNKHOUND_REQUIRE_HNSW set) but unavailable");
+            }
             eprintln!("VSS extension unavailable, skipping ensure_all_hnsw_indexes metric test");
             return;
         }

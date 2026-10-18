@@ -234,6 +234,7 @@ impl IndexingPipeline {
             compaction_threshold: self.config.compaction_threshold,
             compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
             insert_batch_size: self.config.db_batch_size.max(1),
+            hnsw_enabled: self.config.duckdb_hnsw_enabled,
         };
 
         // Ensure parent directory exists (DuckDB doesn't auto-create it).
@@ -395,6 +396,7 @@ impl IndexingPipeline {
                 compaction_threshold,
                 compaction_min_size_bytes,
                 insert_batch_size,
+                hnsw_enabled: self.config.duckdb_hnsw_enabled,
             };
             let backend: Box<dyn DbBackend> = create_backend(db_config);
             let db_entries: Vec<DbFileEntry> = backend.read_file_states()?;
@@ -1156,15 +1158,18 @@ impl IndexingPipeline {
     /// Whether the store thread can leave the HNSW indexes exactly as
     /// `open()` left them, instead of dropping them and building them again.
     ///
-    /// True only when the run changes no rows (`nothing_to_write`: no batch
-    /// to insert, no orphan to delete) and no compaction is due. Compaction
-    /// is excluded because it rebuilds the indexes itself, through
-    /// `reopen()`, with the metrics `drop_all_hnsw_indexes()` captures.
+    /// True only when the backend maintains HNSW, the run changes no rows
+    /// (`nothing_to_write`: no batch to insert, no orphan to delete) and no
+    /// compaction is due. Compaction is excluded because it rebuilds the
+    /// indexes itself, through `reopen()`, with the metrics
+    /// `drop_all_hnsw_indexes()` captures. A disabled backend can never skip:
+    /// skipping exists to avoid the expensive *rebuild*, which disabled mode
+    /// never performs, so its drop must always run to clear leftover indexes.
     fn can_skip_hnsw_bracket(
         backend: &dyn DbBackend,
         nothing_to_write: bool,
     ) -> Result<bool, DbError> {
-        Ok(nothing_to_write && !backend.needs_compaction()?)
+        Ok(backend.hnsw_enabled() && nothing_to_write && !backend.needs_compaction()?)
     }
 
     /// Run a fallible backend setup step (`open`/`drop_all_hnsw_indexes`),
@@ -1679,6 +1684,7 @@ mod tests {
         close_called: Cell<bool>,
         /// `None` makes `needs_compaction()` fail.
         compaction_due: Option<bool>,
+        hnsw_enabled: bool,
     }
 
     impl DbBackend for FakeBackend {
@@ -1717,6 +1723,10 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn hnsw_enabled(&self) -> bool {
+            self.hnsw_enabled
+        }
     }
 
     #[test]
@@ -1726,6 +1736,7 @@ mod tests {
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
             compaction_due: Some(false),
+            hnsw_enabled: true,
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1743,6 +1754,7 @@ mod tests {
             fail_drop_hnsw: true,
             close_called: Cell::new(false),
             compaction_due: Some(false),
+            hnsw_enabled: true,
         };
         let drop_result = backend.drop_all_hnsw_indexes();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, drop_result);
@@ -1760,6 +1772,7 @@ mod tests {
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
             compaction_due: Some(false),
+            hnsw_enabled: true,
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1778,6 +1791,7 @@ mod tests {
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
             compaction_due,
+            hnsw_enabled: true,
         }
     }
 
@@ -1812,6 +1826,19 @@ mod tests {
         assert!(
             backend.close_called.get(),
             "close() must run even when the compaction check fails (Invariant 14)"
+        );
+    }
+
+    #[test]
+    fn test_hnsw_bracket_not_skipped_when_hnsw_disabled() {
+        // Disabled HNSW has no rebuild to save, so the drop must always run
+        // to clear indexes left by an earlier enabled run — even when this
+        // run writes nothing.
+        let mut backend = backend_with_compaction(Some(false));
+        backend.hnsw_enabled = false;
+        assert!(
+            !IndexingPipeline::can_skip_hnsw_bracket(&backend, true).unwrap(),
+            "a disabled backend must never leave stale HNSW indexes in place"
         );
     }
 

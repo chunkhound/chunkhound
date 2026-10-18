@@ -60,7 +60,9 @@ supported by the search API).
   `CHUNKHOUND_DATABASE__DUCKDB_HNSW_ENABLED`) switches between approximate
   HNSW search and exact linear scans. Disabled mode never creates or uses
   HNSW indexes, drops the `[0, 1000)` result window, and lets read-only
-  search succeed without a persisted index.
+  search succeed without a persisted index. Both the Python and the Rust
+  indexing paths honor the toggle: a disabled Rust run cleans up an index
+  left by an earlier enabled run instead of resurrecting it.
 - **Test suite runs hermetic and offline by default** — A session-scoped
   isolation layer (``tests/helpers/isolation.py``) sandboxes HOME/cwd and
   declared env inputs; ``tests/helpers/live.py`` blocks outbound sockets via

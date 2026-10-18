@@ -93,7 +93,59 @@ async def test_fragmentation_threshold_pct_forwarded_as_compaction_ratio(
         config=config,
     )
 
-    assert fake_native_pipeline.captured_config["compaction_threshold"] == pytest.approx(0.60)
+    assert fake_native_pipeline.captured_config[
+        "compaction_threshold"
+    ] == pytest.approx(0.60)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (None, True),
+        (SimpleNamespace(indexing=SimpleNamespace(), embedding=None), True),
+        (
+            SimpleNamespace(
+                database=SimpleNamespace(),
+                indexing=SimpleNamespace(),
+                embedding=None,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                database=SimpleNamespace(duckdb_hnsw_enabled=False),
+                indexing=SimpleNamespace(),
+                embedding=None,
+            ),
+            False,
+        ),
+    ],
+    ids=["no-config", "no-database", "database-without-field", "explicit-false"],
+)
+async def test_duckdb_hnsw_toggle_forwarding_defaults_to_enabled(
+    tmp_path: Path,
+    fake_native_pipeline: _FakeNativePipeline,
+    config: object,
+    expected: bool,
+) -> None:
+    """Missing config layers must not crash or silently disable HNSW.
+
+    ``config`` is optional for callers of run_rust_pipeline, and database
+    configs may be duck-typed namespaces. Only an explicit False may disable
+    HNSW; every missing layer inherits DatabaseConfig's enabled default.
+    """
+    from chunkhound import pipeline_bridge
+
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=True,
+        config=config,
+    )
+
+    assert fake_native_pipeline.captured_config["duckdb_hnsw_enabled"] is expected
 
 
 @pytest.mark.asyncio
@@ -188,7 +240,9 @@ async def test_missing_fragmentation_threshold_pct_defaults_to_30_pct(
         config=None,
     )
 
-    assert fake_native_pipeline.captured_config["compaction_threshold"] == pytest.approx(0.30)
+    assert fake_native_pipeline.captured_config[
+        "compaction_threshold"
+    ] == pytest.approx(0.30)
 
 
 @pytest.mark.asyncio
@@ -271,7 +325,9 @@ async def test_explicit_zero_mtime_epsilon_forwarded(
         config=config,
     )
 
-    assert fake_native_pipeline.captured_config["mtime_epsilon_seconds"] == pytest.approx(0.0)
+    assert fake_native_pipeline.captured_config[
+        "mtime_epsilon_seconds"
+    ] == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -289,7 +345,9 @@ async def test_disk_limit_exceeded_report_becomes_structured_error_dict(
     """
     from chunkhound import pipeline_bridge
 
-    fake_native_pipeline.instance.run.return_value = _fake_report(disk_limit=(12.0, 10.0))
+    fake_native_pipeline.instance.run.return_value = _fake_report(
+        disk_limit=(12.0, 10.0)
+    )
 
     result = await pipeline_bridge.run_rust_pipeline(
         files_to_process=[],
@@ -367,9 +425,7 @@ def test_hung_embed_shutdown_is_bounded_by_timeout(
 
     from chunkhound import pipeline_bridge
 
-    monkeypatch.setattr(
-        pipeline_bridge, "_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS", 0.05
-    )
+    monkeypatch.setattr(pipeline_bridge, "_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS", 0.05)
 
     async def _hang() -> None:
         await asyncio.sleep(9999)

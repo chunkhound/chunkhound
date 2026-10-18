@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
+
 @dataclass
 class _EmbedThreadCache:
     """Per-``run_rust_pipeline()`` cache of embed providers/event loops.
@@ -98,9 +99,7 @@ def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
                 tid,
             )
         except Exception as e:
-            logger.debug(
-                "Embedding provider shutdown failed for thread {}: {}", tid, e
-            )
+            logger.debug("Embedding provider shutdown failed for thread {}: {}", tid, e)
         if not loop.is_closed():
             loop.close()
 
@@ -269,9 +268,7 @@ def parse_file_callback(
         ):
             return ("", [], "large_config_file")
 
-    parser = create_parser_for_language(
-        lang, detect_embedded_sql=detect_embedded_sql
-    )
+    parser = create_parser_for_language(lang, detect_embedded_sql=detect_embedded_sql)
 
     file_id = FileId(0)  # Rust assigns the real ID
     chunks = parser.parse_file(Path(file_path), file_id)
@@ -673,7 +670,6 @@ def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
     }.get(provider, "")
 
 
-
 _T = TypeVar("_T")
 _MISSING = object()
 
@@ -780,9 +776,7 @@ async def run_rust_pipeline(
         embedding_cfg, embedding_provider, embedding_model
     )
     embedding_api_key = getattr(embedding_cfg, "api_key", None)
-    if embedding_api_key is not None and hasattr(
-        embedding_api_key, "get_secret_value"
-    ):
+    if embedding_api_key is not None and hasattr(embedding_api_key, "get_secret_value"):
         embedding_api_key = embedding_api_key.get_secret_value()
     embedding_base_url = getattr(embedding_cfg, "base_url", None)
     embedding_azure_endpoint = getattr(embedding_cfg, "azure_endpoint", None)
@@ -798,6 +792,9 @@ async def run_rust_pipeline(
     )
     _index_unknown = bool(getattr(indexing_cfg, "index_unknown_files", False))
     disk_usage_limit_mb = getattr(database_cfg, "max_disk_usage_mb", None)
+    # HNSW toggle must reach the Rust writer: with it disabled the Rust backend
+    # must never create HNSW indexes (Python's provider already honors it).
+    duckdb_hnsw_enabled = _cfg_or(database_cfg, "duckdb_hnsw_enabled", True, bool)
 
     config_dict = {
         "db_path": str(db_path.resolve()),
@@ -841,11 +838,10 @@ async def run_rust_pipeline(
         ),
         "embedding_is_azure": bool(embedding_azure_endpoint),
         "embedding_azure_endpoint": embedding_azure_endpoint,
-        "embedding_azure_deployment": getattr(
-            embedding_cfg, "azure_deployment", None
-        ),
+        "embedding_azure_deployment": getattr(embedding_cfg, "azure_deployment", None),
         "embed_max_tokens_per_batch": embed_max_tokens_per_batch,
         "disk_usage_limit_mb": disk_usage_limit_mb,
+        "duckdb_hnsw_enabled": duckdb_hnsw_enabled,
     }
 
     # Build (absolute_path, relative_key) pairs from (path, hash) tuples.
