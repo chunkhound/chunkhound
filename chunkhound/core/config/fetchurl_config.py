@@ -12,10 +12,12 @@ import os
 from typing import Any
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from ._settings import _ChunkhoundBaseSettings
 
 
-class FetchUrlConfig(BaseSettings):
+class FetchUrlConfig(_ChunkhoundBaseSettings):
     """
     FetchUrl configuration.
 
@@ -90,7 +92,10 @@ class FetchUrlConfig(BaseSettings):
         parser.add_argument(
             "--fetchurl-truncate-tokens",
             type=int,
-            help="Token cap applied to the truncate-option input before the LLM (default: 15000)",
+            help=(
+                "Token cap applied to the truncate-option input"
+                " before the LLM (default: 15000)"
+            ),
         )
         parser.add_argument(
             "--fetchurl-max-retries",

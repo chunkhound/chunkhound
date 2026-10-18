@@ -12,7 +12,7 @@ import re
 from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 from typing_extensions import Self
 
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
@@ -22,6 +22,7 @@ from chunkhound.core.utils.openai_utils import (
 )
 from chunkhound.core.utils.voyageai_utils import is_official_voyageai_endpoint
 
+from ._settings import _ChunkhoundBaseSettings
 from ._utils import _parse_env_bool
 
 # Error message constants for consistent messaging across config and provider
@@ -99,7 +100,7 @@ def validate_rerank_configuration(
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
-class EmbeddingConfig(BaseSettings):
+class EmbeddingConfig(_ChunkhoundBaseSettings):
     """
     OpenAI embedding configuration for ChunkHound.
 
