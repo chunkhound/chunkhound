@@ -26,6 +26,11 @@ from platform import machine as current_machine
 from platform import system as current_system
 from typing import Literal, cast
 
+# Kept in chunkhound.utils (not chunkhound.core) so this module stays importable in
+# the isolated build environment, where chunkhound.core's package __init__ (and its
+# runtime-only parser dependencies) are unavailable.
+from chunkhound.utils.cache_paths import platform_cache_root
+
 if os.name == "nt":
     import msvcrt
 else:
@@ -791,16 +796,7 @@ def _default_runtime_cache_dir() -> Path:
     if override:
         return Path(override).expanduser()
 
-    if sys.platform == "win32":
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if local_appdata:
-            return Path(local_appdata) / "ChunkHound" / "watchman-runtime"
-        return Path.home() / "AppData" / "Local" / "ChunkHound" / "watchman-runtime"
-
-    cache_root = os.environ.get("XDG_CACHE_HOME")
-    if cache_root:
-        return Path(cache_root) / "chunkhound" / "watchman-runtime"
-    return Path.home() / ".cache" / "chunkhound" / "watchman-runtime"
+    return platform_cache_root() / "watchman-runtime"
 
 
 def _relative_root_path(relative_root: PurePosixPath) -> Path:

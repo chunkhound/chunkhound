@@ -7,9 +7,10 @@ chunks with NULL embedding columns.
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
 
 def test_lancedb_embeddings_stored_during_indexing(lancedb_provider, tmp_path):
     """Verify embeddings are stored in LanceDB during indexing with mock provider."""
@@ -203,6 +204,59 @@ def test_lancedb_embedding_update_finds_chunks(lancedb_provider, tmp_path):
         emb = lancedb_provider.get_embedding_by_chunk_id(chunk_id, "test", "test-model")
         assert emb is not None, f"Embedding for chunk {chunk_id} should be retrievable"
         assert emb.vector is not None, f"Embedding vector should not be None"
+
+
+@pytest.mark.asyncio
+async def test_generate_missing_embeddings_uses_lancedb_fallback(
+    lancedb_provider,
+):
+    """The explicit backend capability keeps LanceDB on its supported fallback path."""
+    from chunkhound.core.models import Chunk, File
+    from chunkhound.core.types.common import ChunkType, Language
+    from chunkhound.services.embedding_service import EmbeddingService
+    from tests.contracts.mock_embed import MockEmbeddingProvider
+
+    file_id = lancedb_provider.insert_file(
+        File(
+            path="src/app.py",
+            mtime=1234567890.0,
+            language=Language.PYTHON,
+            size_bytes=100,
+        )
+    )
+    chunk_ids = lancedb_provider.insert_chunks_batch(
+        [
+            Chunk(
+                file_id=file_id,
+                code="def missing_embedding(): return 1",
+                start_line=1,
+                end_line=1,
+                chunk_type=ChunkType.FUNCTION,
+                language=Language.PYTHON,
+                symbol="missing_embedding",
+            )
+        ]
+    )
+    service = EmbeddingService(
+        database_provider=lancedb_provider,
+        embedding_provider=MockEmbeddingProvider(),
+    )
+
+    with patch.object(
+        lancedb_provider,
+        "execute_query",
+        side_effect=AssertionError(
+            "LanceDB must use the metadata fallback, not SQL joins"
+        ),
+    ):
+        result = await service.generate_missing_embeddings()
+
+    assert result["status"] == "success", f"unexpected status: {result}"
+    assert result["generated"] == 1
+    embedding = lancedb_provider.get_embedding_by_chunk_id(
+        chunk_ids[0], MockEmbeddingProvider.name, MockEmbeddingProvider.model
+    )
+    assert embedding is not None
 
 
 def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):

@@ -191,6 +191,13 @@ class LLMManager:
                 if (thinking_budget := config.get("thinking_budget")) is not None:
                     provider_kwargs["thinking_budget"] = thinking_budget
 
+            elif provider_name == "claude-code-cli":
+                provider_kwargs["append_system_prompt"] = config.get(
+                    "append_system_prompt", "file"
+                )
+                if temp_dir := config.get("temp_dir"):
+                    provider_kwargs["temp_dir"] = temp_dir
+
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:
@@ -222,6 +229,14 @@ class LLMManager:
             )
 
         base_url = config.get("base_url")
+        if (
+            base_url is not None
+            and spec.structured_reasoning_disable_extra_body is not None
+        ):
+            logger.debug(
+                f"{name}: explicit llm.base_url disables structured reasoning "
+                "negotiation; the reasoning-disable payload will not be sent."
+            )
 
         kwargs: dict[str, Any] = {
             "provider_name": name,
@@ -238,6 +253,11 @@ class LLMManager:
                 spec.output_limit_omission
                 if base_url is None
                 else OutputLimitCapability.UNKNOWN
+            ),
+            "structured_reasoning_disable_extra_body": (
+                spec.structured_reasoning_disable_extra_body
+                if base_url is None
+                else None
             ),
         }
 

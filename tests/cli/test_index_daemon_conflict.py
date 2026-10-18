@@ -129,6 +129,7 @@ async def pre_indexed_project_dir(
     discovery.remove_lock()
 
 
+# flaky: macOS may complete no-op indexing before DuckDB lock handling (CI #37423939604)
 @pytest.mark.timeout(90)
 @pytest.mark.asyncio
 @pytest.mark.integration

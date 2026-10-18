@@ -159,6 +159,11 @@ def _iter_batches(values: list[int], batch_size: int) -> list[list[int]]:
 class LanceDBProvider(SerialDatabaseProvider):
     """LanceDB implementation using serial executor pattern."""
 
+    @property
+    def supports_embedding_sql_queries(self) -> bool:
+        """LanceDB's SQL shim does not support chunk/embedding joins."""
+        return False
+
     def __init__(
         self,
         db_path: Path | str,

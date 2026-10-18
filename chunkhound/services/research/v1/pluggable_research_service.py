@@ -17,6 +17,10 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from chunkhound.core.utils.structured_reasoning_diagnostics import (
+    current_empty_failures,
+    structured_reasoning_failure_key,
+)
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.interfaces.llm_provider import (
@@ -54,6 +58,28 @@ from chunkhound.services.research.v1.synthesis_engine import SynthesisEngine
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
     from chunkhound.core.config.research_config import ResearchConfig
+
+
+def apply_structured_reasoning_degradation_note(
+    result: dict[str, Any],
+    *,
+    failed_stages: int,
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """Prepend a caller-visible note when structured stages degraded."""
+    if failed_stages <= 0:
+        return result
+    warning = (
+        f"{failed_stages} structured stage(s) failed because "
+        f"{provider}:{model} cannot disable reasoning; results may be "
+        "incomplete — consider switching `llm.utility_model`"
+    )
+    metadata = result.setdefault("metadata", {})
+    metadata.setdefault("warnings", []).append(warning)
+    answer = result.get("answer", "")
+    result["answer"] = f"> **Note:** {warning}\n\n{answer}"
+    return result
 
 
 class PluggableResearchService(ProgressEmitterMixin):
@@ -124,6 +150,37 @@ class PluggableResearchService(ProgressEmitterMixin):
             return self._config.num_expanded_queries
         return NUM_LLM_EXPANDED_QUERIES
 
+    def _structured_reasoning_health(self) -> dict[str, Any] | None:
+        get_utility = getattr(self._llm_manager, "get_utility_provider", None)
+        if get_utility is None:
+            return None
+        provider = get_utility()
+        get_health = getattr(provider, "get_structured_reasoning_health", None)
+        return get_health() if get_health is not None else None
+
+    def _attach_structured_reasoning_note(
+        self, result: dict[str, Any]
+    ) -> dict[str, Any]:
+        failures = current_empty_failures.get()
+        if not failures:
+            return result
+        get_utility = getattr(self._llm_manager, "get_utility_provider", None)
+        if get_utility is None:
+            return result
+        provider = get_utility()
+        failed_stages = failures.get(structured_reasoning_failure_key(provider), 0)
+        if not failed_stages:
+            return result
+        health = self._structured_reasoning_health()
+        if not health:
+            return result
+        return apply_structured_reasoning_degradation_note(
+            result,
+            failed_stages=failed_stages,
+            provider=str(health["provider"]),
+            model=str(health["model"]),
+        )
+
     async def deep_research(
         self, query: str, previous_query: str | None = None
     ) -> dict[str, Any]:
@@ -143,6 +200,15 @@ class PluggableResearchService(ProgressEmitterMixin):
         Returns:
             Dictionary with answer and metadata
         """
+        token = current_empty_failures.set({})
+        try:
+            return await self._deep_research_impl(query, previous_query)
+        finally:
+            current_empty_failures.reset(token)
+
+    async def _deep_research_impl(
+        self, query: str, previous_query: str | None
+    ) -> dict[str, Any]:
         logger.info(f"Starting deep research for query: '{query}'")
 
         # Emit main start event
@@ -280,16 +346,20 @@ class PluggableResearchService(ProgressEmitterMixin):
                 "- Mention classes/functions (e.g., 'DeepResearchService._single_pass_synthesis')\n"
                 "- Include keywords that appear in code (constants, config keys)\n"
             )
-            return {
-                "answer": friendly,
-                "metadata": {
-                    "depth_reached": 0,
-                    "nodes_explored": aggregated.get("stats", {}).get("total_nodes", 1),
-                    "chunks_analyzed": 0,
-                    "files_analyzed": 0,
-                    "skipped_synthesis": True,
+            return self._attach_structured_reasoning_note(
+                {
+                    "answer": friendly,
+                    "metadata": {
+                        "depth_reached": 0,
+                        "nodes_explored": aggregated.get("stats", {}).get(
+                            "total_nodes", 1
+                        ),
+                        "chunks_analyzed": 0,
+                        "files_analyzed": 0,
+                        "skipped_synthesis": True,
+                    },
                 },
-            }
+            )
 
         # Pass pre-filtered chunks to synthesis (elbow detection done in exploration strategies)
         (
@@ -436,10 +506,9 @@ class PluggableResearchService(ProgressEmitterMixin):
             chunks_analyzed=metadata["chunks_analyzed"],
         )
 
-        return {
-            "answer": answer,
-            "metadata": metadata,
-        }
+        return self._attach_structured_reasoning_note(
+            {"answer": answer, "metadata": metadata}
+        )
 
     async def _run_synthesis_maps(
         self,
