@@ -61,3 +61,20 @@ def test_utf16_config_raises_friendly_value_error(
 
     with pytest.raises(ValueError, match="Invalid JSON in config file"):
         Config(target_dir=tmp_path)
+
+
+def test_locale_encoded_config_still_loads(
+    tmp_path: Path, monkeypatch, clean_environment
+) -> None:
+    # Base readers used the platform locale. Simulate a Windows ANSI/ACP
+    # machine so a cp1252 config with non-ASCII text keeps loading instead of
+    # regressing to a decode error under the forced UTF-8-sig reader.
+    (tmp_path / ".chunkhound.json").write_bytes(
+        '{"indexing": {"exclude": ["café"]}}'.encode("cp1252")
+    )
+    monkeypatch.setattr(
+        "chunkhound.core.config._utils.locale.getpreferredencoding",
+        lambda do_setlocale=True: "cp1252",
+    )
+
+    assert "café" in Config(target_dir=tmp_path).indexing.exclude
