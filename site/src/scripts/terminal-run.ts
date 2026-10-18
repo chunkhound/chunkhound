@@ -433,25 +433,22 @@ function beginRun(session: TerminalSession): void {
 }
 
 function markSettled(session: TerminalSession): void {
-    if (!session.loop) {
-        session.card.classList.add("is-settled");
-        setControl(session, "replay");
-    }
+    session.card.classList.add("is-settled");
+    setControl(session, "replay");
 }
 
 async function animateRun(session: TerminalSession): Promise<void> {
     await startGate(session);
     do {
         await renderOnce(session);
-        if (!session.shouldAnimate()) {
-            return;
-        }
-        if (!session.loop) {
-            markSettled(session);
-            return;
+        if (!session.shouldAnimate() || !session.loop || session.stopRequested) {
+            break;
         }
         await session.sleep(session.loopDelay);
     } while (session.shouldAnimate());
+    // Completion, loop-off, and visibility abort all settle: a "Stop" control
+    // must never advertise a running animation over a cleared card.
+    markSettled(session);
 }
 
 /** User-initiated: re-run the transcript exactly once from a clean state,

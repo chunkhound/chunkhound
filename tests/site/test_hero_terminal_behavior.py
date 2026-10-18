@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import html
+import json
 import re
+
+import pytest
 
 from tests.site.css_helpers import bodies
 from tests.site.dom_helpers import DIST, browser_dom, dist_body, hero_noscript
@@ -1187,11 +1190,12 @@ def test_hero_noscript_carries_static_transcript(built_site) -> None:
     assert re.sub(r"\s+", "", without_noscript) == "</div></div>"
 
 
-def test_hero_terminal_stop_control_halts_the_run(built_site) -> None:
+@pytest.mark.parametrize("loop", [False, True])
+def test_hero_terminal_stop_control_halts_the_run(built_site, loop: bool) -> None:
     """WCAG 2.2.2 (Pause, Stop, Hide): the auto-playing run exceeds five seconds,
     so the chrome exposes a user-operable control. It reads "Stop" while a run is
     in flight; activating it halts the run and reveals the settled transcript, and
-    the control then reads "Replay"."""
+    the control then reads "Replay". Looping runs must settle too."""
     script = (
         browser_dom(dist_body(_HOMEPAGE), expose_document=False)
         + _INIT
@@ -1207,7 +1211,7 @@ initHeroTerminal(doc, {
   workingPause: 0,
   answerDelay: 0,
   startDelay: 0,
-  loop: false,
+  loop: __LOOP__,
   // Stall the run on its 2nd sleep (mid prompt-typing) so it is in flight.
   sleep: () => { sleepCalls += 1; return sleepCalls >= 2 ? gate : Promise.resolve(); },
 });
@@ -1240,7 +1244,7 @@ console.log(JSON.stringify({
   answerCount: countOf('answer'),
   transcript: textOf(container),
 }));
-"""
+""".replace("__LOOP__", json.dumps(loop))
         + _TRANSCRIPT_STRUCTURE
     )
     rendered = run_tsx_json(script)
@@ -1262,6 +1266,262 @@ console.log(JSON.stringify({
     assert rendered["answerCount"] == 1
     assert EXPECTED_DEMO["synthesis"] in rendered["transcript"]
     assert EXPECTED_DEMO["answer"] in rendered["transcript"]
+
+
+_VISIBILITY_ABORT_SCRIPT = """
+async function waitFor(predicate) {
+  for (let i = 0; i < 200; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error('visibility condition not met');
+}
+
+const card = container.closest('.terminal-card');
+const control = doc.querySelector('.terminal-control');
+let sleepCalls = 0;
+let release;
+let loopPauseReached = false;
+let resumedSleeps = 0;
+const pauseAtLoop = __PAUSE_AT_LOOP__;
+const finalAnswer = __FINAL_ANSWER__;
+const loopDelay = 47;
+const gate = new Promise((resolve) => { release = resolve; });
+function sleep(ms) {
+  if (!pauseAtLoop) {
+    sleepCalls += 1;
+    return sleepCalls >= 2 ? gate : Promise.resolve();
+  }
+  if (loopPauseReached) resumedSleeps += 1;
+  // Full answer plus the loop delay excludes the final character's own sleep.
+  if (ms === loopDelay && container.querySelector('.result')?.textContent === finalAnswer) {
+    loopPauseReached = true;
+    return gate;
+  }
+  return Promise.resolve();
+}
+initHeroTerminal(doc, {
+  charDelay: 0,
+  sendPause: 0,
+  workingPause: 0,
+  answerDelay: 0,
+  startDelay: 0,
+  loop: __LOOP__,
+  loopDelay,
+  sleep,
+});
+const observer = FakeIntersectionObserver.instances.at(-1);
+
+observer.callback([{ isIntersecting: true }]);
+await waitFor(() => pauseAtLoop ? loopPauseReached : control.textContent.trim() === 'Stop');
+const transcriptBeforeAbort = textOf(container);
+const midRun = {
+  label: control.textContent.trim(),
+  aria: control.getAttribute('aria-label'),
+  settled: card.classList.contains('is-settled'),
+};
+
+observer.callback([{ isIntersecting: false }]);
+release();
+await waitFor(() => card.classList.contains('is-settled'));
+// Let any wrongly scheduled next pass become observable before checking state.
+await new Promise((resolve) => setTimeout(resolve, 0));
+const afterAbort = {
+  label: control.textContent.trim(),
+  aria: control.getAttribute('aria-label'),
+  settled: card.classList.contains('is-settled'),
+  lineCount: container.querySelectorAll('.line').length,
+};
+
+let afterReentry = null;
+__REENTER__
+
+console.log(JSON.stringify({
+  midRun,
+  afterAbort,
+  afterReentry,
+  reenteredLineCount: container.querySelectorAll('.line').length,
+  transcriptBeforeAbort,
+  loopPauseReached,
+  resumedSleeps,
+}));
+"""
+
+
+_VISIBILITY_REENTRY_SCRIPT = """
+observer.callback([{ isIntersecting: true }]);
+afterReentry = {
+  label: control.textContent.trim(),
+  aria: control.getAttribute('aria-label'),
+  settled: card.classList.contains('is-settled'),
+};
+await waitFor(() => container.querySelectorAll('.line').length > 0);
+"""
+
+
+def _visibility_abort_rendered(
+    *, loop: bool, reenter: bool, pause_at_loop: bool = False
+) -> dict:
+    script = (
+        browser_dom(dist_body(_HOMEPAGE), expose_document=False)
+        + _INIT
+        + _VISIBILITY_ABORT_SCRIPT.replace("__LOOP__", json.dumps(loop))
+        .replace("__PAUSE_AT_LOOP__", json.dumps(pause_at_loop))
+        .replace("__FINAL_ANSWER__", json.dumps(EXPECTED_DEMO["answer"]))
+        .replace("__REENTER__", _VISIBILITY_REENTRY_SCRIPT if reenter else "")
+        + _TRANSCRIPT_STRUCTURE
+    )
+    return run_tsx_json(script)
+
+
+def test_hero_terminal_visibility_abort_settles_the_control(built_site) -> None:
+    """Leaving the viewport mid-run must not leave "Stop" over a cleared card.
+
+    The aborted run settles instead of returning early; re-entry restarts it.
+    """
+    rendered = _visibility_abort_rendered(loop=False, reenter=True)
+
+    assert rendered["midRun"] == {
+        "label": "Stop",
+        "aria": "Stop animation",
+        "settled": False,
+    }
+    assert rendered["afterAbort"] == {
+        "label": "Replay",
+        "aria": "Replay demo",
+        "settled": True,
+        "lineCount": 0,
+    }
+    assert rendered["afterReentry"] == {
+        "label": "Stop",
+        "aria": "Stop animation",
+        "settled": False,
+    }
+    assert rendered["reenteredLineCount"] > 0
+
+
+def test_hero_terminal_visibility_abort_settles_looping_run(built_site) -> None:
+    """A looping run must settle when it leaves the viewport."""
+    rendered = _visibility_abort_rendered(loop=True, reenter=False)
+
+    assert rendered["midRun"] == {
+        "label": "Stop",
+        "aria": "Stop animation",
+        "settled": False,
+    }
+    assert rendered["afterAbort"] == {
+        "label": "Replay",
+        "aria": "Replay demo",
+        "settled": True,
+        "lineCount": 0,
+    }
+    assert rendered["reenteredLineCount"] == 0
+
+
+def test_hero_terminal_visibility_abort_during_loop_pause_settles(built_site) -> None:
+    """Leaving after the full transcript cancels the next pass and settles."""
+    rendered = _visibility_abort_rendered(loop=True, reenter=False, pause_at_loop=True)
+
+    assert rendered["loopPauseReached"] is True
+    for text in (
+        EXPECTED_DEMO["prompt"],
+        EXPECTED_DEMO["synthesis"],
+        EXPECTED_DEMO["answer"],
+    ):
+        assert text in rendered["transcriptBeforeAbort"]
+    assert rendered["midRun"]["label"] == "Stop"
+    assert rendered["afterAbort"] == {
+        "label": "Replay",
+        "aria": "Replay demo",
+        "settled": True,
+        "lineCount": 0,
+    }
+    assert rendered["resumedSleeps"] == 0
+    assert rendered["reenteredLineCount"] == 0
+
+
+def test_hero_terminal_pagehide_abort_settles_the_control(built_site) -> None:
+    """Tab hide settles the control; tab show restarts the run."""
+    script = (
+        browser_dom(dist_body(_HOMEPAGE), expose_document=False)
+        + _INIT
+        + """
+async function waitFor(predicate) {
+  for (let i = 0; i < 200; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error('pagehide condition not met');
+}
+
+const card = container.closest('.terminal-card');
+const control = doc.querySelector('.terminal-control');
+let sleepCalls = 0;
+let release;
+const gate = new Promise((resolve) => { release = resolve; });
+function sleep() {
+  sleepCalls += 1;
+  return sleepCalls >= 2 ? gate : Promise.resolve();
+}
+initHeroTerminal(doc, {
+  charDelay: 0,
+  sendPause: 0,
+  workingPause: 0,
+  answerDelay: 0,
+  startDelay: 0,
+  loop: false,
+  sleep,
+});
+const observer = FakeIntersectionObserver.instances.at(-1);
+observer.callback([{ isIntersecting: true }]);
+await waitFor(() => control.textContent.trim() === 'Stop');
+const midRun = {
+  label: control.textContent.trim(),
+  aria: control.getAttribute('aria-label'),
+  settled: card.classList.contains('is-settled'),
+};
+
+window.dispatchEvent(new window.Event('pagehide'));
+release();
+await waitFor(() => card.classList.contains('is-settled'));
+await new Promise((resolve) => setTimeout(resolve, 0));
+const afterHide = {
+  label: control.textContent.trim(),
+  aria: control.getAttribute('aria-label'),
+  settled: card.classList.contains('is-settled'),
+  lineCount: container.querySelectorAll('.line').length,
+};
+
+window.dispatchEvent(new window.Event('pageshow'));
+flushRaf();
+await waitFor(() => control.textContent.trim() === 'Stop');
+const afterShow = {
+  label: control.textContent.trim(),
+  aria: control.getAttribute('aria-label'),
+  settled: card.classList.contains('is-settled'),
+};
+
+console.log(JSON.stringify({ midRun, afterHide, afterShow }));
+"""
+    )
+    rendered = run_tsx_json(script)
+
+    assert rendered["midRun"] == {
+        "label": "Stop",
+        "aria": "Stop animation",
+        "settled": False,
+    }
+    assert rendered["afterHide"] == {
+        "label": "Replay",
+        "aria": "Replay demo",
+        "settled": True,
+        "lineCount": 0,
+    }
+    assert rendered["afterShow"] == {
+        "label": "Stop",
+        "aria": "Stop animation",
+        "settled": False,
+    }
 
 
 def test_hero_terminal_plays_once_by_default_and_replay_reruns_once(
