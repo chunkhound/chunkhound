@@ -287,6 +287,13 @@ class EmbeddingConfig(BaseSettings):
 
         return typo_fixes.get(v, v)
 
+    @field_validator("rerank_model")
+    def normalize_rerank_model(cls, v: str | None) -> str | None:  # noqa: N805
+        """Treat empty or whitespace-only as unset so provider defaults apply."""
+        if v is None:
+            return None
+        return v.strip() or None
+
     @field_validator("base_url")
     def validate_base_url(cls, v: str | None) -> str | None:  # noqa: N805
         """Validate and normalize base URL."""
@@ -404,9 +411,9 @@ class EmbeddingConfig(BaseSettings):
         if self.azure_deployment:
             base_config["azure_deployment"] = self.azure_deployment
 
-        # Add rerank configuration if available
-        # Emit rerank_model only when set: an omitted model must stay absent so
-        # the provider's default reranking model can apply.
+        # Add rerank configuration if available.
+        # normalize_rerank_model maps empty and whitespace-only to None, so
+        # an unset model stays absent and the provider default applies.
         if self.rerank_model is not None:
             base_config["rerank_model"] = self.rerank_model
         base_config["rerank_url"] = self.rerank_url
