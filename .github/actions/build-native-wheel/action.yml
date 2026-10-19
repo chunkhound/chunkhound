@@ -14,10 +14,11 @@ description: >
   Linux wheels are built inside a pinned Ubuntu 20.04 container (glibc 2.31)
   instead of on the runner's own glibc (>=2.34 on ubuntu-latest/ubuntu-24.04-arm),
   so the wheel installs on glibc 2.31+ hosts (including Ubuntu 20.04) rather
-  than only 2.34+. scripts/finalize_manylinux_wheel.py then un-versions Rust
-  std's weak statx/getrandom references, fails the build if any ELF file in
-  the wheel needs a GLIBC_ symbol newer than 2.31, and rewrites RECORD for the
-  patched extension (see that script for details). DuckDB's bundled prebuilt
+  than only 2.34+. `auditwheel repair --plat manylinux_2_31_<arch>` then
+  bundles DuckDB and rejects any ELF symbol version above the 2.31 floor, so
+  the wheel's tag is enforced rather than assumed. (Rust std's weak
+  statx@GLIBC_2.28/getrandom@GLIBC_2.25 references are already within that
+  policy and need no patching.) DuckDB's bundled prebuilt
   library needs glibc 2.25, below the 2.31 floor. musl needs a separate
   build; no native sdist fallback exists. Assumes the
   calling job has already checked out the repo and installed `uv`.
@@ -51,8 +52,11 @@ runs:
         # Ubuntu 20.04 is the oldest supported glibc host (2.31). Pin its
         # multi-arch manifest so a rerun uses the same baseline; bootstrap the
         # current Rust/maturin toolchain inside it below.
+        # The image pin lives in .github/linux-baseline-images.env, shared
+        # with ci.yml's old-linux-wheel-smoke so build and runtime agree.
+        source .github/linux-baseline-images.env
         {
-          echo "MANYLINUX_IMAGE=ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214"
+          echo "MANYLINUX_IMAGE=$UBUNTU_20_04_IMAGE"
           echo "MANYLINUX_RUST_TOOLCHAIN=1.99.0"
           echo "MANYLINUX_MATURIN_VERSION=1.15.0"
         } >> "$GITHUB_ENV"
@@ -133,7 +137,7 @@ runs:
         # save/restore can access them.
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq build-essential binutils ca-certificates curl patchelf
+        apt-get install -y -qq build-essential ca-certificates curl
         export HOME=/build/home
         export RUSTUP_HOME=/build/rustup
         export CARGO_HOME=/build/cargo
@@ -151,16 +155,14 @@ runs:
         rustup toolchain install "$MANYLINUX_RUST_TOOLCHAIN" --profile minimal
         rustup default "$MANYLINUX_RUST_TOOLCHAIN"
         [[ -x /build/venv/bin/python ]] || uv venv --python 3.12 /build/venv
-        # auditwheel supplies the PEP 600 manylinux_2_31 repair policy;
-        # patchelf is maturin's optional extra needed for repair.
+        # auditwheel supplies the PEP 600 manylinux_2_31 repair policy and
+        # needs patchelf; pin it here (Ubuntu 20.04's apt patchelf is 0.10).
         uv pip install --python /build/venv/bin/python -q \
-          "maturin[patchelf]==$MANYLINUX_MATURIN_VERSION" "auditwheel==6.8.2"
+          "maturin==$MANYLINUX_MATURIN_VERSION" "auditwheel==6.8.2" "patchelf==0.17.2.4"
         cd /work
         cargo clean -p chunkhound_native --release
-        # Rust std emits weak statx/getrandom references with a symbol version
-        # from the compiler's build host. Build an un-repaired wheel first so
-        # the finalizer can remove that non-requirement and enforce the glibc
-        # 2.31 ceiling before auditwheel repairs and tags the wheel.
+        # Build an un-repaired wheel, then let auditwheel bundle DuckDB, enforce
+        # the explicit manylinux_2_31 policy, and tag the result.
         mkdir -p /out/unrepaired
         maturin build --release --compatibility linux --auditwheel skip --out /out/unrepaired/
         shopt -s nullglob
@@ -169,7 +171,6 @@ runs:
           echo "Expected exactly one un-repaired chunkhound_native wheel" >&2
           exit 1
         fi
-        python /work/scripts/finalize_manylinux_wheel.py "${wheels[0]}" --max-glibc 2.31
         duckdb_lib="$(find "$CARGO_TARGET_DIR" -type f -name libduckdb.so -print -quit)"
         if [[ -z "$duckdb_lib" ]]; then
           echo "Could not find the DuckDB shared library for auditwheel repair" >&2

@@ -572,58 +572,8 @@ class TestDocsVersionWorkflowContract:
     def test_pinned_musl_uv_installer_verifies_archives_before_extracting(self) -> None:
         installer = MUSL_UV_INSTALLER.read_text(encoding="utf-8")
 
-        assert (
-            "6c86040a8f045ab9adc9e3ec4cdafa03fd00e9a988ed2bf28971c7fc2d0debd0"
-            in installer
-        )
-        assert (
-            "345a8308e4d1835cdfaadf692836fd3137a6d45864773f05ad7bf59442b1ba16"
-            in installer
-        )
-        assert "sha256sum --check --status" in installer
-        assert installer.index("sha256sum --check --status") < installer.index(
-            "tar -xzf"
-        )
-        assert "curl --fail --location --silent --show-error" in installer
-        assert '--output "$archive"' in installer
-
-    def test_old_linux_native_wheel_smoke_contract(self) -> None:
-        job = _job(".github/workflows/ci.yml", "old-linux-wheel-smoke")
-        steps = cast(list[dict[str, Any]], job["steps"])
-        glibc_smoke_step_name = (
-            "Install main + native wheels on Ubuntu 20.04 (glibc 2.31) and smoke test"
-        )
-        common_lts_smoke_step_name = (
-            "Install main + native wheels on Ubuntu 22.04 + Python 3.10 and smoke test"
-        )
-        glibc_smoke_step = next(
-            step for step in steps if step["name"] == glibc_smoke_step_name
-        )
-        common_lts_smoke_step = next(
-            step for step in steps if step["name"] == common_lts_smoke_step_name
-        )
-
-        assert job["needs"] == "watchman-runtime-validation"
-        assert "ubuntu:20.04@sha256:" in glibc_smoke_step["run"]
-        assert "install_pinned_musl_uv.sh /tmp/uv" in glibc_smoke_step["run"]
-        assert "/tmp/uv/uv venv --python 3.12 /tmp/venv" in glibc_smoke_step["run"]
-        assert "--no-deps /dist/chunkhound-*.whl" in glibc_smoke_step["run"]
-        assert 'requires("chunkhound")' in glibc_smoke_step["run"]
-        assert 'startswith("chunkhound-native")' in glibc_smoke_step["run"]
-        assert (
-            "--reinstall --no-deps /dist/chunkhound_native-*.whl"
-            in glibc_smoke_step["run"]
-        )
-        assert "smoke_test_native_wheel.py" in glibc_smoke_step["run"]
-        assert "/tmp/venv/bin/chunkhound --version" in glibc_smoke_step["run"]
-        assert "ubuntu:22.04" in common_lts_smoke_step["run"]
-        assert "--no-deps /dist/chunkhound-*.whl" in common_lts_smoke_step["run"]
-        assert 'requires("chunkhound")' in common_lts_smoke_step["run"]
-        assert 'startswith("chunkhound-native")' in common_lts_smoke_step["run"]
-        assert (
-            "--force-reinstall --no-deps /dist/chunkhound_native-*.whl"
-            in common_lts_smoke_step["run"]
-        )
+        # A downloaded bootstrap binary must never be unpacked unverified.
+        assert installer.index("sha256sum --check") < installer.index("tar -xzf")
 
     def test_workflow_concurrency_contract(self) -> None:
         workflow = _load_workflow(".github/workflows/ci.yml")

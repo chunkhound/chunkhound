@@ -225,22 +225,29 @@ jobs:
           skip-tag-version-patch: 'true'
 
   # Installs the wheels already built by watchman-runtime-validation's
-  # ubuntu-latest leg on hosts with no Rust toolchain:
-  # - ubuntu:20.04 (glibc 2.31) verifies the claimed manylinux_2_31 floor by
-  #   installing the main + native wheels together and exercising their public
-  #   native API at runtime (the build also enforces it statically via
-  #   scripts/finalize_manylinux_wheel.py).
-  # - ubuntu:22.04 + Python 3.10 retains the same combined install on a common
-  #   LTS. CI native wheels keep Cargo.toml's placeholder version, which cannot
-  #   satisfy the main wheel's chunkhound-native>=X requirement during
-  #   resolution. Install the main wheel without dependencies, resolve all of
-  #   its other metadata dependencies, then replace the excluded native
-  #   dependency with the branch artifact (same replacement approach as
-  #   scripts/verify_watchman_live_indexing_e2e.py).
+  # ubuntu-latest leg into clean containers with no Rust toolchain, via
+  # scripts/smoke_linux_wheel_install.sh:
+  # - ubuntu:20.04 (glibc 2.31) proves the manylinux_2_31 floor at runtime
+  #   (auditwheel repair enforces it statically during the build).
+  # - ubuntu:22.04 + its system Python 3.10 covers a common LTS user setup.
+  # Both are below the packaged Watchman payload's min_glibc, so both must
+  # default to the watchdog realtime backend.
   old-linux-wheel-smoke:
     needs: watchman-runtime-validation
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 20.04 (glibc 2.31)
+            image_var: UBUNTU_20_04_IMAGE
+            apt_packages: ca-certificates curl
+            python: '3.12'
+          - name: Ubuntu 22.04 + Python 3.10
+            image_var: UBUNTU_22_04_IMAGE
+            apt_packages: ca-certificates curl python3.10 python3.10-venv
+            python: /usr/bin/python3.10
 
     steps:
       - name: Checkout code
@@ -253,75 +260,25 @@ jobs:
           path: old-linux-dist
           merge-multiple: true
 
-      - name: Install main + native wheels on Ubuntu 20.04 (glibc 2.31) and smoke test
+      - name: Install main + native wheels on ${{ matrix.name }} and smoke test
+        env:
+          IMAGE_VAR: ${{ matrix.image_var }}
+          APT_PACKAGES: ${{ matrix.apt_packages }}
+          PYTHON_REQUEST: ${{ matrix.python }}
         run: |
-          cat > "$RUNNER_TEMP/glibc-2-31-smoke.sh" <<'CONTAINER_SCRIPT'
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
-          apt-get install -y -qq ca-certificates curl
-          # Share the build bootstrap pin so this smoke test stays reproducible
-          # and independent of a future GNU uv release's glibc requirement.
-          bash /work/scripts/install_pinned_musl_uv.sh /tmp/uv
-          /tmp/uv/uv venv --python 3.12 /tmp/venv
-          # The branch native wheel keeps Cargo.toml's placeholder version,
-          # while the branch main wheel requires chunkhound-native>=5.2.0.
-          # Install the main wheel's other declared dependencies normally, but
-          # intentionally replace that one dependency with the branch artifact.
-          /tmp/uv/uv pip install --python /tmp/venv/bin/python \
-            --no-cache-dir --no-deps /dist/chunkhound-*.whl
-          /tmp/venv/bin/python - <<'PY' > /tmp/chunkhound-requirements.txt
-          from importlib.metadata import requires
-
-          for requirement in requires("chunkhound") or []:
-              if not requirement.lower().startswith("chunkhound-native"):
-                  print(requirement)
-          PY
-          /tmp/uv/uv pip install --python /tmp/venv/bin/python \
-            --no-cache-dir -r /tmp/chunkhound-requirements.txt
-          /tmp/uv/uv pip install --python /tmp/venv/bin/python \
-            --no-cache-dir --reinstall --no-deps /dist/chunkhound_native-*.whl
-          /tmp/venv/bin/python /work/scripts/smoke_test_native_wheel.py
-          /tmp/venv/bin/chunkhound --version
-          CONTAINER_SCRIPT
+          source .github/linux-baseline-images.env
           docker run --rm \
             -v "$(pwd)":/work:ro \
             -v "$(pwd)/old-linux-dist":/dist:ro \
-            -v "$RUNNER_TEMP/glibc-2-31-smoke.sh":/tmp/smoke.sh:ro \
+            -e APT_PACKAGES -e PYTHON_REQUEST \
+            -e DEBIAN_FRONTEND=noninteractive \
             -w /tmp \
-            ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214 \
-            bash /tmp/smoke.sh
-
-      - name: Install main + native wheels on Ubuntu 22.04 + Python 3.10 and smoke test
-        run: |
-          cat > "$RUNNER_TEMP/ubuntu-22-04-smoke.sh" <<'CONTAINER_SCRIPT'
-          set -euo pipefail
-          apt-get update -qq
-          apt-get install -y -qq python3.10 python3.10-venv
-          python3.10 -m venv /tmp/venv
-          # Keep the branch native wheel in place instead of resolving its
-          # placeholder version from PyPI; install every other main-wheel
-          # dependency from its metadata before the smoke checks.
-          /tmp/venv/bin/pip install --no-cache-dir --no-deps /dist/chunkhound-*.whl
-          /tmp/venv/bin/python - <<'PY' > /tmp/chunkhound-requirements.txt
-          from importlib.metadata import requires
-
-          for requirement in requires("chunkhound") or []:
-              if not requirement.lower().startswith("chunkhound-native"):
-                  print(requirement)
-          PY
-          /tmp/venv/bin/pip install --no-cache-dir -r /tmp/chunkhound-requirements.txt
-          /tmp/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps /dist/chunkhound_native-*.whl
-          /tmp/venv/bin/python /work/scripts/smoke_test_native_wheel.py
-          /tmp/venv/bin/chunkhound --version
-          CONTAINER_SCRIPT
-          docker run --rm \
-            -v "$(pwd)":/work:ro \
-            -v "$(pwd)/old-linux-dist":/dist:ro \
-            -v "$RUNNER_TEMP/ubuntu-22-04-smoke.sh":/tmp/smoke.sh:ro \
-            -w /tmp \
-            ubuntu:22.04 \
-            bash /tmp/smoke.sh
+            "${!IMAGE_VAR}" \
+            bash -euo pipefail -c '
+              apt-get update -qq
+              apt-get install -y -qq $APT_PACKAGES
+              bash /work/scripts/smoke_linux_wheel_install.sh "$PYTHON_REQUEST" watchdog
+            '
 
   # Run the public Makefile contract once on macOS rather than only checking
   # its printed commands. Other platforms exercise the equivalent native build

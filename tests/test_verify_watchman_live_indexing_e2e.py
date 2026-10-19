@@ -188,20 +188,10 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     assert linux_build["env"]["OUT_DIR"] == "${{ inputs.out-dir }}"
     assert 'OUT_DIR="$(realpath "$OUT_DIR")"' in linux_build["run"]
     assert '-v "$OUT_DIR":/out' in linux_build["run"]
-    # The weak Rust statx/getrandom symbol versions are finalized before
-    # auditwheel validates the explicit manylinux_2_31 policy; otherwise
-    # auditwheel rejects the unpatched statx@GLIBC_2.28 reference.
-    assert (
-        "--compatibility linux --auditwheel skip --out /out/unrepaired/"
-        in linux_build["run"]
-    )
-    assert "--max-glibc 2.31" in linux_build["run"]
+    # auditwheel, not the runner's glibc, decides the published Linux tag.
     assert (
         'auditwheel repair --plat "manylinux_2_31_$(uname -m)" --wheel-dir /out'
         in linux_build["run"]
-    )
-    assert linux_build["run"].index("--max-glibc 2.31") < linux_build["run"].index(
-        "auditwheel repair --plat"
     )
     assert '--out "${{ inputs.out-dir }}/"' in other_build_run
     # realpath keeps workspace-relative inputs working and preserves absolute ones.
@@ -471,7 +461,7 @@ def test_source_tree_copy_ignore_excludes_transient_repo_state() -> None:
 def test_main_runs_host_compatible_wheels_and_source_fallback(
     tmp_path: Path, monkeypatch
 ) -> None:
-    linux_wheel = tmp_path / "chunkhound-0.0.0-py3-none-manylinux_2_34_x86_64.whl"
+    linux_wheel = tmp_path / "chunkhound-0.0.0-py3-none-manylinux_2_31_x86_64.whl"
     windows_wheel = tmp_path / "chunkhound-0.0.0-py3-none-win_amd64.whl"
     linux_wheel.write_text("wheel", encoding="utf-8")
     windows_wheel.write_text("wheel", encoding="utf-8")

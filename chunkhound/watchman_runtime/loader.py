@@ -788,6 +788,38 @@ def _host_glibc_at_least(required: tuple[int, int]) -> bool:
     return host >= required
 
 
+def _require_host_glibc_for_packaged_runtime(
+    *, system_name: str | None = None, machine_name: str | None = None
+) -> None:
+    """Fail clearly, before hydrating or launching, on a too-old host glibc.
+
+    The install default already avoids watchman on such hosts; this covers an
+    explicit ``realtime_backend='watchman'`` so the user gets an actionable
+    error instead of a dynamic-loader failure from the sidecar.
+    """
+    platform_key = _normalize_platform_key(
+        system_name=system_name, machine_name=machine_name
+    )
+    relative_root = _SUPPORTED_PLATFORM_ROOTS.get(platform_key)
+    if relative_root is None:
+        return
+    manifest_path = relative_root / "manifest.json"
+    if not _packaged_resource_exists(manifest_path):
+        return
+    manifest = _read_packaged_json(manifest_path)
+    min_glibc = _optional_manifest_glibc(manifest)
+    if min_glibc is None or _host_glibc_at_least(min_glibc):
+        return
+    libc_name, libc_version = platform.libc_ver()
+    host = f"{libc_name} {libc_version}".strip() or "an unknown libc"
+    raise UnsupportedWatchmanRuntimePlatformError(
+        "The packaged Watchman runtime for "
+        f"{_require_manifest_string(manifest, 'platform')} requires glibc >= "
+        f"{min_glibc[0]}.{min_glibc[1]}, but this host has {host}. Use "
+        "realtime_backend='watchdog' (the default on this host) or 'polling'."
+    )
+
+
 def default_realtime_backend_for_platform(
     *, system_name: str | None = None, machine_name: str | None = None
 ) -> str:
@@ -1621,6 +1653,9 @@ def materialize_watchman_binary(
 ) -> Path:
     """Copy the packaged Watchman payload to a stable executable path."""
 
+    _require_host_glibc_for_packaged_runtime(
+        system_name=system_name, machine_name=machine_name
+    )
     runtime = resolve_packaged_watchman_runtime(
         system_name=system_name, machine_name=machine_name
     )
