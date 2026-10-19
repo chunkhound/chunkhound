@@ -49,16 +49,21 @@ def _run(*args: str) -> str:
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout
 
 
-def _has_versioned_undefined_ref(elf: Path, symbol: str) -> bool:
-    pattern = re.compile(rf"\bUND\s+{re.escape(symbol)}@GLIBC_")
+def _has_versioned_weak_undefined_ref(elf: Path, symbol: str) -> bool:
+    pattern = re.compile(rf"\bWEAK\b.*\bUND\s+{re.escape(symbol)}@GLIBC_")
     return bool(pattern.search(_run("readelf", "--dyn-syms", "-W", str(elf))))
 
 
 def _required_glibc_versions(elf: Path) -> set[tuple[int, ...]]:
-    return {
-        _parse_version(match)
-        for match in _GLIBC_VERSION_RE.findall(_run("objdump", "-T", str(elf)))
-    }
+    symbol_versions = _GLIBC_VERSION_RE.findall(_run("objdump", "-T", str(elf)))
+    version_info = _run("readelf", "--version-info", "-W", str(elf))
+    version_needs = re.search(
+        r"Version needs section.*?(?=\n\n|\Z)", version_info, flags=re.DOTALL
+    )
+    need_versions = (
+        _GLIBC_VERSION_RE.findall(version_needs.group()) if version_needs else []
+    )
+    return {_parse_version(version) for version in [*symbol_versions, *need_versions]}
 
 
 def _record_hash(data: bytes) -> str:
@@ -123,11 +128,11 @@ def main() -> int:
 
         patched: set[str] = set()
         for symbol in WEAK_SYMBOLS_TO_UNVERSION:
-            if _has_versioned_undefined_ref(extension, symbol):
+            if _has_versioned_weak_undefined_ref(extension, symbol):
                 _run("patchelf", "--clear-symbol-version", symbol, str(extension))
                 patched.add(extension.relative_to(root).as_posix())
                 print(f"cleared glibc version on weak symbol {symbol!r}")
-                if _has_versioned_undefined_ref(extension, symbol):
+                if _has_versioned_weak_undefined_ref(extension, symbol):
                     raise SystemExit(f"patchelf did not clear {symbol!r} version")
 
         violations = []

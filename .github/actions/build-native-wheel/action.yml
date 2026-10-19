@@ -140,11 +140,10 @@ runs:
         export CARGO_TARGET_DIR=/build/target
         export PATH="$CARGO_HOME/bin:/build/venv/bin:/build/uv:$PATH"
         bash -euo pipefail <<'BUILD_SCRIPT'
-        if ! command -v uv >/dev/null; then
-          # The static musl bootstrap has no glibc requirement. Share its pin
-          # with the oldest-runtime smoke job so the two cannot drift.
-          bash /work/scripts/install_pinned_musl_uv.sh /build/uv
-        fi
+        # The static musl bootstrap has no glibc requirement. Reinstall it on
+        # every build so a restored cache cannot retain a previous pin; share
+        # the helper with the oldest-runtime smoke job so the two cannot drift.
+        bash /work/scripts/install_pinned_musl_uv.sh /build/uv
         if ! command -v rustup >/dev/null; then
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
@@ -160,10 +159,8 @@ runs:
         cargo clean -p chunkhound_native --release
         # Rust std emits weak statx/getrandom references with a symbol version
         # from the compiler's build host. Build an un-repaired wheel first so
-        # the finalizer can remove that non-requirement before auditwheel
-        # validates the requested manylinux_2_31 policy. Running auditwheel
-        # through maturin first would reject statx@GLIBC_2.28 before the
-        # finalizer gets a chance to patch it.
+        # the finalizer can remove that non-requirement and enforce the glibc
+        # 2.31 ceiling before auditwheel repairs and tags the wheel.
         mkdir -p /out/unrepaired
         maturin build --release --compatibility linux --auditwheel skip --out /out/unrepaired/
         shopt -s nullglob
@@ -254,7 +251,7 @@ runs:
         # macOS/Windows repair edge case) before it reaches PyPI -- alpha/beta/rc
         # tags publish with no other gate on the native wheel's importability.
         WORKSPACE_DIR="$(pwd)"
-        WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"
+        WHEEL_DIR="$(realpath "${{ inputs.out-dir }}")"
         TMP_DIR="$(mktemp -d)"
         cd "$TMP_DIR"
         uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \

@@ -28,11 +28,14 @@ requires_toolchain = pytest.mark.skipif(
     reason="needs Linux with gcc, readelf, objdump and patchelf",
 )
 
-# dlopen is versioned GLIBC_2.34 in any glibc >= 2.34 build host, so an
-# extension that references it requires glibc 2.34 at runtime.
+# The high-floor fixture links against a synthetic provider which exports a
+# GLIBC_2.32 version. That is deterministic across build hosts, unlike libc
+# symbols whose versions depend on the host's glibc.
 _HIGH_GLIBC_SOURCE = (
-    "#include <dlfcn.h>\nvoid *ext_entry(void) { return (void *)&dlopen; }\n"
+    "extern void high_versioned(void);\nvoid ext_entry(void) { high_versioned(); }\n"
 )
+_HIGH_GLIBC_PROVIDER_SOURCE = "void high_versioned(void) {}\n"
+_HIGH_GLIBC_VERSION_SCRIPT = "GLIBC_2.32 { global: high_versioned; };\n"
 _LOW_GLIBC_SOURCE = "int ext_entry(void) { return 0; }\n"
 # getrandom was introduced in glibc 2.25.  The ELF symbol is made weak below
 # so this mirrors Rust's optional syscall-wrapper reference.
@@ -73,13 +76,42 @@ def _record_hash(data: bytes) -> str:
 
 
 def _build_wheel(
-    tmp_path: Path, source: str, *, make_weak_symbol: str | None = None
+    tmp_path: Path,
+    source: str,
+    *,
+    make_weak_symbol: str | None = None,
+    requires_high_glibc: bool = False,
 ) -> Path:
     src = tmp_path / "ext.c"
     src.write_text(source)
     so = tmp_path / "chunkhound_native.abi3.so"
+    command = ["gcc", "-shared", "-fPIC", "-o", str(so), str(src)]
+    if requires_high_glibc:
+        provider = tmp_path / "libversioned-provider.so"
+        provider_src = tmp_path / "provider.c"
+        provider_map = tmp_path / "provider.map"
+        provider_src.write_text(_HIGH_GLIBC_PROVIDER_SOURCE)
+        provider_map.write_text(_HIGH_GLIBC_VERSION_SCRIPT)
+        subprocess.run(
+            [
+                "gcc",
+                "-shared",
+                "-fPIC",
+                "-Wl,--version-script",
+                f"-Wl,{provider_map}",
+                "-Wl,-soname,libversioned-provider.so",
+                "-o",
+                str(provider),
+                str(provider_src),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        command.extend([f"-L{tmp_path}", "-lversioned-provider"])
+    else:
+        command.append("-ldl")
     subprocess.run(
-        ["gcc", "-shared", "-fPIC", "-o", str(so), str(src), "-ldl"],
+        command,
         check=True,
         capture_output=True,
     )
@@ -117,7 +149,7 @@ def _run_finalizer(wheel: Path, max_glibc: str) -> subprocess.CompletedProcess[s
 
 @requires_toolchain
 def test_wheel_requiring_glibc_above_floor_is_rejected(tmp_path: Path) -> None:
-    wheel = _build_wheel(tmp_path, _HIGH_GLIBC_SOURCE)
+    wheel = _build_wheel(tmp_path, _HIGH_GLIBC_SOURCE, requires_high_glibc=True)
     result = _run_finalizer(wheel, "2.31")
     assert result.returncode != 0
     assert "exceeds glibc 2.31 floor" in result.stderr
@@ -146,7 +178,7 @@ def test_weak_versioned_getrandom_is_unversioned_and_record_is_rewritten(
     ).stdout
     assert "WEAK" in next(line for line in before.splitlines() if "getrandom@" in line)
 
-    result = _run_finalizer(wheel, "2.24")
+    result = _run_finalizer(wheel, "2.31")
     assert result.returncode == 0, result.stderr
     assert "cleared glibc version on weak symbol 'getrandom'" in result.stdout
 
@@ -172,3 +204,26 @@ def test_weak_versioned_getrandom_is_unversioned_and_record_is_rewritten(
         _record_hash(extension_data),
         str(len(extension_data)),
     ]
+
+
+@requires_toolchain
+def test_strong_versioned_getrandom_is_not_unversioned(tmp_path: Path) -> None:
+    wheel = _build_wheel(tmp_path, _WEAK_GETRANDOM_SOURCE)
+
+    result = _run_finalizer(wheel, "2.24")
+
+    assert result.returncode != 0
+    assert "cleared glibc version" not in result.stdout
+    assert "exceeds glibc 2.24 floor" in result.stderr
+
+
+@requires_toolchain
+def test_unversioned_weak_symbol_does_not_hide_above_floor_version_need(
+    tmp_path: Path,
+) -> None:
+    wheel = _build_wheel(tmp_path, _WEAK_GETRANDOM_SOURCE, make_weak_symbol="getrandom")
+
+    result = _run_finalizer(wheel, "2.24")
+
+    assert result.returncode != 0
+    assert "exceeds glibc 2.24 floor" in result.stderr

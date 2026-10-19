@@ -204,7 +204,9 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
         "auditwheel repair --plat"
     )
     assert '--out "${{ inputs.out-dir }}/"' in other_build_run
-    assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
+    # realpath keeps workspace-relative inputs working and preserves absolute ones.
+    assert 'WHEEL_DIR="$(realpath "${{ inputs.out-dir }}")"' in smoke_run
+    assert smoke_run.index("WHEEL_DIR=") < smoke_run.index('cd "$TMP_DIR"')
 
 
 def test_prepare_release_enforces_supported_matrix_for_runtime_verifier() -> None:
