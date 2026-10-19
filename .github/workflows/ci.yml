@@ -226,16 +226,16 @@ jobs:
 
   # Installs the wheels already built by watchman-runtime-validation's
   # ubuntu-latest leg on hosts with no Rust toolchain:
-  # - ubuntu:20.04 (glibc 2.31): the repaired native wheel alone, exercising
-  #   the manylinux_2_31 floor at runtime (the build also enforces it
-  #   statically via scripts/finalize_manylinux_wheel.py).
-  # - ubuntu:22.04 + Python 3.10: main + native wheel together, the way a
-  #   user on a common LTS installs them. The main wheel is installed with
-  #   its PyPI dependencies first, then the branch native wheel replaces the
-  #   PyPI chunkhound-native with --no-deps -- CI native wheels keep
-  #   Cargo.toml's placeholder version, which can't satisfy the main wheel's
-  #   chunkhound-native>=X pin (same approach as
-  #   scripts/verify_watchman_live_indexing_e2e.py).
+  # - ubuntu:20.04 (glibc 2.31) verifies the claimed manylinux_2_31 floor by
+  #   installing the main + native wheels together and exercising their public
+  #   native API at runtime (the build also enforces it statically via
+  #   scripts/finalize_manylinux_wheel.py).
+  # - ubuntu:22.04 + Python 3.10 retains the same combined install on a common
+  #   LTS. The main wheel is installed with its PyPI dependencies first, then
+  #   the branch native wheel replaces the PyPI chunkhound-native with
+  #   --no-deps -- CI native wheels keep Cargo.toml's placeholder version,
+  #   which can't satisfy the main wheel's chunkhound-native>=X pin (same
+  #   approach as scripts/verify_watchman_live_indexing_e2e.py).
   old-linux-wheel-smoke:
     needs: watchman-runtime-validation
     runs-on: ubuntu-latest
@@ -252,7 +252,7 @@ jobs:
           path: old-linux-dist
           merge-multiple: true
 
-      - name: Smoke test native wheel on Ubuntu 20.04 (glibc 2.31)
+      - name: Install main + native wheels on Ubuntu 20.04 (glibc 2.31) and smoke test
         run: |
           cat > "$RUNNER_TEMP/glibc-2-31-smoke.sh" <<'CONTAINER_SCRIPT'
           set -euo pipefail
@@ -262,9 +262,13 @@ jobs:
           # Share the build bootstrap pin so this smoke test stays reproducible
           # and independent of a future GNU uv release's glibc requirement.
           bash /work/scripts/install_pinned_musl_uv.sh /tmp/uv
-          /tmp/uv/uv run --no-project --python 3.12 \
-            --with /dist/chunkhound_native-*.whl \
-            python /work/scripts/smoke_test_native_wheel.py
+          /tmp/uv/uv venv --python 3.12 /tmp/venv
+          /tmp/uv/uv pip install --python /tmp/venv/bin/python \
+            --no-cache-dir /dist/chunkhound-*.whl
+          /tmp/uv/uv pip install --python /tmp/venv/bin/python \
+            --no-cache-dir --reinstall --no-deps /dist/chunkhound_native-*.whl
+          /tmp/venv/bin/python /work/scripts/smoke_test_native_wheel.py
+          /tmp/venv/bin/chunkhound --version
           CONTAINER_SCRIPT
           docker run --rm \
             -v "$(pwd)":/work:ro \
