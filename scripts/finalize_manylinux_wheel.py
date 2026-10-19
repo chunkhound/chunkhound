@@ -1,9 +1,9 @@
 """Post-process a repaired Linux chunkhound_native wheel and enforce its glibc floor.
 
-Run inside the manylinux_2_28 build container (needs `readelf`, `objdump` and
+Run inside the manylinux_2_31 build container (needs `readelf`, `objdump` and
 `patchelf` on PATH) right after `maturin build --auditwheel repair`:
 
-    python scripts/finalize_manylinux_wheel.py <wheel> --max-glibc 2.28
+    python scripts/finalize_manylinux_wheel.py <wheel> --max-glibc 2.31
 
 1. Clears the glibc symbol version from Rust std's weak `statx`/`getrandom`
    references in the extension module. Rust references both as true ELF weak
@@ -100,7 +100,7 @@ def _rewrite_wheel(wheel: Path, root: Path, patched: set[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("wheel", type=Path)
-    parser.add_argument("--max-glibc", required=True, help="e.g. 2.28")
+    parser.add_argument("--max-glibc", required=True, help="e.g. 2.31")
     args = parser.parse_args()
     max_glibc = _parse_version(args.max_glibc)
 

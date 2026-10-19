@@ -574,11 +574,11 @@ class TestDocsVersionWorkflowContract:
         smoke_step = next(
             step
             for step in steps
-            if step["name"] == "Smoke test native wheel on Ubuntu 18.04 (glibc 2.27)"
+            if step["name"] == "Smoke test native wheel on Ubuntu 20.04 (glibc 2.31)"
         )
 
         assert job["needs"] == "watchman-runtime-validation"
-        assert "ubuntu:18.04@sha256:" in smoke_step["run"]
+        assert "ubuntu:20.04@sha256:" in smoke_step["run"]
         assert "--python 3.12" in smoke_step["run"]
         assert "chunkhound_native-*.whl" in smoke_step["run"]
 

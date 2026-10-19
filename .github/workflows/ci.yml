@@ -226,8 +226,8 @@ jobs:
 
   # Installs the wheels already built by watchman-runtime-validation's
   # ubuntu-latest leg on hosts with no Rust toolchain:
-  # - ubuntu:18.04 (glibc 2.27): the repaired native wheel alone, exercising
-  #   the manylinux_2_27 floor at runtime (the build also enforces it
+  # - ubuntu:20.04 (glibc 2.31): the repaired native wheel alone, exercising
+  #   the manylinux_2_31 floor at runtime (the build also enforces it
   #   statically via scripts/finalize_manylinux_wheel.py).
   # - ubuntu:22.04 + Python 3.10: main + native wheel together, the way a
   #   user on a common LTS installs them. The main wheel is installed with
@@ -252,9 +252,9 @@ jobs:
           path: old-linux-dist
           merge-multiple: true
 
-      - name: Smoke test native wheel on Ubuntu 18.04 (glibc 2.27)
+      - name: Smoke test native wheel on Ubuntu 20.04 (glibc 2.31)
         run: |
-          cat > "$RUNNER_TEMP/glibc-2-27-smoke.sh" <<'CONTAINER_SCRIPT'
+          cat > "$RUNNER_TEMP/glibc-2-31-smoke.sh" <<'CONTAINER_SCRIPT'
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq
@@ -268,9 +268,9 @@ jobs:
           docker run --rm \
             -v "$(pwd)":/work:ro \
             -v "$(pwd)/old-linux-dist":/dist:ro \
-            -v "$RUNNER_TEMP/glibc-2-27-smoke.sh":/tmp/smoke.sh:ro \
+            -v "$RUNNER_TEMP/glibc-2-31-smoke.sh":/tmp/smoke.sh:ro \
             -w /tmp \
-            ubuntu:18.04@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98 \
+            ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214 \
             bash /tmp/smoke.sh
 
       - name: Install main + native wheels on Ubuntu 22.04 + Python 3.10 and smoke test

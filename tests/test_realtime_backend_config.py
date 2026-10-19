@@ -171,3 +171,40 @@ def test_realtime_service_logs_install_default_backend_resolution(
         "explicit realtime backend is configured."
     ]
     assert service._last_warning is None
+
+
+@pytest.mark.parametrize(
+    ("host_libc", "expected"),
+    [
+        (("glibc", "2.31"), "watchdog"),
+        (("glibc", "2.35"), "watchdog"),
+        (("glibc", "2.36"), "watchman"),
+        (("musl", "1.2"), "watchdog"),
+    ],
+)
+def test_default_backend_falls_back_to_watchdog_when_host_glibc_is_too_old(
+    monkeypatch, host_libc, expected
+):
+    monkeypatch.setattr(watchman_runtime_loader.platform, "libc_ver", lambda: host_libc)
+    monkeypatch.setattr(
+        watchman_runtime_loader,
+        "_normalize_platform_key",
+        lambda **_: ("linux", "x86_64"),
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader,
+        "_read_packaged_json",
+        lambda _path: {
+            "binary": "bin/watchman",
+            "support_files": [],
+            "min_glibc": "2.36",
+        },
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader, "_packaged_resource_exists", lambda _path: True
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader, "_running_from_source_tree", lambda: False
+    )
+
+    assert default_realtime_backend_for_current_install() == expected

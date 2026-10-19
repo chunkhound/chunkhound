@@ -8,17 +8,17 @@ description: >
   watchman-rollout-gate jobs (all with skip-tag-version-patch: true, since a
   CI branch/PR ref has no release tag to derive a version from). Published
   native-wheel support is
-  macOS arm64, Linux x86_64/aarch64 (manylinux_2_27), and Windows x86_64.
+  macOS arm64, Linux x86_64/aarch64 (manylinux_2_31), and Windows x86_64.
   Intel macOS is deliberately excluded: free Intel macOS runners are retired,
   and arm64 cross-compilation has unresolved PyO3 framework-linking failures.
-  Linux wheels are built inside a pinned Ubuntu 18.04 container (glibc 2.27)
+  Linux wheels are built inside a pinned Ubuntu 20.04 container (glibc 2.31)
   instead of on the runner's own glibc (>=2.34 on ubuntu-latest/ubuntu-24.04-arm),
-  so the wheel installs on glibc 2.27+ hosts (including Ubuntu 18.04) rather
+  so the wheel installs on glibc 2.31+ hosts (including Ubuntu 20.04) rather
   than only 2.34+. scripts/finalize_manylinux_wheel.py then un-versions Rust
   std's weak statx/getrandom references, fails the build if any ELF file in
-  the wheel needs a GLIBC_ symbol newer than 2.27, and rewrites RECORD for the
+  the wheel needs a GLIBC_ symbol newer than 2.31, and rewrites RECORD for the
   patched extension (see that script for details). DuckDB's bundled prebuilt
-  library needs glibc 2.25, below the 2.27 floor. musl needs a separate
+  library needs glibc 2.25, below the 2.31 floor. musl needs a separate
   build; no native sdist fallback exists. Assumes the
   calling job has already checked out the repo and installed `uv`.
 
@@ -44,15 +44,15 @@ runs:
       shell: bash
       run: uv python install 3.12
 
-    - name: Resolve manylinux_2_27 build pins
+    - name: Resolve manylinux_2_31 build pins
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        # Ubuntu 18.04 is the oldest supported glibc host (2.27). Pin its
+        # Ubuntu 20.04 is the oldest supported glibc host (2.31). Pin its
         # multi-arch manifest so a rerun uses the same baseline; bootstrap the
         # current Rust/maturin toolchain inside it below.
         {
-          echo "MANYLINUX_IMAGE=ubuntu:18.04@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98"
+          echo "MANYLINUX_IMAGE=ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214"
           echo "MANYLINUX_RUST_TOOLCHAIN=1.99.0"
           echo "MANYLINUX_MATURIN_VERSION=1.15.0"
           echo "MANYLINUX_UV_VERSION=0.13.1"
@@ -66,13 +66,13 @@ runs:
     # host setup-rust-toolchain cache (host target/) is unused there. Cache
     # the container's rustup/cargo homes and target dir instead, outside the
     # workspace so a caller's own target/ cache never picks them up.
-    - name: Cache manylinux_2_27 Rust build
+    - name: Cache manylinux_2_31 Rust build
       if: runner.os == 'Linux'
       uses: actions/cache@v4
       with:
         path: ${{ runner.temp }}/manylinux-build
-        key: manylinux_2_27-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: manylinux_2_27-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-
+        key: manylinux_2_31-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: manylinux_2_31-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-
 
     - name: Patch Cargo.toml version from git tag
       shell: bash
@@ -104,7 +104,7 @@ runs:
         PYEOF
         fi
 
-    - name: Build native wheel (Linux, manylinux_2_27 container)
+    - name: Build native wheel (Linux, manylinux_2_31 container)
       if: runner.os == 'Linux'
       shell: bash
       env:
@@ -112,7 +112,7 @@ runs:
         OUT_DIR: ${{ inputs.out-dir }}
       run: |
         # No QEMU: ubuntu-24.04-arm is itself an aarch64 host, so Ubuntu
-        # 18.04's multi-arch image runs natively there.
+        # 20.04's multi-arch image runs natively there.
         BUILD_CACHE="$RUNNER_TEMP/manylinux-build"
         mkdir -p "$BUILD_CACHE/home" "$OUT_DIR"
         # Resolve relative inputs against the workspace, then mount the output
@@ -126,9 +126,9 @@ runs:
         mv pyproject.toml pyproject.toml.hidden
         trap 'mv pyproject.toml.hidden pyproject.toml' EXIT
 
-        cat > "$RUNNER_TEMP/build-manylinux-2-27.sh" <<'CONTAINER_SCRIPT'
+        cat > "$RUNNER_TEMP/build-manylinux-2-31.sh" <<'CONTAINER_SCRIPT'
         set -euo pipefail
-        # The base image deliberately supplies glibc 2.27 but no build tools.
+        # The base image deliberately supplies glibc 2.31 but no build tools.
         # Build as root inside the container, then restore host ownership of
         # its mounted output and cache so subsequent action steps and cache
         # save/restore can access them.
@@ -147,10 +147,10 @@ runs:
             x86_64|aarch64) uv_arch="$(uname -m)" ;;
             *) echo "Unsupported Linux arch for uv: $(uname -m)" >&2; exit 1 ;;
           esac
-          # The glibc-gnu release build requires glibc 2.28+ (statx), newer
-          # than this container's 2.27 -- the exact problem this build
-          # floors for chunkhound_native itself. Use the statically linked
-          # musl build instead; it has no glibc floor at all.
+          # The statically linked musl uv build is used so the bootstrap
+          # tool has no glibc requirement at all. The glibc-gnu build needs
+          # glibc 2.28+ (statx), which this 2.31 container satisfies, but the
+          # musl build keeps the bootstrap independent of the container's libc.
           curl -LsSf "https://github.com/astral-sh/uv/releases/download/$MANYLINUX_UV_VERSION/uv-${uv_arch}-unknown-linux-musl.tar.gz" \
             | tar -xz --strip-components=1 -C /build/uv
         fi
@@ -161,7 +161,7 @@ runs:
         rustup toolchain install "$MANYLINUX_RUST_TOOLCHAIN" --profile minimal
         rustup default "$MANYLINUX_RUST_TOOLCHAIN"
         [[ -x /build/venv/bin/python ]] || uv venv --python 3.12 /build/venv
-        # auditwheel supplies the PEP 600 manylinux_2_27 repair policy;
+        # auditwheel supplies the PEP 600 manylinux_2_31 repair policy;
         # patchelf is maturin's optional extra needed for repair.
         uv pip install --python /build/venv/bin/python -q \
           "maturin[patchelf]==$MANYLINUX_MATURIN_VERSION" "auditwheel==6.8.2"
@@ -170,7 +170,7 @@ runs:
         # Rust std emits weak statx/getrandom references with a symbol version
         # from the compiler's build host. Build an un-repaired wheel first so
         # the finalizer can remove that non-requirement before auditwheel
-        # validates the requested manylinux_2_27 policy. Running auditwheel
+        # validates the requested manylinux_2_31 policy. Running auditwheel
         # through maturin first would reject statx@GLIBC_2.28 before the
         # finalizer gets a chance to patch it.
         mkdir -p /out/unrepaired
@@ -181,16 +181,16 @@ runs:
           echo "Expected exactly one un-repaired chunkhound_native wheel" >&2
           exit 1
         fi
-        python /work/scripts/finalize_manylinux_wheel.py "${wheels[0]}" --max-glibc 2.27
+        python /work/scripts/finalize_manylinux_wheel.py "${wheels[0]}" --max-glibc 2.31
         duckdb_lib="$(find "$CARGO_TARGET_DIR" -type f -name libduckdb.so -print -quit)"
         if [[ -z "$duckdb_lib" ]]; then
           echo "Could not find the DuckDB shared library for auditwheel repair" >&2
           exit 1
         fi
         # Auditwheel's CLI requires the architecture-qualified PEP 600 policy
-        # name (for example, manylinux_2_27_aarch64), unlike maturin's base
+        # name (for example, manylinux_2_31_aarch64), unlike maturin's base
         # policy spelling. Repair both bundles DuckDB and validates every ELF.
-        auditwheel repair --plat "manylinux_2_27_$(uname -m)" --wheel-dir /out \
+        auditwheel repair --plat "manylinux_2_31_$(uname -m)" --wheel-dir /out \
           --ldpaths "$(dirname "$duckdb_lib")" "${wheels[0]}"
         BUILD_SCRIPT
         chown -R "$HOST_UID:$HOST_GID" /build /out
@@ -200,7 +200,7 @@ runs:
           -v "$(pwd)":/work \
           -v "$OUT_DIR":/out \
           -v "$BUILD_CACHE":/build \
-          -v "$RUNNER_TEMP/build-manylinux-2-27.sh":/tmp/build-manylinux-2-27.sh:ro \
+          -v "$RUNNER_TEMP/build-manylinux-2-31.sh":/tmp/build-manylinux-2-31.sh:ro \
           -e DUCKDB_DOWNLOAD_LIB \
           -e HOST_UID="$(id -u)" \
           -e HOST_GID="$(id -g)" \
@@ -209,7 +209,7 @@ runs:
           -e MANYLINUX_UV_VERSION \
           -e RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN' \
           "$MANYLINUX_IMAGE" \
-          bash /tmp/build-manylinux-2-27.sh
+          bash /tmp/build-manylinux-2-31.sh
 
     - name: Build native wheel (macOS/Windows)
       if: runner.os != 'Linux'
