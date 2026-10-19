@@ -259,8 +259,9 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq
           apt-get install -y -qq ca-certificates curl
-          curl -LsSf https://astral.sh/uv/install.sh \
-            | env UV_UNMANAGED_INSTALL=/tmp/uv sh
+          # Share the build bootstrap pin so this smoke test stays reproducible
+          # and independent of a future GNU uv release's glibc requirement.
+          bash /work/scripts/install_pinned_musl_uv.sh /tmp/uv
           /tmp/uv/uv run --no-project --python 3.12 \
             --with /dist/chunkhound_native-*.whl \
             python /work/scripts/smoke_test_native_wheel.py

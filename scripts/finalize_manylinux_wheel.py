@@ -1,7 +1,8 @@
-"""Post-process a repaired Linux chunkhound_native wheel and enforce its glibc floor.
+"""Post-process an unrepaired Linux chunkhound_native wheel before auditwheel repair.
 
-Run inside the manylinux_2_31 build container (needs `readelf`, `objdump` and
-`patchelf` on PATH) right after `maturin build --auditwheel repair`:
+Run inside the pinned Ubuntu 20.04 (glibc 2.31) build container (needs
+`readelf`, `objdump` and `patchelf` on PATH) after
+`maturin build --auditwheel skip` and before `auditwheel repair`:
 
     python scripts/finalize_manylinux_wheel.py <wheel> --max-glibc 2.31
 
@@ -11,9 +12,9 @@ Run inside the manylinux_2_31 build container (needs `readelf`, `objdump` and
    missing; the version stamped on them is a build-host artifact (`statx`
    debuted in glibc 2.28), not a real requirement. patchelf runs only when the
    versioned reference is actually present, and any patchelf failure is fatal.
-2. Fails if any ELF file in the wheel (extension + bundled .libs/) still
-   requires a GLIBC_x.y symbol version above --max-glibc. This is the check
-   that keeps the wheel's manylinux tag honest.
+2. Fails if any ELF file present in the input wheel requires a GLIBC_x.y
+   symbol version above --max-glibc. auditwheel adds bundled .libs/ during the
+   subsequent repair stage. This check keeps the wheel's manylinux tag honest.
 3. Rewrites the wheel with RECORD hashes/sizes updated for the patched files.
 """
 

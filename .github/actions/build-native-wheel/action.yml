@@ -55,7 +55,6 @@ runs:
           echo "MANYLINUX_IMAGE=ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214"
           echo "MANYLINUX_RUST_TOOLCHAIN=1.99.0"
           echo "MANYLINUX_MATURIN_VERSION=1.15.0"
-          echo "MANYLINUX_UV_VERSION=0.13.1"
         } >> "$GITHUB_ENV"
 
     - name: Set up Rust toolchain
@@ -142,17 +141,9 @@ runs:
         export PATH="$CARGO_HOME/bin:/build/venv/bin:/build/uv:$PATH"
         bash -euo pipefail <<'BUILD_SCRIPT'
         if ! command -v uv >/dev/null; then
-          mkdir -p /build/uv
-          case "$(uname -m)" in
-            x86_64|aarch64) uv_arch="$(uname -m)" ;;
-            *) echo "Unsupported Linux arch for uv: $(uname -m)" >&2; exit 1 ;;
-          esac
-          # The statically linked musl uv build is used so the bootstrap
-          # tool has no glibc requirement at all. The glibc-gnu build needs
-          # glibc 2.28+ (statx), which this 2.31 container satisfies, but the
-          # musl build keeps the bootstrap independent of the container's libc.
-          curl -LsSf "https://github.com/astral-sh/uv/releases/download/$MANYLINUX_UV_VERSION/uv-${uv_arch}-unknown-linux-musl.tar.gz" \
-            | tar -xz --strip-components=1 -C /build/uv
+          # The static musl bootstrap has no glibc requirement. Share its pin
+          # with the oldest-runtime smoke job so the two cannot drift.
+          bash /work/scripts/install_pinned_musl_uv.sh /build/uv
         fi
         if ! command -v rustup >/dev/null; then
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -192,6 +183,8 @@ runs:
         # policy spelling. Repair both bundles DuckDB and validates every ELF.
         auditwheel repair --plat "manylinux_2_31_$(uname -m)" --wheel-dir /out \
           --ldpaths "$(dirname "$duckdb_lib")" "${wheels[0]}"
+        # /out is the action's published output: retain only the repaired wheel.
+        rm -rf /out/unrepaired
         BUILD_SCRIPT
         chown -R "$HOST_UID:$HOST_GID" /build /out
         CONTAINER_SCRIPT
@@ -206,7 +199,6 @@ runs:
           -e HOST_GID="$(id -g)" \
           -e MANYLINUX_RUST_TOOLCHAIN \
           -e MANYLINUX_MATURIN_VERSION \
-          -e MANYLINUX_UV_VERSION \
           -e RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN' \
           "$MANYLINUX_IMAGE" \
           bash /tmp/build-manylinux-2-31.sh

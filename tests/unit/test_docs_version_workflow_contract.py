@@ -579,6 +579,7 @@ class TestDocsVersionWorkflowContract:
 
         assert job["needs"] == "watchman-runtime-validation"
         assert "ubuntu:20.04@sha256:" in smoke_step["run"]
+        assert "install_pinned_musl_uv.sh /tmp/uv" in smoke_step["run"]
         assert "--python 3.12" in smoke_step["run"]
         assert "chunkhound_native-*.whl" in smoke_step["run"]
 

@@ -5,7 +5,12 @@ manylinux tag honest: a wheel that requires a newer GLIBC symbol version than
 --max-glibc must be rejected before it is published.
 """
 
+import base64
+import csv
+import hashlib
+import io
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
@@ -29,9 +34,47 @@ _HIGH_GLIBC_SOURCE = (
     "#include <dlfcn.h>\nvoid *ext_entry(void) { return (void *)&dlopen; }\n"
 )
 _LOW_GLIBC_SOURCE = "int ext_entry(void) { return 0; }\n"
+# getrandom was introduced in glibc 2.25.  The ELF symbol is made weak below
+# so this mirrors Rust's optional syscall-wrapper reference.
+_WEAK_GETRANDOM_SOURCE = (
+    "#define _GNU_SOURCE\n#include <sys/random.h>\n"
+    "void *ext_entry(void) { return (void *)&getrandom; }\n"
+)
 
 
-def _build_wheel(tmp_path: Path, source: str) -> Path:
+def _make_undefined_symbol_weak(elf: Path, symbol: str) -> None:
+    """Change one ELF64 dynamic undefined symbol from GLOBAL to WEAK."""
+    data = bytearray(elf.read_bytes())
+    assert data[:5] == b"\x7fELF\x02" and data[5] == 1  # 64-bit little-endian ELF
+    (section_offset,) = struct.unpack_from("<Q", data, 40)
+    section_size, section_count = struct.unpack_from("<HH", data, 58)
+    sections = [
+        struct.unpack_from("<IIQQQQIIQQ", data, section_offset + i * section_size)
+        for i in range(section_count)
+    ]
+    for section in sections:
+        # SHT_DYNSYM; sh_link points at its associated string table.
+        if section[1] != 11:
+            continue
+        strings = sections[section[6]]
+        for offset in range(section[4], section[4] + section[5], section[9]):
+            (name_offset,) = struct.unpack_from("<I", data, offset)
+            name_end = data.index(0, strings[4] + name_offset)
+            if data[strings[4] + name_offset : name_end].decode() == symbol:
+                data[offset + 4] = (data[offset + 4] & 0x0F) | 0x20  # STB_WEAK
+                elf.write_bytes(data)
+                return
+    raise AssertionError(f"dynamic symbol {symbol!r} not found in {elf}")
+
+
+def _record_hash(data: bytes) -> str:
+    encoded = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+    return f"sha256={encoded.decode('ascii')}"
+
+
+def _build_wheel(
+    tmp_path: Path, source: str, *, make_weak_symbol: str | None = None
+) -> Path:
     src = tmp_path / "ext.c"
     src.write_text(source)
     so = tmp_path / "chunkhound_native.abi3.so"
@@ -40,16 +83,27 @@ def _build_wheel(tmp_path: Path, source: str) -> Path:
         check=True,
         capture_output=True,
     )
+    if make_weak_symbol:
+        _make_undefined_symbol_weak(so, make_weak_symbol)
     wheel = tmp_path / "chunkhound_native-0.0.0-cp312-abi3-linux_x86_64.whl"
     dist = "chunkhound_native-0.0.0.dist-info"
+    contents = {
+        so.name: so.read_bytes(),
+        f"{dist}/METADATA": (
+            b"Metadata-Version: 2.1\nName: chunkhound-native\nVersion: 0.0.0\n"
+        ),
+        f"{dist}/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: false\n",
+    }
+    record_name = f"{dist}/RECORD"
+    record = io.StringIO()
+    writer = csv.writer(record, lineterminator="\n")
+    for name, data in contents.items():
+        writer.writerow((name, _record_hash(data), len(data)))
+    writer.writerow((record_name, "", ""))
     with zipfile.ZipFile(wheel, "w") as zf:
-        zf.write(so, so.name)
-        zf.writestr(
-            f"{dist}/METADATA",
-            "Metadata-Version: 2.1\nName: chunkhound-native\nVersion: 0.0.0\n",
-        )
-        zf.writestr(f"{dist}/WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: false\n")
-        zf.writestr(f"{dist}/RECORD", "")
+        for name, data in contents.items():
+            zf.writestr(name, data)
+        zf.writestr(record_name, record.getvalue())
     return wheel
 
 
@@ -74,3 +128,47 @@ def test_wheel_within_glibc_floor_is_accepted(tmp_path: Path) -> None:
     wheel = _build_wheel(tmp_path, _LOW_GLIBC_SOURCE)
     result = _run_finalizer(wheel, "2.31")
     assert result.returncode == 0, result.stderr
+
+
+@requires_toolchain
+def test_weak_versioned_getrandom_is_unversioned_and_record_is_rewritten(
+    tmp_path: Path,
+) -> None:
+    wheel = _build_wheel(tmp_path, _WEAK_GETRANDOM_SOURCE, make_weak_symbol="getrandom")
+    with zipfile.ZipFile(wheel) as zf:
+        extension = tmp_path / "before.abi3.so"
+        extension.write_bytes(zf.read("chunkhound_native.abi3.so"))
+    before = subprocess.run(
+        ["readelf", "--dyn-syms", "-W", str(extension)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "WEAK" in next(line for line in before.splitlines() if "getrandom@" in line)
+
+    result = _run_finalizer(wheel, "2.24")
+    assert result.returncode == 0, result.stderr
+    assert "cleared glibc version on weak symbol 'getrandom'" in result.stdout
+
+    with zipfile.ZipFile(wheel) as zf:
+        extension_data = zf.read("chunkhound_native.abi3.so")
+        extension.write_bytes(extension_data)
+        rows = list(
+            csv.reader(
+                io.StringIO(
+                    zf.read("chunkhound_native-0.0.0.dist-info/RECORD").decode()
+                )
+            )
+        )
+    after = subprocess.run(
+        ["readelf", "--dyn-syms", "-W", str(extension)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "getrandom@GLIBC_" not in after
+    record = {row[0]: row[1:] for row in rows}
+    assert record["chunkhound_native.abi3.so"] == [
+        _record_hash(extension_data),
+        str(len(extension_data)),
+    ]
