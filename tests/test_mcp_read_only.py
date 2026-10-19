@@ -192,6 +192,38 @@ async def test_read_only_deferred_start_sets_query_ready_and_skips_realtime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("realtime_backend", ["watchdog", "watchman"])
+async def test_read_only_never_constructs_realtime_for_any_backend(
+    populated_db_path, tmp_path, realtime_backend
+):
+    """read_only disables realtime indexing whatever backend is configured.
+
+    The flag is the contract: under read_only no realtime service is built,
+    so neither the watchdog observer nor the watchman sidecar can start.
+    """
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": populated_db_path, "read_only": True},
+        indexing={"realtime_backend": realtime_backend},
+    )
+    args = SimpleNamespace(path=str(tmp_path))
+    with (
+        patch("chunkhound.mcp_server.base.EmbeddingManager"),
+        patch("chunkhound.mcp_server.base.LLMManager"),
+        patch("chunkhound.mcp_server.base.RealtimeIndexingService") as realtime_cls,
+    ):
+        server = _ConcreteMCPServer(config=config, args=args)
+        await server.initialize()
+        await server._deferred_start_task
+        try:
+            realtime_cls.assert_not_called()
+            assert server.realtime_indexing is None
+            assert server._scan_progress["query_ready_at"] is not None
+        finally:
+            await server.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_read_only_daemon_status_reports_ready(populated_db_path, tmp_path):
     server = await _start_read_only_server(populated_db_path, tmp_path)
     try:
