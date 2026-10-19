@@ -9,7 +9,10 @@ Subclass overrides of _get_provider_name() / _get_default_base_url() are optiona
 """
 
 import asyncio
+import copy
 import json
+import time
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -18,6 +21,10 @@ from loguru import logger
 from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
+from chunkhound.core.utils.structured_reasoning_diagnostics import (
+    record_empty_failure,
+    structured_reasoning_failure_key,
+)
 from chunkhound.core.utils.token_utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import (
     LLMProvider,
@@ -25,6 +32,14 @@ from chunkhound.interfaces.llm_provider import (
     OutputLimitCapability,
     OutputLimitIntent,
     OutputLimitMetadata,
+)
+from chunkhound.providers.llm.capability_cache import (
+    ACCEPTED,
+    REJECTED,
+    UNKNOWN,
+    CapabilityState,
+    LLMCapabilityStore,
+    deadline_for,
 )
 from chunkhound.utils.json_extraction import (
     build_schema_system_instruction,
@@ -39,6 +54,14 @@ except ImportError:
     AsyncOpenAI = None  # type: ignore
     OPENAI_AVAILABLE = False
     logger.warning("OpenAI not available - install with: uv pip install openai")
+
+
+# Process-wide latch so a provider/model warns about rejected-capability empty
+# content once per process rather than once per provider instance.
+_EMPTY_STRUCTURED_WARNING_KEY: set[str] = set()
+# Report only empty failures observed within this window so a single historical
+# failure cannot keep the health signal alive forever.
+_EMPTY_STRUCTURED_HEALTH_WINDOW_SECONDS = 60 * 60
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -71,6 +94,8 @@ class OpenAICompatibleProvider(LLMProvider):
         reasoning_effort: str | None = None,
         synthesis_concurrency: int = 3,
         output_limit_omission: OutputLimitCapability = OutputLimitCapability.UNKNOWN,
+        structured_reasoning_disable_extra_body: Mapping[str, Any] | None = None,
+        capability_store: LLMCapabilityStore | None = None,
     ):
         """Initialize OpenAI-compatible provider.
 
@@ -98,6 +123,9 @@ class OpenAICompatibleProvider(LLMProvider):
             synthesis_concurrency: Recommended parallel synthesis operations count.
             output_limit_omission: Authoritative omission capability for the
                 configured endpoint. Generic and custom endpoints default to unknown.
+            structured_reasoning_disable_extra_body: Extra request body used only for
+                structured calls when the endpoint accepts it.
+            capability_store: Persistent structured-request capability store.
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -116,6 +144,23 @@ class OpenAICompatibleProvider(LLMProvider):
         self._synthesis_concurrency = synthesis_concurrency
         self._output_limit_metadata = OutputLimitMetadata(
             omission=output_limit_omission
+        )
+        self._structured_reasoning_disable_extra_body = (
+            structured_reasoning_disable_extra_body
+        )
+        self._capability_store = capability_store or LLMCapabilityStore()
+        self._structured_reasoning_capability: CapabilityState = UNKNOWN
+        self._structured_reasoning_capability_deadline: float | None = None
+        if self._structured_reasoning_disable_extra_body is not None:
+            (
+                self._structured_reasoning_capability,
+                self._structured_reasoning_capability_deadline,
+            ) = self._capability_store.get_with_expiry(self.name, self._model)
+        self._structured_reasoning_empty_failure_times: list[float] = []
+        self._structured_reasoning_last_empty_ts: float | None = None
+        self._structured_reasoning_capability_lock: asyncio.Lock | None = None
+        self._structured_reasoning_capability_loop: asyncio.AbstractEventLoop | None = (
+            None
         )
 
         # Use provided base_url, or default_base_url, or subclass override
@@ -195,6 +240,7 @@ class OpenAICompatibleProvider(LLMProvider):
         response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build chat-completions kwargs for subclasses to extend safely."""
+        self._expire_capability_if_due()
         max_tokens_param = self._get_max_completion_tokens_param_name()
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -205,6 +251,13 @@ class OpenAICompatibleProvider(LLMProvider):
             kwargs[max_tokens_param] = max_completion_tokens
         if response_format is not None:
             kwargs["response_format"] = response_format
+            if (
+                self._structured_reasoning_disable_extra_body is not None
+                and self._structured_reasoning_capability != REJECTED
+            ):
+                kwargs["extra_body"] = copy.deepcopy(
+                    self._structured_reasoning_disable_extra_body
+                )
         if self._reasoning_effort:
             kwargs["reasoning_effort"] = self._reasoning_effort
         return kwargs
@@ -355,6 +408,152 @@ class OpenAICompatibleProvider(LLMProvider):
             logger.error(f"{self.name} completion failed: {e}")
             raise RuntimeError(f"LLM completion failed: {e}") from e
 
+    async def _create_structured_completion(self, kwargs: dict[str, Any]) -> Any:
+        """Create a structured completion with sticky payload negotiation."""
+        self._expire_capability_if_due()
+        if self._structured_reasoning_disable_extra_body is None:
+            return await self._create_chat_completion(**kwargs)
+
+        state: CapabilityState = self._structured_reasoning_capability
+        kwargs = self._set_structured_payload(kwargs, state != REJECTED)
+        if state == UNKNOWN:
+            async with self._capability_lock():
+                self._expire_capability_if_due()
+                state = self._structured_reasoning_capability
+                if state == UNKNOWN:
+                    return await self._probe_structured_reasoning_payload(kwargs)
+                kwargs = self._set_structured_payload(kwargs, state == ACCEPTED)
+            return await self._send_flagged(kwargs)
+
+        return await self._send_flagged(kwargs)
+
+    async def _send_flagged(self, kwargs: dict[str, Any]) -> Any:
+        try:
+            return await self._create_chat_completion(**kwargs)
+        except Exception as error:
+            if "extra_body" not in kwargs or not self._is_payload_rejection(error):
+                raise
+            return await self._replay_without_payload(kwargs)
+
+    async def _probe_structured_reasoning_payload(self, kwargs: dict[str, Any]) -> Any:
+        try:
+            response = await self._create_chat_completion(**kwargs)
+        except Exception as error:
+            if not self._is_payload_rejection(error):
+                raise
+            return await self._replay_without_payload(kwargs)
+
+        self._set_structured_reasoning_capability(ACCEPTED)
+        return response
+
+    async def _replay_without_payload(self, kwargs: dict[str, Any]) -> Any:
+        """Retry an unflagged request and record the capability rejection."""
+        response = await self._create_chat_completion(
+            **self._set_structured_payload(kwargs, False)
+        )
+        self._set_structured_reasoning_capability(REJECTED)
+        return response
+
+    def _set_structured_payload(
+        self, kwargs: dict[str, Any], enabled: bool
+    ) -> dict[str, Any]:
+        updated = dict(kwargs)
+        if enabled:
+            updated["extra_body"] = copy.deepcopy(
+                self._structured_reasoning_disable_extra_body or {}
+            )
+        else:
+            updated.pop("extra_body", None)
+        return updated
+
+    @staticmethod
+    def _is_payload_rejection(error: Exception) -> bool:
+        response = getattr(error, "response", None)
+        return getattr(response, "status_code", None) in {400, 422}
+
+    def _expire_capability_if_due(self) -> None:
+        """Reset expired in-memory capability decisions without writing."""
+        if (
+            self._structured_reasoning_disable_extra_body is None
+            or self._structured_reasoning_capability == UNKNOWN
+        ):
+            return
+        deadline = self._structured_reasoning_capability_deadline
+        if deadline is None or time.time() < deadline:
+            return
+        self._structured_reasoning_capability = UNKNOWN
+        self._structured_reasoning_capability_deadline = None
+
+    def _set_structured_reasoning_capability(self, state: CapabilityState) -> None:
+        if self._structured_reasoning_capability == state:
+            return
+        self._structured_reasoning_capability = state
+        try:
+            deadline = self._capability_store.set(self.name, self._model, state)
+            if deadline is None:
+                deadline = deadline_for(state, time.time())
+        except OSError as error:
+            logger.warning(
+                f"Failed to persist {self.name} structured reasoning "
+                f"capability: {error}"
+            )
+            deadline = deadline_for(state, time.time())
+        self._structured_reasoning_capability_deadline = deadline
+
+    def _capability_lock(self) -> asyncio.Lock:
+        """Return a capability lock bound to the current event loop."""
+        loop = asyncio.get_running_loop()
+        if (
+            self._structured_reasoning_capability_lock is None
+            or self._structured_reasoning_capability_loop is not loop
+        ):
+            self._structured_reasoning_capability_lock = asyncio.Lock()
+            self._structured_reasoning_capability_loop = loop
+        return self._structured_reasoning_capability_lock
+
+    def _record_empty_structured_content(self) -> None:
+        """Count an empty structured response only under a rejected capability."""
+        if self._structured_reasoning_capability != REJECTED:
+            return
+        now = time.time()
+        self._structured_reasoning_empty_failure_times.append(now)
+        self._structured_reasoning_last_empty_ts = now
+        self._prune_empty_failure_times(now)
+        record_empty_failure(self)
+        warning_key = structured_reasoning_failure_key(self)
+        if warning_key not in _EMPTY_STRUCTURED_WARNING_KEY:
+            _EMPTY_STRUCTURED_WARNING_KEY.add(warning_key)
+            logger.warning(
+                f"{self.name}:{self._model} returned empty structured content "
+                "while reasoning-disable is known-rejected; results may be incomplete."
+            )
+
+    def _prune_empty_failure_times(self, now: float) -> None:
+        cutoff = now - _EMPTY_STRUCTURED_HEALTH_WINDOW_SECONDS
+        self._structured_reasoning_empty_failure_times = [
+            observed
+            for observed in self._structured_reasoning_empty_failure_times
+            if observed >= cutoff
+        ]
+
+    def get_structured_reasoning_health(self) -> dict[str, Any] | None:
+        """Read-only health for recent empty structured failures under rejection."""
+        cutoff = time.time() - _EMPTY_STRUCTURED_HEALTH_WINDOW_SECONDS
+        empty_failures = sum(
+            1
+            for observed in self._structured_reasoning_empty_failure_times
+            if observed >= cutoff
+        )
+        if empty_failures == 0:
+            return None
+        return {
+            "provider": self.name,
+            "model": self._model,
+            "capability": self._structured_reasoning_capability,
+            "empty_failures": empty_failures,
+            "last_empty_ts": self._structured_reasoning_last_empty_ts,
+        }
+
     async def complete_structured(
         self,
         prompt: str,
@@ -394,8 +593,8 @@ class OpenAICompatibleProvider(LLMProvider):
                     messages.append({"role": "system", "content": system})
                 messages.append({"role": "user", "content": prompt})
 
-                response = await self._create_chat_completion(
-                    **self._build_chat_completion_kwargs(
+                response = await self._create_structured_completion(
+                    self._build_chat_completion_kwargs(
                         messages,
                         resolved_max_tokens,
                         request_timeout,
@@ -426,8 +625,8 @@ class OpenAICompatibleProvider(LLMProvider):
                     {"role": "user", "content": prompt},
                 ]
 
-                response = await self._create_chat_completion(
-                    **self._build_chat_completion_kwargs(
+                response = await self._create_structured_completion(
+                    self._build_chat_completion_kwargs(
                         messages,
                         resolved_max_tokens,
                         request_timeout,
@@ -469,9 +668,27 @@ class OpenAICompatibleProvider(LLMProvider):
                     f"{self.name} structured completion returned empty content "
                     f"(finish_reason={finish_reason})"
                 )
+                self._record_empty_structured_content()
+                diagnostic = (
+                    "LLM structured completion returned empty response "
+                    f"(finish_reason={finish_reason}, provider={self.name}, "
+                    f"model={self._model}"
+                )
+                if (
+                    self._structured_reasoning_disable_extra_body is not None
+                    and self._structured_reasoning_capability == REJECTED
+                ):
+                    raise RuntimeError(
+                        f"{diagnostic}, capability=rejected). "
+                        "This provider/model may be unable to disable reasoning for "
+                        "structured calls, so structured output cannot be relied on. "
+                        "Configure a different model for structured calls "
+                        "(`llm.utility_model` for utility stages, or the synthesis "
+                        "model for synthesis stages)."
+                    )
                 raise RuntimeError(
-                    f"LLM structured completion returned empty response "
-                    f"(finish_reason={finish_reason})"
+                    f"{diagnostic}). This may indicate a content filter, API error, "
+                    "or model refusal."
                 )
 
             # Parse JSON

@@ -45,6 +45,11 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    @property
+    def supports_embedding_sql_queries(self) -> bool:
+        """Whether targeted chunk/file/embedding SQL queries are supported."""
+        ...
+
     def release_for_rust_pipeline(self) -> None:
         """Release this provider's connection so the Rust pipeline can take
         write ownership of the database file.
@@ -142,6 +147,14 @@ class DatabaseProvider(Protocol):
 
         No-op for providers without HNSW support (LanceDB).
         """
+        ...
+
+    async def drop_all_hnsw_indexes_async(self) -> None:
+        """Drop provider-managed HNSW indexes without blocking the event loop."""
+        ...
+
+    async def ensure_all_hnsw_indexes_async(self) -> None:
+        """Rebuild provider-managed HNSW indexes without blocking the event loop."""
         ...
 
     # File Operations

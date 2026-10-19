@@ -176,7 +176,9 @@ class RustProgressBridge:
                 _pr.update(self._data_task, info="writing...")
         elif phase == "write-index":
             # Data write done; compaction wasn't needed — build the HNSW
-            # index directly. The compact bar never runs on this path —
+            # index directly, or leave it in place when the run changed no
+            # rows (the phase then arrives already complete, as (1, 1)).
+            # The compact bar never runs on this path —
             # resolve it to "not needed" right away (reset+finish
             # together) so it doesn't sit unstarted and then get stamped
             # "done" by write-done/done below, which used to render as a

@@ -24,6 +24,8 @@ Any changes to this factory must be tested across all execution paths:
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from loguru import logger
+
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.registry import configure_registry, get_registry
 
@@ -33,7 +35,6 @@ if TYPE_CHECKING:
     from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
-    from chunkhound.services.search_service import SearchService
 
 
 class DatabaseServices(NamedTuple):
@@ -120,7 +121,8 @@ def create_services(
                     )
                 )
             effective_config = config
-    except Exception:
+    except Exception as exc:
+        logger.debug(f"Config path normalization failed, using raw config: {exc}")
         effective_config = config
 
     configure_registry(effective_config)
@@ -132,9 +134,8 @@ def create_services(
             provider = embedding_manager.get_default_provider()
             if provider:
                 registry.register_embedding_provider(provider)
-        except Exception:
-            # If no provider in embedding_manager, registry will handle provider creation
-            pass
+        except Exception as exc:
+            logger.opt(exception=True).warning("Provider registration failed: {}", exc)
 
     return DatabaseServices(
         provider=registry.get_provider("database"),
