@@ -231,11 +231,12 @@ jobs:
   #   native API at runtime (the build also enforces it statically via
   #   scripts/finalize_manylinux_wheel.py).
   # - ubuntu:22.04 + Python 3.10 retains the same combined install on a common
-  #   LTS. The main wheel is installed with its PyPI dependencies first, then
-  #   the branch native wheel replaces the PyPI chunkhound-native with
-  #   --no-deps -- CI native wheels keep Cargo.toml's placeholder version,
-  #   which can't satisfy the main wheel's chunkhound-native>=X pin (same
-  #   approach as scripts/verify_watchman_live_indexing_e2e.py).
+  #   LTS. CI native wheels keep Cargo.toml's placeholder version, which cannot
+  #   satisfy the main wheel's chunkhound-native>=X requirement during
+  #   resolution. Install the main wheel without dependencies, resolve all of
+  #   its other metadata dependencies, then replace the excluded native
+  #   dependency with the branch artifact (same replacement approach as
+  #   scripts/verify_watchman_live_indexing_e2e.py).
   old-linux-wheel-smoke:
     needs: watchman-runtime-validation
     runs-on: ubuntu-latest
@@ -263,8 +264,21 @@ jobs:
           # and independent of a future GNU uv release's glibc requirement.
           bash /work/scripts/install_pinned_musl_uv.sh /tmp/uv
           /tmp/uv/uv venv --python 3.12 /tmp/venv
+          # The branch native wheel keeps Cargo.toml's placeholder version,
+          # while the branch main wheel requires chunkhound-native>=5.2.0.
+          # Install the main wheel's other declared dependencies normally, but
+          # intentionally replace that one dependency with the branch artifact.
           /tmp/uv/uv pip install --python /tmp/venv/bin/python \
-            --no-cache-dir /dist/chunkhound-*.whl
+            --no-cache-dir --no-deps /dist/chunkhound-*.whl
+          /tmp/venv/bin/python - <<'PY' > /tmp/chunkhound-requirements.txt
+          from importlib.metadata import requires
+
+          for requirement in requires("chunkhound") or []:
+              if not requirement.lower().startswith("chunkhound-native"):
+                  print(requirement)
+          PY
+          /tmp/uv/uv pip install --python /tmp/venv/bin/python \
+            --no-cache-dir -r /tmp/chunkhound-requirements.txt
           /tmp/uv/uv pip install --python /tmp/venv/bin/python \
             --no-cache-dir --reinstall --no-deps /dist/chunkhound_native-*.whl
           /tmp/venv/bin/python /work/scripts/smoke_test_native_wheel.py
@@ -285,7 +299,18 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq python3.10 python3.10-venv
           python3.10 -m venv /tmp/venv
-          /tmp/venv/bin/pip install --no-cache-dir /dist/chunkhound-*.whl
+          # Keep the branch native wheel in place instead of resolving its
+          # placeholder version from PyPI; install every other main-wheel
+          # dependency from its metadata before the smoke checks.
+          /tmp/venv/bin/pip install --no-cache-dir --no-deps /dist/chunkhound-*.whl
+          /tmp/venv/bin/python - <<'PY' > /tmp/chunkhound-requirements.txt
+          from importlib.metadata import requires
+
+          for requirement in requires("chunkhound") or []:
+              if not requirement.lower().startswith("chunkhound-native"):
+                  print(requirement)
+          PY
+          /tmp/venv/bin/pip install --no-cache-dir -r /tmp/chunkhound-requirements.txt
           /tmp/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps /dist/chunkhound_native-*.whl
           /tmp/venv/bin/python /work/scripts/smoke_test_native_wheel.py
           /tmp/venv/bin/chunkhound --version

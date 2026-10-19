@@ -607,7 +607,9 @@ class TestDocsVersionWorkflowContract:
         assert "ubuntu:20.04@sha256:" in glibc_smoke_step["run"]
         assert "install_pinned_musl_uv.sh /tmp/uv" in glibc_smoke_step["run"]
         assert "/tmp/uv/uv venv --python 3.12 /tmp/venv" in glibc_smoke_step["run"]
-        assert "/dist/chunkhound-*.whl" in glibc_smoke_step["run"]
+        assert "--no-deps /dist/chunkhound-*.whl" in glibc_smoke_step["run"]
+        assert 'requires("chunkhound")' in glibc_smoke_step["run"]
+        assert 'startswith("chunkhound-native")' in glibc_smoke_step["run"]
         assert (
             "--reinstall --no-deps /dist/chunkhound_native-*.whl"
             in glibc_smoke_step["run"]
@@ -615,7 +617,9 @@ class TestDocsVersionWorkflowContract:
         assert "smoke_test_native_wheel.py" in glibc_smoke_step["run"]
         assert "/tmp/venv/bin/chunkhound --version" in glibc_smoke_step["run"]
         assert "ubuntu:22.04" in common_lts_smoke_step["run"]
-        assert "/dist/chunkhound-*.whl" in common_lts_smoke_step["run"]
+        assert "--no-deps /dist/chunkhound-*.whl" in common_lts_smoke_step["run"]
+        assert 'requires("chunkhound")' in common_lts_smoke_step["run"]
+        assert 'startswith("chunkhound-native")' in common_lts_smoke_step["run"]
         assert (
             "--force-reinstall --no-deps /dist/chunkhound_native-*.whl"
             in common_lts_smoke_step["run"]
