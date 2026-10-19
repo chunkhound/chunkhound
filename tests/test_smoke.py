@@ -22,7 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers.cli import run_cli
+from tests.helpers.cli import (
+    CLI_STARTUP_TIMEOUT_SECONDS,
+    registered_cli_commands,
+    run_cli,
+    run_cli_in_process,
+)
 
 # Add parent directory to path to import chunkhound
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -86,35 +91,37 @@ class TestModuleImports:
 
 
 class TestCLICommands:
-    """Test that CLI commands at least show help without crashing."""
+    """CLI parser and entry-point smoke checks.
 
-    @pytest.mark.parametrize(
-        "command",
-        [
-            ["chunkhound", "--help"],
-            ["chunkhound", "--version"],
-            ["chunkhound", "index", "--help"],
-            ["chunkhound", "search", "--help"],
-            ["chunkhound", "research", "--help"],
-            ["chunkhound", "map", "--help"],
-            ["chunkhound", "mcp", "--help"],
-            ["chunkhound", "calibrate", "--help"],
-        ],
-    )
-    def test_cli_help_commands(self, command):
-        """Test that CLI help commands work without crashing."""
-        result = run_cli(command[1:], timeout=5)
+    Help and version are parser work, so they run in-process. One real
+    process start proves the interpreter can import and launch the entry point.
+    """
 
-        # Help commands should exit with 0
-        assert result.returncode == 0, (
-            f"Command {' '.join(command)} failed with code {result.returncode}\n"
-            f"stderr: {result.stderr}"
-        )
+    def test_main_help(self):
+        result = run_cli_in_process(["--help"])
 
-        # Should have some output
-        assert result.stdout or result.stderr, (
-            f"Command {' '.join(command)} produced no output"
-        )
+        assert result.returncode == 0, result.stderr
+        assert "Available commands" in result.stdout
+
+    @pytest.mark.parametrize("command", registered_cli_commands())
+    def test_subcommand_help(self, command):
+        result = run_cli_in_process([command, "--help"])
+
+        assert result.returncode == 0, result.stderr
+        assert command in result.stdout
+
+    def test_version(self):
+        result = run_cli_in_process(["--version"])
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("chunkhound ")
+
+    def test_cli_entry_point_starts(self):
+        """One real process start: interpreter, imports, and native load."""
+        result = run_cli(["--version"], timeout=CLI_STARTUP_TIMEOUT_SECONDS)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("chunkhound ")
 
 
 class TestParserLoading:

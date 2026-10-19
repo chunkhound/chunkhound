@@ -27,7 +27,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.helpers.cli import cli_command
+from tests.helpers.cli import cli_command, run_cli_in_process
 from tests.utils import HttpMcpClient, SubprocessJsonRpcClient, SubprocessJsonRpcError
 from tests.utils.windows_compat import get_fs_event_timeout, windows_safe_tempdir
 from tests.utils.windows_subprocess import (
@@ -82,24 +82,13 @@ async def _wait_for_http_ready(
 
 
 class TestMCPStdioHelp:
-    """Minimal smoke — does the ``--help`` flag work via subprocess?"""
+    """The ``--help`` flag parses without starting a server."""
 
-    @pytest.mark.asyncio
-    async def test_mcp_stdio_server_help(self) -> None:
-        """Test that MCP stdio server responds to help."""
-        proc = await create_subprocess_exec_safe(
-            *cli_command("mcp", "--no-daemon", "--help"),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=get_safe_subprocess_env(),
-        )
+    def test_mcp_stdio_server_help(self) -> None:
+        """Help is parser work; no child process is needed."""
+        result = run_cli_in_process(["mcp", "--no-daemon", "--help"])
 
-        stdout, stderr = await proc.communicate()
-
-        assert proc.returncode == 0, (
-            f"MCP stdio help failed with code {proc.returncode}\n"
-            f"stderr: {stderr.decode()}"
-        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestMCPStartupImports:

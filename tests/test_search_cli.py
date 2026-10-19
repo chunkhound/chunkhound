@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the `chunkhound search` CLI argument parsing and validation."""
 
-from tests.helpers.cli import run_cli
+from tests.helpers.cli import run_cli, run_cli_in_process
 
 
 class TestSearchCLIArguments:
@@ -9,7 +9,7 @@ class TestSearchCLIArguments:
 
     def test_search_help(self):
         """Test that search help command works."""
-        result = run_cli(["search", "--help"], timeout=5)
+        result = run_cli_in_process(["search", "--help"])
 
         assert result.returncode == 0, f"Help command failed: {result.stderr}"
         assert "search" in result.stdout.lower(), "Help should mention search"
@@ -19,15 +19,15 @@ class TestSearchCLIArguments:
 
     def test_invalid_arguments(self):
         """Test handling of invalid arguments."""
-        result = run_cli(["search", "query", "--invalid-flag"], timeout=5)
+        result = run_cli_in_process(["search", "query", "--invalid-flag"])
 
-        assert result.returncode != 0, "Should fail with invalid argument"
+        assert result.returncode == 2, "Should fail with invalid argument"
 
     def test_missing_query(self):
         """Test handling when query is missing."""
-        result = run_cli(["search", "--regex"], timeout=5)
+        result = run_cli_in_process(["search", "--regex"])
 
-        assert result.returncode != 0, "Should fail when query is missing"
+        assert result.returncode == 2, "Should fail when query is missing"
 
     def test_regex_search_smoke(self, tmp_path):
         """Test end-to-end regex search through the real CLI."""

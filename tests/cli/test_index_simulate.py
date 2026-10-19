@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers.cli import run_cli
+from tests.helpers.cli import run_cli, run_cli_in_process
 
 
 def test_index_simulate_help() -> None:
-    proc = run_cli(["index", "--help"], timeout=20)
+    proc = run_cli_in_process(["index", "--help"])
     assert proc.returncode == 0, proc.stderr
     assert "simulate" in proc.stdout.lower()
 
