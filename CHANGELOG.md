@@ -87,6 +87,10 @@ supported by the search API).
   pages.
 
 ### Fixed
+- **Indexing progress reports the real HNSW outcome** — The index row now
+  names what actually happened (built, left in place, disabled, or VSS
+  unavailable), hides when HNSW is disabled, and compaction rows no longer
+  claim an index rebuild that did not run.
 - **`path_filter` behaves identically for diff and DB search** — Git-diff
   searches (`--last-n`, `--commit-range`, `--commit-hash`) previously treated
   every filter as a directory prefix, so a file filter such as

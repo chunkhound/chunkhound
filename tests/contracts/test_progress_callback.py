@@ -3,8 +3,9 @@
 `IndexingPipeline.run()`'s doc comment (`src/pipeline/pipeline.rs`) specifies
 ``progress_callback(phase: str, current: int, total: int)`` firing at phase
 transitions for ``"diff"``, ``"parse"``, ``"embed"``, ``"write-prepare"``,
-``"write-data"``, one of ``"write-index"``/``"write-compact"``,
-``"write-done"``, and ``"done"``.
+``"write-data"``, exactly one ``write-index*``/``write-compact*`` phase,
+``"write-done"``, and ``"done"``. The suffix distinguishes build, kept,
+disabled, and VSS-unavailable outcomes.
 
 Note: the original design specified a 4-arg callback returning `bool` to
 support abort-on-`False`.
@@ -47,7 +48,9 @@ class TestProgressCallback:
 
         calls: list[tuple[str, int, int]] = []
 
-        def progress_callback(phase: str, current: int, total: int, chunks: int = 0) -> None:
+        def progress_callback(
+            phase: str, current: int, total: int, chunks: int = 0
+        ) -> None:
             calls.append((phase, current, total))
 
         pipeline = IndexingPipeline(default_rust_config(db_dir))
@@ -72,14 +75,30 @@ class TestProgressCallback:
         assert "write-prepare" in phases_seen
         assert "write-data" in phases_seen
         assert "write-done" in phases_seen
-        # write-index and write-compact are mutually exclusive — compaction
-        # rebuilds the HNSW index as part of its own rewrite (see
-        # test_compaction_before_index.py), so exactly one of the two fires.
-        has_index = "write-index" in phases_seen
-        has_compact = "write-compact" in phases_seen
-        assert has_index != has_compact, (
-            f"Expected exactly one of write-index/write-compact, got phases: {phases_seen}"
+        # Exactly one index/compact call fires. The suffix says whether the
+        # run built, kept, skipped, or compacted, so progress never claims
+        # work that did not happen.
+        index_phases = {
+            "write-index",
+            "write-index-disabled",
+            "write-index-unavailable",
+        }
+        compact_phases = {
+            "write-compact",
+            "write-compact-disabled",
+            "write-compact-unavailable",
+        }
+        index_calls = [phase for phase in phases_seen if phase in index_phases]
+        compact_calls = [phase for phase in phases_seen if phase in compact_phases]
+        assert len(index_calls) + len(compact_calls) == 1, (
+            "Expected exactly one index/compact phase, got: "
+            f"{index_calls + compact_calls} (all phases: {phases_seen})"
         )
+        # This run enables HNSW, so a build or a VSS-unavailable skip is the
+        # only truthful outcome. A disabled/compacted phase means the writer
+        # ignored the config or ran extra index work.
+        if index_calls:
+            assert index_calls[0] in {"write-index", "write-index-unavailable"}
         # "done" is always the final call.
         assert phases_seen[-1] == "done"
 

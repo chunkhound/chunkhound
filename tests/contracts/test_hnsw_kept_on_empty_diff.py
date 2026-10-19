@@ -19,28 +19,20 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from tests.contracts.pipeline_harness import collect_table_counts, index_with_rust
+from tests.contracts.pipeline_harness import (
+    collect_table_counts,
+    hnsw_index_names,
+    index_with_rust,
+)
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 REBUILT = ("write-index", 0, 1)
 LEFT_IN_PLACE = ("write-index", 1, 1)
 
 
-def _hnsw_index_names(db_dir: Path) -> set[str]:
-    conn = duckdb.connect(str(db_dir / "chunks.db"))
-    try:
-        rows = conn.execute(
-            "SELECT index_name FROM duckdb_indexes() "
-            "WHERE table_name LIKE 'embeddings_%'"
-        ).fetchall()
-    finally:
-        conn.close()
-    return {name for (name,) in rows if "hnsw" in name.lower()}
-
-
 def _drop_hnsw_indexes(db_dir: Path) -> None:
     """Drop every HNSW index, as a run killed mid-bracket would leave them."""
-    names = _hnsw_index_names(db_dir)
+    names = hnsw_index_names(db_dir)
     conn = duckdb.connect(str(db_dir / "chunks.db"))
     try:
         conn.execute("LOAD vss")
@@ -82,7 +74,7 @@ def indexed_db(work_dir: Path, tmp_path: Path) -> Path:
     first = index_with_rust(work_dir, db_dir, incremental=True)
     assert not first.errors, f"Unexpected errors: {first.errors}"
     assert first.chunks_written > 0, "the first run should index the fixtures"
-    assert _hnsw_index_names(db_dir), "expected an HNSW index after the first run"
+    assert hnsw_index_names(db_dir), "expected an HNSW index after the first run"
     return db_dir
 
 
@@ -92,7 +84,7 @@ class TestHnswKeptOnEmptyDiff:
     def test_empty_incremental_run_keeps_the_index(
         self, work_dir: Path, indexed_db: Path
     ):
-        names_before = _hnsw_index_names(indexed_db)
+        names_before = hnsw_index_names(indexed_db)
         counts_before = collect_table_counts(indexed_db)
 
         second, events = _run(work_dir, indexed_db)
@@ -104,7 +96,7 @@ class TestHnswKeptOnEmptyDiff:
         )
         assert REBUILT not in events
         assert "write-compact" not in {phase for phase, _, _ in events}
-        assert _hnsw_index_names(indexed_db) == names_before
+        assert hnsw_index_names(indexed_db) == names_before
         assert collect_table_counts(indexed_db) == counts_before
 
     def test_run_that_writes_keeps_the_bracket(self, work_dir: Path, indexed_db: Path):
@@ -118,7 +110,7 @@ class TestHnswKeptOnEmptyDiff:
         assert second.files_processed == 1
         assert REBUILT in events
         assert LEFT_IN_PLACE not in events
-        assert _hnsw_index_names(indexed_db), "the index must exist after a write"
+        assert hnsw_index_names(indexed_db), "the index must exist after a write"
 
     def test_non_incremental_run_keeps_the_bracket(
         self, work_dir: Path, indexed_db: Path
@@ -129,7 +121,7 @@ class TestHnswKeptOnEmptyDiff:
         assert second.files_processed > 0
         assert REBUILT in events
         assert LEFT_IN_PLACE not in events
-        assert _hnsw_index_names(indexed_db)
+        assert hnsw_index_names(indexed_db)
 
     def test_run_that_only_deletes_keeps_the_bracket(
         self, work_dir: Path, indexed_db: Path
@@ -142,7 +134,7 @@ class TestHnswKeptOnEmptyDiff:
         assert second.files_processed == 0
         assert REBUILT in events
         assert LEFT_IN_PLACE not in events
-        assert _hnsw_index_names(indexed_db)
+        assert hnsw_index_names(indexed_db)
 
     def test_empty_run_that_compacts_keeps_the_bracket(
         self, work_dir: Path, indexed_db: Path
@@ -156,15 +148,15 @@ class TestHnswKeptOnEmptyDiff:
         assert second.files_processed == 0
         assert "write-compact" in phases
         assert "write-index" not in phases
-        assert _hnsw_index_names(indexed_db)
+        assert hnsw_index_names(indexed_db)
 
     def test_empty_run_restores_an_index_a_crash_left_missing(
         self, work_dir: Path, indexed_db: Path
     ):
         """Skipping the bracket must not skip crash recovery."""
-        names_before = _hnsw_index_names(indexed_db)
+        names_before = hnsw_index_names(indexed_db)
         _drop_hnsw_indexes(indexed_db)
-        assert not _hnsw_index_names(indexed_db), (
+        assert not hnsw_index_names(indexed_db), (
             "the simulated crash should leave no index"
         )
 
@@ -172,6 +164,6 @@ class TestHnswKeptOnEmptyDiff:
 
         assert second.files_processed == 0
         assert LEFT_IN_PLACE in events
-        assert _hnsw_index_names(indexed_db) == names_before, (
+        assert hnsw_index_names(indexed_db) == names_before, (
             "an empty run must still recreate an index that is missing"
         )

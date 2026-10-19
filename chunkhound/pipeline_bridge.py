@@ -688,6 +688,16 @@ def _cfg_or(obj: Any, attr: str, default: _T, cast: Callable[[Any], _T]) -> _T:
     return cast(value)
 
 
+def resolve_duckdb_hnsw_enabled(config: Any | None) -> bool:
+    """Resolve the HNSW toggle once for both the Rust writer and progress UI.
+
+    Single source of truth: the pipeline config dict and the progress bridge
+    must agree, or the CLI can claim index work that the writer skipped.
+    """
+    database_cfg = getattr(config, "database", None) if config else None
+    return _cfg_or(database_cfg, "duckdb_hnsw_enabled", True, bool)
+
+
 async def run_rust_pipeline(
     files_to_process: list[tuple[Path, str | None]],
     *,
@@ -794,7 +804,7 @@ async def run_rust_pipeline(
     disk_usage_limit_mb = getattr(database_cfg, "max_disk_usage_mb", None)
     # HNSW toggle must reach the Rust writer: with it disabled the Rust backend
     # must never create HNSW indexes (Python's provider already honors it).
-    duckdb_hnsw_enabled = _cfg_or(database_cfg, "duckdb_hnsw_enabled", True, bool)
+    duckdb_hnsw_enabled = resolve_duckdb_hnsw_enabled(config)
 
     config_dict = {
         "db_path": str(db_path.resolve()),

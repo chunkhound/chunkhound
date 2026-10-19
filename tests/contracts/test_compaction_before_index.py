@@ -14,13 +14,13 @@ the compact-then-reindex sequence intact.
 import tempfile
 from pathlib import Path
 
-import duckdb
 import pytest
 
 from tests.contracts.mock_embed import MockEmbeddingProvider
 from tests.contracts.pipeline_harness import (
     IndexResult,
     assert_identical,
+    hnsw_index_names,
     index_with_python,
     index_with_rust,
 )
@@ -57,18 +57,6 @@ def _index_with_rust_forced_compaction(
     return result, phases_seen
 
 
-def _hnsw_index_names(db_dir: Path) -> list[str]:
-    db_file = db_dir / "chunks.db"
-    conn = duckdb.connect(str(db_file))
-    try:
-        rows = conn.execute(
-            "SELECT index_name FROM duckdb_indexes() WHERE table_name LIKE 'embeddings_%'"
-        ).fetchall()
-    finally:
-        conn.close()
-    return [r[0] for r in rows if "hnsw" in r[0].lower()]
-
-
 class TestCompactionBeforeIndex:
     """Compaction must run before, and fold in, the HNSW index rebuild."""
 
@@ -95,13 +83,18 @@ class TestCompactionBeforeIndex:
     @pytest.mark.asyncio
     async def test_compaction_preserves_data_and_index(self):
         """Data and the HNSW index both survive the compact-then-reindex path."""
-        with tempfile.TemporaryDirectory() as tmp_py, tempfile.TemporaryDirectory() as tmp_rs:
+        with (
+            tempfile.TemporaryDirectory() as tmp_py,
+            tempfile.TemporaryDirectory() as tmp_rs,
+        ):
             db_py = Path(tmp_py) / "db"
             db_py.mkdir(parents=True, exist_ok=True)
             db_rs = Path(tmp_rs) / "db"
 
             result_py = await index_with_python(
-                FIXTURE_DIR, db_py, skip_embeddings=False,
+                FIXTURE_DIR,
+                db_py,
+                skip_embeddings=False,
                 embedding_provider=MockEmbeddingProvider(),
             )
 
@@ -109,7 +102,7 @@ class TestCompactionBeforeIndex:
 
             assert_identical(result_py, result_rs)
 
-            hnsw_names = _hnsw_index_names(db_rs)
+            hnsw_names = hnsw_index_names(db_rs)
             assert hnsw_names, (
                 "Expected an HNSW index on the embeddings table after a "
                 "compaction-triggering run, found none"

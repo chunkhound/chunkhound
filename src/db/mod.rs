@@ -58,6 +58,15 @@ pub trait DbBackend: Send {
         true
     }
 
+    /// True when HNSW indexes can actually be created this run: enabled by
+    /// config AND the backend has everything it needs (DuckDB: VSS loaded).
+    /// Progress reporting uses this so it never claims a build that cannot
+    /// happen. Defaults to `hnsw_enabled()`; backends that can lose a runtime
+    /// capability (extension unavailable) must override it.
+    fn hnsw_available(&self) -> bool {
+        self.hnsw_enabled()
+    }
+
     /// Snapshot every row of the `files` table for the pipeline's diff phase.
     /// Default: no-op (empty index / non-DuckDB backends treat every file as
     /// new). Deliberately `&self`, not `&mut self`, and does NOT go through

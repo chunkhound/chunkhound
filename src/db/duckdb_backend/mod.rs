@@ -167,6 +167,10 @@ impl crate::db::DbBackend for DuckDbHnswBackend {
         self.hnsw_enabled
     }
 
+    fn hnsw_available(&self) -> bool {
+        self.hnsw_enabled && self.has_vss
+    }
+
     fn read_file_states(&self) -> Result<Vec<DbFileEntry>, DbError> {
         read::read_file_states(self)
     }

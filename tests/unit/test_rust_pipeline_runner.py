@@ -8,9 +8,13 @@ disconnected. See run_rust_pipeline_runner.run_rust_indexing_phase's inline
 comments for the invariant this guards.
 """
 
+import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
+from rich.progress import Progress
 
 import chunkhound.services.rust_pipeline_runner as runner_module
 from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
@@ -138,6 +142,47 @@ async def test_reconnects_even_when_rust_pipeline_raises(monkeypatch):
 
     assert db.release_calls == 1
     assert db.connect_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hnsw_enabled", "phase", "expected_visible"),
+    [
+        (True, "write-index", True),
+        (False, "write-index-disabled", False),
+    ],
+    ids=["enabled", "disabled"],
+)
+async def test_hnsw_toggle_reaches_progress_bridge(
+    monkeypatch, hnsw_enabled, phase, expected_visible
+):
+    """The config resolver must drive both the Rust config and the index bar."""
+    captured: dict = {}
+
+    async def fake_run_rust_pipeline(*args, **kwargs):
+        captured.update(kwargs)
+        kwargs["progress_callback"](phase, 1, 1)
+        return {}
+
+    monkeypatch.setattr(runner_module, "run_rust_pipeline", fake_run_rust_pipeline)
+    db = FakeDatabaseProvider(connected=True)
+    progress = Progress(console=Console(file=io.StringIO(), force_terminal=False))
+    config = SimpleNamespace(database=SimpleNamespace(duckdb_hnsw_enabled=hnsw_enabled))
+    kwargs = _phase_kwargs(db)
+    kwargs.update(
+        config=config,
+        progress=progress,
+        parse_task=progress.add_task("parse"),
+    )
+
+    await run_rust_indexing_phase(**kwargs)
+
+    assert captured["config"] is config
+    index_row = next(
+        task for task in progress.tasks if "Vector index" in task.description
+    )
+    assert index_row.visible is expected_visible
+    assert index_row.finished
 
 
 @pytest.mark.asyncio

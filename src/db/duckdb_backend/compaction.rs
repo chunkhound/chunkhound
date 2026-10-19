@@ -209,7 +209,9 @@ impl DuckDbHnswBackend {
         self.known_dims
             .extend(existing.into_iter().map(|(_, dims)| dims));
         self.conn = Some(conn);
-        // Recreate HNSW indexes on existing embedding tables.
+        // Ensure HNSW indexes on existing embedding tables. Creates nothing
+        // when HNSW is disabled or VSS is unavailable, but still clears bulk
+        // mode before returning.
         self.ensure_all_hnsw_indexes()?;
         Ok(())
     }

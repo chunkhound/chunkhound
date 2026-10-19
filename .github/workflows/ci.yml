@@ -308,6 +308,8 @@ jobs:
             tests/test_duckdb_compaction.py \
             tests/integration/test_duckdb_failure_modes.py \
             tests/integration/test_directory_indexing_hnsw.py \
+            tests/contracts/test_hnsw_progress_output.py \
+            tests/contracts/test_disk_usage_limit_rust.py \
             -m hnsw -v
 
   pages-artifact:
