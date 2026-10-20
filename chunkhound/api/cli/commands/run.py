@@ -137,10 +137,11 @@ def _is_db_lock_error(exc: Exception) -> bool:
     return (
         msg.startswith("could not set lock on file")
         or msg == "database is locked"
-        # Windows includes the path before the complete OS sharing diagnostic.
+        # Windows puts the path and OS sharing diagnostic on the first line;
+        # DuckDB may append lock-owner process details on subsequent lines.
         or (
             msg.startswith("cannot open file")
-            and msg.endswith(
+            and msg.partition("\n")[0].rstrip("\r").endswith(
                 "the process cannot access the file because it is being used "
                 "by another process."
             )

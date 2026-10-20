@@ -40,6 +40,43 @@ class TestIsDbLockError:
             )
         )
 
+    @pytest.mark.parametrize("wrapped", [False, True], ids=["raw", "preflight"])
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+    def test_windows_sharing_violation_with_owner_details(self, wrapped, newline):
+        import duckdb
+
+        from chunkhound.core.index_format import IndexFormatError
+
+        cause = duckdb.IOException(
+            'IO Error: Cannot open file "C:\\temp\\private-index\\chunks.db": '
+            "The process cannot access the file because it is being used "
+            "by another process."
+            f"{newline}{newline}File is already open in{newline}"
+            "C:\\Python\\python.exe (PID 2660)"
+        )
+        error = cause
+        if wrapped:
+            error = IndexFormatError("Cannot safely inspect index")
+            error.__cause__ = cause
+        assert _is_db_lock_error(error)
+
+    @pytest.mark.parametrize("wrapped", [False, True], ids=["raw", "preflight"])
+    def test_windows_sharing_diagnostic_in_filename_is_not_a_lock(self, wrapped):
+        import duckdb
+
+        from chunkhound.core.index_format import IndexFormatError
+
+        cause = duckdb.IOException(
+            'IO Error: Cannot open file "C:\\temp\\The process cannot access '
+            'the file because it is being used by another process.": '
+            "The system cannot find the file specified."
+        )
+        error = cause
+        if wrapped:
+            error = IndexFormatError("Cannot safely inspect index")
+            error.__cause__ = cause
+        assert not _is_db_lock_error(error)
+
     def test_windows_wal_permission_denied(self):
         assert _is_db_lock_error(
             PermissionError(
