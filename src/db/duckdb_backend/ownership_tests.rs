@@ -67,11 +67,19 @@ mod non_utf8_targets {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS native filesystems reject non-UTF8 filenames during fixture creation"
+    )]
     fn direct_open_rejects_non_utf8_target_before_preflight_and_recovery() {
         assert_rejected_without_mutation(false);
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS native filesystems reject non-UTF8 filenames during fixture creation"
+    )]
     fn direct_read_rejects_non_utf8_target_before_preflight_and_recovery() {
         assert_rejected_without_mutation(true);
     }

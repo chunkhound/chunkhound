@@ -749,7 +749,8 @@ mod format_tests {
             .env("CH_FORMAT_KIND", kind)
             .env("CH_FORMAT_FUTURE", if future { "1" } else { "0" });
         if let Some(home) = home {
-            command.env("HOME", home);
+            // DuckDB resolves its home via USERPROFILE on Windows, HOME elsewhere.
+            command.env("HOME", home).env("USERPROFILE", home);
         }
         let output = command.output().expect("native fixture subprocess");
         assert!(
@@ -795,8 +796,9 @@ mod format_tests {
                 );
             }
             assert_eq!(snapshot(path.parent().expect("parent")), before);
+            let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
             assert!(
-                !PathBuf::from(std::env::var_os("HOME").expect("isolated home"))
+                !PathBuf::from(std::env::var_os(home_variable).expect("isolated home"))
                     .join(".duckdb")
                     .exists()
             );
