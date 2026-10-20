@@ -1192,6 +1192,17 @@ class LanceDBProvider(SerialDatabaseProvider):
             except Exception as e:
                 logger.error(f"Error deleting chunk {chunk_id}: {e}")
 
+    def _executor_delete_chunks_batch(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> None:
+        """Delete selected chunk rows and their inline embeddings in one batch."""
+        chunks_table: Any = self._chunks_table
+        if not chunk_ids or chunks_table is None:
+            return
+
+        ids = ", ".join(str(chunk_id) for chunk_id in chunk_ids)
+        chunks_table.delete(f"id IN ({ids})")
+
     def update_chunk(self, chunk_id: int, **kwargs) -> None:
         """Update chunk record with new values."""
         # LanceDB doesn't support in-place updates, need to implement via delete/insert

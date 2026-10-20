@@ -648,6 +648,9 @@ impl IndexingPipeline {
             // while bulk mode is on), then either compact (which rebuilds
             // indexes as part of its own rewrite) or rebuild indexes directly
             // once at the very end — never both, see the comment below.
+            // An empty diff must leave existing indexes in place unless
+            // compaction is due. open() still restores any index a crash lost.
+            let nothing_to_write = batch_count == 0 && delete_paths.is_empty();
             let store_handle: std::thread::ScopedJoinHandle<'_, Result<StoreOutcome, DbError>> = {
                 scope.spawn(move || {
                     // Captured before `db_config` is moved into the backend —
@@ -661,13 +664,24 @@ impl IndexingPipeline {
                     // data scan), so it's always sub-10ms in practice — not
                     // worth a dedicated progress bar (it would flash past
                     // unnoticed). Log it instead for the rare case it's slow.
-                    let t_hnsw_drop = Instant::now();
-                    let drop_hnsw_result = backend.drop_all_hnsw_indexes();
-                    Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
-                    log::info!(
-                        "[hnsw-drop] done in {:.3}s",
-                        t_hnsw_drop.elapsed().as_secs_f64()
-                    );
+                    // Compaction still needs the bracket to capture the HNSW
+                    // metrics before its rewrite; do not reconsider compaction
+                    // after deciding to leave the indexes in place.
+                    let skip_decision =
+                        Self::can_skip_hnsw_bracket(backend.as_ref(), nothing_to_write);
+                    let skip_hnsw_bracket =
+                        Self::close_backend_on_err(backend.as_mut(), skip_decision)?;
+                    if skip_hnsw_bracket {
+                        log::info!("[hnsw-drop] skipped: nothing to write, delete or compact");
+                    } else {
+                        let t_hnsw_drop = Instant::now();
+                        let drop_hnsw_result = backend.drop_all_hnsw_indexes();
+                        Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
+                        log::info!(
+                            "[hnsw-drop] done in {:.3}s",
+                            t_hnsw_drop.elapsed().as_secs_f64()
+                        );
+                    }
                     // Orphan deletes free space and must run even when the DB is
                     // already over disk_usage_limit_mb — that guard exists to
                     // stop inserts (growth), not cleanup. Applied here, before
@@ -856,20 +870,33 @@ impl IndexingPipeline {
                     // instead of returning early with the connection left open
                     // and HNSW indexes un-restored (Invariant 14).
                     let post_write_result: Result<(), DbError> = write_result.and_then(|()| {
-                        let needs_compaction =
-                            disk_limit_hit.is_none() && backend.needs_compaction()?;
+                        let needs_compaction = !skip_hnsw_bracket
+                            && disk_limit_hit.is_none()
+                            && backend.needs_compaction()?;
                         if needs_compaction {
                             emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
                             backend.run_compaction()?;
                         } else {
                             if disk_limit_hit.is_some() {
-                                log::info!(
-                                    "[store] skipping compaction after disk-limit trip; \
-                                 rebuilding HNSW indexes only"
-                                );
+                                if skip_hnsw_bracket {
+                                    log::info!(
+                                        "[store] skipping compaction after disk-limit trip; \
+                                         existing HNSW indexes left in place"
+                                    );
+                                } else {
+                                    log::info!(
+                                        "[store] skipping compaction after disk-limit trip; \
+                                         rebuilding HNSW indexes only"
+                                    );
+                                }
                             }
-                            emit_progress_gil(&store_progress_cb, "write-index", 0, 1);
-                            backend.ensure_all_hnsw_indexes()?;
+                            // Resolve the progress consumer's index/compact bars
+                            // even when no rebuild is needed: report it complete.
+                            let index_done = u64::from(skip_hnsw_bracket);
+                            emit_progress_gil(&store_progress_cb, "write-index", index_done, 1);
+                            if !skip_hnsw_bracket {
+                                backend.ensure_all_hnsw_indexes()?;
+                            }
                         }
                         Ok(())
                     });

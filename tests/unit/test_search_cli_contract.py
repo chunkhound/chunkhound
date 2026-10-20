@@ -6,6 +6,7 @@ no subprocesses, no network calls, no mocks.
 """
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -110,7 +111,7 @@ async def test_file_backed_search_command_uses_factory_initialization(
     db_path = config.database.get_db_path()
     services = create_services(db_path, config)
     try:
-        assert services.provider.db_path == str(db_path)
+        assert Path(services.provider.db_path) == db_path
         assert services.provider.get_base_directory() == tmp_path
         indexing = DirectoryIndexingService(
             indexing_coordinator=services.indexing_coordinator, config=config
