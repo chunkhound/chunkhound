@@ -142,6 +142,7 @@ LLMProviderLiteral = Literal[
     "openrouter",
     "orcarouter",
     "requesty",
+    "opper",
     "opencode-cli",
 ]
 
@@ -182,6 +183,7 @@ CLI_PROVIDER_CHOICES = (
     "openrouter",
     "orcarouter",
     "requesty",
+    "opper",
     "opencode-cli",
 )
 
