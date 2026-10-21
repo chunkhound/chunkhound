@@ -228,6 +228,46 @@ impl DuckDbHnswBackend {
         self.reopen()
     }
 
+    /// Count stored rows through the scalar `id` column only. A `FLOAT[dims]`
+    /// embedding column also emits child validity/segment rows whose `count`
+    /// is the child-vector length, not the table row count; taking
+    /// `MAX(count)` across every segment inflates stored rows by the vector
+    /// width and makes a clean table look almost entirely dead.
+    fn stored_rows_for_table(conn: &Connection, table: &str) -> i64 {
+        let safe = table.replace('"', "\"\"");
+        let sql = format!(
+            "SELECT COALESCE(SUM(cnt), 0) FROM (\
+               SELECT row_group_id, MAX(count) AS cnt \
+               FROM pragma_storage_info('\"{safe}\"') \
+               WHERE column_name = 'id' \
+               GROUP BY row_group_id)"
+        );
+        conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0)
+    }
+
+    /// Live rows for a table; a missing table contributes zero.
+    fn live_rows_for_table(conn: &Connection, table: &str) -> i64 {
+        let safe = table.replace('"', "\"\"");
+        conn.query_row(&format!("SELECT COUNT(*) FROM \"{safe}\""), [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap_or(0)
+    }
+
+    /// Stored and live row totals for `chunks` plus every embedding table.
+    /// Discover tables from the catalog, not `known_dims`: compaction can
+    /// follow a reopen that did not observe every dimension table.
+    fn table_row_totals(conn: &Connection) -> Result<(i64, i64), DbError> {
+        let mut stored = Self::stored_rows_for_table(conn, "chunks");
+        let mut live = Self::live_rows_for_table(conn, "chunks");
+        for (table, _dims) in Self::discover_embedding_tables(conn)? {
+            stored += Self::stored_rows_for_table(conn, &table);
+            live += Self::live_rows_for_table(conn, &table);
+        }
+        Ok((stored, live))
+    }
+
     /// Two-signal fragmentation detection (Phase 0).
     ///
     /// `free_ratio`: fraction of DB blocks that are free (freed by CHECKPOINT,
@@ -236,10 +276,7 @@ impl DuckDbHnswBackend {
     /// `row_waste_ratio`: fraction of rows in storage that are dead (deleted but
     /// still occupying space in row groups). Estimated by comparing total stored
     /// row counts from `pragma_storage_info` against live `COUNT(*)` from our
-    /// tables.
-    ///
-    /// Both signals fall back to zero when the DB is empty or pragmas are
-    /// unavailable (safe default: no compaction needed).
+    /// tables. Both signals fall back to zero when unavailable.
     fn compaction_stats(&self) -> Result<CompactionStats, DbError> {
         let conn = self.conn_or_err()?;
 
@@ -254,61 +291,7 @@ impl DuckDbHnswBackend {
             .unwrap_or(0.0);
 
         // --- row_waste_ratio: stored vs live rows across our tables ------------
-        let live_chunks: i64 = conn
-            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
-            .unwrap_or(0);
-
-        let live_embeddings: i64 = {
-            let mut total = 0i64;
-            for &dims in &self.known_dims {
-                let table_name = format!("embeddings_{dims}");
-                if let Ok(cnt) =
-                    conn.query_row(&format!("SELECT COUNT(*) FROM \"{table_name}\""), [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                {
-                    total += cnt;
-                }
-            }
-            total
-        };
-
-        // MAX(count) per row_group avoids counting the same row N times (once
-        // per column segment).
-        let stored_chunks: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(cnt), 0) FROM (\
-                   SELECT row_group_id, MAX(count) AS cnt \
-                   FROM pragma_storage_info('chunks') \
-                   GROUP BY row_group_id)",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-
-        let stored_embeddings: i64 = {
-            let mut total = 0i64;
-            for &dims in &self.known_dims {
-                let table_name = format!("embeddings_{dims}");
-                let safe = table_name.replace('"', "\"\"");
-                if let Ok(cnt) = conn.query_row(
-                    &format!(
-                        "SELECT COALESCE(SUM(cnt), 0) FROM (\
-                           SELECT row_group_id, MAX(count) AS cnt \
-                           FROM pragma_storage_info('\"{safe}\"') \
-                           GROUP BY row_group_id)"
-                    ),
-                    [],
-                    |r| r.get::<_, i64>(0),
-                ) {
-                    total += cnt;
-                }
-            }
-            total
-        };
-
-        let total_stored = stored_chunks + stored_embeddings;
-        let total_live = live_chunks + live_embeddings;
+        let (total_stored, total_live) = Self::table_row_totals(conn)?;
         let row_waste_ratio = if total_stored > total_live && total_stored > 0 {
             (total_stored - total_live) as f64 / total_stored as f64
         } else {
@@ -340,7 +323,9 @@ pub(super) fn needs_compaction(backend: &DuckDbHnswBackend) -> Result<bool, DbEr
         return Ok(false);
     };
     let effective = stats.free_ratio.max(stats.row_waste_ratio);
-    Ok(effective >= threshold && stats.reclaimable >= backend.config.compaction_min_size_bytes)
+    // Strict '>' matches Python's _fragmentation_exceeds_threshold: at exactly
+    // the threshold both backends skip.
+    Ok(effective > threshold && stats.reclaimable >= backend.config.compaction_min_size_bytes)
 }
 
 pub(super) fn run_compaction(backend: &mut DuckDbHnswBackend) -> Result<(), DbError> {
@@ -390,6 +375,67 @@ mod compaction_threshold_tests {
         );
         backend.open().expect("open");
         assert!(!backend.needs_compaction().expect("needs_compaction"));
+    }
+}
+
+#[cfg(test)]
+mod compaction_stats_tests {
+    use super::*;
+    use crate::db::DbBackend;
+    use crate::types::DbWriterBatch;
+
+    fn churn_config(db_path: String) -> crate::db::DbConfig {
+        let mut config = super::super::test_support::config(db_path);
+        config.compaction_threshold = Some(0.30);
+        config.compaction_min_size_bytes = 0;
+        config
+    }
+
+    fn open_with_embeddings(prefix: &str) -> (tempfile::TempDir, DuckDbHnswBackend) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("t.duckdb").to_string_lossy().into_owned();
+        let mut backend = DuckDbHnswBackend::new(churn_config(db_path));
+        backend.open().expect("open");
+        backend
+            .write_batch(&super::super::test_support::embedding_batch(prefix, 8, 100))
+            .expect("write");
+        (tmp, backend)
+    }
+
+    #[test]
+    fn clean_float_array_table_has_no_row_waste() {
+        let (_tmp, backend) = open_with_embeddings("a");
+        let stats = backend.compaction_stats().expect("stats");
+
+        // Old MAX(count)-across-segments logic counted FLOAT[8] child rows
+        // (800) against 100 live rows, so this failed at ~0.88.
+        assert_eq!(stats.row_waste_ratio, 0.0);
+        assert!(!backend.needs_compaction().expect("needs_compaction"));
+    }
+
+    #[test]
+    fn delete_then_checkpoint_reports_row_waste() {
+        let (_tmp, mut backend) = open_with_embeddings("a");
+        let delete_paths = (0..50).map(|i| format!("a{i}.py")).collect();
+        backend
+            .prepare_write(&DbWriterBatch {
+                files: vec![],
+                delete_paths,
+            })
+            .expect("delete");
+        backend
+            .conn_or_err()
+            .expect("conn")
+            .execute_batch("CHECKPOINT")
+            .expect("checkpoint");
+
+        let stats = backend.compaction_stats().expect("stats");
+        assert!(
+            (0.40..=0.60).contains(&stats.row_waste_ratio),
+            "expected ~50% row waste, got {}",
+            stats.row_waste_ratio
+        );
+        assert!(backend.needs_compaction().expect("needs_compaction"));
     }
 }
 
