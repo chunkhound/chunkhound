@@ -1129,111 +1129,120 @@ class DuckDBProvider(SerialDatabaseProvider):
         if force and not state.get("transaction_active", False):
             conn.execute("CHECKPOINT")
 
+    @staticmethod
+    def _free_block_ratio(conn: Any) -> float:
+        """Fraction of DB blocks DuckDB has already freed for reuse."""
+        row = conn.execute(
+            "SELECT CASE WHEN total_blocks > 0 THEN free_blocks::DOUBLE "
+            "/ total_blocks ELSE 0.0 END FROM pragma_database_size()"
+        ).fetchone()
+        return float(row[0]) if row else 0.0
+
+    @staticmethod
+    def _stored_rows_for_table(conn: Any, table_name: str) -> int:
+        """Rows physically stored in one table, including dead MVCC rows.
+
+        A FLOAT[dims] column also emits child validity/segment rows whose
+        count is the child-vector length, not the table row count. Restrict
+        to the scalar id column so stored rows match COUNT(*), even when
+        HNSW is disabled.
+        """
+        escaped = table_name.replace("'", "''")
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(cnt), 0) FROM ("
+                "SELECT row_group_id, MAX(count) AS cnt "
+                f"FROM pragma_storage_info('{escaped}') "
+                "WHERE column_name = 'id' GROUP BY row_group_id)"
+            ).fetchone()
+        except Exception:
+            return 0
+        return int(row[0] or 0) if row else 0
+
+    @staticmethod
+    def _live_rows_for_table(conn: Any, table_name: str) -> int:
+        quoted = table_name.replace('"', '""')
+        try:
+            row = conn.execute(f'SELECT COUNT(*) FROM "{quoted}"').fetchone()
+        except Exception:
+            return 0
+        return int(row[0] or 0) if row else 0
+
+    def _executor_row_totals(
+        self, conn: Any, state: dict[str, Any]
+    ) -> tuple[int, int]:
+        tables = ["chunks", *self._executor_get_all_embedding_tables(conn, state)]
+        stored = sum(self._stored_rows_for_table(conn, table) for table in tables)
+        live = sum(self._live_rows_for_table(conn, table) for table in tables)
+        return stored, live
+
+    def _executor_compaction_stats(
+        self, conn: Any, state: dict[str, Any]
+    ) -> dict[str, float]:
+        """Return the two-signal compaction metrics used by the decision path.
+
+        Mirrors the Rust backend: free_ratio and row_waste_ratio, whichever
+        is larger, times the file size estimates reclaimable bytes. No
+        synthetic index factor — an absent HNSW index must not inflate the
+        expected live size and hide real bloat.
+        """
+        free_ratio = self._free_block_ratio(conn)
+        stored, live = self._executor_row_totals(conn, state)
+        row_waste_ratio = (stored - live) / stored if stored > live else 0.0
+        effective = max(free_ratio, row_waste_ratio)
+        try:
+            db_size = os.path.getsize(cast(str, self._connection_manager.db_path))
+        except OSError:
+            db_size = 0
+        return {
+            "free_ratio": free_ratio,
+            "row_waste_ratio": row_waste_ratio,
+            "effective": effective,
+            "reclaimable": db_size * effective,
+        }
+
     def _executor_measure_fragmentation(
         self, conn: Any, state: dict[str, Any]
     ) -> float:
-        """Return fragmentation ratio using DuckDB block-level metadata.
-
-        Uses pragma_storage_info (block allocation metadata, not row data)
-        to count blocks holding actual table data, then compares
-        used_blocks against the estimated minimum.
-
-        By definition, HNSW indexes are smaller than the embeddings tables
-        they index (vectors + graph links only, not full rows).  B-tree
-        indexes are also smaller than their tables.  So total live index
-        storage is bounded by data_blocks (INDEX_FACTOR=1.0).
-
-        System/catalog/sequence overhead is a small fixed number of blocks
-        (SYSTEM_BLOCKS=4).
-
-        Returns ratio where:
-          < 1.5  = healthy
-          > 3.0  = fragmented
-          > 5.0  = significantly fragmented
-        """
+        """Return current_size / estimated_live_size for observability."""
         if self._connection_manager.is_memory_db:
             return 0.0
-
-        row = conn.execute("PRAGMA database_size").fetchone()
-        block_size: int = row[2]
-
-        if block_size <= 0:
-            return 0.0
-
-        try:
-            current_size = os.path.getsize(cast(str, self._connection_manager.db_path))
-        except OSError:
-            return 0.0
-
-        # Count blocks holding table data via block allocation metadata.
-        # pragma_storage_info reads block-level allocation pages, not row
-        # data — no full table scan, very fast.
-        tables = conn.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema='main' AND table_type='BASE TABLE'"
-        ).fetchall()
-
-        data_blocks = 0
-        for (t,) in tables:
-            escaped = t.replace("'", "''")
-            count = conn.execute(
-                f"SELECT COUNT(DISTINCT block_id) FROM pragma_storage_info('{escaped}') "
-                f"WHERE block_id >= 0"
-            ).fetchone()[0]
-            data_blocks += count
-
-        # Fixed overhead for system metadata: catalog pages, sequences,
-        # DuckDB internal bookkeeping, schema_version table.
-        system_blocks = 4
-
-        # Index overhead: HNSW + b-tree indexes. Since HNSW is smaller
-        # than the embedding table (vectors + graph links, not full rows)
-        # and b-tree indexes are smaller than their tables, total index
-        # overhead is safely bounded by data_blocks.
-        index_factor = 1.0
-
-        expected_min = system_blocks + data_blocks + int(data_blocks * index_factor)
-
-        if expected_min <= 0:
-            return 0.0
-
-        # Return ratio of current size to expected minimum size.
-        # This catches both MVCC stale data and HNSW drop/recreate bloat
-        # because used_blocks includes index blocks while pragma_storage_info
-        # only counts table data blocks, leaving the waste visible.
-        live = expected_min * block_size
-        return current_size / live
+        effective = self._executor_compaction_stats(conn, state)["effective"]
+        if effective <= 0.0:
+            return 1.0
+        if effective >= 1.0:
+            return float("inf")
+        return 1.0 / (1.0 - effective)
 
     @staticmethod
-    def _fragmentation_exceeds_threshold(ratio: float, threshold: float | None) -> bool:
-        """Return True when the fragmentation ratio exceeds the configured threshold."""
+    def _fragmentation_exceeds_threshold(
+        waste_ratio: float, threshold: float | None
+    ) -> bool:
+        """True when reclaimable waste exceeds the configured percentage."""
         if threshold is None or threshold < 0:
             return False
-        return (ratio - 1.0) * 100.0 > threshold
+        return waste_ratio * 100.0 > threshold
 
     def _executor_compact_if_needed(self, conn: Any, state: dict[str, Any]) -> bool:
-        """Executor method — checks fragmentation, compacts if needed.
-
-        Runs entirely in the executor thread.  Calls _executor_measure_fragmentation
-        and _executor_compact_database directly (no _execute_in_db_thread_sync
-        round-trips, which would deadlock the single executor thread).
-        """
+        """Compact when real reclaimable space exceeds the threshold."""
         if state.get("transaction_active", False):
             return False
         if self._connection_manager.is_memory_db:
             return False
         threshold = self.config.fragmentation_threshold_pct if self.config else 30.0
-        ratio = self._executor_measure_fragmentation(conn, state)
-        if not self._fragmentation_exceeds_threshold(ratio, threshold):
+        stats = self._executor_compaction_stats(conn, state)
+        effective = stats["effective"]
+        if not self._fragmentation_exceeds_threshold(effective, threshold):
             log_if_not_mcp(
                 "debug",
-                f"Fragmentation ratio={ratio:.2f} below threshold={threshold}% — "
-                "skipping auto-compaction",
+                f"Reclaimable waste={effective:.2f} below threshold={threshold}% "
+                f"(free={stats['free_ratio']:.2f}, "
+                f"row_waste={stats['row_waste_ratio']:.2f}) — skipping auto-compaction",
             )
             return False
         log_if_not_mcp(
             "info",
-            f"Fragmentation ratio={ratio:.2f} (threshold={threshold}%) — compacting",
+            f"Reclaimable waste={effective:.2f} (threshold={threshold}%) — compacting",
         )
         self._executor_compact_database(conn, state)
         return True
@@ -5156,12 +5165,10 @@ class DuckDBProvider(SerialDatabaseProvider):
     # --- Public compaction / fragmentation interface ---
 
     def measure_fragmentation(self) -> float:
-        """Return fragmentation ratio. Fully stateless.
+        """Return current_size / estimated_live_size. Fully stateless.
 
-        Uses PRAGMA database_size, pragma_storage_info (block allocation
-        metadata), and os.path.getsize to compare actual file size against
-        the estimated minimum live data size.
-        < 1.5 = healthy, > 3.0 = fragmented, > 5.0 = significantly fragmented.
+        Uses the larger of free-block ratio and dead-row ratio. A clean
+        database is ~1.0; 2.0 means about half the file is reclaimable.
         """
         return cast(float, self._execute_in_db_thread_sync("measure_fragmentation"))
 
@@ -5181,5 +5188,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         if self._connection_manager.is_memory_db:
             return False
         threshold = self.config.fragmentation_threshold_pct if self.config else 30.0
-        ratio = cast(float, self._execute_in_db_thread_sync("measure_fragmentation"))
-        return self._fragmentation_exceeds_threshold(ratio, threshold)
+        stats = cast(
+            dict[str, float],
+            self._execute_in_db_thread_sync("compaction_stats"),
+        )
+        return self._fragmentation_exceeds_threshold(stats["effective"], threshold)

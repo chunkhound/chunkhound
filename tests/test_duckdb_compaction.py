@@ -1392,35 +1392,112 @@ class TestShouldOptimize:
 class TestFragmentationThresholdBoundaries:
     """Boundary tests for ``_fragmentation_exceeds_threshold``.
 
-    Tests the pure decision function directly — no monkeypatching or I/O.
-
-    Formula: ``(ratio - 1.0) * 100.0 > threshold``
-    Guards: ``threshold is None`` → False; ``threshold < 0`` → False
-    (unreachable in production: DatabaseConfig enforces ``>= 0`` via Pydantic).
+    The argument is a waste fraction, matching Rust's compaction_threshold:
+    threshold 30 means 30% of the file is reclaimable.
     """
 
     @pytest.mark.parametrize(
-        "ratio,threshold,expected",
+        "waste_ratio,threshold,expected",
         [
-            pytest.param(1.29, 30.0, False, id="below-nonzero-threshold-29pct-lt-30"),
-            pytest.param(1.25, 25.0, False, id="exact-boundary-strict-gt-25-not-gt-25"),
-            pytest.param(1.31, 30.0, True, id="above-nonzero-threshold-31pct-gt-30"),
-            pytest.param(1.01, 0.0, True, id="threshold-zero-any-positive-overhead"),
-            pytest.param(0.5, 0.0, False, id="ratio-below-one-negative-overhead"),
-            pytest.param(1.0, 30.0, False, id="ratio-exactly-one-zero-overhead"),
-            pytest.param(1.5, None, False, id="threshold-none-always-false"),
-            pytest.param(1.5, -1.0, False, id="threshold-negative-always-false"),
+            pytest.param(0.29, 30.0, False, id="below-threshold-29pct-lt-30"),
+            pytest.param(0.25, 25.0, False, id="exact-boundary-strict-gt-25"),
+            pytest.param(0.31, 30.0, True, id="above-threshold-31pct-gt-30"),
+            pytest.param(0.01, 0.0, True, id="threshold-zero-any-positive-waste"),
+            pytest.param(0.0, 30.0, False, id="zero-waste-never-triggers"),
+            pytest.param(0.5, None, False, id="threshold-none-always-false"),
+            pytest.param(0.5, -1.0, False, id="threshold-negative-always-false"),
         ],
     )
     def test_fragmentation_exceeds_threshold(
         self,
-        ratio: float,
+        waste_ratio: float,
         threshold: float | None,
         expected: bool,
     ) -> None:
-        """Every boundary of the fragmentation threshold decision formula."""
-        # Pure static function — no I/O or instance state needed.
-        assert DuckDBProvider._fragmentation_exceeds_threshold(ratio, threshold) is expected
+        assert (
+            DuckDBProvider._fragmentation_exceeds_threshold(waste_ratio, threshold)
+            is expected
+        )
+
+
+class TestBloatDetection:
+    """Real delete+reinsert churn must trigger compaction without HNSW."""
+
+    @staticmethod
+    def _seed(db: DuckDBProvider, count: int, dims: int = 16) -> list[int]:
+        file_id = db._execute_in_db_thread_sync(
+            "insert_file",
+            File(
+                path="churn.py",
+                mtime=1.0,
+                language=Language.PYTHON,
+                size_bytes=count * 50,
+            ),
+        )
+        chunks = [
+            Chunk(
+                file_id=file_id,
+                chunk_type=ChunkType.FUNCTION,
+                code=f"def churn_{i}(): pass",
+                start_line=i + 1,
+                end_line=i + 2,
+                symbol=f"churn_{i}",
+                language=Language.PYTHON,
+            )
+            for i in range(count)
+        ]
+        chunk_ids = db._execute_in_db_thread_sync("insert_chunks_batch", chunks)
+        embeddings = [
+            {
+                "chunk_id": chunk_id,
+                "provider": "fake",
+                "model": "fake-embeddings",
+                "embedding": [0.1] * dims,
+                "dims": dims,
+            }
+            for chunk_id in chunk_ids
+        ]
+        db._execute_in_db_thread_sync("insert_embeddings_batch", embeddings, None)
+        return chunk_ids
+
+    def test_delete_reinsert_bloat_triggers_compaction(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "bloat.duckdb"
+        db = DuckDBProvider(db_path, base_directory=tmp_path)
+        db.config = DatabaseConfig(
+            duckdb_hnsw_enabled=False, fragmentation_threshold_pct=30.0
+        )
+        embedding_manager = EmbeddingManager()
+        embedding_manager.register_provider(
+            FakeEmbeddingProvider(dims=16), set_default=True
+        )
+        db.embedding_manager = embedding_manager
+        db.connect()
+
+        chunk_ids = self._seed(db, 1000)
+        db._execute_in_db_thread_sync("delete_chunks_batch", chunk_ids[:500])
+        self._seed(db, 500)
+        db._execute_in_db_thread_sync("maybe_checkpoint", True)
+
+        stats = db._execute_in_db_thread_sync("compaction_stats")
+        assert stats["effective"] > 0.30, stats
+        assert db.should_optimize() is True
+
+        size_before = os.path.getsize(db_path)
+        ratio_before = db.measure_fragmentation()
+        assert db.compact_if_needed() is True
+        assert os.path.getsize(db_path) < size_before
+        assert db.measure_fragmentation() < ratio_before
+        db.disconnect()
+
+        conn = duckdb.connect(str(db_path), read_only=True)
+        try:
+            hnsw = conn.execute(
+                "SELECT COUNT(*) FROM duckdb_indexes() "
+                "WHERE sql ILIKE '%USING HNSW%'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert hnsw == 0
 
 
 # ── Index flow compaction points ─────────────────────────────────────────
