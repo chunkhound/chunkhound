@@ -87,6 +87,17 @@ supported by the search API).
   pages.
 
 ### Fixed
+- **DuckDB compaction sees real bloat again** — The Python fragmentation
+  check no longer adds a phantom index's worth of blocks to the expected live
+  size, so a file that doubled after delete-and-reinsert churn now compacts
+  instead of reporting ~1.0. The Rust row-waste check now counts stored rows
+  through the scalar `id` column; counting `FLOAT[dims]` child segments made a
+  clean embedding table look ~98% dead and forced compaction on every run.
+  Both paths now use the same two signals: free-block ratio and dead-row ratio.
+  With that meaning, the threshold now triggers at ~1.43x the live data size
+  (30% overhead previously meant ~1.30x). The realtime service also checks
+  compaction once after a write burst drains, closing the gap where the
+  sampled per-write check never ran again.
 - **Indexing progress reports the real HNSW outcome** — The index row now
   names what actually happened (built, left in place, disabled, or VSS
   unavailable), hides when HNSW is disabled, and compaction rows no longer

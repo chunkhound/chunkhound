@@ -583,12 +583,10 @@ class DatabaseProvider(Protocol):
         ...
 
     def measure_fragmentation(self) -> float:
-        """Return fragmentation ratio. Fully stateless.
+        """Return current_size / estimated_live_size. Fully stateless.
 
-        Uses PRAGMA database_size, pragma_storage_info (block allocation
-        metadata), and os.path.getsize to compare actual file size against
-        the estimated minimum live data size.
-        < 1.5 = healthy, > 3.0 = fragmented, > 5.0 = significantly fragmented.
+        Uses the larger of free-block ratio and dead-row ratio. A clean
+        database is ~1.0; 2.0 means about half the file is reclaimable.
         """
         ...
 

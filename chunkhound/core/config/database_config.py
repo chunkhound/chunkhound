@@ -72,10 +72,11 @@ class DatabaseConfig(BaseModel):
     fragmentation_threshold_pct: float | None = Field(
         default=30.0,
         ge=0.0,
-        description="Background/auto-compaction trigger: percentage overhead of "
-        "file size above the provider's estimated minimum live size. "
-        "30 = compact when the DB is ~30% larger than live data. "
-        "0 = compact whenever any overhead exists, None = never auto-compact. "
+        description="Background/auto-compaction trigger: reclaimable waste as a "
+        "share of the DB file (free blocks or dead rows). "
+        "30 = compact when ~30% of the file is reclaimable (~1.43x the live "
+        "data size). 0 = compact whenever any waste exists, "
+        "None = never auto-compact. "
         "Does not disable the fixed compaction boundaries in chunkhound index.",
     )
 
