@@ -2,8 +2,10 @@
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,6 +14,7 @@ from typing import Any
 
 import execnet
 import pytest
+from filelock import FileLock, Timeout
 from loguru import logger
 
 # Runner switches are inputs, not application settings. Consumers use the snapshot.
@@ -36,6 +39,8 @@ CONTROLS_KEY = pytest.StashKey[Mapping[str, str]]()
 ARTIFACTS_KEY = pytest.StashKey[Path]()
 SESSION_KEY = pytest.StashKey[tuple[Path, pytest.MonkeyPatch]]()
 _RUN_CONFIG: pytest.Config | None = None
+_ARTIFACT_CACHE_DIRNAME = "chunkhound-pytest-artifacts"
+_ARTIFACT_RUN_LOCKS: list[FileLock] = []
 
 
 def bind_run_config(config: pytest.Config) -> None:
@@ -117,7 +122,7 @@ def bootstrap_isolation(config: pytest.Config) -> None:
     config.add_cleanup(scratch.cleanup)
     config.add_cleanup(patch.undo)
     root = Path(scratch.name).resolve()
-    artifacts = _session_artifacts(root, worker_inputs)
+    artifacts = _artifact_run(worker_inputs)
     config.stash[ARTIFACTS_KEY] = artifacts
     session_root = root / "session"
     config.stash[SESSION_KEY] = session_root, patch
@@ -141,12 +146,72 @@ def prepare_local_worker(gateway: execnet.Gateway) -> None:
         channel.waitclose()
 
 
-def _session_artifacts(root: Path, worker_inputs: Mapping[str, Any]) -> Path:
-    if "isolation_artifacts" in worker_inputs:
-        return Path(worker_inputs["isolation_artifacts"])
-    artifacts = root / "artifacts"
-    stage_artifacts(artifacts)
-    return artifacts
+def _artifact_run(worker_inputs: Mapping[str, Any]) -> Path:
+    """Share one run cache across xdist workers; keep it out of pytest's temp root.
+
+    A loaded DuckDB extension stays mapped until this process exits. Windows
+    therefore rejects deleting it during pytest teardown. The run cache is
+    pruned by a later process, after the mapping is gone.
+    """
+    provided = worker_inputs.get("isolation_artifacts")
+    if provided is not None:
+        return Path(provided)
+    cache_root = Path(tempfile.gettempdir()) / _ARTIFACT_CACHE_DIRNAME
+    cache_root.mkdir(parents=True, exist_ok=True)
+    # Serialize prune/create so one process cannot delete a run directory
+    # between another process's mkdir and lock acquisition.
+    with FileLock(cache_root / ".cache.lock"):
+        _prune_stale_artifact_runs(cache_root)
+        run = cache_root / f"run-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        run.mkdir()
+        # The lock lives as long as this process. A later run can delete the
+        # cache only after the lock is released, so a loaded DLL is never
+        # unlinked.
+        lock = FileLock(run / ".lock")
+        lock.acquire(timeout=0)
+    _ARTIFACT_RUN_LOCKS.append(lock)
+    try:
+        stage_artifacts(run)
+    except BaseException:
+        lock.release()
+        _ARTIFACT_RUN_LOCKS.remove(lock)
+        _force_rmtree(run)
+        raise
+    return run
+
+
+def _prune_stale_artifact_runs(cache_root: Path) -> None:
+    """Remove caches whose loader process has released its run lock."""
+    for run in cache_root.glob("run-*"):
+        lock = FileLock(run / ".lock")
+        try:
+            lock.acquire(timeout=0)
+        except (OSError, Timeout):
+            continue
+        finally:
+            if lock.is_locked:
+                lock.release()
+        _force_rmtree(run)
+
+
+def _force_rmtree(root: Path) -> None:
+    """Best-effort removal for a stale cache, including frozen Windows files."""
+    if not root.exists():
+        return
+    try:
+        paths = list(root.rglob("*"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            path.chmod(0o700 if path.is_dir() else 0o600)
+        except OSError:
+            pass
+    try:
+        root.chmod(0o700)
+    except OSError:
+        pass
+    shutil.rmtree(root, ignore_errors=True)
 
 
 def clear_application_environment(patch: pytest.MonkeyPatch) -> None:
@@ -167,7 +232,8 @@ def stage_artifacts(destination: Path) -> None:
 
     The VSS tree is frozen because every test HOME links to this one copy.
     A writable shared copy would let one test corrupt the extension for all
-    later tests.
+    later tests. It stays outside pytest's TemporaryDirectory because Windows
+    cannot delete a mapped DLL until the loading process exits.
     """
     from chunkhound.watchman_runtime.loader import _default_runtime_cache_dir
 
@@ -242,16 +308,35 @@ def _install_artifacts(root: Path, artifacts: Path) -> None:
     extension_dir = root / "home" / ".duckdb" / "extensions"
     source = artifacts / "vss"
     if source.is_dir():
-        extension_dir.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            # One dlopen identity across private HOME directories. The shared
-            # tree is read-only; tests that need a writable copy must ask for
-            # one explicitly.
-            extension_dir.symlink_to(source, target_is_directory=True)
-        except OSError:
-            # Windows can deny symlink creation without developer mode.
-            _copy_tree(source, extension_dir)
+        # One dlopen identity across private HOME directories. The shared
+        # tree is read-only; tests that need a writable copy must ask for
+        # one explicitly.
+        _link_shared_tree(source, extension_dir)
     _copy_tree(artifacts / "watchman", root / "watchman")
+
+
+def _link_shared_tree(source: Path, target: Path) -> None:
+    """Link one frozen native tree; never copy it into a temp directory."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.symlink_to(source, target_is_directory=True)
+        return
+    except OSError as exc:
+        if os.name != "nt":
+            raise
+        symlink_error = exc
+    # Windows can deny symlink creation without Developer Mode. Junctions
+    # need no privilege and keep the single shared image identity.
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(target), str(source)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Cannot link the shared VSS tree into the test HOME. "
+            "Enable Windows Developer Mode or use an NTFS temp directory."
+        ) from symlink_error
 
 
 @contextmanager

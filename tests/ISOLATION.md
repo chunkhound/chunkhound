@@ -13,6 +13,21 @@ The suite is offline by default. Do not add network calls to ordinary tests.
   namespaces). macOS and Windows get only the Python socket guard; subprocess
   and native traffic there is not isolated.
 
+## Native artifact cache
+
+Shared VSS and Watchman artifacts live outside pytest's session
+`TemporaryDirectory`, under
+`<system temp>/chunkhound-pytest-artifacts/run-<pid>-<uuid>/`. The DuckDB VSS
+DLL stays mapped until the pytest process exits. Windows cannot delete a mapped
+DLL, so deleting the cache during pytest teardown would fail with
+`PermissionError`.
+
+Each test HOME links to the one frozen VSS tree. If Windows denies symlink
+creation, the harness creates a directory junction. It never copies the DLL
+into a temp sandbox because that recreates the Windows cleanup lock. A later
+pytest run deletes run caches whose lock is free, which proves the loader
+process has exited.
+
 ## Running offline
 
 ```bash
