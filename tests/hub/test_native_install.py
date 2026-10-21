@@ -64,7 +64,9 @@ def test_missing_candidate_does_not_touch_old_target_or_create_marker(tmp_path):
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
-@pytest.mark.parametrize("kind", ["same", "wrong-name", "wrong-shape", "symlink"])
+@pytest.mark.parametrize(
+    "kind", ["same", "wrong-name", "wrong-shape", "symlink", "symlink-absent-parent"]
+)
 def test_invalid_candidate_preserves_old_database(tmp_path, backend, kind):
     name = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
     target = tmp_path / name
@@ -78,9 +80,20 @@ def test_invalid_candidate_preserves_old_database(tmp_path, backend, kind):
         (target / "payload").write_bytes(b"old")
     if kind == "same":
         candidate = target
-    elif kind == "symlink":
+    elif kind in ("symlink", "symlink-absent-parent"):
+        referent = target
+        if kind == "symlink-absent-parent":
+            # A separate valid candidate prevents same-target rejection from
+            # masking accidental leaf-symlink following during canonicalization.
+            referent = stage / "private" / name
+            referent.parent.mkdir()
+            if backend == "duckdb":
+                referent.write_bytes(b"new")
+            else:
+                referent.mkdir()
+                (referent / "payload").write_bytes(b"new")
         try:
-            candidate.symlink_to(target, target_is_directory=backend == "lancedb")
+            candidate.symlink_to(referent, target_is_directory=backend == "lancedb")
         except OSError:
             pytest.skip("symlink creation is unavailable")
     elif (backend == "lancedb") != (kind == "wrong-shape"):
@@ -89,11 +102,20 @@ def test_invalid_candidate_preserves_old_database(tmp_path, backend, kind):
         candidate.write_bytes(b"new")
     lease = native.acquire_install_lease(str(target), backend)
     try:
+        spelling = (
+            stage / "missing" / ".." / candidate.name
+            if kind == "symlink-absent-parent" else candidate
+        )
         with pytest.raises(native.DatabaseLayoutError):
-            lease.install(str(candidate))
+            lease.install(str(spelling))
+        assert not (stage / "missing").exists()
         payload = target if backend == "duckdb" else target / "payload"
         assert payload.read_bytes() == b"old"
         assert candidate.exists()
+        if kind == "symlink-absent-parent":
+            assert candidate.is_symlink()
+            payload = referent if backend == "duckdb" else referent / "payload"
+            assert payload.read_bytes() == b"new"
         assert not lease.interrupted
     finally:
         lease.close()
@@ -227,6 +249,39 @@ def test_symlink_parent_candidates_and_targets_preserve_canonical_identity(
     payload = target if backend == "duckdb" else target / "payload"
     assert payload.read_bytes() == b"new"
     assert not (tmp_path / name).exists()
+
+
+@pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
+def test_candidate_after_absent_parent_traversal_uses_canonical_identity(
+    tmp_path, backend
+):
+    name = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
+    target = tmp_path / name
+    candidate = tmp_path / "stage" / name
+    candidate.parent.mkdir()
+    if backend == "duckdb":
+        target.write_bytes(b"old")
+        candidate.write_bytes(b"new")
+    else:
+        target.mkdir()
+        (target / "payload").write_bytes(b"old")
+        candidate.mkdir()
+        (candidate / "payload").write_bytes(b"new")
+    spelling = tmp_path / "missing" / ".." / "stage" / name
+    lease = native.acquire_install_lease(str(target), backend)
+    try:
+        assert lease.install(str(spelling)) == []
+        lease.assert_covers(str(target))
+        assert not lease.interrupted
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_database_lease(str(target))
+    finally:
+        lease.close()
+    payload = target if backend == "duckdb" else target / "payload"
+    assert payload.read_bytes() == b"new"
+    assert not candidate.exists()
+    assert not (tmp_path / "missing").exists()
+    native.acquire_database_lease(str(target)).close()
 
 
 def test_closed_install_lease_rejects_candidate_without_changes(tmp_path):

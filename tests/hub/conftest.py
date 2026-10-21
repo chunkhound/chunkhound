@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
+import anyio
 import pytest
 
 
@@ -18,6 +19,7 @@ def hub_server(context: ssl.SSLContext | None = None) -> Iterator[SimpleNamespac
     state = SimpleNamespace(
         resources={},
         requests=[],
+        hosts=[],
         encodings=[],
         ignore_range=False,
         bad_range=False,
@@ -38,6 +40,7 @@ def hub_server(context: ssl.SSLContext | None = None) -> Iterator[SimpleNamespac
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler API
             state.requests.append((self.path, self.headers.get("Range")))
+            state.hosts.append(self.headers.get("Host"))
             if state.before_get is not None:
                 state.before_get(self.path)
             state.encodings.append(self.headers.get("Accept-Encoding"))
@@ -209,20 +212,34 @@ def hub_trusted_certificate(hub_certificate, monkeypatch):
 
 @pytest.fixture
 def hub_network(monkeypatch):
-    getaddrinfo = socket.getaddrinfo
-    connect = socket.socket.connect
+    connect_tcp = anyio.connect_tcp
 
-    def resolve_test_host(host, port, *args, **kwargs):
-        if host in {"hub.internal", b"hub.internal"}:
-            host = "127.0.0.1"
-        return getaddrinfo(host, port, *args, **kwargs)
+    async def connect_test_host(
+        remote_host,
+        remote_port,
+        *,
+        local_host=None,
+        tls=False,
+        ssl_context=None,
+        tls_standard_compatible=True,
+        tls_hostname=None,
+        happy_eyeballs_delay=0.25,
+    ):
+        # Numeric hosts bypass DNS; Windows IOCP bypasses socket.connect.
+        # Route only TCP, retaining the original URL/Host and TLS identity.
+        if remote_host in {"hub.internal", "192.0.2.1", "127.1"}:
+            if tls or ssl_context or tls_hostname:
+                tls_hostname = tls_hostname or str(remote_host)
+            remote_host = "127.0.0.1"
+        return await connect_tcp(
+            remote_host,
+            remote_port,
+            local_host=local_host,
+            tls=tls,
+            ssl_context=ssl_context,
+            tls_standard_compatible=tls_standard_compatible,
+            tls_hostname=tls_hostname,
+            happy_eyeballs_delay=happy_eyeballs_delay,
+        )
 
-    def connect_test_address(sock, address):
-        # Numeric hosts bypass DNS in anyio/asyncio, so route at the socket edge.
-        if address[0] == "192.0.2.1":
-            address = ("127.0.0.1", address[1])
-        return connect(sock, address)
-
-    # Exercise real requests for non-loopback URLs without an external network.
-    monkeypatch.setattr(socket, "getaddrinfo", resolve_test_host)
-    monkeypatch.setattr(socket.socket, "connect", connect_test_address)
+    monkeypatch.setattr(anyio, "connect_tcp", connect_test_host)

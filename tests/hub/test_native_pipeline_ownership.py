@@ -1,3 +1,4 @@
+import errno
 import os
 
 import pytest
@@ -56,7 +57,12 @@ def test_pipeline_rejects_non_utf8_canonical_target_without_mutation(
     tmp_path, empty, db_present
 ):
     raw_dir = os.fsencode(tmp_path) + b"/index-\xff"
-    os.mkdir(raw_dir)
+    try:
+        os.mkdir(raw_dir)
+    except OSError as error:
+        if error.errno == errno.EILSEQ:
+            pytest.skip("filesystem does not support non-UTF8 directory names")
+        raise
     alias = tmp_path / "alias"
     os.symlink(raw_dir, os.fsencode(alias))
     neighbor = tmp_path / "index-\ufffd"

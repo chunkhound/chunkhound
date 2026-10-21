@@ -43,10 +43,11 @@ fn filesystem_failures_preserve_old_or_refuse_open_and_cleanup_is_only_warning()
         }
         assert_eq!(lease.interrupted().unwrap(), interrupted);
         drop(lease);
-        assert_eq!(
-            matches!(acquire_shared(&target), Err(LeaseError::Interrupted)),
-            interrupted
-        );
+        match acquire_shared(&target) {
+            Ok(_) => assert!(!interrupted, "opener succeeded after {point:?}"),
+            Err(LeaseError::Interrupted) if interrupted => {}
+            Err(error) => panic!("unexpected opener error after {point:?}: {error:?}"),
+        }
     }
 }
 

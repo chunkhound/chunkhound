@@ -3,7 +3,6 @@
 import asyncio
 import concurrent.futures
 import os
-import shutil
 import threading
 import traceback
 import weakref
@@ -180,8 +179,11 @@ def test_borrowed_reader_recovery_preserves_live_provider_and_transaction(
     owner = provider._database_ownership
     manager = provider.connection
     try:
-        provider.execute_query("CHECKPOINT")
-        shutil.copyfile(path, Path(str(path) + ".compact_backup"))
+        # A valid closed recovery candidate avoids reading the live primary,
+        # whose writable DuckDB handle denies file reads on Windows.
+        with duckdb.connect(str(path) + ".compact_backup") as backup:
+            backup.execute("CREATE TABLE schema_version AS SELECT 1 AS version")
+            backup.execute("CREATE TABLE files(id INTEGER)")
         # Supported partial reconnect: the manager survives executor disconnect.
         provider._execute_in_db_thread_sync("disconnect", True)
         with _failed_inspection_shutdown(monkeypatch) as readers:

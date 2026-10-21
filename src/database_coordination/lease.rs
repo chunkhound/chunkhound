@@ -111,7 +111,23 @@ impl Backend {
 /// Each owner holds an independently opened descriptor; dropping one never unlocks another.
 pub(crate) struct Lease {
     target: PathBuf,
-    _file: Option<File>,
+    file: Option<File>,
+    creator_pid: u32,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // flock ownership follows the open file description through fork. Release
+        // explicitly so a pre-exec child's inherited descriptor cannot retain it,
+        // but never let a fork child's destructor release its live parent's lock.
+        if self.creator_pid == std::process::id() {
+            if let Some(file) = &self.file {
+                // Drop cannot report errors: best-effort unlock, then ordinary
+                // descriptor close remains the fallback when the file is dropped.
+                let _ = fs4::FileExt::unlock(file);
+            }
+        }
+    }
 }
 
 impl Lease {
@@ -160,7 +176,8 @@ fn acquire(path: &Path, exclusive: bool) -> Result<Lease, LeaseError> {
         }
         return Ok(Lease {
             target,
-            _file: None,
+            file: None,
+            creator_pid: std::process::id(),
         });
     }
     let parent = target
@@ -181,7 +198,8 @@ fn acquire(path: &Path, exclusive: bool) -> Result<Lease, LeaseError> {
     }
     let lease = Lease {
         target,
-        _file: Some(file),
+        file: Some(file),
+        creator_pid: std::process::id(),
     };
     if !exclusive && lease.interrupted()? {
         return Err(LeaseError::Interrupted);

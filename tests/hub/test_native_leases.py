@@ -4,12 +4,148 @@ import gc
 import os
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
 import pytest
 
 import chunkhound_native as native
+
+# Run the entire contract in a fresh interpreter: pytest/plugins may have
+# threads whose inherited runtime locks make Python/PyO3 after fork unsafe.
+_FORK_LEASE_PROBE = """
+import os
+import select
+import signal
+import sys
+import threading
+from contextlib import contextmanager
+from pathlib import Path
+
+import chunkhound_native as native
+
+
+@contextmanager
+def fork_holding_inherited_lease(lease, *, close_in_child=False):
+    assert threading.active_count() == 1, "fork probe must be single-threaded"
+    ready_read, ready_write = os.pipe()
+    release_read, release_write = os.pipe()
+    try:
+        pid = os.fork()
+    except BaseException:
+        for fd in (ready_read, ready_write, release_read, release_write):
+            os.close(fd)
+        raise
+    if pid == 0:
+        try:
+            os.close(ready_read)
+            os.close(release_write)
+            if close_in_child:
+                lease.close()
+            os.write(ready_write, b"ready")
+            os.read(release_read, 1)
+        finally:
+            os._exit(0)
+    try:
+        os.close(ready_write)
+        os.close(release_read)
+        readable, _, _ = select.select([ready_read], [], [], 20)
+        assert readable, "fork child did not acknowledge inherited lease"
+        assert os.read(ready_read, 5) == b"ready"
+        yield
+    finally:
+        # Reap even when the assertion fails; never leave an inherited owner alive.
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        finally:
+            os.waitpid(pid, 0)
+            os.close(ready_read)
+            os.close(release_write)
+
+
+target = sys.argv[1]
+"""
+
+
+def _run_fork_probe(tmp_path, code):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-W",
+            "error::DeprecationWarning",
+            "-c",
+            _FORK_LEASE_PROBE + textwrap.dedent(code),
+            str(tmp_path / "chunks.db"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="requires descriptor inheritance via fork"
+)
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_parent_close_releases_ownership_while_fork_child_holds_descriptor(
+    tmp_path, interrupted
+):
+    _run_fork_probe(
+        tmp_path,
+        f"interrupted = {interrupted!r}\n" + textwrap.dedent("""
+        lease = native.acquire_install_lease(target, "duckdb")
+        try:
+            if interrupted:
+                marker = Path(target + ".chunkhound-install.json")
+                marker.write_bytes(b'{"version":1}\\n')
+            with fork_holding_inherited_lease(lease):
+                lease.close()
+                if interrupted:
+                    try:
+                        native.acquire_database_lease(target).close()
+                    except native.DatabaseInterruptedError:
+                        pass
+                    else:
+                        raise AssertionError("marker must refuse shared lease")
+                else:
+                    native.acquire_database_lease(target).close()
+        finally:
+            lease.close()
+        """),
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="requires descriptor inheritance via fork"
+)
+def test_fork_child_close_does_not_release_live_parent_ownership(tmp_path):
+    _run_fork_probe(
+        tmp_path,
+        """
+        lease = native.acquire_install_lease(target, "duckdb")
+        try:
+            with fork_holding_inherited_lease(lease, close_in_child=True):
+                try:
+                    native.acquire_database_lease(target).close()
+                except native.DatabaseBusyError:
+                    pass
+                else:
+                    raise AssertionError("child close allowed shared competitor")
+                try:
+                    native.acquire_install_lease(target, "duckdb").close()
+                except native.DatabaseBusyError:
+                    pass
+                else:
+                    raise AssertionError("child close allowed install competitor")
+        finally:
+            lease.close()
+        native.acquire_install_lease(target, "duckdb").close()
+        """,
+    )
 
 
 def test_each_shared_owner_excludes_install_until_its_own_close(tmp_path):

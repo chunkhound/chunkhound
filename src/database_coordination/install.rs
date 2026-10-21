@@ -84,10 +84,10 @@ pub(super) fn install_with(
     backend.validate_shape(target)?;
     // Validate the unresolved leaf before canonicalization can follow a symlink.
     backend.validate_shape(candidate)?;
-    if metadata_optional(candidate)?.is_none() {
+    let candidate = canonical_target(candidate)?;
+    if metadata_optional(&candidate)?.is_none() {
         return Err(LeaseError::Layout("candidate is absent"));
     }
-    let candidate = canonical_target(candidate)?;
     if candidate.file_name() != Some(std::ffi::OsStr::new(backend.filename()))
         || candidate == target
         || candidate.starts_with(target)

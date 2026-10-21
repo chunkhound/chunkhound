@@ -19,15 +19,37 @@ from chunkhound.providers.database.index_format import read_format
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 
 
-def snapshot(path: Path) -> dict[str, tuple[str, int]]:
+def snapshot(
+    path: Path, *, live_database_paths: tuple[Path | str, ...] = ()
+) -> dict[str, tuple[str, int] | tuple[str, int, int, int, int]]:
+    """Hash files strictly, except explicitly named live Windows primaries.
+
+    DuckDB's Windows writer denies primary-file reads. Metadata plus callers'
+    live-state assertions is weaker than byte equality (timestamps may lag).
+    WAL, recovery files, and all closed databases always retain full hashes.
+    """
+    live_paths = {Path(p).resolve() for p in live_database_paths}
     files = (
         [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file())
     )
-    return {
-        str(p): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
-        for p in files
-        if not p.name.endswith(".chunkhound.lock")
-    }
+    result: dict[str, tuple[str, int] | tuple[str, int, int, int, int]] = {}
+    for p in files:
+        if p.name.endswith(".chunkhound.lock"):
+            continue
+        if os.name == "nt" and p.resolve() in live_paths:
+            stat = p.stat()
+            result[str(p)] = (
+                "live-windows-primary-metadata",
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_dev,
+                stat.st_ino,
+            )
+        else:
+            result[str(p)] = (
+                hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns
+            )
+    return result
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
@@ -278,13 +300,39 @@ def test_live_preflight_refuses_handle_for_another_database(tmp_path):
     path = tmp_path / "owned.db"
     with duckdb.connect(str(path)) as conn:
         conn.execute("CREATE TABLE schema_version AS SELECT 2 AS version")
-    with duckdb.connect(str(tmp_path / "unrelated.db")) as other:
+    unrelated = tmp_path / "unrelated.db"
+    with duckdb.connect(str(unrelated)) as other:
         other.execute("CREATE TABLE schema_version AS SELECT 1 AS version")
-        before = snapshot(tmp_path)
+        before = snapshot(tmp_path, live_database_paths=(unrelated,))
         with pytest.raises(IndexFormatError, match="catalog identity is ambiguous"):
             preflight_duckdb(path, live_connection=other)
-        assert snapshot(tmp_path) == before
+        assert snapshot(tmp_path, live_database_paths=(unrelated,)) == before
         assert other.execute("SELECT version FROM schema_version").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_live_preflight_checks_attached_catalog_with_embedded_quote(tmp_path, version):
+    from chunkhound.providers.database.index_format import preflight_duckdb
+
+    path = tmp_path / "owned'quoted.db"
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("CREATE TABLE schema_version AS SELECT ? AS version", [version])
+    before = snapshot(tmp_path)
+    with duckdb.connect(":memory:") as conn:
+        escaped_path = str(path).replace("'", "''")
+        conn.execute(f'''ATTACH '{escaped_path}' AS "owned""quoted" (READ_ONLY)''')
+        conn.execute("CREATE TEMP TABLE retained_session AS SELECT 42 AS value")
+        if version == 2:
+            with pytest.raises(IndexFormatError, match="Unsupported index format"):
+                preflight_duckdb(path, live_connection=conn)
+        else:
+            preflight_duckdb(path, live_connection=conn)
+        assert conn.execute(
+            'SELECT version FROM "owned""quoted".main.schema_version'
+        ).fetchone() == (version,)
+        assert conn.execute("SELECT value FROM retained_session").fetchone() == (42,)
+        assert snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 def test_stored_format_defaults_are_not_generated_columns(tmp_path):

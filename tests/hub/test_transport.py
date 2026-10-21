@@ -132,6 +132,10 @@ async def test_http_urls_allow_localhost_and_non_loopback_hosts(
     assert hub_http.requests == ([("/redirect", None)] if redirect else []) + [
         (OBJECT, None)
     ]
+    port = hub_http.url.rsplit(":", 1)[1]
+    assert hub_http.hosts == ([f"127.0.0.1:{port}"] if redirect else []) + [
+        f"{host}:{port}"
+    ]
 
 
 @pytest.mark.parametrize("operation", ["manifest", "artifact"])
