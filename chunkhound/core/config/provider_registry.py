@@ -111,4 +111,14 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://docs.requesty.ai",
         auth_url="https://app.requesty.ai/api-keys",
     ),
+    "cheaperinference": OpenAICompatibleSpec(
+        name="cheaperinference",
+        default_base_url="https://api.cheaperinference.com/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
+        docs_url="https://cheaperinference.com/docs",
+        auth_url="https://cheaperinference.com/signup",
+    ),
 }
