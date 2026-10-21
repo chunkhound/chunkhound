@@ -114,6 +114,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "cheaperinference",
+            "model": "gpt-5.4-mini",
+            "expected_name": "cheaperinference",
+            "expected_base_url": "https://api.cheaperinference.com/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'cheaperinference'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="cheaperinference",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -266,6 +281,7 @@ class TestFactoryPipeline:
             "openrouter": 10,
             "orcarouter": 10,
             "requesty": 10,
+            "cheaperinference": 10,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected

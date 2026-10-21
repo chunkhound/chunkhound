@@ -211,6 +211,14 @@ def test_requesty_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_cheaperinference_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "cheaperinference")
+
+    assert config["provider"] == "cheaperinference"
+    assert config["model"] == "gpt-5.4-mini"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 
