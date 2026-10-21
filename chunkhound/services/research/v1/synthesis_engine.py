@@ -60,6 +60,17 @@ def _format_output_allowance(allowance: int | OutputLimitIntent) -> str:
     return allowance.value
 
 
+def _log_neutralized_citations(stage: str, invalid: list[int]) -> None:
+    """Log repaired citation references, truncating long lists."""
+    if not invalid:
+        return
+    logger.warning(
+        f"Neutralized {len(invalid)} invalid citation reference(s) in {stage}: "
+        f"{invalid[:10]}"
+        + (f" ... and {len(invalid) - 10} more" if len(invalid) > 10 else "")
+    )
+
+
 class SynthesisEngine:
     """Engine for synthesizing research results into comprehensive answers.
 
@@ -318,6 +329,15 @@ class SynthesisEngine:
                 "This indicates an LLM error, content filter, or model refusal."
             )
 
+        # Drop invented [N] markers before the sources footer is built so the
+        # delivered answer only cites references it actually lists.
+        answer, invalid_citations = (
+            self._parent._citation_manager.neutralize_invalid_citations(
+                answer, file_reference_map
+            )
+        )
+        _log_neutralized_citations("single-pass synthesis", invalid_citations)
+
         # Append sources footer with file and chunk information
         try:
             footer = self._parent._citation_manager.build_sources_footer(
@@ -486,6 +506,17 @@ Provide a comprehensive analysis focusing on the query."""
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
         )
 
+        # Drop invented [N] markers before this summary is remapped and folded
+        # into the reduce prompt (validity is cluster-local at this stage).
+        summary, invalid_citations = (
+            self._parent._citation_manager.neutralize_invalid_citations(
+                response.content, file_reference_map
+            )
+        )
+        _log_neutralized_citations(
+            f"cluster {cluster.cluster_id} map synthesis", invalid_citations
+        )
+
         # Build sources list for this cluster
         sources = []
         for chunk in cluster_chunks:
@@ -499,12 +530,12 @@ Provide a comprehensive analysis focusing on the query."""
 
         logger.debug(
             f"Cluster {cluster.cluster_id} synthesis complete: "
-            f"{llm.estimate_tokens(response.content):,} tokens generated"
+            f"{llm.estimate_tokens(summary):,} tokens generated"
         )
 
         return {
             "cluster_id": cluster.cluster_id,
-            "summary": response.content,
+            "summary": summary,
             "sources": sources,
             "file_paths": cluster.file_paths,
             "file_reference_map": file_reference_map,
@@ -581,6 +612,17 @@ Provide a comprehensive analysis focusing on the query."""
             original_summary = result["summary"]
             remapped_summary = self._parent._citation_manager.remap_cluster_citations(
                 original_summary, cluster_file_map, file_reference_map
+            )
+            # Remapping passes unknown cluster refs through unchanged; drop any
+            # that are still invalid in the global space before the reduce LLM
+            # ever sees them.
+            remapped_summary, unremapped_invalid = (
+                self._parent._citation_manager.neutralize_invalid_citations(
+                    remapped_summary, file_reference_map
+                )
+            )
+            _log_neutralized_citations(
+                f"cluster {result.get('cluster_id')} post-remap", unremapped_invalid
             )
             result["summary"] = remapped_summary
 
@@ -678,20 +720,14 @@ Provide a complete, integrated analysis that addresses the original query."""
                 f"(minimum: {MIN_SYNTHESIS_LENGTH}). finish_reason={response.finish_reason}."
             )
 
-        # Validate citation references are valid
-        invalid_citations = self._parent._citation_manager.validate_citation_references(
-            answer, file_reference_map
-        )
-        if invalid_citations:
-            logger.warning(
-                f"Found {len(invalid_citations)} invalid citation references after reduce: "
-                f"{invalid_citations[:10]}"
-                + (
-                    f" ... and {len(invalid_citations) - 10} more"
-                    if len(invalid_citations) > 10
-                    else ""
-                )
+        # Repair invalid citation references before delivery; this is the
+        # final assertion that no [N] survives outside the sources footer.
+        answer, invalid_citations = (
+            self._parent._citation_manager.neutralize_invalid_citations(
+                answer, file_reference_map
             )
+        )
+        _log_neutralized_citations("reduce synthesis", invalid_citations)
 
         # Append sources footer (aggregate all sources from all clusters)
         try:
