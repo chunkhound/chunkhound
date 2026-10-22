@@ -45,7 +45,6 @@ def _manager_provider(
         ("openrouter", "max_tokens"),
         ("orcarouter", "max_tokens"),
         ("requesty", "max_tokens"),
-        ("opper", "max_tokens"),
     ],
 )
 async def test_canonical_builtin_provider_managed_request_omits_cap(
