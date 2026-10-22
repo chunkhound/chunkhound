@@ -505,34 +505,11 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OpenRouter API. Registry providers require explicit `model`. |
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OrcaRouter API. Registry providers require explicit `model`. |
 | Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Requesty API. Registry providers require explicit `model`. |
-| [API Route](https://www.api-route.com/) | `api_route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OpenAI-compatible Chat Completions gateway. Use an exact model ID available to your key. |
+| API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | API Route API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
 When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Requesty, and API Route) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
-
-### API Route
-
-Set `llm.provider` to `api_route` to use `https://global.api-route.com/v1`.
-Create a key in [API Keys](https://www.api-route.com/api-keys) and supply it
-through `CHUNKHOUND_LLM_API_KEY`. Choose an exact model ID returned by the
-authenticated `/models` catalog, such as `gpt-6.1-sol` if your key can access it;
-do not add an upstream-provider prefix. See the [API documentation](https://github.com/DennyHo0917/api-route/blob/main/API.md).
-
-```json
-{
-  "llm": {
-    "provider": "api_route",
-    "model": "gpt-6.1-sol"
-  }
-}
-```
-
-API Route uses the existing prompt-based structured-output fallback, since
-native JSON Schema support depends on the selected upstream model. Its output
-cap omission capability remains `UNKNOWN`, so provider-managed synthesis uses
-the configured output-limit fallback rather than assuming an uncapped request.
-Configure embeddings and reranking separately; this preset adds only an LLM provider.
 
 ### LLM Options
 

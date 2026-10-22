@@ -211,17 +211,22 @@ def test_requesty_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
-def test_api_route_configurator_round_trips_through_llm_config(
+def test_api_route_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "api-route")
+
+    assert config["provider"] == "api-route"
+    assert config["model"] == "gemini-3.5-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_api_route_config_passes_research_validation(
     tmp_path, clean_environment
 ) -> None:
-    config = Config(**_build_chunkhound_config("voyageai", "api_route"))
-    assert config.llm is not None
-    utility, synthesis = config.llm.get_provider_configs()
-    for role in (utility, synthesis):
-        assert role["provider"] == "api_route"
-        assert role["model"] == "gpt-6.1-sol"
+    errors = _validated_config_errors(
+        tmp_path, "research", "voyageai", "api-route"
+    )
 
-    assert _validated_config_errors(tmp_path, "research", "voyageai", "api_route") == []
+    assert errors == []
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")

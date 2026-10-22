@@ -105,12 +105,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://docs.requesty.ai",
         auth_url="https://app.requesty.ai/api-keys",
     ),
-    "api_route": OpenAICompatibleSpec(
-        name="api_route",
+    "api-route": OpenAICompatibleSpec(
+        name="api-route",
         default_base_url="https://global.api-route.com/v1",
         supports_structured_outputs=False,
         max_tokens_param_name="max_tokens",
-        docs_url="https://github.com/DennyHo0917/api-route/blob/main/API.md",
+        synthesis_concurrency=10,
+        docs_url="https://www.api-route.com/en/docs/quickstart",
         auth_url="https://www.api-route.com/api-keys",
     ),
 }
