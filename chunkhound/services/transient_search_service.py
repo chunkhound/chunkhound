@@ -2,6 +2,7 @@
 
 import asyncio
 import heapq
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
@@ -10,7 +11,16 @@ import numpy as np
 from chunkhound.services.search_service_protocol import SearchServiceProtocol
 from chunkhound.services.vector_cache import VectorCache
 
-_OVERFETCH_FACTOR = 5
+OVERFETCH_FACTOR_ENV = "CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR"
+_DEFAULT_OVERFETCH_FACTOR = 5
+_MIN_OVERFETCH = 50
+
+
+def _overfetch_factor() -> int:
+    try:
+        return max(1, int(os.environ.get(OVERFETCH_FACTOR_ENV, "")))
+    except ValueError:
+        return _DEFAULT_OVERFETCH_FACTOR
 
 # Hard ceiling on (offset + page_size) for a single transient (diff/web) search
 # call. The top-K heap must hold at least offset + page_size entries to return
@@ -172,7 +182,13 @@ class TransientSearchService:
         effective_limit = (
             limit
             if limit is not None
-            else max(offset + page_size, page_size * _OVERFETCH_FACTOR)
+            else max(
+                offset + page_size,
+                min(
+                    max(page_size * _overfetch_factor(), _MIN_OVERFETCH),
+                    _MAX_RESULT_WINDOW,
+                ),
+            )
         )
         assert effective_limit >= offset + page_size, (
             "candidate pool must cover the requested offset+page_size slice"

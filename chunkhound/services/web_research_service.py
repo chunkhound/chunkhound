@@ -21,7 +21,7 @@ from chunkhound.services.vector_cache import VectorCache
 
 _PAGE_CHUNK_CHARS = 10_000
 _BATCH_SIZE = 100
-_WEB_VECTOR_CACHE = VectorCache()
+_WEB_VECTOR_CACHE = VectorCache.from_env()
 
 Page = tuple[str, str, str | bytes]
 

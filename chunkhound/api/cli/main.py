@@ -35,8 +35,7 @@ _ANALYTICS_ACTION_ARGS: dict[str, tuple[str, ...]] = {
 
 # Bounded, single-shot commands analytics wraps -- excludes "mcp" (handled by
 # the MCP tool-call hook instead), "_daemon" (long-running, per the design's
-# non-goal for long-running commands), and "_quickresearch" (an internal
-# subprocess spawned by research/websearch, not a user-facing entry point).
+# non-goal for long-running commands).
 _ANALYTICS_WRAPPED_COMMANDS = frozenset(
     {
         "index",
@@ -299,8 +298,7 @@ async def async_main() -> None:
     # `mcp`/`_daemon` build and own their own recorder (one per server
     # process, see mcp_server/base.py) -- constructing a second one here
     # would spin up a redundant background flush thread + reqwest client
-    # for the lifetime of that long-running process. `_quickresearch` is an
-    # internal subprocess, not a user-facing entry point. Only build a
+    # for the lifetime of that long-running process. Only build a
     # recorder at all for commands this hook actually wraps.
     if args.command in _ANALYTICS_WRAPPED_COMMANDS:
         analytics_recorder = ch_analytics.build_recorder(

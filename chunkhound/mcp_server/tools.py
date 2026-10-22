@@ -50,7 +50,7 @@ MAX_ALLOWED_TOKENS = 25000
 # safely under the 16384-token limit of the smallest supported embedding model.
 MAX_DIFF_CHUNK_CHARS = 10_000
 _TRANSIENT_BATCH_SIZE = 100
-_TRANSIENT_VECTOR_CACHE = VectorCache()
+_TRANSIENT_VECTOR_CACHE = VectorCache.from_env()
 
 
 def _format_fetch_warnings(warnings: list[str]) -> str:

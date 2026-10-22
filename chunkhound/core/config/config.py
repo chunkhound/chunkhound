@@ -59,7 +59,7 @@ class ConfigErrorCode(str, Enum):
 # the remote-config terminal delta gate, in addition to the current command.
 # Any new command whose command-scoped gate can be tripped by a
 # remote-pushable value must be added here. `research` stands in for the
-# LLM-requiring commands (`websearch`, `fetchurl`, `_quickresearch`) — its
+# LLM-requiring commands (`websearch`, `fetchurl`) — its
 # LLM validation branch produces the same codes (`LLM_NOT_CONFIGURED`,
 # `LLM_MISSING_ROLE_CONFIG`) they all do, so covering it catches a payload
 # that would remove or break `llm.*` from any low-privilege invocation

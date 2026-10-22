@@ -9,6 +9,7 @@ safe across threads. Async callers on one event loop do not await inside
 get/put, so they never hold the lock across a yield.
 """
 
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -18,6 +19,19 @@ import numpy as np
 import numpy.typing as npt
 
 from chunkhound.utils.hashing import compute_text_hash
+
+CACHE_MAX_ENTRIES_ENV = "CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES"
+CACHE_TTL_ENV = "CHUNKHOUND_VECTOR_CACHE_TTL_SECONDS"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
 
 
 class VectorCache:
@@ -30,6 +44,17 @@ class VectorCache:
             OrderedDict()
         )
         self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls) -> "VectorCache":
+        """Build a cache sized by env.
+
+        ``CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES=0`` disables caching entirely.
+        """
+        return cls(
+            max_entries=_env_int(CACHE_MAX_ENTRIES_ENV, 10_000),
+            ttl_seconds=_env_int(CACHE_TTL_ENV, 300),
+        )
 
     def _key(self, text: str, provider: str, model: str, dims: int) -> str:
         return f"{provider}\0{model}\0{dims}\0{compute_text_hash(text)}"

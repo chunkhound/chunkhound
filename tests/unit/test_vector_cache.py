@@ -107,3 +107,18 @@ def test_vector_cache_returns_isolated_copies() -> None:
     cached[1] = 99.0
 
     assert _vector(cache, "alpha") == [1.0, 2.0]
+
+
+def test_vector_cache_from_env_zero_disables_cache(monkeypatch) -> None:
+    monkeypatch.setenv("CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES", "0")
+    cache = VectorCache.from_env()
+
+    cache.put("alpha", [1.0])
+
+    assert cache.get("alpha") is None
+
+
+def test_vector_cache_from_env_ignores_invalid_values(monkeypatch) -> None:
+    monkeypatch.setenv("CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES", "abc")
+
+    assert VectorCache.from_env().max_entries == 10_000
