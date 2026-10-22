@@ -97,7 +97,7 @@ def validate_rerank_configuration(
     # If using reranking (model set or TEI format with URL), validate URL config.
     # An inactive rerank_url is tolerated so switching reranking off never blocks
     # config load (see CHANGELOG: "An unused rerank_url no longer blocks"); the
-    # factory drops an unresolvable relative path instead of forwarding it.
+    # factory forwards it; the provider drops an unresolvable relative path.
     is_using_reranking = rerank_model or (rerank_format == "tei" and rerank_url)
 
     if is_using_reranking and rerank_url:

@@ -16,7 +16,12 @@ from chunkhound.core.exceptions.embedding import (
     EmbeddingProviderError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
-from chunkhound.core.utils.rerank_url import normalize_rerank_url, resolve_rerank_url
+from chunkhound.core.utils.rerank_url import (
+    drop_invalid_rerank_url_message,
+    drop_relative_rerank_url_message,
+    normalize_rerank_url,
+    resolve_rerank_url,
+)
 from chunkhound.core.utils.voyageai_utils import (
     OFFICIAL_VOYAGEAI_BASE_V1,
     is_official_voyageai_endpoint,
@@ -330,19 +335,26 @@ class VoyageAIEmbeddingProvider:
         self._base_url = base_url
         # Same contract as the factory: an unusable endpoint must not break
         # construction and must not silently become an HTTP rerank target, so
-        # dropping it leaves the VoyageAI SDK reranker in charge.
+        # dropping it leaves the VoyageAI SDK reranker in charge. An empty
+        # endpoint is unset, not an HTTP target, so it collapses to None.
         if rerank_url:
             try:
                 rerank_url = normalize_rerank_url(rerank_url)
-            except ValueError:
+            except ValueError as exc:
+                logger.warning(
+                    drop_invalid_rerank_url_message("VoyageAI", rerank_url, exc)
+                )
                 rerank_url = None
             else:
                 if base_url:
                     rerank_url = resolve_rerank_url(rerank_url, base_url, join=True)
                 elif not rerank_url.startswith(("http://", "https://")):
                     # A relative path needs base_url to resolve against.
+                    logger.warning(
+                        drop_relative_rerank_url_message("VoyageAI", rerank_url)
+                    )
                     rerank_url = None
-        self._rerank_url = rerank_url
+        self._rerank_url = rerank_url or None
         self._rerank_format = rerank_format
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size

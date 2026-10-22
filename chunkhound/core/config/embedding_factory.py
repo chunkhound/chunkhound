@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from chunkhound.core.utils.rerank_url import normalize_rerank_url
+from chunkhound.core.utils.rerank_url import rerank_url_for_log
 
 from .embedding_config import EmbeddingConfig
 
@@ -179,10 +179,13 @@ class EmbeddingProviderFactory:
         if not model:
             raise ValueError("Model not specified in provider configuration")
 
+        # Secrets in rerank_url userinfo must not reach logs; use the shared
+        # redactor rather than the raw value.
         logger.debug(
             f"Creating VoyageAI provider: model={model}, "
             f"base_url={base_url}, api_key={'***' if api_key else None}, "
-            f"rerank_model={rerank_model}, rerank_url={rerank_url}, "
+            f"rerank_model={rerank_model}, "
+            f"rerank_url={rerank_url_for_log(rerank_url) if rerank_url else None}, "
             f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
         )
 
@@ -207,22 +210,11 @@ class EmbeddingProviderFactory:
                 kwargs["output_dims"] = output_dims
             if client_side_truncation:
                 kwargs["client_side_truncation"] = True
-            # Normalize the scheme, dropping malformed endpoints so an unused
-            # external endpoint cannot block provider creation.
+            # Forward the endpoint unchanged; the provider owns normalization,
+            # resolution, and warnings so the contract has one owner. A falsy
+            # endpoint is unset, so omit it and its dependent options instead of
+            # forwarding an empty string as a distinct unset shape.
             if rerank_url:
-                try:
-                    rerank_url = normalize_rerank_url(rerank_url)
-                except ValueError as exc:
-                    logger.warning(
-                        f"Dropping invalid rerank_url={rerank_url} for VoyageAI "
-                        f"provider: {exc}"
-                    )
-                    rerank_url = None
-            # Forward absolute URLs and relative paths with a base_url; the
-            # provider resolves the latter against the base.
-            if rerank_url and (
-                base_url or rerank_url.startswith(("http://", "https://"))
-            ):
                 kwargs["rerank_url"] = rerank_url
                 kwargs["rerank_format"] = rerank_format
                 if rerank_ssl_verify is not None:

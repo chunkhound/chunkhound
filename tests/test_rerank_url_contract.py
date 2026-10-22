@@ -3,6 +3,7 @@
 from inspect import signature
 
 import pytest
+from loguru import logger
 
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
@@ -10,6 +11,23 @@ from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvi
 from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
 from tests.fixtures.rerank_server_manager import RerankServerManager
 from tests.rerank_server import MockRerankResult, MockRerankScenario
+
+
+@pytest.fixture
+def warning_records():
+    """Capture rerank warnings without depending on the configured log format."""
+    records: list[tuple[str, str]] = []
+
+    def capture(message) -> None:
+        text = message.record["message"]
+        if "rerank_url=" in text:
+            records.append((message.record["level"].name, text))
+
+    sink_id = logger.add(capture, level="WARNING")
+    try:
+        yield records
+    finally:
+        logger.remove(sink_id)
 
 
 @pytest.mark.parametrize("provider", ["openai", "voyageai"])
@@ -286,3 +304,155 @@ def test_voyage_direct_malformed_url_leaves_no_endpoint(bad_url):
         rerank_url=bad_url,
     )
     assert client._rerank_url is None
+
+
+def test_voyage_creation_log_redacts_rerank_url_secrets():
+    """Debug logs must not echo userinfo credentials from rerank_url."""
+    records: list[str] = []
+
+    def capture(message) -> None:
+        text = message.record["message"]
+        if "Creating VoyageAI provider" in text:
+            records.append(text)
+
+    sink_id = logger.add(capture, level="DEBUG")
+    try:
+        EmbeddingProviderFactory.create_provider(
+            _voyage_config(
+                rerank_url="https://REVIEW_USER:REVIEW_SECRET@host/rerank",
+                base_url="https://host/v1",
+            )
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert len(records) == 1
+    message = records[0]
+    assert "REVIEW_USER" not in message
+    assert "REVIEW_SECRET" not in message
+    assert "https://host/rerank" in message
+
+
+def _voyage_for_warning(entry, url, base_url=None, rerank_model=None):
+    config = dict(
+        api_key="local-test-key",
+        model="local-embedding-model",
+        rerank_model=rerank_model,
+        rerank_url=url,
+        base_url=base_url,
+    )
+    if entry == "factory":
+        return EmbeddingProviderFactory.create_provider(_voyage_config(**config))
+    return VoyageAIEmbeddingProvider(**config)
+
+
+@pytest.mark.parametrize("entry", ["direct", "factory"])
+def test_voyage_empty_rerank_url_is_the_same_unset_shape(entry):
+    """An empty endpoint must behave exactly like None, not as HTTP reranking.
+
+    The direct entry must not report SDK reranking as HTTP capability when no
+    model is configured; the factory applies the same provider default either
+    way, so its capability only has to match the None case.
+    """
+    unset = _voyage_for_warning(entry, None)
+    empty = _voyage_for_warning(entry, "")
+    assert empty._rerank_url is None
+    assert empty.supports_reranking() == unset.supports_reranking()
+    if entry == "direct":
+        assert empty.supports_reranking() is False
+
+
+@pytest.mark.parametrize("entry", ["direct", "factory"])
+@pytest.mark.parametrize(
+    "url,endpoint,reason",
+    [
+        ("/rerank", "/rerank", "base_url is required"),
+        (
+            "/rerank?api_key=REVIEW_SECRET#REVIEW_FRAGMENT",
+            "/rerank",
+            "base_url is required",
+        ),
+        (
+            "ftp://REVIEW_USER:REVIEW_SECRET@host/rerank?key=REVIEW_QUERY",
+            "ftp://host/rerank",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "//REVIEW_USER:REVIEW_SECRET@host/rerank#REVIEW_FRAGMENT",
+            "//host/rerank",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "https://REVIEW_USER:REVIEW_SECRET@host/rerank\nFORGED LOG LINE",
+            "https://host/rerank\\nFORGED LOG LINE",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "https:/REVIEW_USER:REVIEW_SECRET@host/rerank",
+            "<invalid URL>",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "https://REVIEW_USER:bad/REVIEW_SECRET@host/rerank",
+            "<invalid URL>",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "https://REVIEW_USER:REVIEW_SECRET?x@host/rerank",
+            "<invalid URL>",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "https://REVIEW_USER:REVIEW_SECRET#x@host/rerank",
+            "<invalid URL>",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "https://REVIEW_USER:pa?ss@host/rerank",
+            "<invalid URL>",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "http://[REVIEW_USER:REVIEW_SECRET@host/rerank",
+            "http://host/rerank",
+            "complete HTTP(S) URL",
+        ),
+        (
+            "https://host/rerank\r\t\x1b\u0085\u2028",
+            "https://host/rerank",
+            "complete HTTP(S) URL",
+        ),
+    ],
+)
+def test_voyage_dropped_endpoint_warns_safely(
+    entry, url, endpoint, reason, warning_records
+):
+    _voyage_for_warning(entry, url)
+    assert len(warning_records) == 1
+    level, message = warning_records[0]
+    assert level == "WARNING"
+    assert "Dropping" in message and "rerank_url=" in message
+    assert endpoint in message
+    assert "VoyageAI provider" in message
+    assert reason in message
+    assert all(char.isprintable() for char in message)
+    assert not any(char in message for char in "\r\n\t\x1b\u0085\u2028")
+    for secret in ("USER", "SECRET", "QUERY", "FRAGMENT"):
+        assert f"REVIEW_{secret}" not in message
+
+
+@pytest.mark.parametrize("entry", ["direct", "factory"])
+@pytest.mark.parametrize(
+    "url,base_url",
+    [
+        (None, None),
+        ("", None),
+        ("https://host/rerank", None),
+        ("/rerank", "https://host/v1"),
+    ],
+)
+def test_voyage_usable_or_omitted_endpoint_does_not_warn(
+    entry, url, base_url, warning_records
+):
+    _voyage_for_warning(entry, url, base_url)
+    assert warning_records == []
