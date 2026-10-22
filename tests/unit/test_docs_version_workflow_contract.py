@@ -16,6 +16,7 @@ from tests.utils.windows_subprocess import get_safe_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
 RESOLVER = ROOT / "scripts" / "resolve_docs_version.sh"
+MUSL_UV_INSTALLER = ROOT / "scripts" / "install_pinned_musl_uv.sh"
 INLINE_RESOLVE_SNIPPET = (
     "CHUNKHOUND_DOCS_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')"
 )
@@ -555,6 +556,7 @@ class TestDocsVersionWorkflowContract:
             "site-build-validation",
             "watchman-rollout-gate",
             "native-wheel-smoke-arm64",
+            "old-linux-wheel-smoke",
             "native-dev-macos",
         ]
         assert job["if"] == "github.ref == 'refs/heads/main'"
@@ -563,12 +565,19 @@ class TestDocsVersionWorkflowContract:
         assert upload_step["with"]["path"] == "site/dist/"
         assert permissions["contents"] == "read"
 
+    def test_pinned_musl_uv_installer_verifies_archives_before_extracting(self) -> None:
+        installer = MUSL_UV_INSTALLER.read_text(encoding="utf-8")
+
+        # A downloaded bootstrap binary must never be unpacked unverified.
+        assert installer.index("sha256sum --check") < installer.index("tar -xzf")
+
     def test_workflow_concurrency_contract(self) -> None:
         workflow = _load_workflow(".github/workflows/ci.yml")
         concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
 
         assert concurrency["group"] == (
-            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}"
+            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' "
+            "|| github.run_id }}"
         )
         assert concurrency["cancel-in-progress"] is False
 
