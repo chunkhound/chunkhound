@@ -400,10 +400,12 @@ class PrivateWatchmanSidecar:
                 "Watchman sidecar exited before it became ready (simulated)"
             )
 
-        self._runtime = resolve_packaged_watchman_runtime()
+        # Materialize first: it rejects a host below the payload's glibc floor
+        # before any runtime hydration download.
         binary_path = materialize_watchman_binary(
             destination_root=self.paths.runtime_root
         )
+        self._runtime = resolve_packaged_watchman_runtime()
         self._binary_path = binary_path
         self._validate_socket_path()
         if listener_path_is_filesystem(self._runtime):

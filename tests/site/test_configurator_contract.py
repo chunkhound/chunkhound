@@ -230,6 +230,14 @@ def test_api_route_config_passes_research_validation(
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_opper_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "opper")
+
+    assert config["provider"] == "opper"
+    assert config["model"] == "claude-sonnet-5"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 

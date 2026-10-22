@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.0] - 2026-10-20
+
+### Added
+- **Opt-in usage analytics** — ChunkHound can record per-user usage events (CLI commands, MCP tool calls, LLM and embedding/rerank calls with token counts) and upload batches to an S3/MinIO-compatible bucket. Off by default; enable with `analytics.enabled` or `CHUNKHOUND_ANALYTICS__*`. `analytics.anonymize` (`full`, `hashed`, `anonymous`) controls how the user is identified. Free-text content such as queries and URLs is recorded as null unless `analytics.save_sensitive_data` is set. S3 write credentials come from `.chunkhound.json` or `CHUNKHOUND_AWS_ACCESS_KEY_ID`/`CHUNKHOUND_AWS_SECRET_ACCESS_KEY`, never ambient `AWS_*` variables.
+- **Native embedding providers** — The Rust pipeline now calls OpenAI-compatible (including Azure) and VoyageAI embedding endpoints itself, with retry, token-aware batching, and the same dimension, TLS-verify and context-length handling as the Python providers. Other providers keep using the Python path.
+- **Requesty LLM provider** — Requesty is supported as an OpenAI-compatible LLM provider (`provider: requesty` or `CHUNKHOUND_LLM_PROVIDER=requesty`).
+
+### Fixed
+- **Windows `.cmd` and `.bat` CLIs launch through `cmd.exe`** — An npm-only Claude Code, Codex, or OpenCode install can run research. A spaced shim path that cannot be shortened is rejected. Newlines, percent signs, quotes, and a command operator in an argument with no spaces are rejected. Addresses #118. The database `WinError 183` in that issue is unchanged.
+- **OpenRouter structured calls with reasoning models** — ChunkHound now detects whether a model accepts the payload that disables reasoning for structured output, retries once without it when rejected, and caches the result per model, so structured calls no longer fail on models that reject it.
+- **Linux native wheels run on older distributions** — `chunkhound-native` Linux wheels (x86_64 and aarch64) are now built in a pinned Ubuntu 20.04 container and tagged `manylinux_2_31`, instead of `manylinux_2_34`. They install on glibc 2.31+ hosts such as Ubuntu 20.04, not only glibc 2.34+.
+- **Orphaned rows after forced reindex** — Rows of deleted files are now cleaned up on a forced full reindex under the Rust pipeline.
+- **Unchanged re-index no longer rebuilds the HNSW index** — A run with nothing to write, delete or compact leaves the vector indexes in place instead of dropping and rebuilding them.
+- **Responsive server during index maintenance** — HNSW maintenance runs off the event loop, so MCP responses and file monitoring are not blocked during rebuilds.
+- **Faster missing-embedding backfill** — `generate_missing_embeddings` uses targeted queries instead of full-table scans.
+- **Rerank retries** — The single-batch rerank path now retries transient failures like the multi-batch path.
+- **Known file types no longer fail the NUL-byte check** — Files of known types are not skipped as binary because of embedded NUL bytes.
+- **Path lookup safety** — Logical path lookup rejects `..` escapes out of the project root.
+- **MCP regex search with commit inputs** — `search` with `type="regex"` now warns that `commit_range`, `commit_hash` and `last_n_commits` are ignored, instead of silently returning whole-index results.
+- **Invalid-argument errors** — Research service, CLI search and `deep_research` validation failures raise `ValueError` rather than generic errors.
+- **Embedding provider registration failures are logged** — A provider that fails to register is now reported instead of disappearing silently.
+- **C# and MATLAB parsing** — Fixed an import error that broke the C# and MATLAB concept mappings.
+- **MCP SDK compatibility** — The MCP SDK dependency is constrained to the supported 1.x API.
+- **DuckDB** — Sequence names in `nextval()` calls are parameterized.
+
+### Changed
+- **Claude Code CLI prompt delivery is configurable** — One mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses `file` (default, every OS) or `inline`. `file` uses `--append-system-prompt-file`: instructions stay in the system prompt, off the Windows command line, and beside a wrapper's `--append-system-prompt`. `inline` is for a wrapper that uses the file flag, or Claude Code older than 2.0.34. Those files use the system temp directory. `llm.claude_temp_dir` overrides it for a special case such as Docker or a limited user. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
 ## [6.0.0] - 2026-09-14
 
 ### Breaking Changes
@@ -826,7 +853,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.0.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.1.0...HEAD
+[6.1.0]: https://github.com/chunkhound/chunkhound/compare/v6.0.0...v6.1.0
 [6.0.0]: https://github.com/chunkhound/chunkhound/compare/v5.2.1...v6.0.0
 [5.2.0]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0

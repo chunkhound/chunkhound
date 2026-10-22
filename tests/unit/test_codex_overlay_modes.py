@@ -36,6 +36,10 @@ async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(monkeypa
     monkeypatch.setattr(CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True)
     # Force availability
     monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     captured = {"args": None, "env": None, "config_text": None}
 
@@ -98,6 +102,10 @@ async def test_codex_config_only_mode_accepts_custom_reasoning_effort(monkeypatc
 
     monkeypatch.setattr(CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True)
     monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        "chunkhound.providers.llm.codex_cli_provider.resolve_cli_binary",
+        lambda name, env_var=None: "codex",
+    )
 
     captured = {"env": None, "config_text": None}
 

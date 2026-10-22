@@ -178,7 +178,7 @@ class DirectoryIndexingService:
         if self.indexing_coordinator.resolve_rust_pipeline_decision(log_reason=False):
             return
         db = getattr(self.indexing_coordinator, "_db", None)
-        if db is not None and hasattr(db, "drop_all_hnsw_indexes"):
+        if db is not None and hasattr(db, "drop_all_hnsw_indexes_async"):
             task = (
                 self.progress.add_task(
                     "  └─ Dropping HNSW indexes", total=None, speed="", info=""
@@ -187,7 +187,9 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            db.drop_all_hnsw_indexes()
+            # Cancellation stops waiting for the operation. Already-running DDL
+            # stays on the serial executor, ahead of queued provider disconnect.
+            await db.drop_all_hnsw_indexes_async()
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")
@@ -208,7 +210,7 @@ class DirectoryIndexingService:
         if used_rust_pipeline:
             return
         db = getattr(self.indexing_coordinator, "_db", None)
-        if db is not None and hasattr(db, "ensure_all_hnsw_indexes"):
+        if db is not None and hasattr(db, "ensure_all_hnsw_indexes_async"):
             task = (
                 self.progress.add_task(
                     "  └─ Rebuilding HNSW indexes", total=None, speed="", info=""
@@ -217,7 +219,7 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            db.ensure_all_hnsw_indexes()
+            await db.ensure_all_hnsw_indexes_async()
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:
                 self.progress.update(task, total=1, completed=1, info="done")

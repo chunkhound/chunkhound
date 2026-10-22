@@ -95,6 +95,7 @@ async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
         ("orcarouter", "max_tokens"),
         ("requesty", "max_tokens"),
         ("api-route", "max_tokens"),
+        ("opper", "max_tokens"),
     ],
 )
 async def test_custom_builtin_endpoint_uses_fallback_cap(

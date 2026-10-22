@@ -506,10 +506,50 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OrcaRouter API. Registry providers require explicit `model`. |
 | Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Requesty API. Registry providers require explicit `model`. |
 | API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | API Route API. Registry providers require explicit `model`. |
+| Opper | `opper` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Opper API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Requesty, and API Route) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Requesty, API Route, and Opper) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+
+### OpenRouter structured reasoning negotiation
+
+OpenRouter can reject requests that disable reasoning for structured (`response_format` with `json_schema`) calls. ChunkHound probes this once per provider/model and caches the outcome:
+
+- **Accepted** (30-day lease): the reasoning-disable payload stays attached to every structured call for that provider/model, so reasoning is disabled there for the lease duration. Non-structured calls (`complete()`), including research synthesis, are unaffected.
+- **Rejected** (24-hour lease): structured calls omit the payload and re-probe once the lease expires. A long-running process enforces the lease in memory, so it re-probes without a restart.
+- **Unknown**: the first structured call optimistically sends the payload; a 400/422 response triggers one unflagged replay.
+
+Negotiation only happens for the built-in canonical OpenRouter endpoint. Setting `llm.base_url` — even to the canonical URL — routes through a generic backend and disables the probe and payload entirely, exactly like a proxy.
+
+Some models require reasoning and can still return empty `content` after the payload is dropped, so a `rejected` cache entry records only the HTTP outcome. When that happens, ChunkHound raises an error naming the provider, model, and capability state, and research results carry a caller-visible note (a `> **Note:**` blockquote advising a switch of `llm.utility_model`) plus a `metadata.warnings` entry.
+
+To reset a stale decision, delete the resolved capability cache file (default `~/.cache/chunkhound/llm-capabilities.json`, or `%LOCALAPPDATA%\ChunkHound\llm-capabilities.json` on Windows) and restart. Set `CHUNKHOUND_LLM_CAPABILITY_CACHE` to override the path. Constructing a provider does not renew a lease.
+
+On Windows, a `.cmd` or `.bat` install of Claude Code, Codex, or OpenCode runs through `cmd.exe`. A shim path that still has a space after the 8.3 short name is rejected. Arguments there cannot contain a newline, a percent sign, or a quote, and a value with no spaces cannot contain `&`, `|`, `<`, `>`, `^`, `(`, or `)`.
+
+### Claude Code CLI
+
+`provider: "claude-code-cli"` runs local `claude` in print mode. The user request goes to stdin. Research instructions go to the system prompt. `--tools` and an empty value stay last and disable Claude's built-in tools.
+
+One delivery mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses it. The default is `file` on every operating system: the instructions are written to a temp file and passed with `--append-system-prompt-file`. That keeps them in the system prompt, off the `cmd.exe` command line, and beside a wrapper that adds `--append-system-prompt` on Claude Code 2.1.283 or newer. The file flag alone works from 2.0.34.
+
+Set it to `inline` to pass `--append-system-prompt` when the wrapper uses the file flag, when it merges that inline text, or when Claude Code is older than 2.0.34. On a `.cmd` shim, `inline` still puts the text through `cmd.exe`, so quotes, percent signs, newlines, and a very long instruction fail that launch.
+
+A wrapper that uses the same form can drop ChunkHound's instructions. A wrapper that replaces stdin, or drops the empty `--tools` value, still breaks the call.
+
+Those files go in the system temp directory. `llm.claude_temp_dir` overrides that directory for a special case such as Docker or a limited user.
+
+```json
+{
+  "llm": {
+    "provider": "claude-code-cli",
+    "claude_append_system_prompt": "file"
+  }
+}
+```
+
+The environment variables are `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` and `CHUNKHOUND_LLM_CLAUDE_TEMP_DIR`. Both apply only when the provider is `claude-code-cli`.
 
 ### LLM Options
 
@@ -521,6 +561,8 @@ When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound
 | `max_retries` | `number` | `3` | Max retry attempts |
 | `output_limits_enabled` | `boolean` | `false` | Restore the exact legacy numeric output limits for research synthesis instead of provider-managed limits. |
 | `output_limit_fallback` | `number` | `64000` | Positive output-token fallback used when a synthesis provider cannot authoritatively omit a limit or declare one. |
+| `claude_append_system_prompt` | `string` | `file` | `file` or `inline`. One mode cannot fit every machine: `file` stays off `cmd.exe` and beside a wrapper's `--append-system-prompt`; `inline` is for a file-flag wrapper or Claude Code older than 2.0.34. |
+| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file and MCP config file, such as Docker or a limited user. |
 | `codex_reasoning_effort` | `string` | `null` | Default reasoning effort for Codex/OpenAI: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex_reasoning_effort_utility` | `string` | `null` | Reasoning effort override for utility stage |
 | `codex_reasoning_effort_synthesis` | `string` | `null` | Reasoning effort override for synthesis stage |
@@ -718,6 +760,8 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_LLM_MAX_RETRIES` | Max retry attempts (default: 3) |
 | `CHUNKHOUND_LLM_OUTPUT_LIMITS_ENABLED` | Restore exact legacy research synthesis output limits (`true`/`false`; default: `false`) |
 | `CHUNKHOUND_LLM_OUTPUT_LIMIT_FALLBACK` | Positive provider-managed synthesis fallback in output tokens (default: `64000`) |
+| `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` | `file` (default) or `inline`. See [Claude Code CLI](#claude-code-cli) |
+| `CHUNKHOUND_LLM_CLAUDE_TEMP_DIR` | Optional override for the Claude CLI temp directory. The default is the system temp directory |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` | Reasoning effort for Codex models (`minimal`, `low`, `medium`, `high`, `xhigh`) |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY` | Reasoning effort override for utility stage |
 | `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS` | Reasoning effort override for synthesis stage |
@@ -834,9 +878,9 @@ Caveats:
 - **Concurrency throttled to 1 by default** when `base_url` is set, to respect Azure serverless rate limits. Override via `max_concurrent_batches` if your SKU permits.
 - **`api_key` still required.** The validator doesn't enforce it when `base_url` is present, but Azure-hosted endpoints still need their own key — supply it.
 
-### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty, API Route)
+### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty, API Route, Opper)
 
-The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty, and API Route LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty, API Route, and Opper LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {
