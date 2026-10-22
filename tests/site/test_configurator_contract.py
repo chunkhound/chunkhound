@@ -211,6 +211,25 @@ def test_requesty_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_api_route_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "api-route")
+
+    assert config["provider"] == "api-route"
+    assert config["model"] == "gemini-3.5-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_api_route_config_passes_research_validation(
+    tmp_path, clean_environment
+) -> None:
+    errors = _validated_config_errors(
+        tmp_path, "research", "voyageai", "api-route"
+    )
+
+    assert errors == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_opper_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "opper")
 
