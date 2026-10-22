@@ -20,15 +20,26 @@ from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 
 
 def snapshot(
-    path: Path, *, live_database_paths: tuple[Path | str, ...] = ()
+    path: Path,
+    *,
+    live_database_paths: tuple[Path | str, ...] = (),
+    live_wal_paths: tuple[Path | str, ...] = (),
 ) -> dict[str, tuple[str, int] | tuple[str, int, int, int, int]]:
-    """Hash files strictly, except explicitly named live Windows primaries.
+    """Hash strictly, except explicitly named live Windows primaries and WALs.
 
-    DuckDB's Windows writer denies primary-file reads. Metadata plus callers'
-    live-state assertions is weaker than byte equality (timestamps may lag).
-    WAL, recovery files, and all closed databases always retain full hashes.
+    DuckDB's Windows writer denies reads of its primary and WAL. An opted-in
+    WAL must be adjacent to a declared live primary. Metadata plus callers'
+    live-state assertions does NOT prove byte identity: timestamps may lag,
+    and same-size, timestamp-preserved writes can go undetected. Unowned WALs,
+    recovery files, closed databases and all non-Windows files retain hashes.
     """
     live_paths = {Path(p).resolve() for p in live_database_paths}
+    live_wals = {Path(p).resolve() for p in live_wal_paths}
+    adjacent_wals = {Path(str(p) + ".wal").resolve() for p in live_database_paths}
+    if not live_wals <= adjacent_wals:
+        raise ValueError(
+            "Each live WAL must be the adjacent WAL of a declared live database"
+        )
     files = (
         [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file())
     )
@@ -36,10 +47,12 @@ def snapshot(
     for p in files:
         if p.name.endswith(".chunkhound.lock"):
             continue
-        if os.name == "nt" and p.resolve() in live_paths:
+        if os.name == "nt" and p.resolve() in live_paths | live_wals:
             stat = p.stat()
             result[str(p)] = (
-                "live-windows-primary-metadata",
+                "live-windows-wal-metadata"
+                if p.resolve() in live_wals
+                else "live-windows-primary-metadata",
                 stat.st_size,
                 stat.st_mtime_ns,
                 stat.st_dev,
@@ -303,10 +316,18 @@ def test_live_preflight_refuses_handle_for_another_database(tmp_path):
     unrelated = tmp_path / "unrelated.db"
     with duckdb.connect(str(unrelated)) as other:
         other.execute("CREATE TABLE schema_version AS SELECT 1 AS version")
-        before = snapshot(tmp_path, live_database_paths=(unrelated,))
+        before = snapshot(
+            tmp_path,
+            live_database_paths=(unrelated,),
+            live_wal_paths=(str(unrelated) + ".wal",),
+        )
         with pytest.raises(IndexFormatError, match="catalog identity is ambiguous"):
             preflight_duckdb(path, live_connection=other)
-        assert snapshot(tmp_path, live_database_paths=(unrelated,)) == before
+        assert snapshot(
+            tmp_path,
+            live_database_paths=(unrelated,),
+            live_wal_paths=(str(unrelated) + ".wal",),
+        ) == before
         assert other.execute("SELECT version FROM schema_version").fetchone() == (1,)
 
 
