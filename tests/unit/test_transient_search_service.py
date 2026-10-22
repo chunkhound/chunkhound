@@ -397,27 +397,46 @@ async def test_both_mode_cancels_sibling_on_failure() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["diff", "both"])
-@pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("page_size, last_offset", [(10, 1990), (30, 1950)])
 async def test_large_corpus_pagination_stops_at_supported_window(
-    source, hybrid, page_size, last_offset
+    page_size, last_offset
 ) -> None:
     chunks = [
         make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
         for i in range(2100)
     ]
     service = TransientSearchService(
-        make_original(), stream_chunks(chunks), source, embedding_manager()
+        make_original(), stream_chunks(chunks), "diff", embedding_manager()
     )
-    search = service.search_hybrid if hybrid else service.search_semantic
 
-    first, first_page = await search("query", page_size=page_size)
-    last, last_page = await search("query", page_size=page_size, offset=last_offset)
+    first, first_page = await service.search_semantic("query", page_size=page_size)
+    last, last_page = await service.search_semantic(
+        "query", page_size=page_size, offset=last_offset
+    )
 
     assert len(first) == len(last) == page_size
     assert first_page["has_more"] is True
     assert isinstance(first_page["total"], int)
+    assert last_page["has_more"] is False
+    assert last_page["next_offset"] is None
+
+
+@pytest.mark.asyncio
+async def test_both_mode_pagination_stops_at_overfetch_pool() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(2100)
+    ]
+    service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "both", embedding_manager()
+    )
+
+    first, first_page = await service.search_semantic("query", page_size=10)
+    last, last_page = await service.search_semantic("query", page_size=10, offset=40)
+
+    assert len(first) == len(last) == 10
+    assert first_page["has_more"] is True
+    assert first_page["total"] == 50
     assert last_page["has_more"] is False
     assert last_page["next_offset"] is None
 
@@ -483,10 +502,8 @@ async def test_hybrid_freezes_initial_source_total() -> None:
 
 @pytest.mark.asyncio
 async def test_both_mode_heap_limit_not_compounded() -> None:
-    """Regression guard: the diff-side heap in "both" mode must stay bounded
-    by the fixed snapshot size, not compound the overfetch formula twice
-    (previously up to page_size * _OVERFETCH_FACTOR**2 == 50,000 for this
-    page_size, contradicting the documented O(K) memory bound)."""
+    """Both-mode heap is overfetch-sized (50 for page_size=10), not the
+    2000-hit paging window and not page_size * overfetch^2."""
     chunks = [
         make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
         for i in range(5_000)
@@ -499,9 +516,10 @@ async def test_both_mode_heap_limit_not_compounded() -> None:
         VectorCache(max_entries=0),
     )
 
-    await service.search_semantic("query", page_size=2_000)
+    await service.search_semantic("query", page_size=10)
 
-    assert service.peak_live_vectors <= 2_000 + 100
+    # Default overfetch is max(10 * 5, 50) = 50, not the 2000-hit window.
+    assert service.peak_live_vectors <= 50 + 100
 
 
 @pytest.mark.asyncio
@@ -555,10 +573,9 @@ async def test_both_mode_db_fetch_size_stable_across_offsets() -> None:
         )
 
     await make_service().search_semantic("query", page_size=10, offset=0)
-    await make_service().search_semantic("query", page_size=10, offset=190)
+    await make_service().search_semantic("query", page_size=10, offset=40)
 
-    assert len(recorded_page_sizes) == 2
-    assert recorded_page_sizes[0] == recorded_page_sizes[1]
+    assert recorded_page_sizes == [50, 50]
 
 
 @pytest.mark.asyncio

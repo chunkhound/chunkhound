@@ -14,6 +14,9 @@ from chunkhound.services.vector_cache import VectorCache
 OVERFETCH_FACTOR_ENV = "CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR"
 _DEFAULT_OVERFETCH_FACTOR = 5
 _MIN_OVERFETCH = 50
+# Hard ceiling on (offset + page_size). Deep paging past this raises rather
+# than growing the heap toward the corpus. Both-mode uses overfetch instead.
+_MAX_RESULT_WINDOW = 2000
 
 
 def _overfetch_factor() -> int:
@@ -23,18 +26,19 @@ def _overfetch_factor() -> int:
         return _DEFAULT_OVERFETCH_FACTOR
 
 
-# Hard ceiling on (offset + page_size) for a single transient (diff/web) search
-# call. The top-K heap must hold at least offset + page_size entries to return
-# an exact page, so heap size -- and therefore peak memory -- scales with this
-# window. Capping it keeps worst-case memory a known constant regardless of
-# corpus size (a 500-chunk diff and a 500,000-chunk diff have the same bound),
-# instead of silently growing toward O(corpus size) as callers page deeper.
-#
-# Also used, unrelated to the ceiling above, as the fixed candidate-pool size
-# for vector_source="both" (see search_semantic): every "both" call fetches
-# this many candidates from both sources regardless of the caller's own
-# offset/page_size, so repeated calls for the same query see a stable pool.
-_MAX_RESULT_WINDOW = 2000
+def _candidate_pool_size(page_size: int) -> int:
+    """Bounded heap / DB fetch size for one transient search call.
+
+    Independent of offset so paging the same query keeps a stable pool.
+    Large enough to cover the requested page (and HNSW-style overfetch),
+    small enough that both-mode does not pull the 2000-hit window on a
+    10-result page.
+    """
+    return min(
+        max(page_size, page_size * _overfetch_factor(), _MIN_OVERFETCH),
+        _MAX_RESULT_WINDOW,
+    )
+
 
 # Wall-clock ceiling on a single diff/web search call: streaming the source
 # plus embedding every uncached chunk it yields. This is a circuit breaker
@@ -183,13 +187,7 @@ class TransientSearchService:
         effective_limit = (
             limit
             if limit is not None
-            else max(
-                offset + page_size,
-                min(
-                    max(page_size * _overfetch_factor(), _MIN_OVERFETCH),
-                    _MAX_RESULT_WINDOW,
-                ),
-            )
+            else max(offset + page_size, _candidate_pool_size(page_size))
         )
         assert effective_limit >= offset + page_size, (
             "candidate pool must cover the requested offset+page_size slice"
@@ -302,18 +300,9 @@ class TransientSearchService:
                 query, page_size, offset, threshold, path_filter, provider
             )
 
-        # Fixed (not offset-dependent) so every "both"-mode call for the same
-        # query fetches an identically-sized candidate pool from both sources,
-        # regardless of which page is requested. An offset-growing fetch size
-        # here previously let the DB side's approximate top-K search explore a
-        # different candidate depth per page, which can change which items
-        # rank in the same slot across pages for SingleHopStrategy. This fix
-        # guarantees a stable candidate pool for SingleHopStrategy; under
-        # MultiHopStrategy (reranking-capable providers) the DB side's own
-        # time-boxed/score-heuristic termination is independent of page_size
-        # and can still vary run-to-run -- this removes the window-growth
-        # mechanism this codebase controls, not all possible DB-side variance.
-        snapshot_size = _MAX_RESULT_WINDOW
+        # Overfetch-sized heaps from both sources, independent of offset.
+        # Not the 2000-hit paging ceiling — that only rejects deep offsets.
+        snapshot_size = _candidate_pool_size(page_size)
         transient_task = asyncio.create_task(
             self._search_transient(
                 query,
@@ -343,11 +332,8 @@ class TransientSearchService:
             transient_task, db_task
         )
         merged = self._merge(transient_results, db_results, threshold)
-        page = self._pagination(page_size, offset, len(merged))
-        # Continuation describes only the filtered merged snapshot within the
-        # supported window, not unseen (possibly nonmatching) source results.
-        # Total is a numeric lower bound on corpus matches, even when the
-        # snapshot contains more matches than the supported paging window.
+        available = min(len(merged), snapshot_size)
+        page = self._pagination(page_size, offset, available)
         return merged[offset : offset + page_size], page
 
     @staticmethod
@@ -433,6 +419,11 @@ class TransientSearchService:
                 f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
             )
         candidate_limit = offset + page_size + 1
+        # Hybrid ranking uses list position, so every page of a query must
+        # freeze the same semantic/regex lists. Cap at the paging window,
+        # not overfetch(page_size): page_size=1 vs page_size=200 would
+        # otherwise rank overlapping hits differently.
+        transient_snapshot = _MAX_RESULT_WINDOW
 
         async def frozen_snapshot(
             fetch: Callable[
@@ -441,9 +432,7 @@ class TransientSearchService:
             ],
         ) -> list[dict[str, Any]]:
             if self._vector_source != "db":
-                # Freeze a bounded pool independent of the requested page or
-                # the corpus total, which can exceed the supported window.
-                results, _ = await fetch(_MAX_RESULT_WINDOW)
+                results, _ = await fetch(transient_snapshot)
                 return results
             results, pagination = await fetch(candidate_limit)
             if not pagination.get("has_more"):
@@ -461,11 +450,17 @@ class TransientSearchService:
         async def fetch_semantic(
             fetch_size: int,
         ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-            return await self.search_semantic(
-                query,
-                page_size=fetch_size,
-                offset=0,
-                threshold=threshold,
+            if self._vector_source == "db":
+                return await self.search_semantic(
+                    query,
+                    page_size=fetch_size,
+                    offset=0,
+                    threshold=threshold,
+                )
+            # Bypass search_semantic so a 2000-hit freeze does not turn
+            # both-mode into a 2000-hit DB query. Regex still comes from DB.
+            return await self._search_transient(
+                query, fetch_size, 0, threshold, None, limit=fetch_size
             )
 
         async def fetch_regex(
@@ -505,7 +500,7 @@ class TransientSearchService:
             "page_size": page_size,
             "has_more": has_more,
             "next_offset": offset + page_size if has_more else None,
-            "total": len(combined),
+            "total": available if self._vector_source != "db" else len(combined),
         }
 
     async def get_chunk_similarities_async(

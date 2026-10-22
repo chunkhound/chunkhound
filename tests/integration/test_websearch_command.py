@@ -71,6 +71,36 @@ async def test_websearch_command_runs_research_in_process(
 
 
 @pytest.mark.asyncio
+async def test_websearch_command_keeps_progress_off_stdout(
+    monkeypatch, providers, capsys
+) -> None:
+    monkeypatch.setattr(
+        ws_mod, "search_multi", AsyncMock(return_value=search_results())
+    )
+
+    async def pages(*args, **kwargs):
+        yield "https://example.invalid/page", ".md", "# In memory"
+
+    async def research(query, page_stream, *args, **kwargs):
+        await kwargs["progress"].emit_event("search_semantic", "scanning pages")
+        async for _ in page_stream:
+            pass
+        return {"answer": "ANSWER"}
+
+    monkeypatch.setattr(ws_mod, "fetch_pages", pages)
+    monkeypatch.setattr(ws_mod, "research_web_pages", research)
+    monkeypatch.setattr(
+        ws_mod.RichOutputFormatter, "text_block", lambda self, text: None
+    )
+
+    await ws_mod.websearch_command(make_args(), MagicMock())
+
+    captured = capsys.readouterr()
+    assert "scanning pages" not in captured.out
+    assert "scanning pages" in captured.err
+
+
+@pytest.mark.asyncio
 async def test_websearch_timeout_covers_query_expansion(monkeypatch, providers) -> None:
     async def blocked(*args, **kwargs):
         await asyncio.Event().wait()

@@ -70,7 +70,9 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
                 got_page = True
                 yield page
 
-        with TreeProgressDisplay(output=sys.stdout) as research_progress:
+        # Progress is append-only noise; keep stdout for the answer so
+        # piped `chunkhound websearch` stays machine-readable.
+        with TreeProgressDisplay(output=sys.stderr) as research_progress:
             result = await research_web_pages(
                 args.query,
                 pages(),
