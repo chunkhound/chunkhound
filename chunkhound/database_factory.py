@@ -94,9 +94,11 @@ def create_services(
     Returns:
         DatabaseServices bundle with all components
     """
+    # This factory owns registry initialization; callers must not configure it
+    # first. It does not provide simultaneous-provider ownership/reuse.
     registry = get_registry()
 
-    # Always (re)configure the registry with an effective per-call config so that
+    # Always configure the registry with an effective per-call config so that
     # tests using distinct temporary directories get an IndexingCoordinator whose
     # base_directory matches the current tmp_path. This avoids cross-test leakage
     # from the global registry's previous target_dir.

@@ -9,13 +9,19 @@ import contextvars
 import random
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from loguru import logger
 
+from chunkhound.providers.database.exception_cleanup import clear_exception_frames
+from chunkhound.utils.async_worker import await_worker_completion
 from chunkhound.utils.logging_guard import log_if_not_mcp
-from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
+
+
+class DatabaseOperationTimeoutError(TimeoutError):
+    """The caller's wait expired; submitted database work still owns its handles."""
 
 
 class DatabaseTemporarilyUnavailableError(RuntimeError):
@@ -67,6 +73,7 @@ def get_thread_local_connection(provider: Any) -> Any:
     Raises:
         RuntimeError: If connection creation fails
     """
+    provider._ensure_database_ownership()
     if not hasattr(_executor_local, "connection"):
         # Create new connection for this thread
         _executor_local.connection = provider._create_connection()
@@ -146,6 +153,13 @@ class SerialDatabaseExecutor:
         # access to the DB file (Python's connection is closed).
         self._rust_pipeline_in_progress = threading.Event()
         self._execute_timeout_seconds = execute_timeout_seconds
+        self._submission_lock = threading.RLock()
+        self._finalization_lock = threading.RLock()
+        self._accepting = True
+        self._joined = False
+        self.handles_closed = True
+        self.finalization_complete = False
+        self._finalization: concurrent.futures.Future[Any] | None = None
 
     def resolve_timeout(self, operation_name: str) -> float:
         """Resolve the wait timeout for a named ``execute_sync`` operation.
@@ -196,6 +210,88 @@ class SerialDatabaseExecutor:
                 "Rust indexing pipeline owns the database — retry once it finishes"
             )
 
+    @staticmethod
+    def _run_with_cleanup(function: Callable[..., Any], *args: Any) -> Any:
+        """Release completed backend frames before publishing a worker failure."""
+        try:
+            return function(*args)
+        except BaseException as error:
+            clear_exception_frames(error)
+            raise
+
+    def _submit(
+        self, function: Callable[..., Any], *args: Any
+    ) -> concurrent.futures.Future[Any]:
+        with self._submission_lock:
+            if not self._accepting:
+                raise RuntimeError("Database executor is closing or closed")
+            return self._db_executor.submit(self._run_with_cleanup, function, *args)
+
+    def _execute_operation(
+        self,
+        provider: Any,
+        operation_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        _bypass_rust_pipeline_guard: bool = False,
+    ) -> Any:
+        """Run one operation's complete handle lifecycle on the owning thread."""
+        self._raise_if_db_unavailable_before_submit(
+            operation_name, _bypass_rust_pipeline_guard
+        )
+        conn = (
+            getattr(_executor_local, "connection", None)
+            if operation_name == "disconnect"
+            else get_thread_local_connection(provider)
+        )
+        self.handles_closed = not hasattr(_executor_local, "connection")
+        state = get_thread_local_state()
+        state["last_activity_time"] = time.time()
+        if hasattr(provider, "get_base_directory"):
+            state["base_directory"] = provider.get_base_directory()
+
+        # Auto-compaction is sampled by the caller only after this operation.
+        op_func = getattr(provider, f"_executor_{operation_name}")
+        try:
+            return op_func(conn, state, *args, **kwargs)
+        finally:
+            conn = None
+            self.handles_closed = not hasattr(_executor_local, "connection")
+
+    def _wait_for_operation(
+        self,
+        future: concurrent.futures.Future[Any],
+        operation_name: str,
+        timeout: float | None,
+    ) -> Any:
+        # Future.result(timeout) uses the same TimeoutError as a backend failure.
+        # Observe completion separately so backend errors retain their identity,
+        # even when the worker finishes at the caller's deadline boundary.
+        done, _ = concurrent.futures.wait((future,), timeout=timeout)
+        if future not in done:
+            raise DatabaseOperationTimeoutError(
+                f"Operation '{operation_name}' timed out"
+            )
+        return future.result()
+
+    def prepare_connection(self, provider: Any) -> bool:
+        """Check reconnect state on its owning thread without opening a connection.
+
+        Unlike normal dispatch, the provider's lifecycle hook must be able to
+        preflight a missing/partially released connection before lazy creation.
+        """
+        self._raise_if_db_unavailable_before_submit("connect")
+        future = self._submit(self._prepare_connection, provider)
+        return bool(
+            self._wait_for_operation(future, "connect", self.resolve_timeout("connect"))
+        )
+
+    def _prepare_connection(self, provider: Any) -> bool:
+        # Caller admission can precede a completed native handoff. Recheck on
+        # the serial worker before preparation can inspect, recover or reopen.
+        self._raise_if_db_unavailable_before_submit("connect")
+        return bool(provider._executor_prepare_connection())
+
     def execute_sync(
         self,
         provider: Any,
@@ -233,39 +329,25 @@ class SerialDatabaseExecutor:
         )
 
         def executor_operation() -> Any:
-            # Get thread-local connection (created on first access)
-            conn = get_thread_local_connection(provider)
-
-            # Get thread-local state
-            state = get_thread_local_state()
-
-            # Update last activity time for ALL operations
-            state["last_activity_time"] = time.time()
-
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
-
-            # NOTE: The current operation owns the executor while it runs.
-            # Compaction may be dispatched by the caller AFTER this operation
-            # returns (post-operation auto-compaction).
-            # No mid-operation compaction guard is needed.
-
-            # Execute operation - look for method named _executor_{operation_name}
-            op_func = getattr(provider, f"_executor_{operation_name}")
-            return op_func(conn, state, *args, **kwargs)
+            return self._execute_operation(
+                provider, operation_name, args, kwargs, _bypass_rust_pipeline_guard
+            )
 
         # Run in executor synchronously with configured timeout
-        future = self._db_executor.submit(executor_operation)
+        future = self._submit(executor_operation)
         timeout_s = self.resolve_timeout(operation_name)
         try:
-            result = future.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError:
+            result = self._wait_for_operation(
+                future,
+                operation_name,
+                None if operation_name == "disconnect" else timeout_s,
+            )
+        except DatabaseOperationTimeoutError:
             logger.error(
                 f"Database operation '{operation_name}' timed out after "
                 f"{timeout_s} seconds"
             )
-            raise TimeoutError(f"Operation '{operation_name}' timed out")
+            raise
 
         self._maybe_run_sampled_auto_compaction(provider, operation_name)
         return result
@@ -290,38 +372,16 @@ class SerialDatabaseExecutor:
             The result of the operation, fully materialized
         """
         self._raise_if_db_unavailable_before_submit(operation_name)
-        loop = asyncio.get_running_loop()
 
-        def executor_operation():
-            # Get thread-local connection (created on first access)
-            conn = get_thread_local_connection(provider)
-
-            # Get thread-local state
-            state = get_thread_local_state()
-
-            # Update last activity time for ALL operations
-            state["last_activity_time"] = time.time()
-
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
-
-            # NOTE: The current operation owns the executor while it runs.
-            # Compaction may be dispatched by the caller AFTER this operation
-            # returns (post-operation auto-compaction).
-            # No mid-operation compaction guard is needed.
-
-            # Execute operation - look for method named _executor_{operation_name}
-            op_func = getattr(provider, f"_executor_{operation_name}")
-            return op_func(conn, state, *args, **kwargs)
+        def executor_operation() -> Any:
+            return self._execute_operation(provider, operation_name, args, kwargs)
 
         # Capture context for async compatibility
         ctx = contextvars.copy_context()
 
         # Run in executor with context
-        result = await loop.run_in_executor(
-            self._db_executor, ctx.run, executor_operation
-        )
+        future = asyncio.wrap_future(self._submit(ctx.run, executor_operation))
+        result = await await_worker_completion(future)
 
         await self._maybe_run_sampled_auto_compaction_async(provider, operation_name)
         return result
@@ -352,45 +412,79 @@ class SerialDatabaseExecutor:
                 "warning", f"Sampled auto-compaction skipped after failure: {error}"
             )
 
-    def shutdown(self, wait: bool = True) -> None:
-        """Shutdown the executor with proper cleanup.
+    def disconnect_provider(self, provider: Any, skip_checkpoint: bool) -> None:
+        """Drain queued work and close provider handles before joining the worker."""
+        with self._finalization_lock:
+            self._disconnect_provider(provider, skip_checkpoint)
 
-        Args:
-            wait: Whether to wait for pending operations to complete
-        """
+    def _disconnect_provider(self, provider: Any, skip_checkpoint: bool) -> None:
+        """One finalization attempt, serialized through worker join publication."""
+        with self._submission_lock:
+            if self._joined:
+                return
+            self._accepting = False
+
+            def finish() -> None:
+                conn = getattr(_executor_local, "connection", None)
+                state = get_thread_local_state()
+                try:
+                    provider._executor_disconnect(conn, state, skip_checkpoint)
+                finally:
+                    conn = None
+                    self.handles_closed = not hasattr(_executor_local, "connection")
+                    if self.handles_closed:
+                        self.clear_thread_local()  # This is the WORKER thread.
+
+            # Final close alone bypasses ordinary admission/compaction/Rust guards.
+            if self._finalization is None or (
+                self._finalization.done() and not self.handles_closed
+            ):
+                # Only a retained handle needs another worker attempt. Reuse a
+                # completed successful future if an earlier caller was interrupted
+                # before joining; never resubmit after successful finalization.
+                self._finalization = self._db_executor.submit(
+                    self._run_with_cleanup, finish
+                )
+            future = self._finalization
         try:
-            # Force close any thread-local connections first
-            self._force_close_connections()
+            future.result()  # Must follow all previously queued work; no timeout.
+        finally:
+            # An interrupted caller does not prove the close worker stopped.
+            if future.done() and self.handles_closed:
+                self._db_executor.shutdown(wait=True)
+                self._joined = True
+                self.finalization_complete = True
 
-            # Shutdown the executor
-            self._db_executor.shutdown(wait=wait)
-
-            # Windows-specific: Small delay to allow file handles to be released
-            if IS_WINDOWS:
-                time.sleep(WINDOWS_FILE_HANDLE_DELAY)
-
-        except Exception as e:
-            logger.error(f"Error during executor shutdown: {e}")
+    def shutdown(self, wait: bool = True) -> None:
+        """Close executor-owned handles; providers must use disconnect_provider."""
+        if not wait:
+            raise ValueError("Database executor shutdown requires wait=True")
+        with self._finalization_lock:
+            if self._joined:
+                return
+            with self._submission_lock:
+                self._accepting = False
+            try:
+                self._force_close_connections()
+            finally:
+                # Retained handles require a usable executor for cleanup retry.
+                if self.handles_closed:
+                    self._db_executor.shutdown(wait=True)
+                    self._joined = True
+                    self.finalization_complete = True
 
     def _force_close_connections(self) -> None:
-        """Force close any thread-local database connections."""
-
-        def close_connection():
+        """Force close thread-local handles without hiding close failures."""
+        def close_connection() -> None:
+            conn = getattr(_executor_local, "connection", None)
             try:
-                if hasattr(_executor_local, "connection"):
-                    conn = _executor_local.connection
-                    if conn and hasattr(conn, "close"):
-                        conn.close()
-                        logger.debug("Forced close of thread-local connection")
-            except Exception as e:
-                logger.error(f"Error force-closing connection: {e}")
-
-        # Submit the close operation to the executor thread
-        try:
-            future = self._db_executor.submit(close_connection)
-            future.result(timeout=2.0)  # Short timeout for cleanup
-        except Exception as e:
-            logger.error(f"Error during force connection close: {e}")
+                if conn is not None and hasattr(conn, "close"):
+                    conn.close()
+                self.clear_thread_local()
+            finally:
+                conn = None
+                self.handles_closed = not hasattr(_executor_local, "connection")
+        self._db_executor.submit(self._run_with_cleanup, close_connection).result()
 
     def clear_thread_local(self) -> None:
         """Clear thread-local storage (for cleanup).
@@ -414,7 +508,7 @@ class SerialDatabaseExecutor:
             return state.get("last_activity_time", None)
 
         try:
-            future = self._db_executor.submit(get_activity_time)
+            future = self._submit(get_activity_time)
             return future.result(timeout=1.0)  # Quick operation, short timeout
         except Exception:
             return None

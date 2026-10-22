@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.utils import SubprocessJsonRpcClient, create_subprocess_exec_safe, get_safe_subprocess_env
+from tests.utils import create_subprocess_exec_safe, get_safe_subprocess_env
+from tests.utils.startup_diagnostics import diagnosed_mcp_client
 from tests.utils.windows_compat import windows_safe_tempdir
 
 
@@ -88,18 +89,12 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
             "--config",
             str(cfg_path),
         ]
-        proc = await create_subprocess_exec_safe(
-            *mcp_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        async with diagnosed_mcp_client(
+            mcp_cmd,
+            debug_file=temp_dir / "mcp_debug.log",
             env=env,
             cwd=str(temp_dir),
-        )
-
-        client = SubprocessJsonRpcClient(proc)
-        await client.start()
-        try:
+        ) as client:
             # Handshake
             init = await client.send_request(
                 "initialize",
@@ -138,5 +133,3 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
             # Also verify our stub marked a file (proves cross-process patch executed)
             assert mark_file.exists(), "codex stub did not run in child process"
             assert "CALLED" in mark_file.read_text(encoding="utf-8")
-        finally:
-            await client.close()

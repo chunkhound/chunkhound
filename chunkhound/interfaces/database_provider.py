@@ -74,9 +74,13 @@ class DatabaseProvider(Protocol):
         the database file.
 
         This is not set automatically as a side effect of
-        `release_for_rust_pipeline()` — callers must call this with `True`
-        only after that method returns successfully, and with `False` before
-        reconnecting once the Rust pipeline finishes. See
+        `release_for_rust_pipeline()` — callers must set `True` BEFORE calling
+        that method, closing admission before the release barrier. Start native
+        work only if release succeeds. Keep the flag set until native work and
+        cleanup have actually stopped, then clear it BEFORE reconnecting (also
+        clear it if release fails, without starting native work). Queued opens
+        must recheck admission on the worker before inspecting or reopening.
+        See
         `chunkhound.services.rust_pipeline_runner.run_rust_indexing_phase()`
         for the canonical (and currently sole) caller and the exact
         set/clear boundaries.

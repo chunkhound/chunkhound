@@ -6,7 +6,9 @@ by Rust.
 """
 
 import atexit
+import contextvars
 import functools
+import multiprocessing
 import os
 import threading
 from collections.abc import Callable
@@ -22,6 +24,7 @@ from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipeline
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.parsers.parser_factory import create_parser_for_language
+from chunkhound.utils.async_worker import await_worker_completion
 
 if TYPE_CHECKING:
     import asyncio
@@ -64,8 +67,8 @@ def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
     closed on the *same* loop they were bound to, via
     ``loop.run_until_complete`` -- which requires this thread to have no
     running loop of its own. The sole caller, ``run_rust_pipeline()``,
-    guarantees that by invoking this via ``asyncio.to_thread()``, which
-    always runs on a fresh worker thread.
+    guarantees that by submitting this to the event loop's executor, off
+    the thread running the caller's event loop.
 
     Each provider's shutdown is individually bounded by
     ``_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS`` -- a hung close (e.g. a
@@ -192,7 +195,10 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
     if _parse_pool is None:
         with _parse_pool_lock:
             if _parse_pool is None:
-                pool = ProcessPoolExecutor(max_workers=max(1, max_workers))
+                pool = ProcessPoolExecutor(
+                    max_workers=max(1, max_workers),
+                    mp_context=multiprocessing.get_context("spawn"),
+                )
                 atexit.register(pool.shutdown, cancel_futures=True)
                 _parse_pool = pool
     return _parse_pool
@@ -689,8 +695,8 @@ async def run_rust_pipeline(
 
     Called from IndexingCoordinator.process_directory() Phase 3. The Rust
     pipeline is the default path; set ``CHUNKHOUND_USE_RUST=0`` to opt out
-    and fall back to the Python path.  Offloads the call to
-    ``asyncio.to_thread`` so the event loop stays responsive.
+    and fall back to the Python path. Offloads the call to the event loop's
+    executor so the event loop stays responsive.
 
     Args:
         files_to_process: List of (path, content_hash) tuples from change detection.
@@ -709,11 +715,17 @@ async def run_rust_pipeline(
     """
     import asyncio
 
-    from chunkhound_native import IndexingPipeline
+    from chunkhound_native import (
+        DatabaseBusyError,
+        DatabaseFilesystemError,
+        DatabaseInterruptedError,
+        DatabaseLayoutError,
+        IndexingPipeline,
+    )
 
     # Resolved here, on the calling task's own thread, before anything hands
-    # off to asyncio.to_thread or the Rust rayon pool -- contextvars cross
-    # asyncio Task boundaries but not OS thread boundaries, so this must be
+    # off to the executor or the Rust rayon pool -- the executor submission
+    # copies contextvars, but Rust-created threads do not, so this must be
     # read now, then threaded through explicitly from here on (both into
     # IndexingPipeline.run()'s own analytics_recorder/analytics_handle
     # params for the native embed path, and into embed_batch_callback's
@@ -861,45 +873,57 @@ async def run_rust_pipeline(
     # _EmbedThreadCache's docstring for why that isolation matters.
     embed_cache = _EmbedThreadCache()
 
-    # Both the pipeline construction and pipeline.run() raise a plain PyO3
-    # PyRuntimeError on failure (see src/pipeline/pipeline.rs), indistinguishable
-    # from any other exception IndexingCoordinator.process_directory() can hit.
-    # Re-raise as RustPipelineError so callers can tell "the native pipeline
-    # itself failed" apart from surrounding Python glue-code errors.
+    # Preserve typed coordination failures from construction and pipeline.run().
+    # Wrap other failures so callers can distinguish native pipeline failures
+    # from surrounding Python glue-code errors.
     try:
         pipeline = IndexingPipeline(config_dict)
 
-        # Run pipeline in thread pool — pipeline releases the GIL internally
-        report = await asyncio.to_thread(
-            pipeline.run,
-            files=file_entries,
-            parse_batch_callback=functools.partial(
-                parse_batch_callback, index_unknown_files=_index_unknown
-            ),
-            embed_batch_callback=(
-                functools.partial(
-                    embed_batch_callback,
-                    embedding_cfg=embedding_cfg,
-                    cache=embed_cache,
-                    analytics=analytics_current,
-                )
-                if not skip_embeddings
-                else None
-            ),
-            progress_callback=progress_callback,
-            incremental=not force_reindex,
-            # Native OpenAI/VoyageAI embed calls record analytics directly
-            # in Rust (see src/embed/{openai,voyageai}.rs) -- this is the
-            # Arc<Inner>-extraction handoff for that path; the
-            # functools.partial binding above covers the Python-callback
-            # fallback path for every other provider.
-            analytics_recorder=(
-                analytics_current[0] if analytics_current is not None else None
-            ),
-            analytics_handle=(
-                analytics_current[1] if analytics_current is not None else 0
-            ),
+        # Retain the executor completion future, not a to_thread Task: shutdown
+        # cancels all Tasks independently, without stopping their worker threads.
+        # Copy the caller's context just as to_thread does.
+        worker = asyncio.get_running_loop().run_in_executor(
+            None,
+            contextvars.copy_context().run,
+            functools.partial(
+                pipeline.run,
+                files=file_entries,
+                parse_batch_callback=functools.partial(
+                    parse_batch_callback, index_unknown_files=_index_unknown
+                ),
+                embed_batch_callback=(
+                    functools.partial(
+                        embed_batch_callback,
+                        embedding_cfg=embedding_cfg,
+                        cache=embed_cache,
+                        analytics=analytics_current,
+                    )
+                    if not skip_embeddings
+                    else None
+                ),
+                progress_callback=progress_callback,
+                incremental=not force_reindex,
+                # Native OpenAI/VoyageAI embed calls record analytics directly
+                # in Rust (see src/embed/{openai,voyageai}.rs) -- this is the
+                # Arc<Inner>-extraction handoff for that path; the
+                # functools.partial binding above covers the Python-callback
+                # fallback path for every other provider.
+                analytics_recorder=(
+                    analytics_current[0] if analytics_current is not None else None
+                ),
+                analytics_handle=(
+                    analytics_current[1] if analytics_current is not None else 0
+                ),
+            )
         )
+        report = await await_worker_completion(worker)
+    except (
+        DatabaseBusyError,
+        DatabaseInterruptedError,
+        DatabaseLayoutError,
+        DatabaseFilesystemError,
+    ):
+        raise
     except Exception as e:
         raise RustPipelineError(reason=str(e)) from e
     finally:
@@ -909,7 +933,13 @@ async def run_rust_pipeline(
         # _shutdown_embed_thread_resources. Passing embed_cache (rather than
         # a shared/global cache) ensures this can never close a
         # concurrently-running sibling run's providers/loops.
-        await asyncio.to_thread(_shutdown_embed_thread_resources, embed_cache)
+        cleanup = asyncio.get_running_loop().run_in_executor(
+            None,
+            contextvars.copy_context().run,
+            _shutdown_embed_thread_resources,
+            embed_cache,
+        )
+        await await_worker_completion(cleanup)
 
     # Map PipelineReport → coordinator stats dict.
     # `report.errors` entries are Rust-formatted as "{path}: {message}"

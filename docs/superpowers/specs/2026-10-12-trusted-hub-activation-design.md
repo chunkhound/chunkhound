@@ -1,0 +1,159 @@
+# Trusted-hub activation: Rust install core, Python hub client
+
+## Status and precedence
+
+The user approved the minimal cooperative-locking/recovery direction, then selected a Rust locking/install core while retaining the completed Python hub foundation. This document records that direction for written-spec review before implementation planning.
+
+This addendum supersedes the always-blocked installation proposal in Tasks 8–9 of `2026-10-11-central-indexing-hub-client.md`. It also supersedes adversarial-publisher audit closure as an activation requirement. Foundation Tasks 1–7 are already implemented and are not to be repeated. Existing tests and ordinary compatibility checks remain valuable; this work is not a broad cleanup or rewrite.
+
+## Approved whole-branch correction amendment (R1–R3)
+
+Following T9 completion and whole-branch review at `976529d087a25c8ce9d09a56432adf90f7cbe73e`, the user approved this narrow correction wave. T1–T9 and Gate A are complete; do not replay them. This amendment governs conflicting historical task instructions, without reopening the approved design or the LanceDB deferral.
+
+- **R1 — MCP final-close integration:** Invoke the authoritative provider `close()` for every existing provider, irrespective of manager-derived `is_connected`. Permit only one in-flight daemon-thread close attempt; reuse a successful result, but allow subsequent cleanup to retry a completed failure. Preserve bounded caller waits, shielding, no concurrent duplicate close, and no fallback `disconnect()` after a `close()` failure. Provider lifetime/ownership remains authoritative; callers do not release leases directly.
+- **R2 — retained-reader failure category:** A persistent `DatabaseReaderCloseError` escaping initial inspection, exclusive automatic recheck, or candidate verification is a distinct sanitized fatal hub outcome in both modes. It is not ordinary unreadable identity, manifest contradiction, or soft unavailability. Preserve the exact originating exception and owner, and delegate safe `retry_close()` rather than closing a borrowed owner. Actual CLI output must exit 1, contain one sanitized hub diagnostic and no raw cause/traceback, and never proceed to automatic local-index fallback. Candidate verification must preserve this category rather than relabeling it as `HubDatabaseMismatch`. After fully draining a hub worker, this fatal outcome also takes precedence over concurrent cancellation; keep that selection hub-local and leave the shared completion helper unchanged. Ordinary unreadable identity remains a soft skip with zero hub requests.
+- **R3 — published configuration correction:** Update `site/src/pages/docs/configuration.md` to describe explicit pull, automatic missing/misaligned triggers, replacement/re-index implications, interruption recovery and support documentation, and operational DuckDB versus nonoperational/deferred LanceDB overlay. Preserve the approved HTTP/HTTPS, TLS/downgrade, URL-normalization and third-party DEBUG diagnostic limitations.
+- **M1–M3 / validation:** Include real unreadable-local/no-request preservation and default nonverbose CLI success-log regressions. The immutable acceptance file's original 92-character E501 at `49:89` is an intentional diagnostic exception required by byte preservation, not a new production regression or a scoped-lint pass. Its SHA256 remains `6ac28823846f5669b5936f748f3f62aec422c139ecd9cb276e3f6719df993f2a`. Keep exactly the two deferred LanceDB acceptance failures visible and unsuppressed. No M4–M7 cleanup is authorized; preserve the accepted SIGKILL five-semaphore diagnostic and living-child exclusion probe.
+
+Use one sole production fixer for the coupled corrections, real RED/GREEN contracts, affected suites, full hub suite, exact full Ruff/mypy baseline comparison and smoke before commit. Then independently review the entire correction range `976529d087a25c8ce9d09a56432adf90f7cbe73e..fixHEAD`, re-review the whole branch `29b137712346a5f539dc75f08fecf685ee897f95..HEAD`, and return to the parent Gate B. No provider ownership rewrite, shared worker-helper redesign, Rust changes, Lance deletion correction, push, merge, version change or AGENTS change is authorized.
+
+## Approved T10 candidate staging-lifetime correction
+
+The user approved this narrow amendment after independent review of `0c25399c5279ab6bba034be4b06834cce30c22fd` demonstrated that ordinary Linux temporary-directory cleanup unlinked the live candidate's coordination inode. This supersedes T10's earlier unchanged-staging instruction and deletion-refusal-only proof, not the prior R1–R3 requirements.
+
+Retain the original candidate workspace and its original coordination inode while candidate inspection shutdown remains unproven. A retained reader must continue excluding an exclusive lease for its exact candidate path under normal filesystem cleanup, including after exception references are dropped. Do not recreate the pathname and claim the new inode proves exclusion. Tie deferred cleanup to successful safe reader-close retry; failed retries preserve both the workspace and fatal category. Public `HubReaderCloseError.retry_close()` retries the exact original reader error before deferred cleanup, is repeatable, and removes the private workspace after successful shutdown. Direct original-error retry remains safe; a later public retry can finish workspace cleanup. An abandoned error conservatively retains the workspace until process exit rather than trusting exception GC as proof of closure.
+
+Keep this policy hub-local: no provider/ownership/native/shared-worker redesign. Ordinary preparation success and non-reader failures still clean immediately; postcommit cleanup failure stays a warning, not a failed installation. Deferred cleanup failure after proven reader shutdown uses a fixed sanitized diagnostic, never raw filesystem detail; cleanup remains retryable. No destination mutation or local-index fallback follows the candidate fatal outcome. Prove these with real HTTP/backend/native exclusion using normal cleanup in both modes, failed then successful/repeated retry, exception-GC survival, and a separate filesystem cleanup-failure control. Preserve existing CLI, cancellation, borrowed-owner, immutable Lance deferral and transport contracts. Use one sole fixer, covering/full-hub/static/smoke evidence, full T10 correction-range review and whole-branch review before parent Gate B.
+
+## Goal and boundaries
+
+Deliver the normal lifecycle: select a matching base, download, validate, install, search, and overlay local changes through existing indexing. DuckDB is the operational pull-then-overlay target.
+
+**Approved T9 deferral:** After the required acceptance stop, bounded diagnosis and independent correction-plan review, the user deferred the LanceDB correction because it is not operational yet. LanceDB overlay is nonoperational/deferred due to stale changed-file chunks; do not advertise a fresh local overlay for that backend. Preserve its already verified ownership, installation, no-pull and interruption/recovery contracts. This is a support qualification, not authorization to disable LanceDB, change CLI behavior, modify production code or weaken acceptance. Format/checksum validation does not establish that publisher content has no stale rows.
+
+Hubs are private, organization-operated and trusted. Keep checksum verification, bounded safe archive extraction, database-format and embedding compatibility checks, TLS verification, and existing sanitized hub diagnostics. Do not pursue deliberately crafted catalog/collation attacks as release blockers.
+
+A developer may lose local index work and need to re-pull or rebuild after interrupted installation. Do not delete unrelated files or silently open mixed old/new database state. Do not promise a durable rollback copy through machine power loss or storage failure.
+
+No publisher, permanent artifact cache, authentication service, new diff engine, generation-pointer storage layout, or native LanceDB backend is introduced. No push, merge, or release is authorized by this document.
+
+## Language and component boundaries
+
+### Python retains policy and backend knowledge
+
+Keep `chunkhound/hub/{manifest,transport,artifact,inspect}.py` and existing configuration/format work. Python owns:
+
+- Configured-key selection and full manifest/artifact URLs.
+- HTTP retries, checksum verification, extraction and candidate inspection.
+- CLI policy, logging, failure classification and the pre-registry auto-pull hook.
+- DuckDB/LanceDB provider integration, search, and local overlay.
+
+A small Python installation adapter converts paths and native error categories; it does not implement a second filesystem protocol.
+
+### Rust owns coordination and installation mechanics
+
+Add focused modules for database leases and installation. Expose the necessary operations through the existing PyO3 extension. The Rust core accepts owned local paths and a backend discriminator; it does not accept manifests, URLs, embedding credentials or arbitrary cleanup paths.
+
+Its responsibilities are:
+
+1. Acquire/release shared database-use leases and exclusive installation leases.
+2. Check interruption state before database access.
+3. Isolate the old database and its recognized sidecars/recovery artifacts.
+4. Move the verified candidate into place and commit the installation marker state.
+5. Return typed busy, interrupted, unsupported-layout and filesystem failures.
+
+The same Rust lease implementation is used by Python providers and native database entry points. There is no Python-only alternative locking protocol. `CHUNKHOUND_USE_RUST=0` continues to select the Python indexing pipeline; it does not disable installation exclusion. The native extension is already a project dependency.
+
+Use a maintained cross-platform advisory file-locking crate compatible with the project's Rust minimum. No custom unsafe platform layer. CPU/IO operations release the GIL, with owned values crossing `allow_threads`; errors become explicit Python exceptions rather than panics.
+
+## Cooperative database ownership
+
+### Identity and scope
+
+Use a stable lock file beside the actual database target, outside any database directory that is renamed. Never unlink/recreate the lock as part of installation. Resolve ordinary relative paths and symlinked parents to a consistent target before choosing the lock. For absent targets, normalize the existing parent and append the target name. Reject a symlinked installation target rather than replacing its link or chasing it during cleanup.
+
+The native String-backed database interface supports only canonical database targets representable as UTF-8. An ASCII/UTF-8 alias resolving to a non-UTF-8 target is rejected with typed `DatabaseLayoutError` before any database preflight, read, recovery or write, including the pipeline's empty-input shortcut. Preserve the exact `PathBuf` lease identity; never use lossy conversion for database operation targets. Stable coordination-file creation is permitted, but rejection must not mutate the original database/recovery files or a replacement-character neighboring target, and must release acquired ownership. This restriction does not change the lease-only API's exact filesystem identity or add arbitrary filename-byte support. Ordinary UTF-8 Unicode paths, aliases to valid UTF-8 targets, legacy layouts and memory database use remain supported. Direct native open/read and pipeline diff/writer setup apply the same validation/conversion contract.
+
+Initial installation supports existing directory-layout targets: `chunks.db` and `lancedb.lancedb` inside the configured database directory. Legacy single-file configurations, in-memory databases and read-only installation are unsupported. Ordinary non-hub database use retains its existing supported layouts. Filesystem deployments must support reliable advisory locks and same-filesystem rename; network-filesystem behavior is not assumed.
+
+Hard-link aliases, clients predating this protocol, and direct third-party database connections are outside cooperative exclusion. Operators must stop such users before pulling. This is a documented support boundary, not a claim that the installer detects them.
+
+### Lifetime rules
+
+- Every current-version file-backed database holder acquires a shared lease before format preflight, recovery or opening backend handles. Hold it until all owned handles and pending database work have finished.
+- Shared here means "installation exclusion", not permission for concurrent backend writers. DuckDB/LanceDB retain their own read/write compatibility rules. Multiple compatible providers must not fail merely because another shared lease exists.
+- The installer acquires an exclusive lease before modifying the destination. Contention returns a busy result; it does not kill a daemon or wait indefinitely.
+- Read-only holders participate as well. New read-only access needs an existing usable coordination file or permission to create it; inability to coordinate must produce an explicit error, not an unlocked open.
+- Provider reconnect is idempotent with respect to leases. A failed open releases ownership only after any partially opened handles are closed. Do not roll back or discard another live provider's transaction to acquire a lease.
+- Python keeps its shared lease during the existing disconnect-for-Rust/reconnect bracket. Publish the native-in-progress flag before the Python release barrier; serial connection preparation must recheck admission on its worker before inspecting, recovering or opening, even if the caller passed its earlier check. Start native work only after successful release. Clear the flag after actual native work/cleanup stops (or failed release), before reconnecting. The native pipeline also acquires shared ownership before its first diff-reader/recovery operation, so direct native calls are protected. Shared ownership overlaps; there is no unlocked handoff interval.
+- Native readers, writers, compaction and recovery remain covered until their handles close. Process exit releases OS locks; an abandoned lock file alone is not evidence of a live owner.
+
+**Approved Gate A reader-lifetime amendment:** This explicitly supersedes only the successor plan's T2 preserve-error/close-policy instruction and T3 C3 audit-without-close-policy-change clause. A failed DuckDB reader `__exit__` is not proof of closure: explicitly retry idempotent close while ownership is held. If shutdown remains unproven, retain the reader with its original owner independently of retained, cleared or dropped exception graphs; `DatabaseReaderCloseError.retry_close()` safely retries reader shutdown. For borrowed ownership it never releases the enclosing lease; use the provider's public `close()` for complete cleanup, not `error.ownership.close()` while other provider handles may remain live. For an acquired standalone inspection scope already unwinding ownership, the retry also finishes lease release. Never release either shared or borrowed exclusive ownership while a retained reader remains live; an abandoned failure keeps exclusion until process exit. Borrowing preserves the caller's exact owner without nested acquisition and never closes its lease on ordinary scope exit. This covers public reader, format, inventory and primary-owned recovery inspection. Provider temporary native handoff must drain/check retained readers while preserving ownership and refuse persistent shutdown failure. Terminal provider closure is published only after all handles and native ownership close successfully; public final close retries failure even after executor finalization. Existing WAL-safe read-only ATTACH/no-install policy and compatible transaction semantics remain unchanged; this is a narrow retained-reader provider integration, not a general teardown redesign.
+
+Download/staging happens without exclusive ownership of the target. The candidate is a private temporary database, not the destination. Close all candidate inspection handles before installation. Automatic pull rechecks the local trigger under the exclusive installation lease before replacing, since another process may have populated the target during download. Expose that lease as a scoped native handle so Python can inspect while it remains held, then close inspection handles before committing. Inspection under that lease must not try to acquire a nested shared lease; unrelated ordinary inspection uses shared ownership. No shared-to-exclusive lock upgrade is required.
+
+A normal open must acquire its own shared lease after installation; no guarantee is made that a racing independent pull cannot win before that open. Async cancellation must not drop leases or staging directories while native filesystem/database work is still running. Wait for that work to finish before releasing its resources; do not use task cancellation as proof that a worker thread stopped. Native pipeline execution, embedding-cache cleanup, and both hub pull worker boundaries (initial inspection and installation/recheck) retain private executor completion futures, not separately cancellable `to_thread` Tasks, so repeated cancellation and `asyncio.run` all-Tasks shutdown cannot trigger resource cleanup or Python reconnect before the actual work ends. Preserve the caller's contextvars when submitting those workers.
+
+**Approved T7 fatal-outcome precedence (extended by R2):** After fully draining a hub worker, report a fatal mismatch, interruption/recovery-needed outcome or retained-reader shutdown failure rather than concurrent cancellation. This includes native interruption during initial inspection as well as interruption during installation/recheck. Log the fatal category once using a sanitized diagnostic and raise it; never convert it into ordinary fallback. A successfully completed worker still reports cancellation, and soft failure behavior is unchanged. This is hub-local outcome selection; the shared T5 completion helper and other callers' cancellation precedence remain unchanged.
+
+## Installation and interruption protocol
+
+Use a small, versioned in-progress marker beside the target and a uniquely named quarantine directory in the same parent. The marker and quarantine names are installer-owned; they are not database recovery sidecars.
+
+Under exclusive ownership:
+
+1. Confirm supported layout and the presence of the already-validated candidate. Recheck the automatic-install condition when relevant.
+2. Publish an in-progress marker before changing any old index file. Marker creation failure leaves the old index untouched.
+3. Move the existing target and recognized associated files into the quarantine directory. For DuckDB this includes its WAL, supported compaction/recovery artifacts, root sidecar and active-embedding sidecar. For LanceDB move the database directory as a unit and any recognized external sidecars. Use the actual filenames used by current providers/recovery code; never sweep the configured parent or use a broad user-file glob.
+4. Rename the candidate into the destination, on the same filesystem. All old sidecars must already be isolated. Newly installed bases start without publisher-root or active-model sidecars.
+5. Remove the marker only after the new target is in place and isolation is complete. This is the process-level commit point. Release ownership after finishing the install operation.
+6. Quarantine cleanup is best-effort and limited to installer-owned paths. Cleanup failure after commit is a warning, not a failed pull or a reason to restore stale sidecars.
+
+The multi-file operation is not called an atomic swap. The lease prevents participating readers from observing intermediate state; the marker prevents normal opens after a process dies during it.
+
+If a marker survives, normal database opens refuse before backend recovery/migration, with guidance to run explicit `chunkhound pull` again. Do not guess which quarantined database is best, replay an old WAL against a new database, or let auto-index silently create a database over partial state. This refusal is an intentional exception to ordinary automatic-pull fallback: continuing local indexing would be unsafe.
+
+Explicit re-pull may recover by first downloading and verifying a fresh candidate, then acquiring exclusive ownership and isolating any partial current target/recognized sidecars before completing the same protocol. Failed re-download leaves the marker and existing files alone. Abandoned quarantine contents are not automatically restored; diagnostics explain that local work may need re-indexing. Do not require an intact old index to recover. This restores installation state, not a content-freshness guarantee: a validated publisher base may itself contain stale rows. Do not present re-pull as a repair for stale LanceDB data; its overlay correction remains deferred.
+
+Tests cover process interruption and ordinary filesystem errors. Power-loss durability across platforms/filesystems is not guaranteed by a marker or rename. Keep incomplete or ambiguous marker state as a refusal during ordinary opens, never a license for unrestricted cleanup. Explicit re-pull uses only the target-derived recognized paths and a fresh quarantine, not cleanup paths read from a possibly incomplete marker. Old abandoned quarantines may remain for manual removal; they are never candidates for backend recovery.
+
+## CLI and error behavior
+
+- `chunkhound pull [path] --version latest|-1|-2` explicitly installs a matching base. Any inability to install returns exit 1. No automatic version walking.
+- `chunkhound index` considers automatic pull only when a hub is configured and a usable embedding identity is available, and the local target is absent or embedding-misaligned. Aligned local databases cause zero hub requests.
+- Run the hook before registry initialization and drift pinning. Simulation, ignore checking and no-embeddings indexing do not pull. MCP and search never initiate a pull.
+- Network, selection, checksum, extraction, space and pre-install busy failures remain soft for auto-index: log and follow existing local behavior. This is not a promise that local indexing can succeed against a busy backend.
+- A downloaded database contradicting its manifest is fatal for both modes; the old target and its sidecars remain untouched.
+- Retained-reader shutdown failure is separately fatal for both modes, with a sanitized CLI exit 1 and no local-index fallback or traceback. Preserve its original error/owner and safe retry capability; ordinary unreadable identity remains soft/no-request.
+- Errors after installation starts retain the interruption marker unless the commit point was reached. They must not be swallowed as ordinary fallback followed by a provider open.
+- Use typed native error categories at the Python boundary; do not parse engine exception text or expose raw paths/URLs through new diagnostic causes.
+- Explicit pull installs only. A subsequent normal index overlays local changes; auto-index continues into ordinary indexing in the same command. DuckDB is the operational overlay target; LanceDB overlay remains nonoperational/deferred because changed-file updates can leave stale chunks searchable. This qualification does not alter command behavior. Search operates unchanged on the installed base.
+
+## Verification contracts
+
+Prefer real backends and subprocesses, with fakes only for external HTTP/embedding services and deterministic fault injection at filesystem boundaries.
+
+1. Cold pull and explicit replacement followed by actual search for DuckDB and LanceDB; relative versions select the requested retained build.
+2. Auto-index absent/misaligned installation before drift pinning; aligned index makes no request; MCP/search/no-embeddings paths make no request.
+3. DuckDB moved-checkout overlay preserves unchanged base content and incorporates new, changed and deleted files through existing indexing logic. Preserve the same LanceDB acceptance assertions unchanged and visibly failing while its overlay correction is deferred; do not skip, xfail or weaken them.
+4. Common download, checksum, archive, space and candidate-mismatch failures have the promised exits/fallback and preserve the pre-install target/sidecars.
+5. Live Python DuckDB/LanceDB users and direct native work prevent installation. Compatible same-process providers/reconnect remain usable. Python/native handoff has no installation window. Two pulls and a concurrent cold opener cannot observe partial state.
+6. Kill the installer after marker creation, during old-file isolation, and after candidate rename but before marker removal: normal open refuses; explicit re-pull restores a searchable index. Kill after marker removal: the new index remains usable even if quarantine cleanup was incomplete.
+7. Normal relative/symlink-parent aliases coordinate; unrelated neighboring files survive success and failure. Native database entry points reject aliases to non-UTF-8 canonical targets with typed layout errors before preflight/recovery/read/write, even for empty pipeline input, without mutating original or replacement-character neighboring files or retaining leases. UTF-8 Unicode targets and memory remain supported; raw filename-byte fixtures are Unix-only. OS exit releases leases without manual lock-file deletion.
+8. Exercise Rust-enabled and Python-pipeline indexing. Run platform CI for supported Windows/POSIX lock and rename behavior before claiming cross-platform support.
+
+Run targeted contracts, Rust fmt/clippy/tests for Rust changes, and smoke before each commit. Run full Ruff and mypy and distinguish exact existing diagnostic/file baselines from introduced errors; unchanged debt is not a passing static command. The immutable acceptance file's original 92-character E501 is an intentional diagnostic exception, not a scoped clean result or new production regression. Full suite before any future PR push. Existing pinned-runtime/full-suite and platform validation debt is not erased by trusting the publisher.
+
+For T9, run both the complete hub suite and acceptance+CLI regression commands and report actual totals/exit codes. Only `tests/hub/test_activation_acceptance.py::test_moved_checkout_overlays_unchanged_new_changed_and_deleted_files[0-lancedb]` and `[1-lancedb]` of that same test are accepted deferred failures. Both fail at line 72 because `OLD_CHANGED_BASE` still returns 33 `changed.py` chunks. Keep the acceptance file byte-for-byte unchanged and retain exact output; these are failures, not GREEN. LanceDB deleted-negative, semantic and final-inventory assertions after that point were not reached and are not passing evidence. Any other failure remains blocking pending exact classification. The reviewed missing batch-delete executor correction and new deletion tests are not authorized in this continuation.
+
+## Implementation planning and delegation
+
+Produce a successor activation plan, not the old refusal-only Tasks 8–9:
+
+1. Rust lease primitive and PyO3 interface; bounded lifecycle mapping supplies exact entry points.
+2. Python/native lifetime integration and real contention/handoff contracts.
+3. Rust marker/quarantine installer and interruption/re-pull contracts.
+4. Python orchestration, CLI and pre-registry hook.
+5. Pull/search/overlay acceptance tests, documentation and regression validation.
+
+Use one writer per dependency-ordered task. Delegate bounded lifecycle discovery or independent contract review where useful, not competing writers in the same subsystem. Review the lease/lifetime contract before implementing installer activation. Do not restart a broad adversarial metadata audit or port the completed Python transport/inspection code.

@@ -50,6 +50,13 @@ class _FakeNativePipeline:
 
 @pytest.fixture
 def fake_native_pipeline(monkeypatch: pytest.MonkeyPatch) -> _FakeNativePipeline:
+    from chunkhound_native import (
+        DatabaseBusyError,
+        DatabaseFilesystemError,
+        DatabaseInterruptedError,
+        DatabaseLayoutError,
+    )
+
     captured_config: dict = {}
     instance = MagicMock()
     instance.run.return_value = _fake_report()
@@ -59,7 +66,11 @@ def fake_native_pipeline(monkeypatch: pytest.MonkeyPatch) -> _FakeNativePipeline
         return instance
 
     fake_module = types.SimpleNamespace(
-        IndexingPipeline=MagicMock(side_effect=_init_side_effect)
+        IndexingPipeline=MagicMock(side_effect=_init_side_effect),
+        DatabaseBusyError=DatabaseBusyError,
+        DatabaseFilesystemError=DatabaseFilesystemError,
+        DatabaseInterruptedError=DatabaseInterruptedError,
+        DatabaseLayoutError=DatabaseLayoutError,
     )
     monkeypatch.setitem(sys.modules, "chunkhound_native", fake_module)
     return _FakeNativePipeline(instance=instance, captured_config=captured_config)

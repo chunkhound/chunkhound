@@ -330,6 +330,35 @@ class TestConfigureKeepsTheIndexUsable:
 
         assert (rebuilt.model, rebuilt.dims) == ("voyage-code-3", 1024)
 
+    def test_known_default_dimensions_report_drift_before_pinning_to_index(
+        self, index: _Index
+    ):
+        index.seed([("voyageai", "voyage-code-3", 512)])
+        consulted: list[ModelDrift] = []
+
+        registry, _ = index.configure(
+            model="voyage-code-3", on_model_drift=_recorder(consulted)
+        )
+
+        assert len(consulted) == 1
+        assert consulted[0].configured_dims == 1024
+        assert registry.get_provider("embedding").dims == 512
+
+    def test_unknown_dimensions_do_not_guess_drift_against_matching_model(
+        self, index: _Index
+    ):
+        index.seed([("voyageai", "acme-custom", 777)])
+        consulted: list[ModelDrift] = []
+
+        registry, config = index.configure(
+            model="acme-custom", on_model_drift=_recorder(consulted)
+        )
+
+        assert consulted == []
+        assert config.embedding is not None
+        assert config.embedding.output_dims is None
+        assert registry.get_provider("embedding").output_dims is None
+
     def test_unknown_configured_model_decline_restores_indexed_dims(
         self, index: _Index
     ):

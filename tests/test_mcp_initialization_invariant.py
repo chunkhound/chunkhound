@@ -11,9 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import duckdb
 import pytest
 
+import chunkhound_native as native
+from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 
 class ConcreteMCPServer(MCPServerBase):
@@ -469,3 +473,55 @@ class TestCleanup:
         assert provider.disconnect_calls == 0
         assert not server._initialized
         assert "Database close failed: close exploded" in debug_file.read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial_manager", [True, False])
+async def test_mcp_cleanup_releases_partial_or_retried_database_ownership(
+    tmp_path, monkeypatch, partial_manager
+):
+    directory = tmp_path / "database"
+    directory.mkdir()
+    target = directory / "chunks.db"
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": directory},
+        analytics={"enabled": False},
+        skip_layers={"global", "env", "local_config", "config_file", "cli"},
+    )
+    monkeypatch.setenv("CHUNKHOUND_DEBUG_FILE", str(tmp_path / "mcp.log"))
+    provider = DuckDBProvider(target, base_directory=tmp_path)
+    provider.connect()
+    server = ConcreteMCPServer(config)
+    server.services = SimpleNamespace(provider=provider)
+    manager = provider.connection
+    real_close = duckdb.DuckDBPyConnection.close
+    failed = False
+
+    def fail_manager_once(conn):
+        nonlocal failed
+        if conn is manager and not failed:
+            failed = True
+            raise OSError("one-time manager close failure")
+        return real_close(conn)
+
+    try:
+        if partial_manager:
+            provider._connection_manager.disconnect(skip_checkpoint=True)
+            assert not provider.is_connected
+            assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+            await server.cleanup()
+        else:
+            with monkeypatch.context() as fault:
+                fault.setattr(duckdb.DuckDBPyConnection, "close", fail_manager_once)
+                await server.cleanup()
+                assert failed
+                with pytest.raises(native.DatabaseBusyError):
+                    native.acquire_install_lease(str(target), "duckdb")
+                # Same public caller retries a completed failure, never a raw lease.
+                await server.cleanup()
+        native.acquire_install_lease(str(target), "duckdb").close()
+        await server.cleanup()  # Successful cleanup remains idempotent.
+        native.acquire_install_lease(str(target), "duckdb").close()
+    finally:
+        provider.close()  # Also makes the failing RED run safe to tear down.
