@@ -1,0 +1,82 @@
+---
+import DiagramFigure from "./DiagramFigure.astro";
+import DiagramNode from "./DiagramNode.astro";
+import { LLM_ROLES } from "../../lib/architecture";
+
+/**
+ * Cost split made visible: the utility model absorbs most token volume as
+ * many small calls, while the synthesis model runs once. The bar's shape is
+ * the evidence, so the diagram shows only each role's call volume; the
+ * surrounding prose carries the explanation.
+ */
+
+// Twenty-four thin segments stand for the many small utility calls.
+const SEGMENTS = Array.from({ length: 24 }, (_, i) => i);
+
+const roles = LLM_ROLES.map((role, index) => ({ ...role, manyCalls: index === 0 }));
+---
+
+<DiagramFigure
+  caption="Where the token volume goes"
+  label="Token routing between the utility and synthesis models"
+  description="The utility model absorbs most token volume through many small calls — query expansion, follow-ups, result classification — while the synthesis model runs one expensive pass to produce the answer from result clusters that are already narrowed and reduced. The two roles are configured independently, each with its own provider and model."
+>
+  <div class="lanes">
+    {roles.map((role) => (
+      <div class="lane">
+        <DiagramNode title={role.name} detail={role.calls} />
+        <div class="lane-bar" data-kind={role.manyCalls ? "segmented" : "single"} aria-hidden="true">
+          {role.manyCalls
+            ? SEGMENTS.map(() => <span class="seg" />)
+            : <span class="block" />}
+        </div>
+      </div>
+    ))}
+  </div>
+
+  <p class="d-note">
+    Token volume goes to the utility model; the synthesis model runs once over results that have already been narrowed, clustered, and reduced. Each role can use its own provider and model.
+  </p>
+</DiagramFigure>
+
+<style>
+  .lanes {
+    display: grid;
+    gap: var(--space-4);
+  }
+
+  .lane {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr);
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  /* Primary-bg track, primary fill: shape conveys calls, not raw colour. */
+  .lane-bar {
+    display: flex;
+    gap: 2px;
+    height: 22px;
+    padding: 3px;
+    border-radius: var(--radius-md);
+    background: var(--primary-bg);
+  }
+
+  .seg {
+    flex: 1 1 0;
+    border-radius: 1px;
+    background: var(--primary);
+  }
+
+  .block {
+    flex: 1 1 0;
+    border-radius: var(--radius-sm);
+    background: var(--primary);
+  }
+
+  @media (max-width: 720px) {
+    .lane {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

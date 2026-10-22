@@ -11,7 +11,8 @@ import subprocess
 import tempfile
 
 from tests.site.png_helpers import png_dimensions
-from tests.site.tsx_runner import ROOT, NPM, sanitized_subprocess_env
+from tests.site.process_runner import run_text_process
+from tests.site.tsx_runner import NPM, ROOT, isolated_subprocess_env
 
 GENERATE_SCRIPT = ROOT / "site" / "scripts" / "generate-og-images.mjs"
 
@@ -29,14 +30,12 @@ INVALID_SVG = "this is not valid svg content"
 
 def _run_generate(public_dir: pathlib.Path) -> subprocess.CompletedProcess:
     """Run generate-og-images.mjs against a fake public directory."""
-    env = sanitized_subprocess_env(CHUNKHOUND_PUBLIC_DIR=str(public_dir))
-    return subprocess.run(
-        [NPM, "exec", "--prefix", "site", "--", "node", str(GENERATE_SCRIPT)],
-        capture_output=True,
-        text=True,
-        cwd=ROOT,
-        env=env,
-    )
+    with isolated_subprocess_env(CHUNKHOUND_PUBLIC_DIR=str(public_dir)) as env:
+        return run_text_process(
+            [NPM, "exec", "--prefix", "site", "--", "node", str(GENERATE_SCRIPT)],
+            cwd=ROOT,
+            env=env,
+        )
 
 
 def test_generates_all_social_pngs_from_svgs() -> None:
@@ -53,7 +52,9 @@ def test_generates_all_social_pngs_from_svgs() -> None:
             name = svg_name.replace(".svg", ".png")
             png_path = public_dir / name
             assert png_path.exists(), f"{name} was not generated"
-            assert png_path.stat().st_size > 50, f"{name} is too small to be a valid PNG"
+            assert png_path.stat().st_size > 50, (
+                f"{name} is too small to be a valid PNG"
+            )
 
             w, h = png_dimensions(png_path)
             assert w == 1200, f"{name} width is {w}, expected 1200"
@@ -86,7 +87,9 @@ def test_invalid_svg_errors() -> None:
 
 def test_package_scripts_keep_prepare_site_only_for_dev_and_build() -> None:
     """Dev/build keep the shared prepare step while preview remains opt-in."""
-    package_json = json.loads((ROOT / "site" / "package.json").read_text(encoding="utf-8"))
+    package_json = json.loads(
+        (ROOT / "site" / "package.json").read_text(encoding="utf-8")
+    )
     scripts = package_json["scripts"]
 
     assert scripts["generate:og-images"] == "node scripts/generate-og-images.mjs"

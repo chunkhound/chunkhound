@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Vercel AI Gateway LLM provider** — Vercel AI Gateway is now supported as an OpenAI-compatible LLM provider (`provider: vercel` or `CHUNKHOUND_LLM_PROVIDER=vercel`). Like every registry provider it requires an explicit `model`; the configurator's Vercel preset defaults to `poolside/laguna-s-2.1`. Because the gateway's output-cap omission behavior is not yet verifiable, the default research route sends the configured `llm.output_limit_fallback` cap (default 64,000) instead of omitting the cap.
+
+### Changed
+- **Site configurator emits explicit VoyageAI models.** Configurator-generated configs pin `voyage-4-lite` + `rerank-3-lite` explicitly, so new setups adopt the current recommended models. Existing configs are unchanged: the runtime fallback when `embedding.model` is unset stays `voyage-3.5` (and `rerank-2.5` for reranking), and the bundled `voyage-3.5` → `voyage-4-lite` suggestion stays a print-only hint.
+- **Package description updated** to "Local-first research engine for AI agents via MCP, with a CLI companion", matching the refreshed site positioning.
+- **Site configurator: the Ollama-embed preset no longer bundles a reranker.** Generated configs for Ollama embedding now contain only embedding settings; add a reranker explicitly if you want one.
+- **Site configurator default selections changed.** New visitors now start with Pi as the default agent and Vercel AI Gateway (Poolside Laguna S 2.1) as the default research provider (previously Cursor and Anthropic).
+- **Site configurator's OpenRouter research preset now ships `poolside/laguna-s-2.1`.** The OpenRouter preset uses the same Poolside Laguna S 2.1 model as the default Vercel AI Gateway route.
+- **Site configurator's Requesty preset now ships `deepseek/deepseek-v4.1-flash`.** The preset replaces `anthropic/claude-sonnet-5` with a fast, cost-efficient DeepSeek model for a lower-cost default route.
+- **Site configurator adds a validated reranker editor.** The rebuilt configurator lets you set the reranker URL, format, and model, and validates them client-side against the backend rule (`rerank_model` or `rerank_format` requires `base_url` or an explicit `rerank_url`), flagging the URL field so the emitted config passes backend validation.
+- **Backend validates `embedding.rerank_url` at config load when reranking is active.** A valid `http://`/`https://` URL is accepted with any scheme casing and normalized to lowercase (endpoint path, query, and fragment stay unchanged); malformed forms (`http:/…`, `//host`, `http://`, embedded whitespace) are rejected instead of being silently joined into a broken endpoint. An unused `rerank_url` no longer blocks config load. The site configurator applies the same rules — including the backend's Unicode whitespace class — and lowercases the scheme in the emitted config.
+- **Chrome launch handling is simplified to a single bounded attempt.** The previous retry/backoff/deadline machinery and the exit-time cleanup net are removed. `_managed_browser` creates and owns the `zd.Browser` before `start()`, bounds `browser.start()` at 20 s, bounds the failed-start CDP close at 2 s, and reaps the owned process and temporary profile on failure, cancellation, or a failed stop. This reverses the accidental scope increase while keeping cold-start tolerance (0.5 s × 30 connection tries ≈ 15 s) and cleanup ownership.
+- **Documentation site upgraded to Astro 7** with a refreshed homepage, architecture page, and a rebuilt configurator/nav/hero experience.
+
+### Fixed
+- **UTF-8-BOM config files now work consistently** for standard configuration loading, Code Mapper workspace overrides, remote-config persistence, and the CLI prompt that adds timeout exclusions. Files written by Windows tools are accepted. Configs saved in the platform's legacy ANSI code page keep loading through a locale fallback, so existing Windows setups do not regress; input that neither UTF-8 nor the locale can decode still fails — now with the friendly "Invalid JSON in config file" error instead of a raw decode traceback. The timeout-exclusion rewrite normalizes BOM files to plain UTF-8.
+- **An empty or whitespace-only `embedding.rerank_model` is treated as unset**, so the provider's default reranker applies instead of query-time failure under an empty model name.
+- **VoyageAI now warns when it drops an unusable `rerank_url`.** A relative endpoint without `base_url`, or an invalid endpoint, is dropped with a warning naming the sanitized endpoint and the reason. Warnings omit credentials, query, and fragment and escape control characters; the old invalid-URL warning echoed the raw URL. Provider creation still proceeds, so a misconfiguration is visible without blocking startup. SDK reranking remains available only when the remaining configuration permits it; custom `base_url` configurations require a usable rerank endpoint.
+- **The hero terminal settles its control when the section leaves the viewport mid-run**, so it no longer advertises "Stop animation" over a cleared card until the section is re-entered.
+
+### Removed
+- **`chunkhound.__description__` removed.** Its value duplicated the module docstring / `pyproject.toml` `project.description` (the single source), and the attribute had no runtime consumer. Read the module docstring or `importlib.metadata` if you need the description.
+
 ## [6.1.0] - 2026-10-20
 
 ### Added
@@ -34,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Claude Code CLI prompt delivery is configurable** — One mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses `file` (default, every OS) or `inline`. `file` uses `--append-system-prompt-file`: instructions stay in the system prompt, off the Windows command line, and beside a wrapper's `--append-system-prompt`. `inline` is for a wrapper that uses the file flag, or Claude Code older than 2.0.34. Those files use the system temp directory. `llm.claude_temp_dir` overrides it for a special case such as Docker or a limited user. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
+
 ## [6.0.0] - 2026-09-14
 
 ### Breaking Changes
@@ -50,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Configurable DB execute timeout** — The database serial-executor timeout can now be set via `.chunkhound.json`, `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS`, or `--db-execute-timeout`, instead of only an internal env var.
 - **VoyageAI `voyage-4` series** (`voyage-code-4`, `voyage-4`, `voyage-4-large`, `voyage-4-lite`). All four support Matryoshka `output_dims` of 256, 512, 1024 (default), and 2048, and a 32K context window. `voyage-code-4` is code-specialized and built for coding-agent retrieval, which is ChunkHound's exact use case. The default stays `voyage-3.5`; set `embedding.model` to opt in.
 - **The index now owns its embedding model and dimensions.** Changing `embedding.model` or `embedding.output_dims` no longer silently re-embeds, or strands, an existing database. For a different model, `chunkhound index` warns, reports how many chunks a switch would rewrite, and asks; declining keeps the indexed model and dimensions, leaves search working, and asks again next run. A dimensions-only change on the same model cannot be re-embedded in place, so the indexed dimensions are kept without asking. Non-interactive runs and MCP startup keep the index's settings without prompting, so an upgraded default can never rewrite a database behind the operator's back. A configured *provider* change is still applied, since credentials and dimensions leave nothing to fall back to. Which model an index uses is recorded in a file beside the database, so a finished or interrupted switch is remembered rather than guessed from vector counts. DuckDB and LanceDB indexes are both covered.
-- **Upgrade suggestions.** When a newer model supersedes the one in use, an interactive `chunkhound index` prints a single informational line stating what a switch would cost. It never acts on its own and does not appear in non-interactive runs. Silence it with `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1`.
+- **Upgrade suggestions.** For models in the bundled upgrade map, an interactive `chunkhound index` prints a single informational line naming an alternative and stating what a switch would cost. This is a print-only hint, not a claim that the suggested model is better for every workload. It never changes the model or re-embeds on its own and does not appear in non-interactive runs. Silence it with `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1`.
 - **VoyageAI model reference table** in `configuration.md`, listing context window and per-batch token limit for every model ChunkHound knows.
 - **Fetchurl CLI command and MCP tool** — New `chunkhound fetchurl <url> [-q "…"]` CLI subcommand and matching `fetchurl` MCP tool fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer.
   - Short pages are token-truncated and summarized in one LLM call; long pages with a query go through a chunk + rerank + elbow-filter pipeline that passes only the most relevant sections to the LLM.

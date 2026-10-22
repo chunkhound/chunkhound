@@ -1,0 +1,128 @@
+---
+/**
+ * The site's documentation navigation — filter + guide list. Single source of
+ * truth for the docs sidebar AND the mobile menu on marketing pages, so the
+ * menu is identical everywhere. Owns its styles so it renders correctly in
+ * either container (docs grid column vs. off-canvas drawer).
+ */
+import PhosphorIcon from "./PhosphorIcon.astro";
+import { DOCS_PAGES, isActivePath } from "../lib/nav";
+
+interface Props {
+  currentPath: string;
+}
+
+const { currentPath } = Astro.props;
+
+// Same trailing-slash-insensitive rule as Nav.astro — shared from lib/nav.ts.
+const isActive = (href: string): boolean => isActivePath(currentPath, href);
+---
+
+<div class="sidebar-inner">
+  <label class="sr-only" for="docs-nav-filter">Filter pages</label>
+  <input
+    id="docs-nav-filter"
+    class="sidebar-filter"
+    type="search"
+    placeholder="Filter pages"
+    autocomplete="off"
+    data-docs-nav-filter
+  />
+
+  <div class="sidebar-section" data-sidebar-section>
+    <div class="sidebar-section-title">Guides</div>
+    <nav aria-label="Documentation guides">
+      {DOCS_PAGES.map((g) => (
+        <a
+          href={g.href}
+          class:list={["sidebar-link", { active: isActive(g.href) }]}
+          data-sidebar-link
+        >
+          <PhosphorIcon name={g.icon} size="16" weight="duotone" aria-hidden="true" />
+          <span>{g.title}</span>
+        </a>
+      ))}
+    </nav>
+  </div>
+</div>
+
+<script>
+  import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
+  import "@phosphor-icons/webcomponents/PhGitPullRequest";
+  import "@phosphor-icons/webcomponents/PhRocketLaunch";
+  import "@phosphor-icons/webcomponents/PhSlidersHorizontal";
+  import "@phosphor-icons/webcomponents/PhTerminalWindow";
+  import "@phosphor-icons/webcomponents/PhTreeStructure";
+</script>
+
+<style>
+  .sidebar-inner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .sidebar-filter {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: var(--border-w-subtle) solid var(--border-subtle);
+    border-radius: var(--radius-control);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    outline: none;
+  }
+
+  .sidebar-filter:focus {
+    border-color: var(--primary);
+  }
+
+  .sidebar-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .sidebar-section-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .sidebar-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+    transition: color 0.15s, background 0.15s;
+  }
+
+  .sidebar-link:hover {
+    color: var(--text-primary);
+    background: var(--bg-surface);
+    text-decoration: none;
+  }
+
+  .sidebar-link.active {
+    color: var(--on-primary-bg);
+    background: var(--primary-bg);
+    font-weight: 500;
+  }
+
+  /* Drawers (docs sidebar + marketing menu) need finger-sized targets; the
+     desktop docs column stays dense. */
+  @media (max-width: 900px) {
+    .sidebar-link {
+      min-height: 44px;
+    }
+  }
+</style>

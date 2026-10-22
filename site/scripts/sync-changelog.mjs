@@ -10,23 +10,18 @@
  * Env override: CHUNKHOUND_ROOT — set to repo root for hermetic testing.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const repoRoot = process.env.CHUNKHOUND_ROOT
-  ? resolve(process.env.CHUNKHOUND_ROOT)
-  : resolve(__dirname, "../..");
+import { repoRoot } from "./lib/repo-context.mjs";
 
-const ROOT_CHANGELOG = resolve(repoRoot, "CHANGELOG.md");
-const SITE_CHANGELOG = resolve(repoRoot, "site/src/pages/docs/changelog.md");
+const root = repoRoot();
+
+const ROOT_CHANGELOG = resolve(root, "CHANGELOG.md");
+const SITE_CHANGELOG = resolve(root, "site/src/pages/docs/changelog.md");
 
 const FRONTMATTER = `---
 layout: ../../layouts/DocsLayout.astro
 title: "Changelog"
-description: "Release history and breaking changes for ChunkHound."
-order: 4
-section: "manual"
 ---
 
 `;

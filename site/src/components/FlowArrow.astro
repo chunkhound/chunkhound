@@ -1,0 +1,17 @@
+---
+/**
+ * Flow connector. Direction is the flow's axis, never decoration: → when the
+ * flow reads left-to-right, ↓ when its bar stacks the two halves vertically.
+ * The surrounding bar owns the axis — flipping the inherited --flow-glyph in the
+ * same rule that sets flex-direction: column — so the arrow can never point
+ * across its own flow. Glyph shapes live here alone; call sites declare an axis.
+ */
+---
+
+<span class="flow-arrow" aria-hidden="true"></span>
+
+<style>
+  .flow-arrow::before {
+    content: var(--flow-glyph, "\2192");
+  }
+</style>

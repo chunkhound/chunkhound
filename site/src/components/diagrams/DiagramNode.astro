@@ -1,0 +1,15 @@
+---
+/** A single labelled step in a static diagram: a title + optional qualifier. */
+interface Props {
+  title: string;
+  detail?: string;
+  tone?: "default" | "accent";
+}
+
+const { title, detail, tone = "default" } = Astro.props;
+---
+
+<div class="d-node" data-tone={tone}>
+  <span class="d-node-title">{title}</span>
+  {detail && <span class="d-node-detail">{detail}</span>}
+</div>

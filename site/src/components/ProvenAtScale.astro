@@ -1,301 +1,228 @@
 ---
+import { ENTRY_POINTS, PROMISES } from "../scripts/conditions";
+import PhosphorIcon from "./PhosphorIcon.astro";
 
+// Origin story + the scale receipt, and the engine teaser.
+// The terms rail (the conditions + interfaces, relocated from the hero) follows
+// the engine lede: that sentence claims "running on your machine", so the rail
+// names the terms it implies and the interfaces you reach it through.
+// Header + footnote compose the shared landing recipes (.intro / .disclaimer,
+// global.css); the receipt reuses .card-grid so it lands on the same three
+// columns as every tile row.
 ---
 
-<section class="proven">
-    <div class="container">
-        <p class="eyebrow">PROVEN AT SCALE</p>
-        <h2 class="heading">Your laptop outperforms their cluster.</h2>
-        <p class="body">
-            ChunkHound indexes your entire codebase on your own machine — no
-            Kubernetes, no GPU servers, no vendor lock-in — and can run fully local with local providers. Open source, MIT licensed, and proven
-            on 50M+ line codebases in production today.
-        </p>
-
-        <div class="compare-card">
-            <table class="compare-table">
-                <thead>
-                    <tr>
-                        <th class="col-feature"></th>
-                        <th class="col-them">Typical setup</th>
-                        <th class="col-us">ChunkHound</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td class="feature-label">Kubernetes cluster</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>often required</span></span></td>
-                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>not needed</span></span></td>
-                    </tr>
-                    <tr>
-                        <td class="feature-label">H100 / GPU server</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>often required</span></span></td>
-                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>not needed</span></span></td>
-                    </tr>
-                    <tr>
-                        <td class="feature-label">Vendor subscription</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>often required</span></span></td>
-                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>MIT licensed</span></span></td>
-                    </tr>
-                    <tr>
-                        <td class="feature-label">Zero code egress</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>rare</span></span></td>
-                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>with local providers</span></span></td>
-                    </tr>
-                    <tr>
-                        <td class="feature-label">Closed, proprietary</td>
-                        <td class="val-bad"><span class="value-content"><ph-x-circle size="16" weight="duotone" aria-hidden="true"></ph-x-circle><span>yes</span></span></td>
-                        <td class="val-good"><span class="value-content"><ph-check-circle size="16" weight="duotone" aria-hidden="true"></ph-check-circle><span>open source</span></span></td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-
-        <div class="proof-receipt">
-            <a class="receipt-org" href="https://www.appliedmaterials.com" target="_blank" rel="noopener">Applied Materials</a>
-            <p class="receipt-facts">50M+ lines · 1 developer laptop · local-provider option · MIT licensed · production today</p>
-        </div>
+<section id="scale" class="proven" aria-labelledby="scale-heading">
+  <div class="container">
+    <header class="intro" data-reveal>
+      <p class="eyebrow">BORN AT APPLIED MATERIALS</p>
+      <h2 id="scale-heading">Give your agent the whole system — not the slice you had time to paste.</h2>
+      <p>ChunkHound was created by engineers at <a href="https://www.appliedmaterials.com" target="_blank" rel="noopener">Applied Materials</a> to reverse-engineer a 180-million-line, 24-year-old codebase running around the clock. It is today an independent, MIT-licensed community project.</p>
+    </header>
+    <!-- Final metric values are server-rendered; count-reveal.ts animates them
+         in place on scroll (progressive enhancement — no JS shows final text). -->
+    <dl class="proof-grid card-grid">
+      <div class="featured" data-reveal>
+        <dt>
+          <span class="sr-only">months to days</span>
+          <span class="before">months</span>
+          <span class="arrow" aria-hidden="true">→</span>
+          <span class="after">days</span>
+        </dt>
+        <dd>feature characterization time</dd>
+      </div>
+      <div data-reveal><dt aria-label="180 million" data-count-to="180" data-suffix="M">180M</dt><dd>lines indexed from one developer laptop</dd></div>
+      <div data-reveal><dt aria-label="over 20" data-count-to="20" data-suffix="+">20+</dt><dd>maintainers from multiple companies</dd></div>
+    </dl>
+    <div class="engine-fold" data-reveal>
+      <p class="engine-lede">That result comes from a single engine, running on your machine — <a href="/docs/architecture/">see how the engine works <span aria-hidden="true">→</span></a></p>
     </div>
+    {/* The terms rail: the conditions + interfaces relocated from the hero.
+        Icon-led, no chip chrome, so a promise reads as a term, not a control.
+        Two wrap units (conditions, then interfaces + repo) split by a hairline
+        the way the receipt above splits its columns, so a narrow container peels
+        them apart instead of splitting the interface pair. Always lit: chrome
+        naming the terms, so nothing tracks the run. */}
+    <div
+      class="terms"
+      role="group"
+      aria-label="Conditions and interfaces"
+      data-reveal
+    >
+      <span class="terms-group">
+        {PROMISES.map((item) => (
+          <span class="terms-item" data-promise={item.id}>
+            <span class="terms-icon" aria-hidden="true">
+              <PhosphorIcon name={item.icon} size="16" weight="duotone" />
+            </span>
+            <span>{item.label}</span>
+          </span>
+        ))}
+      </span>
+      {/* The seam's hairline: a mark, not a box, so it can be dropped alone in
+          the tier where the groups stack (a border on the group would take its
+          padding with it). Decorative: it carries no content. */}
+      <span class="terms-divider" aria-hidden="true"></span>
+      <span class="terms-group">
+        {ENTRY_POINTS.map((item) => (
+          <span class="terms-item">
+            <span class="terms-icon" aria-hidden="true">
+              <PhosphorIcon name={item.icon} size="16" weight="duotone" />
+            </span>
+            <span>{item.label}</span>
+          </span>
+        ))}
+        <a
+          class="terms-item terms-link"
+          href="https://github.com/chunkhound/chunkhound"
+        >
+          <span class="terms-icon" aria-hidden="true">
+            <PhosphorIcon name="ph-github-logo" size="16" weight="duotone" />
+          </span>
+          <span>GitHub</span>
+          <span class="terms-star" aria-hidden="true">★</span>
+          <span data-star-count>--</span>
+          <span class="sr-only">GitHub stars</span>
+        </a>
+      </span>
+    </div>
+    <blockquote class="trust-quote" data-reveal>
+      <p>We&rsquo;ve repeatedly demonstrated compressing what used to take
+      2&ndash;3 months down to 2&ndash;3 days. Claude Code orchestrates
+      tens to hundreds of deep research calls over our monorepo, zooming
+      into each subsection systematically.</p>
+      <cite>— <span class="trust-quote-name">Ofir Rozenfeld</span>, AI Transformation Product Manager at <a href="https://www.appliedmaterials.com" target="_blank" rel="noopener">Applied Materials</a></cite>
+    </blockquote>
+    <div class="disclaimer" role="note">
+      <p class="eyebrow">Disclaimer</p>
+      <p class="disclaimer-text">ChunkHound is an independent open-source project, not affiliated with, endorsed, or sponsored by Applied Materials.</p>
+    </div>
+  </div>
 </section>
 
 <script>
-  import "@phosphor-icons/webcomponents/PhCheckCircle";
-  import "@phosphor-icons/webcomponents/PhXCircle";
-  import { setupScrollAnimation } from "../scripts/scroll-observer.ts";
-  setupScrollAnimation(".proven");
+  import "@phosphor-icons/webcomponents/PhGitFork";
+  import "@phosphor-icons/webcomponents/PhGithubLogo";
+  import "@phosphor-icons/webcomponents/PhLaptop";
+  import "@phosphor-icons/webcomponents/PhPlugsConnected";
+  import "@phosphor-icons/webcomponents/PhShieldCheck";
+  import "@phosphor-icons/webcomponents/PhSlidersHorizontal";
+  import "@phosphor-icons/webcomponents/PhTerminalWindow";
+  import "../scripts/count-reveal.ts";
 </script>
 
 <style>
-    .proven {
-        padding: var(--space-10) 0;
-        text-align: center;
-    }
-
-    .container {
-        max-width: 1120px;
-        margin: 0 auto;
-        padding: 0 var(--space-6);
-    }
-
-    .eyebrow {
-        text-transform: uppercase;
-        font-size: var(--text-xs);
-        font-weight: 600;
-        letter-spacing: 0.12em;
-        color: var(--text-tertiary);
-        margin-bottom: var(--space-3);
-    }
-
-    .heading {
-        font-size: var(--text-2xl);
-        line-height: var(--lh-2xl);
-        font-weight: 600;
-        color: var(--text-primary);
-        margin-bottom: var(--space-4);
-    }
-
-    .body {
-        font-size: var(--text-base);
-        line-height: var(--lh-base);
-        color: var(--text-secondary);
-        margin-bottom: var(--space-6);
-        max-width: 720px;
-        margin-left: auto;
-        margin-right: auto;
-    }
-
-    /* ---- Comparison card ---- */
-    .compare-card {
-        background: var(--code-bg);
-        border-radius: var(--radius-xl);
-        padding: var(--space-6);
-        max-width: 720px;
-        margin: 0 auto var(--space-7);
-        text-align: left;
-        overflow-x: auto;
-    }
-
-    .compare-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-family: "JetBrains Mono", monospace;
-        font-size: var(--text-sm);
-        line-height: var(--lh-sm);
-    }
-
-    .compare-table thead th {
-        font-size: var(--text-xs);
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--code-text);
-        opacity: 0.55;
-        padding-bottom: var(--space-3);
-        border-bottom: 1px solid var(--border-subtle);
-    }
-
-    .col-feature {
-        width: 40%;
-    }
-
-    .col-them,
-    .col-us {
-        width: 30%;
-        text-align: left;
-    }
-
-    .compare-table tbody tr {
-        border-bottom: 1px solid var(--border-subtle);
-    }
-
-    .compare-table tbody tr:last-child {
-        border-bottom: none;
-    }
-
-    .compare-table tbody td {
-        padding: var(--space-3) 0;
-    }
-
-    .feature-label {
-        color: var(--code-text);
-    }
-
-    .val-bad {
-        color: var(--code-text);
-    }
-
-    .val-good {
-        color: var(--code-accent);
-        font-weight: 600;
-    }
-
-    .val-bad,
-    .val-good {
-        vertical-align: middle;
-    }
-
-    .value-content {
-        display: inline-grid;
-        grid-template-columns: 16px 1fr;
-        align-items: center;
-        gap: var(--space-2);
-    }
-
-    .value-content ph-x-circle,
-    .value-content ph-check-circle {
-        width: 16px;
-        height: 16px;
-    }
-
-    @media (max-width: 640px) {
-        .compare-card {
-            padding: var(--space-4);
-        }
-
-        .compare-table {
-            font-size: var(--text-xs);
-        }
-    }
-
-    /* ---- Proof receipt ---- */
-    .proof-receipt {
-        display: flex;
-        align-items: baseline;
-        justify-content: center;
-        gap: var(--space-3);
-        flex-wrap: wrap;
-        font-family: "JetBrains Mono", monospace;
-        padding: var(--space-4) 0;
-    }
-
-    .receipt-org {
-        color: var(--link);
-        font-size: var(--text-sm);
-        font-weight: 600;
-        text-decoration: none;
-        white-space: nowrap;
-        flex-shrink: 0;
-    }
-
-    .receipt-org:hover {
-        color: var(--link-hover);
-        text-decoration: underline;
-    }
-
-    .receipt-org::after {
-        content: " ·";
-        color: var(--text-secondary);
-        font-weight: 400;
-        text-decoration: none;
-    }
-
-    .receipt-facts {
-        font-size: var(--text-sm);
-        line-height: var(--lh-sm);
-        color: var(--text-secondary);
-    }
-
-    /* ============================================================
-       SCROLL ANIMATIONS — progressive enhancement via .js-animate
-    ============================================================ */
-
-    .js-animate .compare-card {
-        opacity: 0;
-        transform: translateY(14px);
-        transition:
-            opacity 0.5s ease 0.3s,
-            transform 0.5s ease 0.3s;
-    }
-
-    .js-animate .proof-receipt {
-        opacity: 0;
-        transition: opacity 0.45s ease 0.55s;
-    }
-
-    .is-visible .compare-card {
-        opacity: 1;
-        transform: none;
-    }
-
-    .is-visible .proof-receipt {
-        opacity: 1;
-    }
-
-    /* Text element entrance animations */
-    .js-animate .eyebrow,
-    .js-animate .heading,
-    .js-animate .body {
-        opacity: 0;
-        transform: translateY(18px);
-        transition: opacity 0.55s ease, transform 0.55s ease;
-    }
-    .is-visible .eyebrow { opacity: 1; transform: none; transition-delay: 0s; }
-    .is-visible .heading { opacity: 1; transform: none; transition-delay: 0.1s; }
-    .is-visible .body    { opacity: 1; transform: none; transition-delay: 0.2s; }
-
-    /* Sequential table row reveals */
-    @keyframes stepReveal {
-        from { opacity: 0; transform: translateY(7px); }
-        to   { opacity: 1; transform: translateY(0);   }
-    }
-
-    .js-animate .compare-table tbody tr { opacity: 0; }
-
-    .is-visible .compare-table tbody tr:nth-child(1) { animation: stepReveal 0.3s ease 0.7s both; }
-    .is-visible .compare-table tbody tr:nth-child(2) { animation: stepReveal 0.3s ease 0.85s both; }
-    .is-visible .compare-table tbody tr:nth-child(3) { animation: stepReveal 0.3s ease 1.0s both; }
-    .is-visible .compare-table tbody tr:nth-child(4) { animation: stepReveal 0.3s ease 1.15s both; }
-    .is-visible .compare-table tbody tr:nth-child(5) { animation: stepReveal 0.3s ease 1.3s both; }
-
-    /* Reduced-motion overrides in CSS */
-    @media (prefers-reduced-motion: reduce) {
-        .js-animate .eyebrow,
-        .js-animate .heading,
-        .js-animate .body,
-        .js-animate .compare-card,
-        .js-animate .proof-receipt {
-            opacity: 1; transform: none; transition: none;
-        }
-        .js-animate .compare-table tbody tr { opacity: 1; animation: none !important; }
-    }
+  /* Token contract: marketing-surface tokens only (no --code-*); metrics
+     --primary, receipt dividers --border-color, footnote --text-tertiary —
+     all pass WCAG AA in both themes. */
+  .proven { padding: var(--space-10) 0; text-align: start; }
+  /* Proof receipt: an accent bar laid on the tile grid. .card-grid supplies the
+     three columns, the gutters and the peer entrance stagger; each metric
+     centers inside its column so the row spans the container exactly like the
+     tile rows above and below it. No card chrome — the section keeps a single
+     accent surface. */
+  .proof-grid { align-items: baseline; }
+  .proof-grid > div { align-items: baseline; display: flex; gap: var(--space-3); justify-content: center; padding: 0 var(--space-3); text-align: center; }
+  .proof-grid > div + div { border-left: var(--border-w-default) solid var(--border-color); }
+  /* Months → days: the old cost shrinks to context, the new unit is the focal
+     point. The precise 2–3 figures live in the quote below. */
+  .featured dt { align-items: baseline; display: inline-flex; flex-wrap: wrap; gap: var(--space-2); justify-content: center; }
+  .featured .before, .featured .arrow { color: var(--text-secondary); font-size: var(--text-lg); line-height: var(--lh-lg); }
+  .featured .arrow { color: var(--text-tertiary); }
+  dt { color: var(--primary); font-family: "JetBrains Mono", monospace; font-size: var(--text-2xl); font-weight: 600; font-variant-numeric: tabular-nums; line-height: var(--lh-2xl); }
+  dd { color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  /* Reveal/pending styling lives in global.css (shared variant vocabulary). */
+  /* The human voice behind the "months → days" metric above. The quote stands
+     one rung above the lead tier (--text-xl vs the .engine-lede's --text-lg) so
+     it outranks adjacent prose; the mark stays inline so the block shares the
+     hero copy column's left edge (DESIGN_SYSTEM Layout). */
+  .trust-quote { margin: var(--space-8) 0 0; padding: 0; text-align: start; }
+  .trust-quote p { color: var(--text-primary); font-size: var(--text-xl); font-weight: 400; line-height: var(--lh-xl); margin: 0; text-wrap: pretty; }
+  /* Accent mark pair, subordinate to the copy (2xl vs xl): line-height 1 keeps
+     the glyph inside the line box, so it frames the voice without inflating
+     leading. A mark near 2x the copy reads as decoration, not quotation. */
+  .trust-quote p::before, .trust-quote p::after { color: var(--primary); font-size: var(--text-2xl); font-weight: 700; line-height: 1; }
+  .trust-quote p::before { content: "\201C"; }
+  .trust-quote p::after { content: "\201D"; }
+  .trust-quote cite { color: var(--text-tertiary); display: block; font-size: var(--text-sm); font-style: normal; font-weight: 400; letter-spacing: .04em; margin-top: var(--space-3); }
+  .trust-quote-name { font-weight: 600; }
+  .trust-quote a { color: var(--link); text-decoration: none; }
+  .trust-quote a:hover { color: var(--link-hover); text-decoration: underline; }
+  /* Engine teaser: one sentence continuing the origin story; the five-stage
+     detail lives on /docs/architecture/. */
+  .engine-fold { margin: var(--space-8) 0 0; }
+  .engine-lede { color: var(--text-secondary); font-size: var(--text-lg); line-height: var(--lh-lg); margin: 0; text-wrap: pretty; }
+  .engine-lede a { color: var(--link); font-weight: 600; text-decoration: none; }
+  .engine-lede a:hover { text-decoration: underline; }
+  /* Terms rail: the conditions + interfaces relocated from the hero. Bare
+     grammar only — accent icons and muted labels, no chip chrome, so a promise
+     reads as a term rather than a control. Marketing-surface tokens (this
+     section's contract: no --code-*): --primary icons, --text-secondary labels
+     at the section's body register, group labels and star count --text-tertiary
+     — all AA on the band in both themes. Always lit: nothing tracks the run. */
+  .terms {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    /* 16px on each side of the seam's hairline, against 8px between items: with
+       no group label, that rule is the row's only structure. */
+    gap: var(--space-2) var(--space-4);
+    margin-top: var(--space-8);
+  }
+  /* The conditions | the interfaces — the section's one hairline grammar (see
+     the receipt's column dividers above). 1em tall so it marks the seam at the
+     text's own height, never a full-height fence, and drawn as a border so the
+     mark never enters the contrast matrix as a text surface. */
+  .terms-divider { align-self: center; border-left: var(--border-w-default) solid var(--border-color); height: 1em; }
+  /* Two wrap units: the conditions, then the interfaces + repo. They peel at
+     the meaningful seam when the container is too narrow for one line. */
+  .terms-group {
+    align-items: center;
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .terms-item {
+    align-items: center;
+    color: var(--text-secondary);
+    display: inline-flex;
+    /* The body tier: the rail names the terms behind the lede above it, so it
+       sits below that section's lead prose (--text-lg) and above its labels
+       (--text-sm) instead of out-shouting the prose — ink labels at the lead
+       size read as 2.5x the sentence above and floated as a foreign row. The
+       icons step down with it: an icon a size above the label is what made the
+       row read as a toolbar. */
+    font-size: var(--text-base);
+    font-weight: 500;
+    gap: var(--space-2);
+    line-height: var(--lh-base);
+    white-space: nowrap;
+  }
+  .terms-icon { color: var(--primary); display: inline-flex; }
+  a.terms-link { text-decoration: none; }
+  a.terms-link:hover { color: var(--link-hover); }
+  a.terms-link:focus-visible { outline: var(--border-w-emphasis) solid var(--link-focus); outline-offset: 2px; }
+  /* The count is meta, not a claim: tertiary ink, so the row's last token
+     cannot read as a stray control. */
+  .terms-star { color: var(--text-tertiary); }
+  /* Reserve the compact-count width: Base.astro rewrites this node from "--"
+     to "1.4K" after load, which would otherwise reflow the rail. The slack
+     trails the number, so no gap opens before it. */
+  [data-star-count] { color: var(--text-tertiary); display: inline-block; font-variant-numeric: tabular-nums; min-width: 4ch; }
+  /* .card-grid stacks at 800px, but the three metrics need ~1120px to share one
+     baseline row, so stack earlier — before a divider can strand at the start
+     of a wrapped row. The terms rail's seam hairline goes with them: it would
+     strand the same way the moment the two groups fall onto separate rows. */
+  @media (max-width: 1250px) {
+    .proof-grid { grid-template-columns: 1fr; }
+    .proof-grid > div + div { border-left: none; }
+    .terms-divider { display: none; }
+  }
+  /* Phones: the figure and its label can no longer share one line, so stack
+     the pair (figure over label). Baseline-aligning a wrapped pair pins the
+     label to the figure's FIRST line and strands the focal word ("days",
+     "laptop"). 600px sits above the ~420px where the widest pair stops
+     fitting and stacks every metric uniformly. */
+  @media (max-width: 600px) {
+    .proof-grid > div { align-items: center; flex-direction: column; }
+  }
 </style>

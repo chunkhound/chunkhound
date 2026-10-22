@@ -3,7 +3,9 @@ import type { MarkdownLayoutProps } from 'astro';
 import Base from './Base.astro';
 import Nav from '../components/Nav.astro';
 import DocsSidebar from '../components/DocsSidebar.astro';
+import { DOCS_HOME, DOCS_PAGES, normalizePath } from '../lib/nav';
 import '../styles/docs.css';
+import '../styles/diagrams.css';
 
 type TocItem = {
   depth: 2 | 3;
@@ -14,7 +16,13 @@ type TocItem = {
 type MarkdownProps = MarkdownLayoutProps<{ title?: string; description?: string }> & {
   headings?: Array<{ depth: number; slug: string; text: string }>;
 };
-type DirectProps = { title?: string; description?: string; toc?: TocItem[] };
+type DirectProps = {
+  title?: string;
+  description?: string;
+  toc?: TocItem[];
+  /** Landing pages omit the "Guides > …" breadcrumb. */
+  breadcrumb?: boolean;
+};
 type Props = MarkdownProps | DirectProps;
 
 const normalizeToc = (
@@ -28,21 +36,33 @@ const normalizeToc = (
 
 const props = Astro.props as Props;
 const title = 'frontmatter' in props ? props.frontmatter.title : props.title;
-const description = 'frontmatter' in props ? props.frontmatter.description : props.description;
+const passedDescription =
+  'frontmatter' in props ? props.frontmatter.description : props.description;
+// nav.ts is the single source of truth for docs meta copy: matching by path
+// lets .md pages (which cannot import TS) derive it from the same blurb the
+// sidebar/hub/llms.txt use. `seoDescription` is a deliberate longer override for
+// pages whose search snippet must exceed the short blurb. A passed prop is used
+// solely for paths nav.ts does not model (e.g. the docs hub).
+const navPage = DOCS_PAGES.find(
+  (page) => normalizePath(page.href) === normalizePath(Astro.url.pathname),
+);
+const description =
+  navPage?.seoDescription ?? navPage?.description ?? passedDescription;
 const pageTitle = title ? `${title} — ChunkHound Docs` : 'ChunkHound Docs';
 const toc = 'toc' in props && props.toc?.length ? props.toc : normalizeToc('headings' in props ? props.headings : undefined);
+const showBreadcrumb = !('breadcrumb' in props) || props.breadcrumb !== false;
 ---
 
 <Base title={pageTitle} description={description}>
   <Nav currentPath={Astro.url.pathname} docsMenu />
-  <div class="docs-shell">
+  <div class:list={["docs-shell", { "no-toc": toc.length === 0 }]}>
     <DocsSidebar currentPath={Astro.url.pathname} />
     <div class="docs-nav-scrim" data-docs-nav-scrim></div>
-    <main class="docs-main" data-docs-mobile-inert>
-      {title && (
+    <main class="docs-main" data-nav-mobile-inert>
+      {title && showBreadcrumb && (
         <nav class="docs-breadcrumb" aria-label="Breadcrumb">
           <ph-book-open size="14" weight="duotone" aria-hidden="true"></ph-book-open>
-          <a href="/docs/getting-started/">Guides</a>
+          <a href={DOCS_HOME.href}>Guides</a>
           <ph-caret-right class="docs-breadcrumb-sep" size="12" weight="bold" aria-hidden="true"></ph-caret-right>
           <span aria-current="page">{title}</span>
         </nav>
@@ -51,20 +71,25 @@ const toc = 'toc' in props && props.toc?.length ? props.toc : normalizeToc('head
         <slot />
       </article>
     </main>
-    <aside class="docs-toc" aria-label="On this page" data-docs-mobile-inert>
-      <div class="toc-title"><ph-list-bullets size="16" weight="duotone" aria-hidden="true"></ph-list-bullets> On this page</div>
-      <nav class="toc-list" data-toc>
-        {toc.map((item) => (
-          <a class="toc-link" href={`#${item.slug}`} data-depth={item.depth}>{item.text}</a>
-        ))}
-      </nav>
-    </aside>
+    {toc.length > 0 && (
+      <aside class="docs-toc" aria-label="On this page" data-nav-mobile-inert>
+        <div class="toc-title"><ph-list-bullets size="16" weight="duotone" aria-hidden="true"></ph-list-bullets> On this page</div>
+        <nav class="toc-list" data-toc>
+          {toc.map((item) => (
+            <a class="toc-link" href={`#${item.slug}`} data-depth={item.depth}>{item.text}</a>
+          ))}
+        </nav>
+      </aside>
+    )}
   </div>
 
   <script>
   import "@phosphor-icons/webcomponents/PhBookOpen";
   import "@phosphor-icons/webcomponents/PhCaretRight";
-  import "@phosphor-icons/webcomponents/PhListBullets";
+  // TOC-less pages never render the toc-title icon — load its chunk only then.
+  if (document.querySelector(".docs-toc")) {
+    import("@phosphor-icons/webcomponents/PhListBullets");
+  }
   import '../scripts/docs-runtime.ts';
   </script>
 </Base>
