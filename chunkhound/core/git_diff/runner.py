@@ -10,6 +10,9 @@ _SAFE_REF = re.compile(r"^[a-zA-Z0-9_.^~/:@{}\-]+\Z")
 
 _GIT_DIFF_TIMEOUT_SECONDS = 30
 
+# Cleanup must not hang even if a descendant keeps a pipe open.
+_GIT_CLEANUP_TIMEOUT_SECONDS = 5
+
 # Grace period for draining stderr once git has already exited.
 _GIT_STDERR_READ_TIMEOUT_SECONDS = 5
 
@@ -88,15 +91,31 @@ async def _readline_unbounded(stream: asyncio.StreamReader) -> bytes:
 async def _cleanup_git_diff_process(
     proc: asyncio.subprocess.Process, stderr_task: asyncio.Task[bytes]
 ) -> None:
-    if proc.returncode is None:
-        proc.kill()
-        await proc.wait()
-    if not stderr_task.done():
-        stderr_task.cancel()
+    async def drain_stdout() -> None:
+        if proc.stdout is not None:
+            while await proc.stdout.read(8192):
+                pass
+
+    try:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass  # The child exited between checking and signalling.
+        # Process.wait() can remain blocked after exit while the stdout
+        # transport is paused on a full buffer. Drain concurrently, in bounded
+        # blocks, including when returncode was already set before cleanup.
+        cleanup = asyncio.gather(drain_stdout(), proc.wait())
         try:
-            await stderr_task
-        except asyncio.CancelledError:
-            pass
+            await asyncio.wait_for(cleanup, _GIT_CLEANUP_TIMEOUT_SECONDS)
+        except (asyncio.TimeoutError, OSError):
+            cleanup.cancel()
+        finally:
+            await asyncio.gather(cleanup, return_exceptions=True)
+    finally:
+        if not stderr_task.done():
+            stderr_task.cancel()
+        await asyncio.gather(stderr_task, return_exceptions=True)
 
 
 async def stream_git_diff_file_blocks(

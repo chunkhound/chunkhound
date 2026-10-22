@@ -284,6 +284,24 @@ async def test_equal_scores_prefer_earlier_ordinal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_late_winner_preserves_tie_order_across_page_boundaries() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(60)
+    ] + [make_chunk("winner", start_line=61, code="target")]
+    service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", embedding_manager()
+    )
+
+    contents = []
+    for offset in range(0, 61, 10):
+        results, _ = await service.search_semantic("query", page_size=10, offset=offset)
+        contents.extend(result["content"] for result in results)
+
+    assert contents == ["target"] + [f"chunk {i}" for i in range(60)]
+
+
+@pytest.mark.asyncio
 async def test_cache_does_not_reuse_vectors_across_embedding_spaces() -> None:
     cache = VectorCache(max_entries=10)
     chunks = [make_chunk("one", code="shared-text")]
@@ -376,6 +394,50 @@ async def test_both_mode_cancels_sibling_on_failure() -> None:
         await service.search_semantic("query")
 
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["diff", "both"])
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("page_size, last_offset", [(10, 1990), (30, 1950)])
+async def test_large_corpus_pagination_stops_at_supported_window(
+    source, hybrid, page_size, last_offset
+) -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(2100)
+    ]
+    service = TransientSearchService(
+        make_original(), stream_chunks(chunks), source, embedding_manager()
+    )
+    search = service.search_hybrid if hybrid else service.search_semantic
+
+    first, first_page = await search("query", page_size=page_size)
+    last, last_page = await search("query", page_size=page_size, offset=last_offset)
+
+    assert len(first) == len(last) == page_size
+    assert first_page["has_more"] is True
+    assert isinstance(first_page["total"], int)
+    assert last_page["has_more"] is False
+    assert last_page["next_offset"] is None
+
+
+@pytest.mark.asyncio
+async def test_both_mode_has_no_continuation_for_filtered_out_corpus() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(2100)
+    ]
+    service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "both", embedding_manager()
+    )
+
+    results, page = await service.search_semantic("query", threshold=0.5)
+
+    assert results == []
+    assert page["total"] == 0
+    assert page["has_more"] is False
+    assert page["next_offset"] is None
 
 
 @pytest.mark.asyncio

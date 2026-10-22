@@ -42,6 +42,94 @@ def resolve_source_text(provider: Any, file_path: str) -> str | None:
     return None
 
 
+async def resolve_source_text_async(provider: Any, file_path: str) -> str | None:
+    """Load transient sources asynchronously (evicted web pages may refetch)."""
+    getter = getattr(provider, "get_transient_file_content_async", None)
+    if callable(getter):
+        content = await getter(file_path)
+        return content if isinstance(content, str) else None
+    return resolve_source_text(provider, file_path)
+
+
+class BudgetedSourceExcerpt(str):
+    """Authoritative web evidence: synthesis must not rebuild it from chunks.
+
+    The marker lives on each value so aggregation and clustering can copy or
+    partition the source mapping without losing its budget semantics. Ordinary
+    code source strings retain their existing chunk/line-marker rendering.
+    """
+
+
+async def read_transient_sources_with_budget(
+    provider: Any,
+    chunks: list[dict[str, Any]],
+    llm_manager: Any,
+    max_tokens: int | None,
+) -> dict[str, str] | None:
+    """Retain bounded selected evidence, not the fetched corpus, for synthesis.
+
+    Only providers explicitly advertising a byte budget opt in. Large sources
+    contribute the actual matching chunk text rather than a prefix of the page
+    or an unbounded line (a whole page may be a single line). Source loading
+    verifies that refetched content still matches the searched revision.
+    """
+    byte_budget = getattr(provider, "transient_source_budget_bytes", None)
+    if not isinstance(byte_budget, int) or byte_budget <= 0:
+        return None
+    llm = llm_manager.get_utility_provider()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for chunk in chunks:
+        path = chunk.get("file_path") or chunk.get("path")
+        if path:
+            grouped.setdefault(path, []).append(chunk)
+    contents: dict[str, str] = {}
+    remaining_tokens = max_tokens
+    for path, matches in grouped.items():
+        if byte_budget <= 0 or (remaining_tokens is not None and remaining_tokens <= 0):
+            break
+        # Let refetch failures propagate: silently using a changed revision
+        # would invalidate citations, even if other sources were readable.
+        source = await resolve_source_text_async(provider, path)
+        if not source:
+            continue
+        per_file = min(byte_budget, 64_000)
+        # Four bytes per Unicode code point is a conservative UTF-8 bound.
+        if len(source) * 4 <= per_file:
+            excerpt = source
+        else:
+            pieces: list[str] = []
+            remaining_chars = per_file // 4
+            for match in matches:
+                text = match.get("content") or match.get("code") or ""
+                piece = text[:remaining_chars]
+                if piece:
+                    pieces.append(piece)
+                    remaining_chars -= len(piece) + 7
+                if remaining_chars <= 0:
+                    break
+            excerpt = "\n\n...\n\n".join(pieces)[: per_file // 4]
+        del source
+        if remaining_tokens is not None:
+            low, high = 0, len(excerpt)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if llm.estimate_tokens(excerpt[:middle]) <= remaining_tokens:
+                    low = middle
+                else:
+                    high = middle - 1
+            excerpt = excerpt[:low]
+        if excerpt:
+            contents[path] = BudgetedSourceExcerpt(excerpt)
+            byte_budget -= len(excerpt.encode("utf-8"))
+            if remaining_tokens is not None:
+                remaining_tokens -= llm.estimate_tokens(excerpt)
+    if chunks and not contents:
+        raise RuntimeError(
+            "No readable web source evidence within the synthesis budget"
+        )
+    return contents
+
+
 class FileReader:
     """Handles token-budget-aware file reading for deep research."""
 
@@ -72,6 +160,12 @@ class FileReader:
         Returns:
             Dictionary mapping file paths to contents
         """
+        transient = await read_transient_sources_with_budget(
+            self._db_services.provider, chunks, llm_manager, max_tokens
+        )
+        if transient is not None:
+            return transient
+
         # Group chunks by file
         files_to_chunks: dict[str, list[dict[str, Any]]] = {}
         for chunk in chunks:
@@ -97,7 +191,9 @@ class FileReader:
                 break
 
             try:
-                content = resolve_source_text(self._db_services.provider, file_path)
+                content = await resolve_source_text_async(
+                    self._db_services.provider, file_path
+                )
                 if content is None:
                     logger.warning(f"File not found: {file_path}")
                     continue

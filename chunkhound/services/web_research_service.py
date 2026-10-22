@@ -1,7 +1,12 @@
 """In-process research composition for transient fetched web pages."""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Sequence
+import copy
+import hashlib
+import sys
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,9 +23,15 @@ from chunkhound.parsers.mappings.pdf import PDFMapping
 from chunkhound.services.research.factory import ResearchServiceFactory
 from chunkhound.services.transient_search_service import TransientSearchService
 from chunkhound.services.vector_cache import VectorCache
+from chunkhound.utils.websearch_core import fetch_pages
 
-_PAGE_CHUNK_CHARS = 10_000
+# Count all codepoints, including whitespace: each needs at most four UTF-8
+# bytes, hence at most 4,800 byte-level tokens (below OpenAI's 8,191 limit).
+# A non-whitespace count or len(text)//3 estimate is unsafe for CJK/emoji.
+_PAGE_CHUNK_CHARS = 1_200
 _BATCH_SIZE = 100
+_SOURCE_CACHE_BYTES = 32 * 1024 * 1024
+_MAX_CONCURRENT_SCANS = 4
 _WEB_VECTOR_CACHE = VectorCache.from_env()
 
 Page = tuple[str, str, str | bytes]
@@ -61,13 +72,50 @@ class _EmptySearchService:
 
 class _TransientProvider:
     def __init__(self) -> None:
-        self._files: dict[str, str] = {}
+        # An explicit synthesis contract, not a claim that sources fit this size.
+        self.transient_source_budget_bytes = 1_000_000
+        self._sources: OrderedDict[str, tuple[Page, str, int]] = OrderedDict()
+        self._source_bytes = 0
+        self._load_source: Callable[[str], Awaitable[str | None]] | None = None
 
-    def store_page_text(self, source_url: str, text: str) -> None:
-        self._files[source_url] = text
+    def _cached(self, source_url: str) -> tuple[Page, str, int] | None:
+        entry = self._sources.get(source_url)
+        if entry is not None:
+            self._sources.move_to_end(source_url)
+        return entry
+
+    def _store(self, page: Page, text: str) -> None:
+        source_url, extension, content = page
+        previous = self._sources.pop(source_url, None)
+        if previous is not None:
+            self._source_bytes -= previous[2]
+        # Count raw and normalized text separately even when they share storage.
+        # Include generous per-entry overhead for the mapping and tuple nodes.
+        size = (
+            sum(
+                sys.getsizeof(item)
+                for item in (page, source_url, extension, content, text)
+            )
+            + 512
+        )
+        if size > _SOURCE_CACHE_BYTES:
+            return
+        while self._sources and self._source_bytes + size > _SOURCE_CACHE_BYTES:
+            _, evicted = self._sources.popitem(last=False)
+            self._source_bytes -= evicted[2]
+        self._sources[source_url] = (page, text, size)
+        self._source_bytes += size
 
     def get_transient_file_content(self, file_path: str) -> str | None:
-        return self._files.get(file_path)
+        """Compatibility-only cache lookup; never performs blocking network I/O."""
+        entry = self._cached(file_path)
+        return entry[1] if entry is not None else None
+
+    async def get_transient_file_content_async(self, file_path: str) -> str | None:
+        """Resolve an evicted source by live refetch, rejecting changed content."""
+        if self._load_source is None:
+            return None
+        return await self._load_source(file_path)
 
     def get_base_directory(self) -> Path:
         return Path.cwd()
@@ -148,42 +196,64 @@ def _page_to_chunks(
 ) -> list[Chunk]:
     if extension == ".pdf" and isinstance(content, bytes):
         parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
-        return [
-            Chunk(
-                symbol=chunk.symbol,
-                start_line=chunk.start_line,
-                end_line=chunk.end_line,
-                code=chunk.code,
-                chunk_type=chunk.chunk_type,
-                file_id=chunk.file_id,
-                language=chunk.language,
-                file_path=FilePath(source_url),
-                parent_header=chunk.parent_header,
-                start_byte=chunk.start_byte,
-                end_byte=chunk.end_byte,
-                metadata=chunk.metadata,
-            )
-            for chunk in parsed
-            if not _is_unusable_pdf_chunk(chunk)
-        ]
+        chunks: list[Chunk] = []
+        for chunk in parsed:
+            if _is_unusable_pdf_chunk(chunk):
+                continue
+            chunk = replace(chunk, file_path=FilePath(source_url))
+            if len(chunk.code) <= _PAGE_CHUNK_CHARS:
+                chunks.append(chunk)
+                continue
+            # Enforce the same hard bound even if the PDF parser's semantic
+            # splitter admits oversized text (e.g. whitespace-heavy chunks).
+            # Keep the original source span/metadata: extracted PDF text does
+            # not map directly to byte offsets in the PDF document.
+            for part, start in enumerate(
+                range(0, len(chunk.code), _PAGE_CHUNK_CHARS), start=1
+            ):
+                chunks.append(
+                    replace(
+                        chunk,
+                        symbol=f"{chunk.symbol}:part:{part}",
+                        code=chunk.code[start : start + _PAGE_CHUNK_CHARS],
+                    )
+                )
+        return chunks
     if isinstance(content, str):
         return _text_chunks(source_url, content)
     return []
 
 
-async def _iter_pages(
-    pages: AsyncIterator[Page] | Sequence[Page],
-) -> AsyncIterator[Page]:
-    if isinstance(pages, Sequence):
-        for page in pages:
-            yield page
-        return
-    async for page in pages:
-        yield page
+@dataclass(frozen=True)
+class _PageDescriptor:
+    url: str
+    fingerprint: bytes
+    usable: bool
 
 
-class _ReplayableChunkStream:
-    """Convert a one-shot page stream once and replay batches to every search."""
+def _normalized_page(page: Page) -> tuple[str, list[Chunk]]:
+    chunks = _page_to_chunks(*page)
+    text = page[2] if isinstance(page[2], str) else "".join(c.code for c in chunks)
+    return text, chunks
+
+
+def _fingerprint(text: str) -> bytes:
+    # Incremental encoding avoids another whole-page UTF-8 allocation.
+    digest = hashlib.sha256()
+    for start in range(0, len(text), 65536):
+        digest.update(text[start : start + 65536].encode("utf-8"))
+    return digest.digest()
+
+
+class _BoundedPageStream:
+    """Replay URL descriptors, never a corpus of chunks or source bodies.
+
+    The one-shot input advances only on demand under a lock. Each scan derives
+    fresh chunks, with at most four scans active. Evicted sources are live
+    refetched (no disk snapshot); normalized text must match its first-read
+    fingerprint or research fails rather than mixing revisions. A caller-owned
+    Sequence is not copied, and its memory remains the caller's responsibility.
+    """
 
     def __init__(
         self,
@@ -194,81 +264,139 @@ class _ReplayableChunkStream:
         self._pages = pages
         self._provider = provider
         self._warning_callback = warning_callback
-        self._batches: list[list[Chunk]] = []
-        self._condition = asyncio.Condition()
-        self._producer: asyncio.Task[None] | None = None
+        self._descriptors: list[_PageDescriptor] = []
+        self._by_url: dict[str, _PageDescriptor] = {}
+        self._lock = asyncio.Lock()
+        self._scans = asyncio.Semaphore(_MAX_CONCURRENT_SCANS)
         self._complete = False
-        self._closing = False
+        self._closed = False
         self._error: BaseException | None = None
         self.usable_page_count = 0
+        provider._load_source = self.load_source
 
-    async def _append(self, batch: list[Chunk]) -> None:
-        async with self._condition:
-            self._batches.append(batch)
-            self._condition.notify_all()
+    def _record_error(self, exc: BaseException) -> None:
+        # Keep failures sticky without retaining frames holding page bodies.
+        if self._error is None:
+            self._error = copy.copy(exc).with_traceback(None)
+            self._error.__context__ = None
+            self._error.__cause__ = None
+        self._complete = True
 
-    async def _produce(self) -> None:
-        batch: list[Chunk] = []
+    async def _refetch(self, descriptor: _PageDescriptor) -> tuple[str, list[Chunk]]:
+        self.raise_stream_error()
         try:
-            async for source_url, extension, content in _iter_pages(self._pages):
-                page_chunks = _page_to_chunks(source_url, extension, content)
-                if not page_chunks:
-                    if self._warning_callback is not None:
-                        self._warning_callback(
-                            f"No usable content parsed from {source_url}"
-                        )
-                    continue
+            return await self._refetch_page(descriptor)
+        except Exception as exc:
+            self._record_error(exc)
+            raise
 
-                self.usable_page_count += 1
-                if isinstance(content, str):
-                    self._provider.store_page_text(source_url, content)
-                else:
-                    self._provider.store_page_text(
-                        source_url, "".join(chunk.code for chunk in page_chunks)
-                    )
-                batch.extend(page_chunks)
-                while len(batch) >= _BATCH_SIZE:
-                    await self._append(batch[:_BATCH_SIZE])
-                    batch = batch[_BATCH_SIZE:]
-            if batch:
-                await self._append(batch)
-        except BaseException as exc:
-            if not (self._closing and isinstance(exc, asyncio.CancelledError)):
-                self._error = exc
+    async def _refetch_page(
+        self, descriptor: _PageDescriptor
+    ) -> tuple[str, list[Chunk]]:
+        entry = self._provider._cached(descriptor.url)
+        if entry is not None:
+            return entry[1], _page_to_chunks(*entry[0])
+        # Each refetch owns and closes its fetch iterator/browser. The shared
+        # lock bounds refetches to one, including asynchronous source readers.
+        fetched = fetch_pages([descriptor.url], warning_callback=self._warning_callback)
+        try:
+            page = await anext(fetched, None)
+            if page is None:
+                raise RuntimeError(f"Unable to refetch web source: {descriptor.url}")
+            text, chunks = _normalized_page(page)
+            if _fingerprint(text) != descriptor.fingerprint:
+                raise RuntimeError(
+                    f"Web source changed since first read: {descriptor.url}"
+                )
+            self._provider._store(page, text)
+            return text, chunks
         finally:
-            async with self._condition:
-                self._complete = True
-                self._condition.notify_all()
+            await fetched.aclose()
+
+    async def load_source(self, url: str) -> str | None:
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("Web research source session is closed")
+            descriptor = self._by_url.get(url)
+            if descriptor is None:
+                return None
+            text, _ = await self._refetch(descriptor)
+            return text
+
+    async def _page_chunks(self, index: int) -> list[Chunk] | None:
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("Web research source session is closed")
+            if index < len(self._descriptors):
+                descriptor = self._descriptors[index]
+                if not descriptor.usable:
+                    return []
+                _, chunks = await self._refetch(descriptor)
+                return chunks
+            if self._complete:
+                self.raise_stream_error()
+                return None
+            try:
+                if isinstance(self._pages, Sequence):
+                    page = self._pages[index] if index < len(self._pages) else None
+                else:
+                    page = await anext(self._pages, None)
+                if page is None:
+                    self._complete = True
+                    return None
+                text, chunks = _normalized_page(page)
+                descriptor = _PageDescriptor(page[0], _fingerprint(text), bool(chunks))
+                previous = self._by_url.get(page[0])
+                if (
+                    previous is not None
+                    and previous.fingerprint != descriptor.fingerprint
+                ):
+                    raise RuntimeError(
+                        f"Web source changed since first read: {page[0]}"
+                    )
+                self._descriptors.append(descriptor)
+                self._by_url[page[0]] = descriptor
+                if chunks:
+                    self.usable_page_count += 1
+                    self._provider._store(page, text)
+                elif self._warning_callback is not None:
+                    self._warning_callback(f"No usable content parsed from {page[0]}")
+                return chunks
+            except BaseException as exc:
+                self._record_error(exc)
+                raise
 
     async def __call__(self) -> AsyncIterator[list[Chunk]]:
-        if self._producer is None:
-            self._producer = asyncio.create_task(self._produce())
-
-        index = 0
-        while True:
-            async with self._condition:
-                await self._condition.wait_for(
-                    lambda: index < len(self._batches) or self._complete
-                )
-                if index < len(self._batches):
-                    batch = self._batches[index]
-                    index += 1
-                else:
-                    if self._error is not None:
-                        raise self._error
-                    return
-            yield batch
+        async with self._scans:
+            index = 0
+            batch: list[Chunk] = []
+            while True:
+                chunks = await self._page_chunks(index)
+                if chunks is None:
+                    break
+                index += 1
+                for chunk in chunks:
+                    batch.append(chunk)
+                    if len(batch) == _BATCH_SIZE:
+                        yield batch
+                        batch = []
+                # Do not carry the preceding page into the next network await.
+                del chunks
+            if batch:
+                yield batch
 
     async def close(self) -> None:
-        if self._producer is not None and not self._producer.done():
-            self._closing = True
-            self._producer.cancel()
-        if self._producer is not None:
-            await asyncio.gather(self._producer, return_exceptions=True)
+        async with self._lock:
+            self._closed = True
+            close = getattr(self._pages, "aclose", None)
+            if close is not None:
+                await close()
+            self._provider._sources.clear()
+            self._provider._source_bytes = 0
 
-    def raise_producer_error(self) -> None:
+    def raise_stream_error(self) -> None:
         if self._error is not None:
-            raise self._error
+            raise copy.copy(self._error).with_traceback(None)
 
 
 async def research_web_pages(
@@ -283,7 +411,7 @@ async def research_web_pages(
 ) -> dict[str, Any]:
     """Run the configured research strategy over fetched pages in process."""
     provider = _TransientProvider()
-    chunk_stream = _ReplayableChunkStream(pages, provider, warning_callback)
+    chunk_stream = _BoundedPageStream(pages, provider, warning_callback)
 
     search_service = TransientSearchService(
         original=cast(Any, _EmptySearchService()),
@@ -313,7 +441,7 @@ async def research_web_pages(
         )
     finally:
         await chunk_stream.close()
-    chunk_stream.raise_producer_error()
+    chunk_stream.raise_stream_error()
     if chunk_stream.usable_page_count == 0:
         raise ValueError("No usable page content was produced")
     return result

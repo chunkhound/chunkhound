@@ -29,6 +29,11 @@ class _LineStdout:
             await asyncio.Event().wait()
         return b""
 
+    async def read(self, n: int = -1) -> bytes:
+        # Cleanup reads after kill; these fake processes have no pipe buffer.
+        self._lines.clear()
+        return b""
+
     async def readuntil(self, separator: bytes = b"\n") -> bytes:
         # This test double always hands out complete, pre-terminated lines
         # (or a clean EOF), so it never needs to exercise the
@@ -119,6 +124,55 @@ async def test_streams_complete_file_blocks_from_real_git(
     assert all(block.startswith("diff --git ") for block in blocks)
     assert "one.py" in blocks[0]
     assert "two.py" in blocks[1]
+
+
+@pytest.mark.asyncio
+async def test_closing_stream_reaps_real_git_with_full_stdout(tmp_path: Path) -> None:
+    async def git(*args: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(tmp_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        assert proc.returncode == 0
+
+    await git("init")
+    (tmp_path / "a.py").write_text("a = 1\n")
+    (tmp_path / "b.py").write_text("b = 1\n")
+    await git("add", ".")
+    await git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "initial",
+    )
+    (tmp_path / "a.py").write_text("a = 2\n")
+    (tmp_path / "b.py").write_text("b = 2\n" * 1_000_000)
+
+    processes = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def tracked_exec(*args, **kwargs):
+        proc = await real_exec(*args, **kwargs)
+        processes.append(proc)
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=tracked_exec):
+        stream = stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
+        assert "a.py" in await anext(stream)
+        # Allow git to fill the pipe while the consumer is paused at yield.
+        await asyncio.sleep(0.2)
+        await asyncio.wait_for(stream.aclose(), timeout=2)
+
+    assert len(processes) == 1
+    assert processes[0].returncode is not None
+    assert processes[0].stdout.at_eof()
 
 
 @pytest.mark.asyncio

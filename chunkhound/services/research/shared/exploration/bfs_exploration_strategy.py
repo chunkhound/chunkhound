@@ -20,7 +20,10 @@ from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
     get_unified_score,
 )
-from chunkhound.services.research.shared.file_reader import resolve_source_text
+from chunkhound.services.research.shared.file_reader import (
+    read_transient_sources_with_budget,
+    resolve_source_text_async,
+)
 from chunkhound.services.research.shared.models import (
     FILE_CONTENT_TOKENS_MAX,
     FILE_CONTENT_TOKENS_MIN,
@@ -438,6 +441,12 @@ class BFSExplorationStrategy:
 
         When max_tokens is None, reads all files without budget constraint.
         """
+        transient = await read_transient_sources_with_budget(
+            self._db_services.provider, chunks, self._llm_manager, max_tokens
+        )
+        if transient is not None:
+            return transient
+
         files_to_chunks: dict[str, list[dict[str, Any]]] = {}
         for chunk in chunks:
             file_path = chunk.get("file_path") or chunk.get("path", "")
@@ -454,7 +463,9 @@ class BFSExplorationStrategy:
                 break
 
             try:
-                content = resolve_source_text(self._db_services.provider, file_path)
+                content = await resolve_source_text_async(
+                    self._db_services.provider, file_path
+                )
                 if content is None:
                     continue
                 estimated_tokens = llm.estimate_tokens(content)

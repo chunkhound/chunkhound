@@ -60,9 +60,8 @@ def _format_fetch_warnings(warnings: list[str]) -> str:
     """
     if not warnings:
         return ""
-    return (
-        "\n\n> **Fetch warnings:**\n"
-        + "\n".join("> - " + w.replace("\n", "\n> ") for w in warnings)
+    return "\n\n> **Fetch warnings:**\n" + "\n".join(
+        "> - " + w.replace("\n", "\n> ") for w in warnings
     )
 
 
@@ -1110,6 +1109,17 @@ async def execute_tool(
                     md = format_search_results_markdown(
                         [result_copy], pagination, search_type
                     )
+            ignored = [
+                name
+                for name in ("commit_range", "commit_hash", "last_n_commits")
+                if arguments.get(name) is not None
+            ]
+            if search_type == "regex" and ignored:
+                md = (
+                    "> **Warning:** Regex search ignores git diff params "
+                    f"({', '.join(ignored)}); searching the indexed corpus instead.\n\n"
+                    + md
+                )
             return md
 
     # String return types (e.g., websearch) pass through directly as markdown

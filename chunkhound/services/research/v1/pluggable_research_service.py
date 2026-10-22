@@ -34,13 +34,16 @@ from chunkhound.services.research.shared.chunk_range import (
     expand_to_natural_boundaries,
     get_chunk_expanded_range,
 )
-from chunkhound.services.research.shared.file_reader import resolve_source_text
 from chunkhound.services.research.shared.citation_manager import CitationManager
 from chunkhound.services.research.shared.evidence_ledger import (
     EvidenceLedger,
     extract_facts_with_clustering,
 )
 from chunkhound.services.research.shared.exploration import ExplorationStrategy
+from chunkhound.services.research.shared.file_reader import (
+    read_transient_sources_with_budget,
+    resolve_source_text_async,
+)
 from chunkhound.services.research.shared.models import (
     MAX_FILE_CONTENT_TOKENS,
     NUM_LLM_EXPANDED_QUERIES,
@@ -448,7 +451,6 @@ class PluggableResearchService(ProgressEmitterMixin):
                 max_concurrency=max_concurrency,
             )
 
-
             logger.info(
                 f"Map step complete: {len(cluster_results)} cluster summaries generated"
             )
@@ -802,6 +804,12 @@ class PluggableResearchService(ProgressEmitterMixin):
         Returns:
             Dictionary mapping file paths to contents (limited to budget)
         """
+        transient = await read_transient_sources_with_budget(
+            self._db_services.provider, chunks, self._llm_manager, max_tokens
+        )
+        if transient is not None:
+            return transient
+
         # Group chunks by file
         files_to_chunks: dict[str, list[dict[str, Any]]] = {}
         for chunk in chunks:
@@ -828,7 +836,9 @@ class PluggableResearchService(ProgressEmitterMixin):
                 break
 
             try:
-                content = resolve_source_text(self._db_services.provider, file_path)
+                content = await resolve_source_text_async(
+                    self._db_services.provider, file_path
+                )
                 if content is None:
                     logger.warning(f"File not found: {file_path}")
                     continue

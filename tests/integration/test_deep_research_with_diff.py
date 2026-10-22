@@ -60,6 +60,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
 
     async def _embed(texts: list[str]) -> LocalEmbeddingResult:
         import math
+
         vec = [1.0 / math.sqrt(dim)] * dim
         return LocalEmbeddingResult(
             embeddings=[vec[:] for _ in texts],
@@ -72,8 +73,11 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
     em.register_provider(provider, set_default=True)
 
     # Also wire embed_texts on the manager itself so the injection block works
-    async def _embed_texts(texts: list[str]) -> LocalEmbeddingResult:
+    async def _embed_texts(
+        texts: list[str], provider_name: str | None = None
+    ) -> LocalEmbeddingResult:
         import math
+
         vec = [1.0 / math.sqrt(dim)] * dim
         return LocalEmbeddingResult(
             embeddings=[vec[:] for _ in texts],
@@ -176,9 +180,7 @@ async def test_deep_research_injects_diff_service_on_commit_range():
     # The factory must receive the streaming search service.
     received_services = captured.get("db_services")
     assert received_services is not None, "ResearchServiceFactory.create was not called"
-    assert isinstance(
-        received_services.search_service, TransientSearchService
-    ), (
+    assert isinstance(received_services.search_service, TransientSearchService), (
         f"Expected TransientSearchService, got {type(received_services.search_service)}"
     )
 
@@ -285,8 +287,11 @@ async def test_semantic_search_returns_changed_code_for_commit_inputs(
     """Each public shorthand selects the expected diff and returns its code."""
     from chunkhound.mcp_server.tools import search_impl
 
-    git_diff = AsyncMock(return_value=FAKE_DIFF)
-    with patch("chunkhound.core.git_diff.run_git_diff", git_diff):
+    async def stream_diff(*args, **kwargs):
+        yield FAKE_DIFF
+
+    git_diff = MagicMock(side_effect=stream_diff)
+    with patch("chunkhound.core.git_diff.stream_git_diff_file_blocks", git_diff):
         result = await search_impl(
             services=_make_services(_make_original_search_service()),
             embedding_manager=_make_embedding_manager(),
@@ -295,7 +300,7 @@ async def test_semantic_search_returns_changed_code_for_commit_inputs(
             **commit_inputs,
         )
 
-    assert git_diff.await_args.args[0] == expected_range
+    assert git_diff.call_args.args[0] == expected_range
     assert result["results"], "changed code must be searchable via the public tool"
 
 
@@ -316,9 +321,9 @@ async def test_semantic_search_rejects_invalid_commit_inputs_before_git(
 ):
     from chunkhound.mcp_server.tools import search_impl
 
-    git_diff = AsyncMock(return_value=FAKE_DIFF)
+    git_diff = MagicMock()
     with (
-        patch("chunkhound.core.git_diff.run_git_diff", git_diff),
+        patch("chunkhound.core.git_diff.stream_git_diff_file_blocks", git_diff),
         pytest.raises(ValueError, match=message),
     ):
         await search_impl(
@@ -328,7 +333,7 @@ async def test_semantic_search_rejects_invalid_commit_inputs_before_git(
             query="changed code",
             **commit_inputs,
         )
-    git_diff.assert_not_awaited()
+    git_diff.assert_not_called()
 
 
 @pytest.mark.asyncio

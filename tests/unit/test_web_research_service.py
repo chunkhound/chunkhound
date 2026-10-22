@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import tiktoken
 
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import (
@@ -15,10 +16,125 @@ from chunkhound.core.types.common import (
 from chunkhound.embeddings import LocalEmbeddingResult
 from chunkhound.services.research.shared.file_reader import resolve_source_text
 from chunkhound.services.transient_search_service import TransientSearchService
+from chunkhound.services.vector_cache import VectorCache
 from chunkhound.services.web_research_service import (
     pages_to_chunks,
     research_web_pages,
 )
+
+
+@pytest.mark.parametrize("extension", [".md", ".pdf"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "漢字龍" * 3333,
+        "漢字龍🧑🏽‍💻🚀abc" * 1000,
+        "🧑🏽‍💻" + " \t" * 6000 + "漢字龍",
+    ],
+    ids=["cjk-single-line", "mixed-emoji-single-line", "whitespace-heavy"],
+)
+def test_web_chunks_fit_openai_embedding_limit_without_losing_text(
+    extension: str, content: str
+) -> None:
+    encoding = tiktoken.encoding_for_model("text-embedding-3-small")
+    url = f"https://example.invalid/source{extension}"
+    parsed = Chunk(
+        symbol="page_7_paragraph_2",
+        start_line=LineNumber(70),
+        end_line=LineNumber(71),
+        code=content,
+        chunk_type=ChunkType.BLOCK,
+        file_id=FileId(0),
+        language=Language.PDF,
+        parent_header="Chapter 7",
+        metadata={"page": 7},
+    )
+    # The third-party PDF parser boundary may return large semantic chunks.
+    with patch(
+        "chunkhound.services.web_research_service.PDFMapping.parse_pdf_content",
+        return_value=[parsed],
+    ):
+        chunks = pages_to_chunks(
+            [(url, extension, b"%PDF" if extension == ".pdf" else content)]
+        )
+
+    assert len(chunks) > 1
+    assert "".join(chunk.code for chunk in chunks) == content
+    assert len({chunk.symbol for chunk in chunks}) == len(chunks)
+    for chunk in chunks:
+        assert chunk.file_path == url
+        assert len(chunk.code.encode("utf-8")) <= 4800
+        assert len(encoding.encode(chunk.code, disallowed_special=())) <= 8191
+        if extension == ".pdf":
+            assert chunk.symbol.startswith(parsed.symbol)
+            assert (chunk.start_line, chunk.end_line) == (70, 71)
+            assert chunk.parent_header == parsed.parent_header
+            assert chunk.metadata == parsed.metadata
+        else:
+            assert (chunk.start_line, chunk.end_line) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_web_embeddings_keep_full_batches_with_safe_text_and_pdf_chunks(
+    monkeypatch,
+) -> None:
+    from chunkhound.services import web_research_service as web
+
+    encoding = tiktoken.encoding_for_model("text-embedding-3-small")
+    content = "漢字龍🧑🏽‍💻🚀abc" * 6000
+    parsed = Chunk(
+        symbol="page_1",
+        start_line=LineNumber(1),
+        end_line=LineNumber(1),
+        code=content,
+        chunk_type=ChunkType.BLOCK,
+        file_id=FileId(0),
+        language=Language.PDF,
+    )
+    monkeypatch.setattr(web, "_WEB_VECTOR_CACHE", VectorCache(max_entries=0))
+    monkeypatch.setattr(web.PDFMapping, "parse_pdf_content", lambda *args: [parsed])
+    batches: list[list[str]] = []
+    query = "embedding safety"
+
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        # A real tokenizer checks the provider's per-input constraint at the
+        # external embedding boundary; no network or heuristic token counts.
+        for text in texts:
+            assert len(encoding.encode(text, disallowed_special=())) <= 8191
+        if texts != [query]:
+            batches.append(texts)
+        return LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0] for _ in texts],
+            model="text-embedding-3-small",
+            provider="openai",
+            dims=2,
+        )
+
+    def create(**kwargs):
+        async def deep_research(query, previous_query=None):
+            results, _ = await kwargs["db_services"].search_service.search_semantic(
+                query
+            )
+            assert results
+            return {"answer": "done"}
+
+        return MagicMock(deep_research=deep_research)
+
+    monkeypatch.setattr(web.ResearchServiceFactory, "create", create)
+    await research_web_pages(
+        query,
+        [
+            ("https://example.invalid/docs", ".md", content),
+            ("https://example.invalid/docs.pdf", ".pdf", b"%PDF"),
+        ],
+        MagicMock(),
+        MagicMock(embed_texts=AsyncMock(side_effect=embed)),
+        MagicMock(),
+    )
+    assert len(batches) >= 2
+    assert all(len(batch) == 100 for batch in batches[:-1])
+    assert 1 <= len(batches[-1]) <= 100
+    assert "".join(text for batch in batches for text in batch) == content * 2
 
 
 def test_pages_to_chunks_keeps_source_url_without_writing_files() -> None:

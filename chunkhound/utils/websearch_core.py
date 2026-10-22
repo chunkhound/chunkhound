@@ -19,7 +19,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import IO, TYPE_CHECKING, Any
 
@@ -141,8 +141,7 @@ def _check_chrome_version(chrome_path: str) -> None:
         ).strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         raise RuntimeError(
-            f"--version probe at {chrome_path!r} failed: "
-            f"{type(e).__name__}: {e}"
+            f"--version probe at {chrome_path!r} failed: {type(e).__name__}: {e}"
         ) from e
     major = next(
         (int(tok.split(".")[0]) for tok in out.split() if tok.split(".")[0].isdigit()),
@@ -182,6 +181,7 @@ def _resolve_chrome_path(
                 deferred[p] = e
     try:
         from zendriver.core.config import find_executable
+
         resolved = find_executable("auto")
     except Exception:
         # Broad catch: zendriver's launch-failure surface is documented as
@@ -436,8 +436,14 @@ def _html_to_markdown(html_text: str) -> str:
     return _Converter(
         strip=[
             "head",
-            "nav", "footer", "header", "aside",
-            "form", "button", "iframe", "noscript",
+            "nav",
+            "footer",
+            "header",
+            "aside",
+            "form",
+            "button",
+            "iframe",
+            "noscript",
         ],
         heading_style="ATX",
     ).convert(html_text)
@@ -618,8 +624,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         response_event = await asyncio.wait_for(main_response, timeout=30)
         response = response_event.response
         ct = _normalize_ct(
-            response.headers.get("content-type")
-            or response.headers.get("Content-Type")
+            response.headers.get("content-type") or response.headers.get("Content-Type")
         )
 
         if ct == "application/pdf":
@@ -643,9 +648,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                     tab.send(cdp.network.get_cookies(urls=[pdf_url])),
                     timeout=10,
                 )
-                cookie_header = "; ".join(
-                    f"{c.name}={c.value}" for c in cookies
-                )
+                cookie_header = "; ".join(f"{c.name}={c.value}" for c in cookies)
             except asyncio.TimeoutError:
                 cookie_header = ""
             # Close the tab *before* urllib so Chrome stops holding the
@@ -666,7 +669,10 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             # the literal avoids a silent decode-behavior change there.
             extra = {"Cookie": cookie_header} if cookie_header else None
             _, body, _ = await asyncio.to_thread(
-                _fetch_url, pdf_url, extra, False  # follow_redirects=False
+                _fetch_url,
+                pdf_url,
+                extra,
+                False,  # follow_redirects=False
             )
             return "application/pdf", body, "utf-8"
 
@@ -674,9 +680,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             await asyncio.wait_for(tab.wait(), timeout=30)
             body_text, base64_encoded = await asyncio.wait_for(
                 tab.send(
-                    cdp.network.get_response_body(
-                        request_id=response_event.request_id
-                    )
+                    cdp.network.get_response_body(request_id=response_event.request_id)
                 ),
                 timeout=30,
             )
@@ -783,33 +787,52 @@ async def fetch_pages(
     urls: list[str],
     progress_callback: Callable[[str], None] | None = None,
     warning_callback: Callable[[str], None] | None = None,
-) -> AsyncIterator[tuple[str, str, str | bytes]]:
-    """Yield fetched page bodies in memory as each request completes."""
+) -> AsyncGenerator[tuple[str, str, str | bytes], None]:
+    """Yield completed bodies with a bounded, downstream-driven task window.
+
+    At most _MAX_FETCH_CONCURRENCY requests/results exist ahead of the
+    consumer. A replacement starts only when the consumer asks for another
+    page, and delivered tasks are discarded instead of retaining their bodies.
+    """
     semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
+    remaining = iter(urls)
     async with _managed_browser(warning_callback) as browser:
-        tasks = [
-            asyncio.create_task(
-                _fetch_content(
-                    url,
-                    browser,
-                    progress_callback,
-                    warning_callback,
-                    semaphore,
+        tasks: set[asyncio.Task[tuple[str, str, str | bytes] | None]] = set()
+
+        def schedule_one() -> None:
+            url = next(remaining, None)
+            if url is not None:
+                tasks.add(
+                    asyncio.create_task(
+                        _fetch_content(
+                            url, browser, progress_callback, warning_callback, semaphore
+                        )
+                    )
                 )
-            )
-            for url in urls
-        ]
+
+        for _ in range(_MAX_FETCH_CONCURRENCY):
+            schedule_one()
         try:
-            for completed in asyncio.as_completed(tasks):
-                fetched = await completed
+            while tasks:
+                done, _pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                completed = done.pop()
+                tasks.remove(completed)
+                fetched = completed.result()
+                # No secondary task containers may retain delivered payloads.
+                del completed, done, _pending
                 if fetched is not None:
                     yield fetched
+                del fetched
+                schedule_one()
         finally:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            tasks.clear()
 
 
 def search(
@@ -897,9 +920,7 @@ async def search_multi(
             else None
         )
         try:
-            batch = await asyncio.to_thread(
-                search, q, limit, per_query_progress
-            )
+            batch = await asyncio.to_thread(search, q, limit, per_query_progress)
         except urllib.error.URLError as e:
             if failure_callback is not None:
                 failure_callback(q, e)

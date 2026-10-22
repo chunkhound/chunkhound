@@ -22,6 +22,7 @@ def _overfetch_factor() -> int:
     except ValueError:
         return _DEFAULT_OVERFETCH_FACTOR
 
+
 # Hard ceiling on (offset + page_size) for a single transient (diff/web) search
 # call. The top-K heap must hold at least offset + page_size entries to return
 # an exact page, so heap size -- and therefore peak memory -- scales with this
@@ -234,15 +235,17 @@ class TransientSearchService:
                     continue
                 qualifying_count += 1
                 result = self._chunk_to_dict(chunk, score)
-                entry = (score, ordinal, result)
+                # The root is the worst retained rank: lowest score, then
+                # latest source position. Ties in output prefer earlier chunks.
+                entry = (score, -ordinal, result)
                 ordinal += 1
                 if len(heap) < effective_limit:
                     heapq.heappush(heap, entry)
-                elif score > heap[0][0]:
+                elif entry[:2] > heap[0][:2]:
                     heapq.heapreplace(heap, entry)
 
         ranked = [
-            entry[2] for entry in sorted(heap, key=lambda item: (-item[0], item[1]))
+            entry[2] for entry in sorted(heap, key=lambda item: (-item[0], -item[1]))
         ]
         return ranked[offset : offset + page_size], self._pagination(
             page_size, offset, qualifying_count
@@ -250,7 +253,9 @@ class TransientSearchService:
 
     @staticmethod
     def _pagination(page_size: int, offset: int, total: int) -> dict[str, Any]:
-        has_more = offset + page_size < total
+        has_more = (
+            offset + page_size < total and offset + 2 * page_size <= _MAX_RESULT_WINDOW
+        )
         return {
             "offset": offset,
             "page_size": page_size,
@@ -334,22 +339,15 @@ class TransientSearchService:
                 result_limit=result_limit,
             )
         )
-        (transient_results, transient_page), (db_results, db_page) = await _await_pair(
+        (transient_results, _), (db_results, _) = await _await_pair(
             transient_task, db_task
         )
         merged = self._merge(transient_results, db_results, threshold)
-        has_more = (
-            len(merged) > offset + page_size
-            or bool(transient_page.get("has_more"))
-            or bool(db_page.get("has_more"))
-        )
         page = self._pagination(page_size, offset, len(merged))
-        if has_more:
-            page["has_more"] = True
-            page["next_offset"] = offset + page_size
-        # `total` stays len(merged): a lower bound while either source still has
-        # results to give, exact once both are exhausted. Never None -- callers
-        # render it directly (see api/cli/commands/search.py).
+        # Continuation describes only the filtered merged snapshot within the
+        # supported window, not unseen (possibly nonmatching) source results.
+        # Total is a numeric lower bound on corpus matches, even when the
+        # snapshot contains more matches than the supported paging window.
         return merged[offset : offset + page_size], page
 
     @staticmethod
@@ -429,6 +427,11 @@ class TransientSearchService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
+        if self._vector_source != "db" and offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+            )
         candidate_limit = offset + page_size + 1
 
         async def frozen_snapshot(
@@ -437,6 +440,11 @@ class TransientSearchService:
                 Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]],
             ],
         ) -> list[dict[str, Any]]:
+            if self._vector_source != "db":
+                # Freeze a bounded pool independent of the requested page or
+                # the corpus total, which can exceed the supported window.
+                results, _ = await fetch(_MAX_RESULT_WINDOW)
+                return results
             results, pagination = await fetch(candidate_limit)
             if not pagination.get("has_more"):
                 return results
@@ -484,7 +492,14 @@ class TransientSearchService:
             semantic_weight=semantic_weight,
             limit=len(semantic_results) + len(regex_results),
         )
-        has_more = len(combined) > offset + page_size
+        available = (
+            len(combined)
+            if self._vector_source == "db"
+            else min(len(combined), _MAX_RESULT_WINDOW)
+        )
+        has_more = available > offset + page_size and (
+            self._vector_source == "db" or offset + 2 * page_size <= _MAX_RESULT_WINDOW
+        )
         return combined[offset : offset + page_size], {
             "offset": offset,
             "page_size": page_size,
