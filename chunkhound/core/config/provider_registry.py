@@ -111,4 +111,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://docs.requesty.ai",
         auth_url="https://app.requesty.ai/api-keys",
     ),
+    "opper": OpenAICompatibleSpec(
+        name="opper",
+        default_base_url="https://api.opper.ai/v3/compat",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        docs_url="https://docs.opper.ai",
+        auth_url="https://platform.opper.ai",
+    ),
 }
