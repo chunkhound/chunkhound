@@ -33,6 +33,7 @@ from chunkhound.services.research.shared.evidence_ledger import (
     CONSTANTS_INSTRUCTION_FULL,
     CONSTANTS_INSTRUCTION_SHORT,
 )
+from chunkhound.services.research.shared.file_reader import BudgetedSourceExcerpt
 from chunkhound.services.research.shared.models import (
     SINGLE_PASS_TIMEOUT_SECONDS,
     TARGET_OUTPUT_TOKENS,
@@ -212,8 +213,13 @@ class SynthesisEngine:
 
         # Build sections from files (already budgeted)
         for file_path, content in files.items():
-            # If we have chunks for this file, build content with individual line markers
-            if file_path in chunks_by_file:
+            file_content: str
+            # Web excerpts already encode the evidence budget; rebuilding from
+            # matching chunks would reintroduce deliberately excluded content.
+            if isinstance(content, BudgetedSourceExcerpt):
+                file_content = content
+            # Ordinary code research keeps its individual chunk line markers.
+            elif file_path in chunks_by_file:
                 file_chunks = chunks_by_file[file_path]
                 # Sort chunks by start_line for logical ordering
                 sorted_chunks = sorted(
@@ -281,9 +287,7 @@ class SynthesisEngine:
             source_context=source_context,
         )
 
-        request_output_allowance = _synthesis_output_allowance(
-            llm, max_output_tokens
-        )
+        request_output_allowance = _synthesis_output_allowance(llm, max_output_tokens)
         logger.info(
             f"Calling LLM for single-pass synthesis "
             f"(max_completion_tokens="
@@ -388,7 +392,10 @@ class SynthesisEngine:
             chunks_by_file[file_path].append(chunk)
 
         for file_path, content in cluster.files_content.items():
-            if file_path in chunks_by_file:
+            file_content: str
+            if isinstance(content, BudgetedSourceExcerpt):
+                file_content = content
+            elif file_path in chunks_by_file:
                 file_chunks = chunks_by_file[file_path]
                 sorted_chunks = sorted(
                     file_chunks, key=lambda c: c.get("start_line", 0)
@@ -648,9 +655,7 @@ NOTE: All citation numbers [N] in the cluster analyses have been remapped to mat
 
 Provide a complete, integrated analysis that addresses the original query."""
 
-        request_output_allowance = _synthesis_output_allowance(
-            llm, max_output_tokens
-        )
+        request_output_allowance = _synthesis_output_allowance(llm, max_output_tokens)
         logger.debug(
             f"Calling LLM for reduce synthesis "
             f"(input: {total_input_tokens:,} tokens, max_completion_tokens="

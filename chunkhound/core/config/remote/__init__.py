@@ -18,7 +18,7 @@ from . import pipeline
 # pipeline and persisted the result to disk. Without this gate, each parent →
 # child hop would pay the 10s fetch tax a second time. Add any new child that
 # inherits its parent's fetched config here.
-_SUBPROCESS_SKIP: frozenset[str] = frozenset({"_daemon", "_quickresearch"})
+_SUBPROCESS_SKIP: frozenset[str] = frozenset({"_daemon"})
 
 # Flag dests checked when warning that a skipped subcommand was invoked with
 # remote-config args — those flags are accepted by the shared parser but

@@ -1688,9 +1688,9 @@ async def test_unexpected_bug_in_pipeline_logs_traceback_and_returns(
 async def test_pipeline_skips_fetch_for_internal_subprocess_commands(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # `_daemon` and `_quickresearch` are spawned by parents that already ran
+    # `_daemon` is spawned by parents that already ran
     # the pipeline; the child reads the persisted result from disk. Without
-    # the skip, `websearch → _quickresearch` and MCP proxy → `_daemon` each
+    # the skip, MCP proxy → `_daemon` would
     # pay the 10s fetch tax twice. Gate is `_SUBPROCESS_SKIP` on the pipeline
     # entry — add any new child that inherits its parent's fetched config there.
     fake = _install_fetch(monkeypatch, {"version": 1, "rules": []})
@@ -1702,7 +1702,7 @@ async def test_pipeline_skips_fetch_for_internal_subprocess_commands(
     )
 
     # Internal subprocess commands must not add any calls.
-    for command in ("_daemon", "_quickresearch"):
+    for command in ("_daemon",):
         prior = len(fake.calls)
         await run_remote_config_fetch(_args(command=command), command)
         assert len(fake.calls) == prior, (
