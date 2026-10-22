@@ -11,6 +11,7 @@ to find.
 """
 
 import pathlib
+import re
 import shutil
 import sys
 
@@ -21,6 +22,53 @@ RUNTIME_LIB_NAMES = {
 RUNTIME_LIB_NAME = RUNTIME_LIB_NAMES.get(sys.platform, "libduckdb.so")
 
 repo_root = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _locked_duckdb_core_version() -> str | None:
+    """The DuckDB core version (e.g. "1.5.4") Cargo.lock's libduckdb-sys
+    entry resolves to -- i.e. the same `<major>.<minor>.<patch>` string
+    libduckdb-sys's own build.rs (duckdb_version_from_pkg_version) derives
+    from CARGO_PKG_VERSION and names its target/duckdb-download/<triple>/
+    subdirectory after, mirrored here so this script can tell which of
+    those subdirectories is actually current.
+
+    The duckdb-download cache tier below persists *every* version ever
+    downloaded across CI runs (a GitHub Actions cache restore brings back
+    whatever a previous run cached, and a fresh download for a changed
+    Cargo.lock version lands in a new sibling directory, not over the old
+    one) -- so mtime alone can't reliably tell which one this build
+    actually resolved to. A Cargo.toml version pin (e.g. reverting a
+    regression) can be shadowed indefinitely by a stale cached artifact
+    from before the pin if selection doesn't account for this. Filtering
+    to the version Cargo.lock names removes the ambiguity outright.
+    """
+    lock_path = repo_root / "Cargo.lock"
+    if not lock_path.is_file():
+        return None
+    match = re.search(
+        r'\[\[package\]\]\nname = "libduckdb-sys"\nversion = "([^"]+)"',
+        lock_path.read_text(encoding="utf-8"),
+    )
+    if not match:
+        return None
+    # duckdb-rs uses 1.MAJOR_MINOR_PATCH.x, e.g. DuckDB 1.5.4 => duckdb-rs
+    # 1.10504.x -- same encoding/decoding as build.rs's own
+    # duckdb_version_from_pkg_version, which must stay in sync with this.
+    encoded = int(match.group(1).split(".")[1])
+    duckdb_major = encoded // 10_000
+    duckdb_minor = (encoded // 100) % 100
+    duckdb_patch = encoded % 100
+    return f"{duckdb_major}.{duckdb_minor}.{duckdb_patch}"
+
+
+locked_version = _locked_duckdb_core_version()
+download_candidates: list[pathlib.Path] = list(
+    repo_root.glob(f"target/duckdb-download/*/*/{RUNTIME_LIB_NAME}")
+)
+if locked_version is not None:
+    download_candidates = [
+        p for p in download_candidates if p.parent.name == locked_version
+    ]
 
 # Cargo copies a dependency's shared library into its own deps/ directory
 # after every successful build, regardless of how that library was sourced
@@ -33,7 +81,7 @@ candidates = sorted(
     [
         *repo_root.glob(f"target/release/deps/{RUNTIME_LIB_NAME}"),
         *repo_root.glob(f"target/debug/deps/{RUNTIME_LIB_NAME}"),
-        *repo_root.glob(f"target/duckdb-download/*/*/{RUNTIME_LIB_NAME}"),
+        *download_candidates,
     ],
     key=lambda p: p.stat().st_mtime,
 )

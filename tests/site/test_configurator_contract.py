@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -131,7 +132,7 @@ def _validated_config_errors(
         overview_only=False,
         assets_only=False,
     )
-    _config, errors = create_validated_config(args, command)
+    _config, errors = asyncio.run(create_validated_config(args, command))
     return errors
 
 
@@ -198,6 +199,14 @@ def test_orcarouter_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "orcarouter")
 
     assert config["provider"] == "orcarouter"
+    assert config["model"] == "anthropic/claude-sonnet-5"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_requesty_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "requesty")
+
+    assert config["provider"] == "requesty"
     assert config["model"] == "anthropic/claude-sonnet-5"
 
 

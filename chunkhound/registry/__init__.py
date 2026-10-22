@@ -20,13 +20,45 @@ from chunkhound.core.config.config import Config
 
 # Import embedding factory for unified provider creation
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.embedding_model_drift import (
+    ActiveModel,
+    ActiveModelStateError,
+    ModelDrift,
+    active_model_path,
+    detect_model_drift,
+    read_active_model,
+    read_index_groups,
+    resolve_indexed_model,
+    write_active_model,
+)
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 
 # Import core types
 from chunkhound.core.types.common import Language
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
 # Import new unified parser system
 from chunkhound.parsers.parser_factory import get_parser_factory
+
+# Answers "the configured model or dims differ from the index; switch to them?".
+# True re-embeds under the configuration, False keeps the index's settings.
+ModelDriftDecision = Callable[[ModelDrift], bool]
+
+
+def _configured_embedding_dims(provider: EmbeddingProvider) -> int | None:
+    """Dimensions the provider will embed at, or None if it cannot know yet.
+
+    An explicit ``output_dims`` wins. Otherwise a provider that knows its
+    model's dimensions reports them; an unknown model on a custom endpoint only
+    learns them from its first response, and guessing would flag drift against
+    an index that is actually fine.
+    """
+    if provider.output_dims is not None:
+        return provider.output_dims
+    if provider.supported_dimensions:
+        return provider.dims
+    return None
 
 
 class LazyLanguageParsers(MutableMapping[Language, Any]):
@@ -110,14 +142,222 @@ class ProviderRegistry:
         self._config: Config | None = None
         self._embedding_manager: EmbeddingManager | None = None
 
-    def configure(self, config: Config) -> None:
-        """Configure the registry with application settings."""
+    def configure(
+        self,
+        config: Config,
+        on_model_drift: ModelDriftDecision | None = None,
+    ) -> None:
+        """Configure the registry with application settings.
+
+        ``on_model_drift`` is consulted when the configured embedding model or
+        dimensions disagree with what the index was built with. Omitting it
+        keeps the index's settings, which is what MCP and other non-interactive
+        entry points want; the CLI passes a callback that asks the operator.
+        """
         self._config = config
 
         # Create and register providers based on configuration
         self._setup_embedding_provider()
         self._setup_database_provider()
         self._setup_language_parsers()
+        self._resolve_embedding_model_drift(on_model_drift)
+
+    def register_embedding_provider(self, provider: EmbeddingProvider) -> None:
+        """Register a caller-built embedding provider, held to the index.
+
+        The MCP server and ``research`` build their provider from the config
+        before ``create_services`` configures the registry, so that instance
+        predates any pin. Checking it again here pins it in place; configure()
+        already announced the pin when it resolved its own provider.
+        """
+        self.register_provider("embedding", provider, singleton=True)
+        self._resolve_embedding_model_drift(None, announce=False)
+
+    def _resolve_embedding_model_drift(
+        self,
+        on_model_drift: ModelDriftDecision | None,
+        *,
+        announce: bool = True,
+    ) -> None:
+        """Keep the model and dimensions the index uses, unless told otherwise.
+
+        Search reads the stored vectors matching the query's length and filters
+        them by ``(provider, model)``, so a different model or different
+        dimensions return nothing, and re-indexing skips chunks that already
+        hold vectors for the provider and model. Pinning to the index means a
+        changed default or ``output_dims`` never silently rewrites, or strands,
+        an existing database. Which model the index uses comes from its
+        active-model record, claimed on first sight and updated on a switch.
+        """
+        # Only a provider built from this config is ours to check. Without an
+        # embedding section nothing was built, and whatever is registered is left
+        # over from an earlier configure() or was placed there by another caller.
+        if (
+            self._config is None
+            or self._config.embedding is None
+            or getattr(self._config, "embeddings_disabled", False)
+        ):
+            return
+
+        embedding_provider = self._providers.get("embedding")
+        database_provider = self._providers.get("database")
+        if embedding_provider is None or database_provider is None:
+            return
+
+        groups = read_index_groups(database_provider)
+        if not groups:
+            return  # an empty index has nothing to protect; unreadable is logged
+
+        record_path = self._active_model_record_path()
+        active, may_record = self._load_active_model(record_path)
+        indexed = resolve_indexed_model(groups, active)
+        if indexed is None:
+            return
+        if active is None and may_record:
+            # Claim what the index holds so later runs never infer it from counts.
+            self._save_active_model(
+                record_path,
+                ActiveModel(indexed.provider, indexed.model, indexed.dims),
+            )
+
+        configured_dims = _configured_embedding_dims(embedding_provider)
+        drift = detect_model_drift(
+            indexed,
+            embedding_provider.name,
+            embedding_provider.model,
+            configured_dims,
+        )
+        if drift is None:
+            return
+        configured = ActiveModel(
+            embedding_provider.name, embedding_provider.model, configured_dims
+        )
+
+        # A different provider cannot be pinned: its credentials, endpoint and
+        # dimensions all differ, so there is nothing to fall back to. Say so
+        # and let the configured provider re-embed.
+        if drift.indexed.provider != embedding_provider.name:
+            logger.warning(
+                f"Index was built with {drift.indexed} but {drift.configured} "
+                "is configured. Switching providers re-embeds every chunk."
+            )
+            if may_record:
+                self._save_active_model(record_path, configured)
+            return
+
+        # The hook always hears about drift so it can explain it, but only a
+        # model change can be re-embedded in place (see ModelDrift.model_changed).
+        accepted = on_model_drift is not None and on_model_drift(drift)
+        if accepted and drift.model_changed:
+            if may_record:
+                self._save_active_model(record_path, configured)
+            logger.info(
+                f"Re-embedding {drift.indexed.embedding_count:,} chunks "
+                f"with {drift.configured} (accepted by operator)."
+            )
+            return
+
+        # A decision hook has already told the operator on its own stream, and
+        # a re-check of an announced configuration has nothing new to say.
+        report = (
+            logger.warning if on_model_drift is None and announce else logger.debug
+        )
+        self._pin_embedding_to_index(embedding_provider, drift, report)
+
+    def _pin_embedding_to_index(
+        self,
+        embedding_provider: EmbeddingProvider,
+        drift: ModelDrift,
+        report: Callable[[str], None],
+    ) -> None:
+        """Point the provider, and the config it came from, at the index.
+
+        The config matters as much as the live provider: ``search`` and
+        ``create_services`` build their own provider from ``config.embedding``
+        rather than asking the registry, and would otherwise query something
+        the index does not hold.
+
+        Never raises, because ``configure`` also runs at MCP startup.
+        """
+        indexed = drift.indexed
+        pin: dict[str, Any] = {"model": indexed.model}
+        if indexed.dims is not None:
+            pin["output_dims"] = indexed.dims
+
+        try:
+            embedding_provider.update_config(**pin)
+        except EmbeddingConfigurationError as dims_error:
+            # The indexed dims are not valid for the indexed model under the
+            # current settings, which can happen when the index came from a
+            # custom endpoint. Keep the model and tell the operator plainly.
+            pin = {"model": indexed.model}
+            try:
+                embedding_provider.update_config(**pin)
+            except EmbeddingConfigurationError as model_error:
+                logger.warning(
+                    f"Could not pin embeddings to {indexed}: {model_error}. "
+                    "Searches will not match the index until the "
+                    "configuration does."
+                )
+                return
+            logger.warning(
+                f"Kept {indexed.model} but could not reproduce its "
+                f"{indexed.dims}-dimension vectors: {dims_error}. Searches will "
+                "match nothing until embedding.output_dims matches the index, "
+                "or the database is deleted and re-indexed."
+            )
+
+        if self._config is not None and self._config.embedding is not None:
+            self._config.embedding.model = indexed.model
+            if "output_dims" in pin:
+                self._config.embedding.output_dims = indexed.dims
+
+        if "output_dims" in pin or indexed.dims is None:
+            report(
+                f"Using {indexed} because the index was built with it "
+                f"({indexed.embedding_count:,} embeddings). Configured "
+                f"{drift.configured} was not applied; nothing was re-embedded."
+            )
+
+    def _active_model_record_path(self) -> Path | None:
+        """Where this database's active-model record lives, if it can have one."""
+        if self._config is None:
+            return None
+        try:
+            return active_model_path(self._config.database.get_db_path())
+        except ValueError:
+            return None  # no database path configured
+
+    def _load_active_model(
+        self, path: Path | None
+    ) -> tuple[ActiveModel | None, bool]:
+        """Read the record, and say whether it may be written this run.
+
+        A read-only database is never written to, and neither is a record that
+        exists but cannot be understood: it may come from a newer ChunkHound,
+        and replacing it would discard that version's choice.
+        """
+        if path is None:
+            return None, False
+        read_only = self._config is not None and self._config.database.read_only
+        try:
+            return read_active_model(path), not read_only
+        except ActiveModelStateError as e:
+            logger.warning(
+                f"Ignoring the recorded embedding model: {e}. Delete the file "
+                "to let ChunkHound record it again."
+            )
+            return None, False
+
+    def _save_active_model(self, path: Path | None, active: ActiveModel) -> None:
+        if path is None:
+            return
+        try:
+            write_active_model(path, active)
+        except OSError as e:
+            logger.warning(
+                f"Could not record the active embedding model in {path}: {e}"
+            )
 
     def register_provider(
         self, name: str, provider: Any, singleton: bool = True
@@ -434,15 +674,23 @@ def get_registry() -> ProviderRegistry:
     return _registry
 
 
-def configure_registry(config: Config | dict[str, Any]) -> None:
-    """Configure the global provider registry."""
+def configure_registry(
+    config: Config | dict[str, Any],
+    on_model_drift: ModelDriftDecision | None = None,
+) -> None:
+    """Configure the global provider registry.
+
+    ``on_model_drift`` lets an interactive caller decide what to do when the
+    configured embedding model disagrees with the indexed one. Callers that
+    cannot prompt (MCP, daemons) omit it and keep the indexed model.
+    """
     if isinstance(config, dict):
         from chunkhound.core.config.config import Config as ConfigClass
 
         config_obj = ConfigClass(**config)
-        get_registry().configure(config_obj)
+        get_registry().configure(config_obj, on_model_drift)
     else:
-        get_registry().configure(config)
+        get_registry().configure(config, on_model_drift)
 
 
 # Convenience functions for common operations

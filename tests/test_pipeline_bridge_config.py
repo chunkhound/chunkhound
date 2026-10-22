@@ -97,6 +97,83 @@ async def test_fragmentation_threshold_pct_forwarded_as_compaction_ratio(
 
 
 @pytest.mark.asyncio
+async def test_embedding_configuration_reaches_native_pipeline(
+    tmp_path: Path,
+    fake_native_pipeline: _FakeNativePipeline,
+) -> None:
+    """Resolved provider settings cross the Python/Rust boundary intact."""
+    from chunkhound import pipeline_bridge
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+
+    embedding = EmbeddingConfig(
+        provider="openai",
+        api_key="secret-test-key",
+        base_url="http://127.0.0.1:9999/v1",
+        output_dims=8,
+        client_side_truncation=True,
+        ssl_verify=False,
+    )
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=False,
+        config=SimpleNamespace(
+            database=SimpleNamespace(),
+            indexing=SimpleNamespace(),
+            embedding=embedding,
+        ),
+    )
+
+    captured = fake_native_pipeline.captured_config
+    assert captured["embedding_model"] == "text-embedding-3-small"
+    assert captured["embedding_api_key"] == "secret-test-key"
+    assert captured["embedding_base_url"] == "http://127.0.0.1:9999/v1"
+    assert captured["embedding_output_dims"] == 8
+    assert captured["embedding_client_side_truncation"] is True
+    assert captured["embedding_ssl_verify"] is False
+    assert captured["embed_max_tokens_per_batch"] == 8091
+
+
+@pytest.mark.asyncio
+async def test_ssl_verify_stays_on_without_a_custom_base_url(
+    tmp_path: Path,
+    fake_native_pipeline: _FakeNativePipeline,
+) -> None:
+    """ssl_verify=False must not disable TLS checks on the official endpoint.
+
+    The flag is scoped to custom endpoints (see EmbeddingConfig.ssl_verify:
+    "Ignored when base_url is not set"), so a user who disabled verification
+    for a self-hosted reranker must still get verified TLS on the embedding
+    requests that carry their API key to api.openai.com.
+    """
+    from chunkhound import pipeline_bridge
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+
+    embedding = EmbeddingConfig(
+        provider="openai",
+        api_key="secret-test-key",
+        ssl_verify=False,
+        rerank_url="https://reranker.internal:8080/rerank",
+    )
+    assert embedding.base_url is None
+
+    await pipeline_bridge.run_rust_pipeline(
+        files_to_process=[],
+        db_path=tmp_path,
+        project_root=tmp_path,
+        skip_embeddings=False,
+        config=SimpleNamespace(
+            database=SimpleNamespace(),
+            indexing=SimpleNamespace(),
+            embedding=embedding,
+        ),
+    )
+
+    assert fake_native_pipeline.captured_config["embedding_ssl_verify"] is True
+
+
+@pytest.mark.asyncio
 async def test_missing_fragmentation_threshold_pct_defaults_to_30_pct(
     tmp_path: Path, fake_native_pipeline: _FakeNativePipeline
 ) -> None:
@@ -431,6 +508,8 @@ async def test_run_rust_pipeline_closes_its_own_embed_resources_after_run(
         embed_batch_callback: object,
         progress_callback: object,
         incremental: object,
+        analytics_recorder: object = None,
+        analytics_handle: object = 0,
     ) -> SimpleNamespace:
         assert embed_batch_callback is not None
         captured_caches.append(embed_batch_callback.keywords["cache"])

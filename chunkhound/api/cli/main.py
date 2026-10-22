@@ -4,16 +4,57 @@ import argparse
 import asyncio
 import logging as _pylogging
 import multiprocessing
+import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from loguru import logger
 
+from chunkhound.core import analytics as ch_analytics
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
 from .utils.config_factory import create_validated_config
 from .utils.rich_output import install_default_log_sink
+
+# Per-command action fields for analytics, mirroring the MCP hook's
+# _ANALYTICS_ACTION_FIELDS -- a small, meaningful subset of CLI args per
+# command, not a generic argument dump. "index" is intentionally absent:
+# its action fields (mode/file_count/total_chunks) aren't fully known
+# until the run completes, and are filled in via ch_analytics.update_action
+# from inside run_command() itself. Values here must match each subcommand
+# parser's actual argparse dest name -- "research"'s positional arg is
+# named `query` (see api/cli/parsers/research_parser.py), not `question`.
+_ANALYTICS_ACTION_ARGS: dict[str, tuple[str, ...]] = {
+    "search": ("query", "commit_range", "commit_hash", "last_n_commits"),
+    "research": ("query",),
+    "websearch": ("query",),
+    "fetchurl": ("url",),
+}
+
+# Bounded, single-shot commands analytics wraps -- excludes "mcp" (handled by
+# the MCP tool-call hook instead), "_daemon" (long-running, per the design's
+# non-goal for long-running commands), and "_quickresearch" (an internal
+# subprocess spawned by research/websearch, not a user-facing entry point).
+_ANALYTICS_WRAPPED_COMMANDS = frozenset(
+    {
+        "index",
+        "search",
+        "research",
+        "websearch",
+        "fetchurl",
+        "map",
+        "autodoc",
+        "calibrate",
+    }
+)
+
+
+def _analytics_action_fields(command: str, args: argparse.Namespace) -> dict:
+    fields = _ANALYTICS_ACTION_ARGS.get(command, ())
+    return {k: getattr(args, k) for k in fields if getattr(args, k, None) is not None}
+
 
 # Required for PyInstaller multiprocessing support
 multiprocessing.freeze_support()
@@ -66,10 +107,7 @@ def _install_logging_to_loguru_bridge(*, verbose: bool = False) -> None:
 
             frame: FrameType | None = _logging.currentframe()
             depth = 2
-            while (
-                frame is not None
-                and frame.f_code.co_filename == _logging.__file__
-            ):
+            while frame is not None and frame.f_code.co_filename == _logging.__file__:
                 frame = frame.f_back
                 depth += 1
 
@@ -188,10 +226,19 @@ async def async_main() -> None:
 
         args.path = _Path(args.project_dir).resolve()
 
+    # Suppress stray log lines that could corrupt MCP stdio framing. The
+    # `mcp` command sets this later at chunkhound/api/cli/commands/mcp.py, but
+    # the remote-config pipeline runs inside create_validated_config below —
+    # WARNINGs from that path must go through log_if_not_mcp, which needs
+    # CHUNKHOUND_MCP_MODE to be set already. mcp_server/stdio.py and
+    # mcp_server/http_server.py set the same var before their factory call.
+    if args.command == "mcp":
+        os.environ["CHUNKHOUND_MCP_MODE"] = "1"
+
     _daemon_startup_breadcrumb(args, "startup tracking began mode=daemon")
     config_validation_started = time.monotonic()
     _daemon_startup_breadcrumb(args, "phase started: cli_config_validation")
-    config, validation_errors = create_validated_config(args, args.command)
+    config, validation_errors = await create_validated_config(args, args.command)
     config_validation_duration = time.monotonic() - config_validation_started
 
     if validation_errors:
@@ -249,6 +296,30 @@ async def async_main() -> None:
         f"duration={config_validation_duration:.3f}s",
     )
 
+    # `mcp`/`_daemon` build and own their own recorder (one per server
+    # process, see mcp_server/base.py) -- constructing a second one here
+    # would spin up a redundant background flush thread + reqwest client
+    # for the lifetime of that long-running process. `_quickresearch` is an
+    # internal subprocess, not a user-facing entry point. Only build a
+    # recorder at all for commands this hook actually wraps.
+    if args.command in _ANALYTICS_WRAPPED_COMMANDS:
+        analytics_recorder = ch_analytics.build_recorder(
+            getattr(config, "analytics", None), config.target_dir or Path.cwd()
+        )
+        _save_sensitive_data = getattr(
+            getattr(config, "analytics", None), "save_sensitive_data", False
+        )
+        analytics_handle = ch_analytics.start_command(
+            analytics_recorder,
+            args.command,
+            "cli",
+            _analytics_action_fields(args.command, args),
+            _save_sensitive_data,
+        )
+    else:
+        analytics_recorder = None
+        analytics_handle = 0
+
     try:
         if args.command == "index":
             # Dynamic import to avoid early chunkhound module loading
@@ -303,13 +374,47 @@ async def async_main() -> None:
             logger.info("Run 'chunkhound --help' for available commands.")
             sys.exit(1)
 
+        ch_analytics.end_command(analytics_recorder, analytics_handle, True)
+
     except KeyboardInterrupt:
+        # User-initiated, not a command failure -- deliberately not recorded
+        # as either a success or a failure in analytics.
         logger.info("Interrupted by user")
         sys.exit(0)
+    except SystemExit as e:
+        # Every wrapped command already does its own error handling and
+        # calls sys.exit() directly on failure (see e.g. commands/search.py,
+        # commands/code_mapper.py) -- SystemExit is a BaseException, not an
+        # Exception, so without this clause it would skip the `except
+        # Exception` branch below entirely and leave this command's handle
+        # open (and its event unrecorded) on every one of those paths.
+        #
+        # A 0/None code is treated the same as the KeyboardInterrupt case
+        # above rather than as success: the only such path today is
+        # commands/run.py's own internal KeyboardInterrupt handler, which
+        # exits 0 after an interrupted (not successful) indexing run --
+        # genuine command success never calls sys.exit() itself, it just
+        # returns and falls through to the `end_command(..., True)` call
+        # above. Any other code is a real command-level failure.
+        code = e.code
+        if code is None or (isinstance(code, int) and code == 0):
+            raise
+        ch_analytics.record_internal_error("SystemExit")
+        ch_analytics.end_command(analytics_recorder, analytics_handle, False)
+        raise
     except Exception as e:
+        ch_analytics.record_internal_error(type(e).__name__)
+        ch_analytics.end_command(analytics_recorder, analytics_handle, False)
         logger.error(f"Command failed: {e}")
         logger.exception("Full error details:")
         sys.exit(1)
+    finally:
+        # Best-effort final flush, bounded so a slow/unreachable S3 endpoint
+        # can never hang CLI exit. Runs on every path out of the try block
+        # above, including sys.exit() (finally still runs before SystemExit
+        # propagates) -- a hard kill (SIGKILL) skips this entirely and relies
+        # on the orphan sweep on a later run instead.
+        ch_analytics.shutdown(analytics_recorder)
 
 
 def main() -> None:

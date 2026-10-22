@@ -7,14 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.0] - 2026-10-20
+
 ### Added
+- **Opt-in usage analytics** — ChunkHound can record per-user usage events (CLI commands, MCP tool calls, LLM and embedding/rerank calls with token counts) and upload batches to an S3/MinIO-compatible bucket. Off by default; enable with `analytics.enabled` or `CHUNKHOUND_ANALYTICS__*`. `analytics.anonymize` (`full`, `hashed`, `anonymous`) controls how the user is identified. Free-text content such as queries and URLs is recorded as null unless `analytics.save_sensitive_data` is set. S3 write credentials come from `.chunkhound.json` or `CHUNKHOUND_AWS_ACCESS_KEY_ID`/`CHUNKHOUND_AWS_SECRET_ACCESS_KEY`, never ambient `AWS_*` variables.
+- **Native embedding providers** — The Rust pipeline now calls OpenAI-compatible (including Azure) and VoyageAI embedding endpoints itself, with retry, token-aware batching, and the same dimension, TLS-verify and context-length handling as the Python providers. Other providers keep using the Python path.
+- **Requesty LLM provider** — Requesty is supported as an OpenAI-compatible LLM provider (`provider: requesty` or `CHUNKHOUND_LLM_PROVIDER=requesty`).
+
+### Fixed
+- **Windows `.cmd` and `.bat` CLIs launch through `cmd.exe`** — An npm-only Claude Code, Codex, or OpenCode install can run research. A spaced shim path that cannot be shortened is rejected. Newlines, percent signs, quotes, and a command operator in an argument with no spaces are rejected. Addresses #118. The database `WinError 183` in that issue is unchanged.
+- **OpenRouter structured calls with reasoning models** — ChunkHound now detects whether a model accepts the payload that disables reasoning for structured output, retries once without it when rejected, and caches the result per model, so structured calls no longer fail on models that reject it.
+- **Linux native wheels run on older distributions** — `chunkhound-native` Linux wheels (x86_64 and aarch64) are now built in a pinned Ubuntu 20.04 container and tagged `manylinux_2_31`, instead of `manylinux_2_34`. They install on glibc 2.31+ hosts such as Ubuntu 20.04, not only glibc 2.34+.
+- **Orphaned rows after forced reindex** — Rows of deleted files are now cleaned up on a forced full reindex under the Rust pipeline.
+- **Unchanged re-index no longer rebuilds the HNSW index** — A run with nothing to write, delete or compact leaves the vector indexes in place instead of dropping and rebuilding them.
+- **Responsive server during index maintenance** — HNSW maintenance runs off the event loop, so MCP responses and file monitoring are not blocked during rebuilds.
+- **Faster missing-embedding backfill** — `generate_missing_embeddings` uses targeted queries instead of full-table scans.
+- **Rerank retries** — The single-batch rerank path now retries transient failures like the multi-batch path.
+- **Known file types no longer fail the NUL-byte check** — Files of known types are not skipped as binary because of embedded NUL bytes.
+- **Path lookup safety** — Logical path lookup rejects `..` escapes out of the project root.
+- **MCP regex search with commit inputs** — `search` with `type="regex"` now warns that `commit_range`, `commit_hash` and `last_n_commits` are ignored, instead of silently returning whole-index results.
+- **Invalid-argument errors** — Research service, CLI search and `deep_research` validation failures raise `ValueError` rather than generic errors.
+- **Embedding provider registration failures are logged** — A provider that fails to register is now reported instead of disappearing silently.
+- **C# and MATLAB parsing** — Fixed an import error that broke the C# and MATLAB concept mappings.
+- **MCP SDK compatibility** — The MCP SDK dependency is constrained to the supported 1.x API.
+- **DuckDB** — Sequence names in `nextval()` calls are parameterized.
+
+### Changed
+- **Claude Code CLI prompt delivery is configurable** — One mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses `file` (default, every OS) or `inline`. `file` uses `--append-system-prompt-file`: instructions stay in the system prompt, off the Windows command line, and beside a wrapper's `--append-system-prompt`. `inline` is for a wrapper that uses the file flag, or Claude Code older than 2.0.34. Those files use the system temp directory. `llm.claude_temp_dir` overrides it for a special case such as Docker or a limited user. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
+## [6.0.0] - 2026-09-14
+
+### Breaking Changes
+- **`chunkhound-native` is now a required dependency** — The Rust extension is no longer an optional extra; it installs by default and its parse→embed→write pipeline runs by default (`CHUNKHOUND_USE_RUST=0` to opt out). Installs where no native wheel is available fall back to the Python pipeline automatically.
+
+### Added
+- **Rust-native indexing pipeline (default)** — Indexing now runs parsing, embedding, and database writes concurrently through the `chunkhound_native` extension by default, for meaningfully faster indexing with crash-safe recovery and more accurate progress reporting (including live DB-size-reduction stats during compaction). Falls back to the Python pipeline automatically for non-DuckDB providers (e.g. LanceDB).
+- **OrcaRouter LLM provider** — OrcaRouter is now supported as an OpenAI-compatible LLM provider (`provider: orcarouter` or `CHUNKHOUND_LLM_PROVIDER=orcarouter`).
+- **OpenRouter LLM provider** — OpenRouter is now supported as a first-class OpenAI-compatible LLM provider (`provider: openrouter` or `CHUNKHOUND_LLM_PROVIDER=openrouter`).
+- **Voyage-native rerank format** — Custom VoyageAI-compatible rerank endpoints (e.g. MongoDB Atlas) are now supported via `rerank_format="voyage"`, fixing reranking that previously silently fell back to raw vector scores against these endpoints.
+- **Provider-managed synthesis output limits** — Research synthesis output truncation is now managed per LLM provider, with explicit support for DeepSeek's and Grok's own output-limit semantics.
+- **Follow-up query chaining for research** — `websearch` and `code_research` now accept a `--previous-query` / `previous_query` parameter so a follow-up query is expanded and synthesized in the context of the prior topic instead of re-exploring the same ground.
+- **MCP HTTP transport** — The MCP server now supports Streamable HTTP transport (`--transport http`) alongside stdio, so remote and browser-based MCP clients can connect without spawning a local subprocess. Configurable via `--host`/`--port`/`--auth-token`/`--cors`; refuses to start on a non-loopback host without an auth token.
+- **Configurable DB execute timeout** — The database serial-executor timeout can now be set via `.chunkhound.json`, `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS`, or `--db-execute-timeout`, instead of only an internal env var.
+- **VoyageAI `voyage-4` series** (`voyage-code-4`, `voyage-4`, `voyage-4-large`, `voyage-4-lite`). All four support Matryoshka `output_dims` of 256, 512, 1024 (default), and 2048, and a 32K context window. `voyage-code-4` is code-specialized and built for coding-agent retrieval, which is ChunkHound's exact use case. The default stays `voyage-3.5`; set `embedding.model` to opt in.
+- **The index now owns its embedding model and dimensions.** Changing `embedding.model` or `embedding.output_dims` no longer silently re-embeds, or strands, an existing database. For a different model, `chunkhound index` warns, reports how many chunks a switch would rewrite, and asks; declining keeps the indexed model and dimensions, leaves search working, and asks again next run. A dimensions-only change on the same model cannot be re-embedded in place, so the indexed dimensions are kept without asking. Non-interactive runs and MCP startup keep the index's settings without prompting, so an upgraded default can never rewrite a database behind the operator's back. A configured *provider* change is still applied, since credentials and dimensions leave nothing to fall back to. Which model an index uses is recorded in a file beside the database, so a finished or interrupted switch is remembered rather than guessed from vector counts. DuckDB and LanceDB indexes are both covered.
+- **Upgrade suggestions.** When a newer model supersedes the one in use, an interactive `chunkhound index` prints a single informational line stating what a switch would cost. It never acts on its own and does not appear in non-interactive runs. Silence it with `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1`.
+- **VoyageAI model reference table** in `configuration.md`, listing context window and per-batch token limit for every model ChunkHound knows.
 - **Fetchurl CLI command and MCP tool** — New `chunkhound fetchurl <url> [-q "…"]` CLI subcommand and matching `fetchurl` MCP tool fetch a single URL (HTML or PDF), extract its content, and return a focused Markdown answer.
   - Short pages are token-truncated and summarized in one LLM call; long pages with a query go through a chunk + rerank + elbow-filter pipeline that passes only the most relevant sections to the LLM.
   - Requires LLM + reranker providers — the MCP tool is hidden from `tools/list` when either is missing.
   - Configurable via `fetchurl.rerank_threshold_tokens` (default 15000), `fetchurl.truncate_tokens` (default 15000), and `fetchurl.max_retries` (default 3), or their `CHUNKHOUND_FETCHURL_*` env-var equivalents.
   - Uses the same zendriver + system Chrome transport as `websearch`, with `urllib` fallback.
+- **Remote configuration fetch** — ChunkHound can now fetch a configuration envelope from an operator-controlled HTTPS endpoint (or `http://` to a loopback host for local development) at the start of every invocation and apply an ordered list of rules to the on-disk global config, letting fleets manage embedding / LLM / research settings centrally instead of touching each machine. See [`/docs/configuration/#remote-configuration`](https://chunkhound.dev/docs/configuration/#remote-configuration).
+  - Activated via `--remote-config-url` / `--remote-config-auth-header` (or `CHUNKHOUND_REMOTE_CONFIG__URL` / `CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER`). Accepted from CLI, env, or the global config file — a `remote_config` key inside a project-local `.chunkhound.json` or a file passed via `--config` is scrubbed at load time (with a WARNING) so a checked-in project file cannot redirect the operator's URL.
+  - Envelope shape: `version: 1`, optional PEP 440 `min_chunkhound_version` (so a payload targeted at a newer client never lands on an older binary), and an ordered `rules` array. Rule ops: `merge` (default), `set`, `remove`. Rule paths accept dotted (`a.b.c`) or slash (`a/b/c`) forms; unknown top-level and depth-2 paths surface as `schema_error` and skip the rule.
+  - Operator-owned paths refused after apply: `database.path`, `target_dir`, `embeddings_disabled`, `local_config_file`, `global_config_file`, `config_file`.
+  - Self-registration (gap-fill): on the first successful fetch, if the global config file (`~/.chunkhound.json` or `CHUNKHOUND_GLOBAL_CONFIG_FILE`) has no `remote_config.url` / `auth_header`, the effective discovery-layer value (CLI/global/env) is seeded via an atomic backup+write so subsequent runs continue to fetch without needing the CLI flag or env var that triggered the initial run. An on-disk value is durable — whether seeded by a prior run, hand-edited, or written by an `op: set` rule — and is NOT overwritten by a differing CLI/env value on later runs, so a one-off `--remote-config-url` cannot silently replace the operator's persisted URL. Server-driven rotation is via envelope rules on `remote_config.url` / `remote_config.auth_header`; those rules also win over discovery-layer seeding on a first-time run. Literal `auth_header` values persist in plaintext; use `${VAR}` interpolation (e.g. `Bearer ${MY_TOKEN}`) to persist only the placeholder — the variable is resolved from `os.environ` at fetch time, and any unset reference drops the entire `Authorization` header rather than leaking the literal placeholder to the wire.
+  - Delta-only validation gate: post-rules config is snapshot-validated against the current command **and** every persistence-hazard command (`index`, `mcp`, `research`) on two substrates — the persisted global JSON (env/local/CLI skipped) and the fully merged invocation. If either comparison introduces a new `ConfigErrorCode` that wasn't already present pre-rules, the fetch is discarded and nothing is written.
+  - Hard 10-second wall-clock fetch budget on every invocation. Single attempt, no client-side cache — recoverable failures (timeout, network, non-2xx, JSON parse, envelope validation) log a WARNING and the invocation proceeds against what's on disk. Disk-write failures during backup or persist escalate to `sys.exit(1)` with the target path and errno on stderr.
+  - Fetch ignores `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and netrc (`httpx` is built with `trust_env=False`) so a hostile env var cannot silently reroute the credentialed request or supply a MITM-friendly CA bundle. Operators needing a private CA must extend the system trust store.
+- **Structured config validation error codes** — Startup validation now emits stable `ConfigErrorCode` identifiers (`missing_required_config`, `llm_not_configured`, `llm_missing_role_config`, `embedding_not_configured`, `mcp_non_loopback_no_auth`, `mcp_cors_no_auth`, `db_readonly_wrong_command`, `db_readonly_non_duckdb`) alongside human-readable messages, enabling machine-parseable diagnostics and powering the remote-config delta-only validation gate.
 
 ### Fixed
+- **OpenAI token-limit error detection** — A third real-world phrasing of OpenAI's context-length error ("the input length exceeds the context length") is now recognized, triggering the existing split-and-retry path instead of failing the batch outright.
+- **Windows project detection** — Directory discovery no longer fails when the current working directory is the user's home directory or sits under a locked-down parent on Windows.
+- **A changed embedding model or `output_dims` silently emptied search results.** Search reads the vector table matching the query's dimensions and filters it by provider and model, so either change returned zero results. Re-indexing never repaired a dimensions change, because chunks already embedded under the model were skipped at any dimension, and a re-embed interrupted partway left two model-tagged vectors per chunk. The index's model and dimensions are now kept unless a switch is explicitly accepted.
+- **Wrong batch token limits for the `voyage-4` series.** The whole series was previously unknown to the provider and fell through to the 320K-token fallback. `voyage-4-large` actually caps at 120K, so large batches failed with `TOO_MANY_TOKENS_IN_BATCH`, while `voyage-4-lite` was capped at a third of its real 1M limit. Unsupported `output_dims` on these models were also accepted locally and only rejected later by the API; they now fail at configuration time.
 - **PyMuPDF `fitz` import deprecation warning on stdout** — PDF parsing now imports `pymupdf` instead of the legacy `fitz` alias, which since PyMuPDF 1.28.2 prints a deprecation warning to stdout and corrupts MCP stdio clients (e.g. CURe preflight). Adds a regression test asserting parser imports write nothing to stdout.
 
 ## [5.2.0] - 2026-07-12
@@ -796,7 +853,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v5.2.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.1.0...HEAD
+[6.1.0]: https://github.com/chunkhound/chunkhound/compare/v6.0.0...v6.1.0
+[6.0.0]: https://github.com/chunkhound/chunkhound/compare/v5.2.1...v6.0.0
 [5.2.0]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/chunkhound/chunkhound/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v5.0.0

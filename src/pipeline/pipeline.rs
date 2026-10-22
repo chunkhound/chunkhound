@@ -10,8 +10,10 @@ use super::differ::DiffResult;
 use super::report::PipelineReport;
 
 use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
+use crate::embed::{create_embed_fn, EmbedBatchFn};
 use crate::error::DbError;
 use crate::types::{ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
+use std::sync::Arc;
 
 /// The main PyO3 class — Python calls `.run()` from `asyncio.to_thread`.
 #[pyclass]
@@ -107,8 +109,11 @@ impl IndexingPipeline {
     /// ``"write-compact"``, ``"write-done"``, ``"done"``. Only one of
     /// ``"write-index"``/``"write-compact"`` fires per run — compaction
     /// rebuilds indexes as part of its own rewrite, so the two never both
-    /// run.
-    #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false))]
+    /// run. ``"write-index"`` arrives as ``(0, 1)`` when the indexes are
+    /// about to be rebuilt and as ``(1, 1)`` when the run changed no rows
+    /// and they were left in place.
+    #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false, analytics_recorder=None, analytics_handle=0))]
+    #[allow(clippy::too_many_arguments)] // Mirrors run()'s existing shape; analytics is two more optional, orthogonal params.
     fn run(
         &mut self,
         py: Python<'_>,
@@ -124,8 +129,18 @@ impl IndexingPipeline {
         embed_batch_callback: Option<Py<PyAny>>,
         progress_callback: Option<Py<PyAny>>,
         incremental: bool,
+        analytics_recorder: Option<Py<crate::analytics::AnalyticsRecorder>>,
+        analytics_handle: u64,
     ) -> PyResult<PipelineReport> {
         let started = Instant::now();
+        // Extracted once here, while the GIL is still held (this whole
+        // method releases it via py.allow_threads() below) -- the resulting
+        // Arc is Send+Sync and needs no further GIL access to record calls
+        // from the embed rayon threads.
+        let analytics: Option<(Arc<crate::analytics::Inner>, u64)> = analytics_recorder
+            .as_ref()
+            .and_then(|r| r.borrow(py).inner_arc())
+            .map(|inner| (inner, analytics_handle));
 
         if files.is_empty() {
             // Only short-circuit when there's no DB yet to clean up (first-ever
@@ -260,7 +275,17 @@ impl IndexingPipeline {
         // panics without the GIL held, and this whole call runs inside
         // py.allow_threads() below.
         let parse_cb = parse_batch_callback.clone_ref(py);
-        let embed_cb = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
+        let embed_fn = if self.config.skip_embeddings {
+            None
+        } else {
+            let callback = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
+            let mut embed_cfg = self.config.embed_config();
+            embed_cfg.analytics = analytics.clone();
+            Some(Arc::from(
+                create_embed_fn(&embed_cfg, callback)
+                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+            ))
+        };
         let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
         let store_progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
         let t_run = Instant::now();
@@ -270,7 +295,7 @@ impl IndexingPipeline {
                     &batch_paths,
                     parse_cb,
                     parse_config,
-                    embed_cb,
+                    embed_fn.clone(),
                     &provider,
                     &model,
                     progress_cb,
@@ -427,8 +452,8 @@ impl IndexingPipeline {
     /// batches, embeds them (via its own long-lived rayon pool, built once
     /// for the whole run), converts each embedded batch into a
     /// `DbWriterBatch`, and forwards it to a dedicated store thread —  so
-    /// while the store thread writes batch N to DuckDB (and, on the final
-    /// batch, rebuilds HNSW indexes and compacts), the embed thread is
+    /// while the store thread writes batch N to DuckDB (and, after the
+    /// final batch, rebuilds HNSW indexes or compacts), the embed thread is
     /// already embedding batch N+1, and the parse thread is already
     /// parsing batch N+2. Both bounds provide backpressure: parsed batches
     /// hold source text, and embedded batches additionally hold float
@@ -438,7 +463,9 @@ impl IndexingPipeline {
     /// using the same HNSW "bulk mode" bracket
     /// (`drop_all_hnsw_indexes()` → N incremental writes →
     /// `ensure_all_hnsw_indexes()`) that the Python path already uses for
-    /// bulk indexing, so no new DB-layer mechanism is required.
+    /// bulk indexing, so no new DB-layer mechanism is required. A run with
+    /// nothing to write, delete or compact skips the bracket and leaves
+    /// the indexes in place.
     ///
     /// **Caller must release the GIL** before entering this method.
     /// Each thread re-acquires the GIL independently via ``Python::with_gil()``.
@@ -456,7 +483,7 @@ impl IndexingPipeline {
         files: &[PathBuf],
         parse_cb: Py<PyAny>,
         parse_config: Py<super::parse_call_config::ParseCallConfig>,
-        embed_cb: Option<Py<PyAny>>,
+        embed_fn: Option<Arc<dyn EmbedBatchFn>>,
         provider: &str,
         model: &str,
         progress_cb: Option<Py<PyAny>>,
@@ -608,6 +635,14 @@ impl IndexingPipeline {
         // while bulk mode is on), then either compact (which rebuilds
         // indexes as part of its own rewrite) or rebuild indexes directly
         // once at the very end — never both, see the comment below.
+        //
+        // A run with nothing to write, nothing to delete and no compaction
+        // due skips the bracket altogether: dropping the indexes only to
+        // rebuild them over the same rows costs a full HNSW build (plus the
+        // checkpoint behind it) for no change. `backend.open()` has already
+        // recreated any index a crashed earlier run left missing, so there
+        // is nothing for the end of this run to restore either.
+        let nothing_to_write = batch_count == 0 && delete_paths.is_empty();
         let store_handle: std::thread::JoinHandle<Result<StoreOutcome, String>> = {
             std::thread::spawn(move || {
                 // Captured before `db_config` is moved into the backend —
@@ -621,13 +656,25 @@ impl IndexingPipeline {
                 // data scan), so it's always sub-10ms in practice — not
                 // worth a dedicated progress bar (it would flash past
                 // unnoticed). Log it instead for the rare case it's slow.
-                let t_hnsw_drop = Instant::now();
-                let drop_hnsw_result = backend.drop_all_hnsw_indexes();
-                Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
-                log::info!(
-                    "[hnsw-drop] done in {:.3}s",
-                    t_hnsw_drop.elapsed().as_secs_f64()
-                );
+                // Compaction must keep the bracket even on an otherwise
+                // empty run: it rebuilds the indexes through `reopen()`, with
+                // the metrics `drop_all_hnsw_indexes()` captures. So whether
+                // to compact is decided here, with the skip: the post-write
+                // step does not ask again on a run that skipped the bracket.
+                let skip_decision = Self::can_skip_hnsw_bracket(backend.as_ref(), nothing_to_write);
+                let skip_hnsw_bracket =
+                    Self::close_backend_on_err(backend.as_mut(), skip_decision)?;
+                if skip_hnsw_bracket {
+                    log::info!("[hnsw-drop] skipped: nothing to write, delete or compact");
+                } else {
+                    let t_hnsw_drop = Instant::now();
+                    let drop_hnsw_result = backend.drop_all_hnsw_indexes();
+                    Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
+                    log::info!(
+                        "[hnsw-drop] done in {:.3}s",
+                        t_hnsw_drop.elapsed().as_secs_f64()
+                    );
+                }
                 // Orphan deletes free space and must run even when the DB is
                 // already over disk_usage_limit_mb — that guard exists to
                 // stop inserts (growth), not cleanup. Applied here, before
@@ -818,22 +865,37 @@ impl IndexingPipeline {
                 // instead of returning early with the connection left open
                 // and HNSW indexes un-restored (Invariant 14).
                 let post_write_result: Result<(), String> = write_result.and_then(|()| {
-                    let needs_compaction = disk_limit_hit.is_none()
+                    let needs_compaction = !skip_hnsw_bracket
+                        && disk_limit_hit.is_none()
                         && backend.needs_compaction().map_err(|e| e.to_string())?;
                     if needs_compaction {
                         emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
                         backend.run_compaction().map_err(|e| e.to_string())?;
                     } else {
                         if disk_limit_hit.is_some() {
-                            log::info!(
-                                "[store] skipping compaction after disk-limit trip; \
-                                 rebuilding HNSW indexes only"
-                            );
+                            if skip_hnsw_bracket {
+                                log::info!(
+                                    "[store] skipping compaction after disk-limit trip; \
+                                     existing HNSW indexes left in place"
+                                );
+                            } else {
+                                log::info!(
+                                    "[store] skipping compaction after disk-limit trip; \
+                                     rebuilding HNSW indexes only"
+                                );
+                            }
                         }
-                        emit_progress_gil(&store_progress_cb, "write-index", 0, 1);
-                        backend
-                            .ensure_all_hnsw_indexes()
-                            .map_err(|e| e.to_string())?;
+                        // Still emitted when there is nothing to rebuild:
+                        // the progress consumer resolves its index and
+                        // compact bars on whichever of these two phases
+                        // fires. A skipped build reports itself complete.
+                        let index_done = u64::from(skip_hnsw_bracket);
+                        emit_progress_gil(&store_progress_cb, "write-index", index_done, 1);
+                        if !skip_hnsw_bracket {
+                            backend
+                                .ensure_all_hnsw_indexes()
+                                .map_err(|e| e.to_string())?;
+                        }
                     }
                     Ok(())
                 });
@@ -927,7 +989,7 @@ impl IndexingPipeline {
                         seen_chunks += embed_targets.len() as u64;
 
                         if !embed_targets.is_empty() {
-                            if let Some(ref batch_cb) = embed_cb {
+                            if let Some(ref batch_fn) = embed_fn {
                                 // `None` progress arg is deliberate:
                                 // embed_batch_parallel's internal progress
                                 // callback reports a total scoped to just
@@ -941,7 +1003,7 @@ impl IndexingPipeline {
                                     embed_batch_size,
                                     &mut parsed_files,
                                     &embed_targets,
-                                    batch_cb,
+                                    batch_fn.as_ref(),
                                     &provider,
                                     &model,
                                     None,
@@ -1089,6 +1151,20 @@ impl IndexingPipeline {
             Ok(Err(e)) => Err(e),
             Err(_) => Err("pipeline store thread panicked".to_string()),
         }
+    }
+
+    /// Whether the store thread can leave the HNSW indexes exactly as
+    /// `open()` left them, instead of dropping them and building them again.
+    ///
+    /// True only when the run changes no rows (`nothing_to_write`: no batch
+    /// to insert, no orphan to delete) and no compaction is due. Compaction
+    /// is excluded because it rebuilds the indexes itself, through
+    /// `reopen()`, with the metrics `drop_all_hnsw_indexes()` captures.
+    fn can_skip_hnsw_bracket(
+        backend: &dyn DbBackend,
+        nothing_to_write: bool,
+    ) -> Result<bool, DbError> {
+        Ok(nothing_to_write && !backend.needs_compaction()?)
     }
 
     /// Run a fallible backend setup step (`open`/`drop_all_hnsw_indexes`),
@@ -1366,9 +1442,10 @@ impl IndexingPipeline {
             .map_err(|e| e.to_string())
     }
 
-    /// Dispatch embed batches via rayon to a Python batch callback.
+    /// Dispatch embed batches via rayon to the selected embedding adapter.
     ///
-    /// Each batch calls Python's ``embed_batch_callback(texts) → List[List[float]]``.
+    /// Each batch returns one ordered result slot per input text. Python is
+    /// involved only when the selected adapter is `PythonEmbedCallback`.
     /// Results are collected and applied to ``parsed`` after all batches complete.
     ///
     /// **Caller must release the GIL** before entering this method (via
@@ -1383,7 +1460,7 @@ impl IndexingPipeline {
         embed_batch_size: usize,
         parsed: &mut [super::types::ParsedFile],
         targets: &[(usize, usize, String)],
-        callback: &Py<PyAny>,
+        embed_fn: &dyn EmbedBatchFn,
         provider: &str,
         model: &str,
         progress_callback: Option<Py<PyAny>>,
@@ -1415,13 +1492,13 @@ impl IndexingPipeline {
                     batch.iter().map(|(fi, ci, _)| (*fi, *ci)).collect();
                 let batch_len = batch.len() as u64;
 
-                match Python::with_gil(|gil_py| {
-                    let cb = callback.bind(gil_py);
-                    let ret = cb.call1((texts,))?;
-                    let vectors: Vec<Vec<f64>> = ret.extract()?;
-                    Ok::<_, pyo3::PyErr>(vectors)
-                }) {
-                    Ok(vectors) => {
+                match embed_fn.embed_batch(&texts) {
+                    Ok(embed_result) => {
+                        log::trace!(
+                            "embedding batch requests={} retries={}",
+                            embed_result.stats.requests,
+                            embed_result.stats.retries
+                        );
                         let mut batch_results = Vec::with_capacity(batch.len());
                         // Indices for which the callback returned no vector at
                         // all (a well-formed but short response — e.g. a
@@ -1429,12 +1506,8 @@ impl IndexingPipeline {
                         // raised exception, which is handled below instead).
                         let mut missing: Vec<(usize, usize)> = Vec::new();
                         for (i, (fi, ci)) in indices.iter().enumerate() {
-                            if let Some(vec) = vectors.get(i) {
-                                batch_results.push((
-                                    *fi,
-                                    *ci,
-                                    vec.iter().map(|x| *x as f32).collect(),
-                                ));
+                            if let Some(Some(vec)) = embed_result.vectors.get(i) {
+                                batch_results.push((*fi, *ci, vec.clone()));
                             } else {
                                 missing.push((*fi, *ci));
                             }
@@ -1446,15 +1519,20 @@ impl IndexingPipeline {
                         if !missing.is_empty() {
                             log::warn!(
                                 "embed batch returned {} vector(s) for {} chunk(s), {} missing",
-                                vectors.len(),
+                                embed_result.vectors.len(),
                                 batch_len,
                                 missing.len()
                             );
                             let reason = format!(
                                 "provider returned {} vector(s) for {} requested",
-                                vectors.len(),
+                                embed_result.vectors.iter().filter(|v| v.is_some()).count(),
                                 batch_len
                             );
+                            let reason = if embed_result.errors.is_empty() {
+                                reason
+                            } else {
+                                format!("{} ({})", reason, embed_result.errors.join("; "))
+                            };
                             batch_errors
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
@@ -1599,6 +1677,8 @@ mod tests {
         fail_open: bool,
         fail_drop_hnsw: bool,
         close_called: Cell<bool>,
+        /// `None` makes `needs_compaction()` fail.
+        compaction_due: Option<bool>,
     }
 
     impl DbBackend for FakeBackend {
@@ -1620,7 +1700,8 @@ mod tests {
         }
 
         fn needs_compaction(&self) -> Result<bool, DbError> {
-            Ok(false)
+            self.compaction_due
+                .ok_or_else(|| DbError::Other("simulated needs_compaction failure".into()))
         }
 
         fn run_compaction(&mut self) -> Result<(), DbError> {
@@ -1644,6 +1725,7 @@ mod tests {
             fail_open: true,
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
+            compaction_due: Some(false),
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1660,6 +1742,7 @@ mod tests {
             fail_open: false,
             fail_drop_hnsw: true,
             close_called: Cell::new(false),
+            compaction_due: Some(false),
         };
         let drop_result = backend.drop_all_hnsw_indexes();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, drop_result);
@@ -1676,6 +1759,7 @@ mod tests {
             fail_open: false,
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
+            compaction_due: Some(false),
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1686,5 +1770,56 @@ mod tests {
              explicitly later, and closing here would wrongly trigger a premature \
              ensure_all_hnsw_indexes() before any batches are written"
         );
+    }
+
+    fn backend_with_compaction(compaction_due: Option<bool>) -> FakeBackend {
+        FakeBackend {
+            fail_open: false,
+            fail_drop_hnsw: false,
+            close_called: Cell::new(false),
+            compaction_due,
+        }
+    }
+
+    #[test]
+    fn test_hnsw_bracket_skipped_only_for_a_run_that_changes_nothing() {
+        let idle = backend_with_compaction(Some(false));
+        assert!(
+            IndexingPipeline::can_skip_hnsw_bracket(&idle, true).unwrap(),
+            "no rows to write or delete and no compaction due: leave the indexes alone"
+        );
+        assert!(
+            !IndexingPipeline::can_skip_hnsw_bracket(&idle, false).unwrap(),
+            "a run that writes or deletes rows must drop and rebuild"
+        );
+    }
+
+    #[test]
+    fn test_hnsw_bracket_kept_when_compaction_is_due() {
+        // Compaction rebuilds the indexes through reopen(), using the metrics
+        // drop_all_hnsw_indexes() captures — so the drop must still happen.
+        let compacting = backend_with_compaction(Some(true));
+        assert!(!IndexingPipeline::can_skip_hnsw_bracket(&compacting, true).unwrap());
+        assert!(!IndexingPipeline::can_skip_hnsw_bracket(&compacting, false).unwrap());
+    }
+
+    #[test]
+    fn test_hnsw_bracket_decision_failure_still_closes_backend() {
+        let mut backend = backend_with_compaction(None);
+        let decision = IndexingPipeline::can_skip_hnsw_bracket(&backend, true);
+        let result = IndexingPipeline::close_backend_on_err(&mut backend, decision);
+        assert!(result.is_err());
+        assert!(
+            backend.close_called.get(),
+            "close() must run even when the compaction check fails (Invariant 14)"
+        );
+    }
+
+    #[test]
+    fn test_hnsw_bracket_decision_does_not_ask_about_compaction_when_writing() {
+        // A failing compaction check must not turn an ordinary writing run
+        // into an error at this point; the post-write check reports it.
+        let backend = backend_with_compaction(None);
+        assert!(!IndexingPipeline::can_skip_hnsw_bracket(&backend, false).unwrap());
     }
 }

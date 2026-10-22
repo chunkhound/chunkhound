@@ -45,6 +45,11 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    @property
+    def supports_embedding_sql_queries(self) -> bool:
+        """Whether targeted chunk/file/embedding SQL queries are supported."""
+        ...
+
     def release_for_rust_pipeline(self) -> None:
         """Release this provider's connection so the Rust pipeline can take
         write ownership of the database file.
@@ -138,6 +143,14 @@ class DatabaseProvider(Protocol):
 
         No-op for providers without HNSW support (LanceDB).
         """
+        ...
+
+    async def drop_all_hnsw_indexes_async(self) -> None:
+        """Drop provider-managed HNSW indexes without blocking the event loop."""
+        ...
+
+    async def ensure_all_hnsw_indexes_async(self) -> None:
+        """Rebuild provider-managed HNSW indexes without blocking the event loop."""
         ...
 
     # File Operations
@@ -467,6 +480,15 @@ class DatabaseProvider(Protocol):
 
     def get_provider_stats(self, provider: str, model: str) -> dict[str, Any]:
         """Get statistics for a specific embedding provider/model."""
+        ...
+
+    def get_embedding_model_counts(self) -> list[dict[str, Any]]:
+        """Summarize stored vectors by provider, model and dimensions.
+
+        Returns one row per combination with ``provider``, ``model``,
+        ``dims``, ``count`` and ``latest``: the newest vector's write time as
+        a datetime or POSIX timestamp, or None when the backend records none.
+        """
         ...
 
     # Transaction and Bulk Operations

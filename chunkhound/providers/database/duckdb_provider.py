@@ -345,6 +345,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         return True
 
     @property
+    def supports_embedding_sql_queries(self) -> bool:
+        """DuckDB supports targeted joins over chunks, files, and embeddings."""
+        return True
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active - delegate to connection manager."""
         return self._connection_manager.is_connected
@@ -757,14 +762,17 @@ class DuckDBProvider(SerialDatabaseProvider):
         current_value = current_value_result[0] if current_value_result else None
         if current_value is None:
             current_value = conn.execute(
-                f"SELECT nextval('{sequence_name}')"
+                "SELECT nextval(?)", [sequence_name]
             ).fetchone()[0]
 
         advance_by = max_id - int(current_value)
         if advance_by <= 0:
             return
 
-        conn.execute(f"SELECT nextval('{sequence_name}') FROM range({advance_by})")
+        conn.execute(
+            f"SELECT nextval(?) FROM range({advance_by})",
+            [sequence_name],
+        )
 
     def _executor_recreate_sequence(
         self, conn: Any, sequence_name: str, next_value: int
@@ -2156,6 +2164,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         indexes on the clean DB.
         """
         self._execute_in_db_thread_sync("ensure_all_hnsw_indexes")
+
+    async def drop_all_hnsw_indexes_async(self) -> None:
+        """Drop indexes on the serial DB executor without the sync timeout."""
+        await self._execute_in_db_thread("drop_all_hnsw_indexes")
+
+    async def ensure_all_hnsw_indexes_async(self) -> None:
+        """Rebuild indexes on the serial DB executor without the sync timeout."""
+        await self._execute_in_db_thread("ensure_all_hnsw_indexes")
 
     def _executor_get_existing_vector_indexes(
         self, conn: Any, state: dict[str, Any]
@@ -4658,6 +4674,31 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "files": 0,
                 "dimensions": 0,
             }
+
+    def get_embedding_model_counts(self) -> list[dict[str, Any]]:
+        """Summarize stored vectors by provider, model and dimensions."""
+        return self._execute_in_db_thread_sync("get_embedding_model_counts")
+
+    def _executor_get_embedding_model_counts(
+        self, conn: Any, state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_embedding_model_counts - runs in DB thread."""
+        rows: list[dict[str, Any]] = []
+        for table_name in self._executor_get_all_embedding_tables(conn, state):
+            for provider, model, dims, count, latest in conn.execute(
+                "SELECT provider, model, dims, COUNT(*), MAX(created_at) "
+                f"FROM {table_name} GROUP BY provider, model, dims"
+            ).fetchall():
+                rows.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "dims": dims,
+                        "count": count,
+                        "latest": latest,
+                    }
+                )
+        return rows
 
     def execute_query(
         self, query: str, params: list[Any] | None = None

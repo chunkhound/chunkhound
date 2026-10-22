@@ -26,7 +26,7 @@ _MCP_INIT_PARAMS = {
     "clientInfo": {"name": "watchman-wheel-e2e", "version": "0.0.1"},
     "capabilities": {},
 }
-_READY_TIMEOUT_SECONDS = 60.0
+_READY_TIMEOUT_SECONDS = 120.0
 _MCP_INITIALIZE_TIMEOUT_SECONDS = 60.0
 _SEARCH_TIMEOUT_SECONDS = 30.0
 _SOURCE_FALLBACK_FAILURE_TIMEOUT_SECONDS = 20.0

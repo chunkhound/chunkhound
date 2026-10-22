@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from loguru import logger
 
+from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
@@ -230,16 +231,15 @@ def parse_file_callback(
 
     lang = detect_language(Path(file_path))
 
-    # Binary guard before unknown-type skip so a NUL-containing .bin is
-    # ``binary_file``, not ``Unknown file type``.
-    with open(file_path, "rb") as fh:
-        sample = fh.read(8192)
-    if b"\x00" in sample:
-        return ("", [], "binary_file")
-
+    # NUL check only for unrecognized extensions opted in as text, matching
+    # batch_processor. A known language such as PDF is parsed as that language.
     if lang is None or lang == Language.UNKNOWN:
         if not index_unknown_files:
             return ("", [], "Unknown file type")
+        with open(file_path, "rb") as fh:
+            sample = fh.read(8192)
+        if b"\x00" in sample:
+            return ("", [], "binary_file")
         lang = Language.TEXT
 
     # Config file size gate
@@ -265,31 +265,42 @@ def embed_batch_callback(
     *,
     embedding_cfg: Any = None,
     cache: "_EmbedThreadCache | None" = None,
+    analytics: tuple[Any, int, bool] | None = None,
 ) -> list[list[float]]:
     """Parallel batch embed (called from Rust rayon threads with GIL held).
 
     Signature matches what ``embed_batch_parallel`` expects:
     ``callback.call1((texts,)) → List[List[float]]``.
 
-    ``embedding_cfg`` and ``cache`` are both bound by ``run_rust_pipeline``
-    via ``functools.partial`` so each rayon call still looks like
-    ``callback(texts)``. ``embedding_cfg`` must be the coordinator's
-    embedding config for this run — not whatever happens to sit on the
-    process-wide registry. ``cache`` must be *this run's own*
+    ``embedding_cfg``, ``cache``, and ``analytics`` are all bound by
+    ``run_rust_pipeline`` via ``functools.partial`` so each rayon call
+    still looks like ``callback(texts)``. ``embedding_cfg`` must be the
+    coordinator's embedding config for this run — not whatever happens to
+    sit on the process-wide registry. ``cache`` must be *this run's own*
     ``_EmbedThreadCache`` — see its docstring for why it can't be a shared
-    module-level cache.
+    module-level cache. ``analytics`` is the (recorder, handle,
+    save_sensitive_data) resolved from the *calling* thread's context
+    before this run started -- this
+    rayon thread's own `contextvars` context is otherwise empty (rayon
+    threads don't inherit it the way asyncio Tasks do), which is exactly
+    the gap this explicit binding closes. Only used for the Python-callback
+    fallback path (providers without a native Rust adapter); the native
+    OpenAI/VoyageAI path records analytics directly in Rust instead, via
+    `IndexingPipeline.run()`'s own `analytics_recorder`/`analytics_handle`
+    params.
 
     Used when ``embed_thread_pool_size > 1`` — each rayon thread
     processes one batch at a time, so the provider sees N concurrent
     API requests.
     """
-    return _embed_batch(texts, embedding_cfg, cache)
+    return _embed_batch(texts, embedding_cfg, cache, analytics)
 
 
 def _embed_batch(
     texts: list[str],
     embedding_cfg: Any = None,
     cache: "_EmbedThreadCache | None" = None,
+    analytics: tuple[Any, int, bool] | None = None,
 ) -> list[list[float]]:
     """Shared embed helper — run the async provider.embed() synchronously.
 
@@ -364,6 +375,15 @@ def _embed_batch(
     emb_provider = cache.providers[tid]
 
     async def _embed() -> list[list[float]]:
+        # Bound here, not once at the top of `_embed_batch`, so it lands on
+        # whichever thread actually runs this coroutine to completion --
+        # covers both the rayon-thread branch below and the ThreadPoolExecutor
+        # fallback branch further down, which really does hand this coroutine
+        # to a distinct new OS thread. `contextvars` don't cross an OS thread
+        # boundary on their own (unlike an asyncio Task boundary), which is
+        # exactly the gap `bind_current` closes explicitly.
+        if analytics is not None:
+            ch_analytics.bind_current(*analytics)
         return await emb_provider.embed(texts)
 
     # Rayon threads are NOT the main thread and have no event loop of their
@@ -583,6 +603,59 @@ def _detect_embed_concurrency(embedding_cfg: Any) -> int:
     return int(get_concurrency())
 
 
+def _embedding_native_capabilities(
+    embedding_cfg: Any, provider: str, model: str
+) -> tuple[int, bool, bool]:
+    """Return the token envelope, Matryoshka flag, and known-model flag.
+
+    These values mirror the actual ``embed_batch`` implementations. In
+    particular, OpenAI reserves 100 tokens below the model limit; the older
+    ``embedding_service`` batching constants are unrelated to this callback
+    path and must not be copied here.
+
+    ``model_known`` mirrors ``model in self._model_config`` in
+    ``openai_provider._build_embedding_request_kwargs`` — it feeds the Rust
+    ``dimensions`` gate (``openai.rs::should_send_dimensions``), which must
+    trust an unknown model the same way it trusts a custom endpoint. It is
+    unused outside the openai provider, where the gate doesn't exist.
+    """
+    if provider == "openai":
+        from chunkhound.providers.embeddings.openai_provider import OPENAI_MODEL_CONFIG
+
+        model_config = OPENAI_MODEL_CONFIG.get(model)
+        if model_config is None:
+            return 8191 - 100, False, False
+        return (
+            max(1, int(model_config["max_tokens"]) - 100),
+            bool(model_config.get("matryoshka", False)),
+            True,
+        )
+    if provider == "voyageai":
+        from chunkhound.providers.embeddings.voyageai_provider import (
+            DEFAULT_UNKNOWN_MODEL_CONFIG,
+            VOYAGE_MODEL_CONFIG,
+        )
+
+        voyage_config = VOYAGE_MODEL_CONFIG.get(model, DEFAULT_UNKNOWN_MODEL_CONFIG)
+        return int(voyage_config["max_tokens_per_batch"]), False, True
+    return 8191, False, True
+
+
+def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
+    """Use the provider's canonical default instead of crossing ``None``."""
+    get_default_model = getattr(embedding_cfg, "get_default_model", None)
+    if callable(get_default_model):
+        return str(get_default_model())
+    model = _cfg_or(embedding_cfg, "model", "", str)
+    if model:
+        return model
+    return {
+        "openai": "text-embedding-3-small",
+        "voyageai": "voyage-3.5",
+    }.get(provider, "")
+
+
+
 _T = TypeVar("_T")
 _MISSING = object()
 
@@ -638,6 +711,15 @@ async def run_rust_pipeline(
 
     from chunkhound_native import IndexingPipeline
 
+    # Resolved here, on the calling task's own thread, before anything hands
+    # off to asyncio.to_thread or the Rust rayon pool -- contextvars cross
+    # asyncio Task boundaries but not OS thread boundaries, so this must be
+    # read now, then threaded through explicitly from here on (both into
+    # IndexingPipeline.run()'s own analytics_recorder/analytics_handle
+    # params for the native embed path, and into embed_batch_callback's
+    # functools.partial binding for the Python-callback fallback path).
+    analytics_current = ch_analytics.get_current()
+
     # ── Config mapping ──────────────────────────────────────
     indexing_cfg = getattr(config, "indexing", None) if config else None
     embedding_cfg = getattr(config, "embedding", None) if config else None
@@ -671,7 +753,21 @@ async def run_rust_pipeline(
     )
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
-    embedding_model = _cfg_or(embedding_cfg, "model", "", str)
+    embedding_model = _resolved_embedding_model(embedding_cfg, embedding_provider)
+    (
+        embed_max_tokens_per_batch,
+        embedding_matryoshka,
+        embedding_model_known,
+    ) = _embedding_native_capabilities(
+        embedding_cfg, embedding_provider, embedding_model
+    )
+    embedding_api_key = getattr(embedding_cfg, "api_key", None)
+    if embedding_api_key is not None and hasattr(
+        embedding_api_key, "get_secret_value"
+    ):
+        embedding_api_key = embedding_api_key.get_secret_value()
+    embedding_base_url = getattr(embedding_cfg, "base_url", None)
+    embedding_azure_endpoint = getattr(embedding_cfg, "azure_endpoint", None)
 
     embed_batch_size = _cfg_or(embedding_cfg, "batch_size", 200, int)
     max_concurrent = _cfg_or(embedding_cfg, "max_concurrent_batches", 0, int)
@@ -703,6 +799,34 @@ async def run_rust_pipeline(
         "config_file_size_threshold_kb": config_file_threshold,
         "embedding_provider": embedding_provider,
         "embedding_model": embedding_model,
+        "embedding_api_key": embedding_api_key,
+        "embedding_base_url": embedding_base_url,
+        "embedding_output_dims": getattr(embedding_cfg, "output_dims", None),
+        "embedding_matryoshka": embedding_matryoshka,
+        "embedding_model_known": embedding_model_known,
+        "embedding_client_side_truncation": bool(
+            getattr(embedding_cfg, "client_side_truncation", False)
+        ),
+        "embedding_api_version": getattr(embedding_cfg, "api_version", None),
+        # ssl_verify is scoped to custom endpoints, mirroring
+        # EmbeddingConfig.get_provider_config() and openai_provider's
+        # verify_tls: the official endpoint (and Azure, which must leave
+        # base_url unset) always gets real TLS verification, even when the
+        # caller disabled it for some other URL such as a self-hosted
+        # reranker. Forwarding it unconditionally would let that unrelated
+        # setting turn off certificate checking on requests that carry the
+        # API key to api.openai.com.
+        "embedding_ssl_verify": (
+            bool(getattr(embedding_cfg, "ssl_verify", True))
+            if embedding_base_url
+            else True
+        ),
+        "embedding_is_azure": bool(embedding_azure_endpoint),
+        "embedding_azure_endpoint": embedding_azure_endpoint,
+        "embedding_azure_deployment": getattr(
+            embedding_cfg, "azure_deployment", None
+        ),
+        "embed_max_tokens_per_batch": embed_max_tokens_per_batch,
         "disk_usage_limit_mb": disk_usage_limit_mb,
     }
 
@@ -757,12 +881,24 @@ async def run_rust_pipeline(
                     embed_batch_callback,
                     embedding_cfg=embedding_cfg,
                     cache=embed_cache,
+                    analytics=analytics_current,
                 )
                 if not skip_embeddings
                 else None
             ),
             progress_callback=progress_callback,
             incremental=not force_reindex,
+            # Native OpenAI/VoyageAI embed calls record analytics directly
+            # in Rust (see src/embed/{openai,voyageai}.rs) -- this is the
+            # Arc<Inner>-extraction handoff for that path; the
+            # functools.partial binding above covers the Python-callback
+            # fallback path for every other provider.
+            analytics_recorder=(
+                analytics_current[0] if analytics_current is not None else None
+            ),
+            analytics_handle=(
+                analytics_current[1] if analytics_current is not None else 0
+            ),
         )
     except Exception as e:
         raise RustPipelineError(reason=str(e)) from e

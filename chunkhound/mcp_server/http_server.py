@@ -265,7 +265,7 @@ async def main(args: Any = None, config: Config | None = None) -> None:
 
     if config is None:
         # Create and validate configuration
-        config, validation_errors = create_validated_config(args, "mcp")
+        config, validation_errors = await create_validated_config(args, "mcp")
 
         if validation_errors:
             msg = "; ".join(str(e) for e in validation_errors)
