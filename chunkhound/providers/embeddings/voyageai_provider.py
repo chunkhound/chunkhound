@@ -1,4 +1,7 @@
-"""VoyageAI embedding provider implementation for ChunkHound - concrete embedding provider using VoyageAI API."""
+"""VoyageAI embedding provider for ChunkHound.
+
+Concrete provider using the VoyageAI API.
+"""
 
 import asyncio
 import os
@@ -283,7 +286,8 @@ class VoyageAIEmbeddingProvider:
             retry_attempts: Number of retry attempts for failed requests
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
-            rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            rerank_batch_size: Max documents per rerank batch
+                (overrides default of 1000).
             output_dims: Optional server-side output dimension override. Known
                 official Voyage models keep their whitelist. Unknown/custom
                 Voyage-compatible endpoints are trusted instead and prove
@@ -408,9 +412,7 @@ class VoyageAIEmbeddingProvider:
         # endpoints; the official VoyageAI API keeps the higher recommended
         # concurrency even when callers pass its base_url explicitly.
         if max_concurrent_batches is None:
-            max_concurrent_batches = (
-                1 if is_custom else self.RECOMMENDED_CONCURRENCY
-            )
+            max_concurrent_batches = 1 if is_custom else self.RECOMMENDED_CONCURRENCY
         self._embed_semaphore = asyncio.Semaphore(max_concurrent_batches)
 
     @property
@@ -539,10 +541,11 @@ class VoyageAIEmbeddingProvider:
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts with automatic retry on network errors.
+        """Generate embeddings for a list of texts.
 
-        Internally sub-batches to self._batch_size so that custom endpoints
-        (e.g. Azure ML) are never overwhelmed by a single oversized request.
+        Retries automatically on network errors. Internally sub-batches to
+        self._batch_size so that custom endpoints (e.g. Azure ML) are never
+        overwhelmed by a single oversized request.
         """
         if not texts:
             return []
@@ -551,7 +554,8 @@ class VoyageAIEmbeddingProvider:
         if not validated_texts:
             return []
 
-        # Sub-batch when input exceeds batch_size (protects custom/low-throughput endpoints)
+        # Sub-batch when input exceeds batch_size
+        # (protects custom/low-throughput endpoints).
         if len(validated_texts) > self._batch_size:
             all_embeddings: list[list[float]] = []
             for i in range(0, len(validated_texts), self._batch_size):
@@ -593,7 +597,10 @@ class VoyageAIEmbeddingProvider:
             )
 
     def _validate_output_dims_config(self) -> None:
-        """Validate output_dims and client_side_truncation, enforcing VoyageAI whitelist."""
+        """Validate output_dims and client_side_truncation.
+
+        Enforces the VoyageAI whitelist.
+        """
         self._validate_output_dims_config_for(
             model=self._model,
             model_config=self._model_config,
@@ -696,9 +703,7 @@ class VoyageAIEmbeddingProvider:
                 # Validate raw API response dims before any client-side truncation
                 expected_raw = self._expected_raw_dims()
                 if raw_dims is not None and expected_raw is not None:
-                    validate_embedding_dims(
-                        raw_dims, expected_raw, model=self._model
-                    )
+                    validate_embedding_dims(raw_dims, expected_raw, model=self._model)
 
                 # Apply client-side truncation when server doesn't support dim param
                 if self._client_side_truncation:
@@ -735,11 +740,14 @@ class VoyageAIEmbeddingProvider:
                 else:
                     if category is not None:
                         logger.error(
-                            f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
+                            "VoyageAI embedding failed after {} attempts: {}",
+                            self._retry_attempts,
+                            e,
                         )
                     else:
                         logger.error(
-                            f"VoyageAI embedding failed with non-retryable error: {e}"
+                            "VoyageAI embedding failed with non-retryable error: {}",
+                            e,
                         )
                     raise RuntimeError(f"Embedding generation failed: {e}") from e
 
@@ -1018,7 +1026,9 @@ class VoyageAIEmbeddingProvider:
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
-                    f"VoyageAI reranking {len(documents)} documents with model {rerank_model}"
+                    "VoyageAI reranking {} documents with model {}",
+                    len(documents),
+                    rerank_model,
                 )
 
                 try:
@@ -1057,10 +1067,12 @@ class VoyageAIEmbeddingProvider:
                             RerankResult(index=item.index, score=item.relevance_score)
                         )
                     else:
-                        logger.warning(f"Skipping invalid rerank result: {item}")
+                        logger.warning("Skipping invalid rerank result: {}", item)
 
                 logger.debug(
-                    f"VoyageAI reranked {len(documents)} documents, got {len(rerank_results)} results"
+                    "VoyageAI reranked {} documents, got {} results",
+                    len(documents),
+                    len(rerank_results),
                 )
                 return rerank_results
 
@@ -1087,11 +1099,14 @@ class VoyageAIEmbeddingProvider:
                 else:
                     if category is not None:
                         logger.error(
-                            f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
+                            "VoyageAI reranking failed after {} attempts: {}",
+                            self._retry_attempts,
+                            e,
                         )
                     else:
                         logger.error(
-                            f"VoyageAI reranking failed with non-retryable error: {e}"
+                            "VoyageAI reranking failed with non-retryable error: {}",
+                            e,
                         )
                     raise RuntimeError(f"Reranking failed: {e}") from e
 
@@ -1148,9 +1163,7 @@ class VoyageAIEmbeddingProvider:
                 if self._api_key:
                     headers["Authorization"] = f"Bearer {self._api_key}"
 
-                response = await client.post(
-                    rerank_url, json=payload, headers=headers
-                )
+                response = await client.post(rerank_url, json=payload, headers=headers)
                 response.raise_for_status()
                 data = response.json()
         except Exception as rerank_call_error:
@@ -1205,7 +1218,8 @@ class VoyageAIEmbeddingProvider:
             data = {"results": data["data"]}
         if "results" not in data:
             raise ValueError(
-                f"Invalid rerank response: missing 'results' field. Got: {list(data.keys())}"
+                "Invalid rerank response: missing 'results' field. "
+                f"Got: {list(data.keys())}"
             )
 
         results = []
