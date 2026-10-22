@@ -19,6 +19,8 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
     LEXICAL_DECLARATION_CONFIG,
+    TOP_LEVEL_CALL_STATEMENTS,
+    TOP_LEVEL_IMPORTS,
     VAR_DECLARATION_CONFIG,
 )
 from chunkhound.parsers.mappings.base import BaseMapping
@@ -215,6 +217,12 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             return """
             (comment) @definition
             """
+
+        elif concept == UniversalConcept.IMPORT:
+            return TOP_LEVEL_IMPORTS
+
+        elif concept == UniversalConcept.BLOCK:
+            return TOP_LEVEL_CALL_STATEMENTS
 
         # Use default handling for other concepts
         return None

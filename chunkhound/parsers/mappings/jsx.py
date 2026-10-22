@@ -16,6 +16,8 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
     LEXICAL_DECLARATION_CONFIG,
+    TOP_LEVEL_CALL_STATEMENTS,
+    TOP_LEVEL_IMPORTS,
     VAR_DECLARATION_CONFIG,
 )
 from chunkhound.parsers.mappings.javascript import JavaScriptMapping
@@ -221,6 +223,10 @@ class JSXMapping(JavaScriptMapping):
             return """
             (comment) @definition
             """
+        elif concept == UniversalConcept.IMPORT:
+            return TOP_LEVEL_IMPORTS
+        elif concept == UniversalConcept.BLOCK:
+            return TOP_LEVEL_CALL_STATEMENTS
         return None
 
     def extract_component_name(self, node: TSNode | None, source: str) -> str:

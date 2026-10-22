@@ -42,11 +42,42 @@ class JSFamilyExtraction:
                 line = node.start_point[0] + 1
                 return f"definition_line_{line}"
 
+        if concept == UniversalConcept.IMPORT and "definition" in captures:
+            node = captures["definition"]
+            module_node = node.child_by_field_name("source")
+            if module_node is not None:
+                module = self.get_node_text(module_node, source).strip("'\"` ")  # type: ignore[attr-defined]
+                return f"import_{module}"
+            return f"import_line_{node.start_point[0] + 1}"
+
+        if concept == UniversalConcept.BLOCK and "definition" in captures:
+            return self._call_statement_name(captures["definition"], source)
+
         if concept == UniversalConcept.COMMENT and "definition" in captures:
             node = captures["definition"]
             return f"comment_line_{node.start_point[0] + 1}"
 
         return f"unnamed_{concept.value}"
+
+    def _call_statement_name(self, statement: TSNode, source: str) -> str:
+        """Name a top-level call statement: ``callee`` or ``callee("first string")``."""
+        call = statement.named_child(0)
+        if call is not None and call.type == "await_expression":
+            call = call.named_child(0)
+        callee = call.child_by_field_name("function") if call is not None else None
+        if callee is None or callee.type not in {"identifier", "member_expression"}:
+            return f"statement_line_{statement.start_point[0] + 1}"
+        name: str = self.get_node_text(callee, source).strip()  # type: ignore[attr-defined]
+        arguments = call.child_by_field_name("arguments") if call else None
+        first = (
+            arguments.named_child(0)
+            if arguments is not None and arguments.named_child_count
+            else None
+        )
+        if first is not None and first.type in {"string", "template_string"}:
+            title = self.get_node_text(first, source).strip("'\"` ")  # type: ignore[attr-defined]
+            return f'{name}("{title}")'
+        return name
 
     def extract_metadata(
         self,
