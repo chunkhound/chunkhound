@@ -17,11 +17,17 @@ inherently slower and more environment-sensitive::
 
 import importlib
 import pkgutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.cli import (
+    CLI_STARTUP_TIMEOUT_SECONDS,
+    registered_cli_commands,
+    run_cli,
+    run_cli_in_process,
+)
 
 # Add parent directory to path to import chunkhound
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -85,37 +91,37 @@ class TestModuleImports:
 
 
 class TestCLICommands:
-    """Test that CLI commands at least show help without crashing."""
+    """CLI parser and entry-point smoke checks.
 
-    @pytest.mark.parametrize(
-        "command",
-        [
-            ["chunkhound", "--help"],
-            ["chunkhound", "--version"],
-            ["chunkhound", "index", "--help"],
-            ["chunkhound", "search", "--help"],
-            ["chunkhound", "research", "--help"],
-            ["chunkhound", "map", "--help"],
-            ["chunkhound", "mcp", "--help"],
-            ["chunkhound", "calibrate", "--help"],
-        ],
-    )
-    def test_cli_help_commands(self, command):
-        """Test that CLI help commands work without crashing."""
-        result = subprocess.run(
-            ["uv", "run"] + command, capture_output=True, text=True, timeout=5
-        )
+    Help and version are parser work, so they run in-process. One real
+    process start proves the interpreter can import and launch the entry point.
+    """
 
-        # Help commands should exit with 0
-        assert result.returncode == 0, (
-            f"Command {' '.join(command)} failed with code {result.returncode}\n"
-            f"stderr: {result.stderr}"
-        )
+    def test_main_help(self):
+        result = run_cli_in_process(["--help"])
 
-        # Should have some output
-        assert result.stdout or result.stderr, (
-            f"Command {' '.join(command)} produced no output"
-        )
+        assert result.returncode == 0, result.stderr
+        assert "Available commands" in result.stdout
+
+    @pytest.mark.parametrize("command", registered_cli_commands())
+    def test_subcommand_help(self, command):
+        result = run_cli_in_process([command, "--help"])
+
+        assert result.returncode == 0, result.stderr
+        assert command in result.stdout
+
+    def test_version(self):
+        result = run_cli_in_process(["--version"])
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("chunkhound ")
+
+    def test_cli_entry_point_starts(self):
+        """One real process start: interpreter, imports, and native load."""
+        result = run_cli(["--version"], timeout=CLI_STARTUP_TIMEOUT_SECONDS)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("chunkhound ")
 
 
 class TestParserLoading:
@@ -186,7 +192,10 @@ class TestParserLoading:
 
         # SetupErrors should cause immediate test failure (critical issues)
         if setup_errors:
-            error_msg = "CRITICAL: Parser setup failures (version incompatibility or missing dependencies):\n"
+            error_msg = (
+                "CRITICAL: Parser setup failures (version incompatibility "
+                "or missing dependencies):\n"
+            )
             for language, error in setup_errors:
                 error_msg += f"  - {language}: {error}\n"
             pytest.fail(error_msg)
@@ -213,7 +222,7 @@ class TestTypeAnnotations:
         for py_file in glob.glob("chunkhound/**/*.py", recursive=True):
             if "/tests/" in py_file.replace("\\", "/"):
                 continue
-            with open(py_file, "r", encoding="utf-8") as f:
+            with open(py_file, encoding="utf-8") as f:
                 content = f.read()
 
             # Check for the problematic pattern: "ClassName" | None
@@ -225,7 +234,7 @@ class TestTypeAnnotations:
             if re.search(pattern, content):
                 # Found potential issue, let's verify it's not in a string
                 try:
-                    tree = ast.parse(content)
+                    ast.parse(content)
                     # This is where we'd do more sophisticated checking
                     # For now, just flag the file
                     problematic_files.append(py_file)
@@ -235,7 +244,7 @@ class TestTypeAnnotations:
 
         if problematic_files:
             pytest.fail(
-                f"Found problematic forward reference union patterns in:\n"
+                "Found problematic forward reference union patterns in:\n"
                 + "\n".join(f"  - {f}" for f in problematic_files)
             )
 

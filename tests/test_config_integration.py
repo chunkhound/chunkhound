@@ -6,21 +6,21 @@ integrates correctly with the registry system, ensuring embedding providers
 are properly registered and available to services without producing warnings.
 """
 
-import json
 import argparse
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
 import gc
+import json
 import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.llm_config import LLMConfig
-from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 from chunkhound.registry import configure_registry, get_registry
+from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 from tests.utils.windows_compat import (
-    cleanup_database_resources,
     database_cleanup_context,
     paths_equal,
     windows_safe_tempdir,
@@ -31,176 +31,189 @@ def _cleanup_registry_and_connections():
     """Clean up registry and database connections for Windows compatibility."""
     try:
         registry = get_registry()
-        
+
         # Try to close database provider if it has a close method
         try:
             db_provider = registry.get_provider("database")
-            if hasattr(db_provider, 'close'):
+            if hasattr(db_provider, "close"):
                 db_provider.close()
-            elif hasattr(db_provider, 'cleanup'):
+            elif hasattr(db_provider, "cleanup"):
                 db_provider.cleanup()
             # For serial providers, try to close the underlying executor connection
-            elif hasattr(db_provider, '_executor') and hasattr(db_provider._executor, '_connection'):
-                if hasattr(db_provider._executor._connection, 'close'):
+            elif hasattr(db_provider, "_executor") and hasattr(
+                db_provider._executor, "_connection"
+            ):
+                if hasattr(db_provider._executor._connection, "close"):
                     db_provider._executor._connection.close()
         except (ValueError, AttributeError):
             # No database provider or connection to clean up
             pass
-            
+
         # Clear registry providers
         registry._providers.clear()
         registry._language_parsers.clear()
         registry._config = None
-        
+
     except Exception:
         # Best effort cleanup - don't fail the test if cleanup fails
         pass
-    
+
     # Force garbage collection to help with Windows file locking
     gc.collect()
-    
+
     # On Windows, give a brief moment for file handles to be released
     if IS_WINDOWS:
         time.sleep(WINDOWS_FILE_HANDLE_DELAY)
 
 
-def test_embedding_config_initializes_cleanly(clean_environment):
+def test_embedding_config_initializes_cleanly(hermetic_environment):
     """
-    Test that valid embedding configuration from .chunkhound.json initializes without warnings.
-    
+    Test that valid embedding configuration from .chunkhound.json initializes
+    without warnings.
+
     This test validates the integration between configuration loading and registry
     initialization, ensuring that:
     - Valid embedding configs are loaded correctly from JSON files
     - Registry initialization processes the config without emitting warnings
     - Embedding providers are properly registered and available to services
-    
+
     This is a regression test for initialization order issues where services
     were created before embedding providers were registered.
     """
     with windows_safe_tempdir() as temp_path:
-        
         # Create .chunkhound.json with valid embedding provider config
-        config_path = temp_path / ".chunkhound.json" 
+        config_path = temp_path / ".chunkhound.json"
         db_path = temp_path / ".chunkhound" / "test.db"
         db_path.parent.mkdir(exist_ok=True)
-        
+
         config_data = {
-            "database": {
-                "path": str(db_path),
-                "provider": "duckdb"
-            },
+            "database": {"path": str(db_path), "provider": "duckdb"},
             "embedding": {
-                "provider": "openai", 
+                "provider": "openai",
                 "base_url": "https://test-api-endpoint/v1",
                 "api_key": "test-key-for-validation",
-                "model": "test-embedding-model"
-            }
+                "model": "test-embedding-model",
+            },
         }
-        
+
         with open(config_path, "w") as f:
             json.dump(config_data, f)
-        
+
         # Change to temp directory to simulate normal usage
         original_cwd = Path.cwd()
         try:
             import os
+
             os.chdir(temp_path)
-            
+
             # Load config using ChunkHound's configuration system
             config = Config()
-            
+
             # Verify config loaded correctly
             assert config.embedding is not None
             assert config.embedding.provider == "openai"
-            assert config.embedding.api_key.get_secret_value() == "test-key-for-validation"
+            assert (
+                config.embedding.api_key.get_secret_value() == "test-key-for-validation"
+            )
             assert config.embedding.base_url == "https://test-api-endpoint/v1"
             assert config.embedding.model == "test-embedding-model"
-            
+
             # Mock the provider to avoid network calls during testing
-            with patch('chunkhound.providers.embeddings.openai_provider.OpenAIEmbeddingProvider') as mock_provider_class:
+            with patch(
+                "chunkhound.providers.embeddings.openai_provider.OpenAIEmbeddingProvider"
+            ) as mock_provider_class:
                 mock_provider = MagicMock()
                 mock_provider_class.return_value = mock_provider
-                
+
                 # Use database cleanup context for proper resource management
                 with database_cleanup_context():
                     # Capture registry logger to check for warnings
-                    with patch('chunkhound.registry.logger') as mock_logger:
+                    with patch("chunkhound.registry.logger") as mock_logger:
                         # Configure registry - this should complete without warnings
                         configure_registry(config)
-                        
+
                         # Check for any warning calls
-                        warning_calls = [call for call in mock_logger.warning.call_args_list]
-                        
-                        # Look for provider-related warnings that indicate initialization issues
-                        provider_warnings = [
-                            call for call in warning_calls 
-                            if call[0] and "No embedding provider configured" in str(call[0][0])
+                        warning_calls = [
+                            call for call in mock_logger.warning.call_args_list
                         ]
-                        
+
+                        # Look for provider-related warnings that indicate
+                        # initialization issues
+                        provider_warnings = [
+                            call
+                            for call in warning_calls
+                            if call[0]
+                            and "No embedding provider configured" in str(call[0][0])
+                        ]
+
                         # Assert no provider warnings were emitted
                         assert len(provider_warnings) == 0, (
-                            f"Valid embedding config should initialize without warnings, but got: "
+                            f"Valid embedding config should initialize without "
+                            f"warnings, but got: "
                             f"{[str(call[0][0]) for call in provider_warnings]}"
                         )
-                        
+
         finally:
             # Clean up database connections and registry before directory cleanup
             _cleanup_registry_and_connections()
             os.chdir(original_cwd)
 
 
-def test_config_loading_from_json_file(clean_environment):
+def test_config_loading_from_json_file(hermetic_environment):
     """
     Test that .chunkhound.json files are properly loaded and parsed.
-    
+
     This test validates the basic configuration loading mechanism to ensure
     JSON files are correctly processed and converted to Config objects.
     """
     with windows_safe_tempdir() as temp_path:
-        
         # Create minimal valid config
         config_path = temp_path / ".chunkhound.json"
         config_data = {
             "embedding": {
                 "provider": "openai",
                 "api_key": "test-key",
-                "model": "text-embedding-3-small"
+                "model": "text-embedding-3-small",
             }
         }
-        
+
         with open(config_path, "w") as f:
             json.dump(config_data, f)
-        
+
         original_cwd = Path.cwd()
         try:
             import os
+
             os.chdir(temp_path)
-            
+
             # Use database cleanup context for proper resource management
             with database_cleanup_context():
                 # Load and verify config
                 config = Config()
-                
+
                 assert config.embedding is not None
                 assert config.embedding.provider == "openai"
                 assert config.embedding.api_key.get_secret_value() == "test-key"
                 assert config.embedding.model == "text-embedding-3-small"
-                
+
         finally:
             # Clean up any registry state
             _cleanup_registry_and_connections()
             os.chdir(original_cwd)
 
 
-def test_embedding_config_rerank_env_vars(monkeypatch, clean_environment):
+def test_embedding_config_rerank_env_vars(monkeypatch, hermetic_environment):
     """
     Test that reranking environment variables are loaded correctly by load_from_env().
 
     This is a regression test for the bug where CHUNKHOUND_EMBEDDING__RERANK_*
-    env vars were not loaded despite being part of the supported test/runtime config surface.
+    env vars were not loaded despite being part of the supported test/runtime
+    config surface.
     """
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL", "test-rerank-model")
-    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_URL", "http://localhost:8080/rerank")
+    monkeypatch.setenv(
+        "CHUNKHOUND_EMBEDDING__RERANK_URL", "http://localhost:8080/rerank"
+    )
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_FORMAT", "tei")
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE", "64")
 
@@ -212,7 +225,7 @@ def test_embedding_config_rerank_env_vars(monkeypatch, clean_environment):
     assert config["rerank_batch_size"] == 64
 
 
-def test_embedding_config_ssl_env_vars(monkeypatch, clean_environment):
+def test_embedding_config_ssl_env_vars(monkeypatch, hermetic_environment):
     """SSL verification env vars should parse into booleans."""
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY", "false")
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY", "true")
@@ -225,7 +238,7 @@ def test_embedding_config_ssl_env_vars(monkeypatch, clean_environment):
 
 @pytest.mark.parametrize("raw_value", ["", "maybe", "2", "truthy"])
 def test_embedding_config_ssl_verify_rejects_invalid_env_bool(
-    monkeypatch, clean_environment, raw_value
+    monkeypatch, hermetic_environment, raw_value
 ):
     """Invalid embedding SSL env bools must fail explicitly."""
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY", raw_value)
@@ -236,18 +249,16 @@ def test_embedding_config_ssl_verify_rejects_invalid_env_bool(
 
 @pytest.mark.parametrize("raw_value", ["", "maybe", "2", "truthy"])
 def test_embedding_config_rerank_ssl_verify_rejects_invalid_env_bool(
-    monkeypatch, clean_environment, raw_value
+    monkeypatch, hermetic_environment, raw_value
 ):
     """Invalid rerank SSL env bools must fail explicitly."""
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY", raw_value)
 
-    with pytest.raises(
-        ValueError, match="CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"
-    ):
+    with pytest.raises(ValueError, match="CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY"):
         EmbeddingConfig.load_from_env()
 
 
-def test_llm_config_ssl_env_var(monkeypatch, clean_environment):
+def test_llm_config_ssl_env_var(monkeypatch, hermetic_environment):
     """LLM ssl_verify env var should parse into a boolean."""
     monkeypatch.setenv("CHUNKHOUND_LLM_SSL_VERIFY", "false")
 
@@ -257,7 +268,7 @@ def test_llm_config_ssl_env_var(monkeypatch, clean_environment):
 
 
 def test_gemini_env_model_satisfies_runtime_config_validation(
-    monkeypatch, clean_environment
+    monkeypatch, hermetic_environment
 ) -> None:
     """CHUNKHOUND_LLM_MODEL must satisfy Gemini's explicit-model contract."""
     monkeypatch.setenv("CHUNKHOUND_LLM_PROVIDER", "gemini")
@@ -276,7 +287,7 @@ def test_gemini_env_model_satisfies_runtime_config_validation(
     assert synthesis_config["model"] == "gemini-3.5-flash"
 
 
-def test_openrouter_json_config_with_model_loads_cleanly(clean_environment) -> None:
+def test_openrouter_json_config_with_model_loads_cleanly(hermetic_environment) -> None:
     with windows_safe_tempdir() as temp_path:
         config_path = temp_path / ".chunkhound.json"
         config_path.write_text(
@@ -300,14 +311,12 @@ def test_openrouter_json_config_with_model_loads_cleanly(clean_environment) -> N
 
 
 def test_openrouter_json_config_without_model_reports_missing(
-    clean_environment,
+    hermetic_environment,
 ) -> None:
     with windows_safe_tempdir() as temp_path:
         config_path = temp_path / ".chunkhound.json"
         config_path.write_text(
-            json.dumps(
-                {"llm": {"provider": "openrouter", "api_key": "sk-test"}}
-            ),
+            json.dumps({"llm": {"provider": "openrouter", "api_key": "sk-test"}}),
             encoding="utf-8",
         )
 
@@ -321,7 +330,7 @@ def test_openrouter_json_config_without_model_reports_missing(
 
 
 def test_openrouter_env_model_satisfies_runtime_config_validation(
-    monkeypatch, clean_environment
+    monkeypatch, hermetic_environment
 ) -> None:
     monkeypatch.setenv("CHUNKHOUND_LLM_PROVIDER", "openrouter")
     monkeypatch.setenv("CHUNKHOUND_LLM_MODEL", "google/gemini-2.0-flash")
@@ -336,7 +345,7 @@ def test_openrouter_env_model_satisfies_runtime_config_validation(
 
 
 def test_gemini_legacy_env_model_does_not_satisfy_runtime_config_validation(
-    monkeypatch, clean_environment
+    monkeypatch, hermetic_environment
 ) -> None:
     """CHUNKHOUND_GEMINI_MODEL is removed; only CHUNKHOUND_LLM_MODEL is valid."""
     monkeypatch.setenv("CHUNKHOUND_LLM_PROVIDER", "gemini")
@@ -365,7 +374,9 @@ def test_embedding_cli_ssl_flags_parse() -> None:
     assert args.rerank_ssl_verify is False
 
 
-def test_embedding_config_rerank_batch_size_invalid_silently_ignored(monkeypatch, clean_environment):
+def test_embedding_config_rerank_batch_size_invalid_silently_ignored(
+    monkeypatch, hermetic_environment
+):
     """
     Test that invalid rerank_batch_size env var is silently ignored.
 
@@ -381,7 +392,7 @@ def test_embedding_config_rerank_batch_size_invalid_silently_ignored(monkeypatch
     assert "rerank_batch_size" not in config
 
 
-def test_embedding_config_legacy_env_vars(monkeypatch, clean_environment):
+def test_embedding_config_legacy_env_vars(monkeypatch, hermetic_environment):
     """Test that single-underscore legacy env vars are read as fallbacks."""
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING_API_KEY", "legacy-key")
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING_BASE_URL", "http://legacy-url")
@@ -396,8 +407,11 @@ def test_embedding_config_legacy_env_vars(monkeypatch, clean_environment):
     assert config["model"] == "legacy-model"
 
 
-def test_embedding_config_new_env_vars_take_precedence(monkeypatch, clean_environment):
-    """Test that canonical double-underscore env vars override legacy single-underscore vars."""
+def test_embedding_config_new_env_vars_take_precedence(
+    monkeypatch, hermetic_environment
+):
+    """Test that canonical double-underscore env vars override legacy
+    single-underscore vars."""
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__API_KEY", "canonical-key")
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING_API_KEY", "legacy-key")
     monkeypatch.setenv("CHUNKHOUND_EMBEDDING__MODEL", "canonical-model")
@@ -443,10 +457,11 @@ def test_azure_api_version_accepts_valid_formats() -> None:
     assert cfg3.api_version == "2024-10-01-preview2"
 
 
-def test_local_config_overrides_env_vars(monkeypatch, clean_environment):
+def test_local_config_overrides_env_vars(monkeypatch, hermetic_environment):
     """Local .chunkhound.json must override environment variables.
 
-    Config precedence (high to low): CLI > explicit --config > local > global > env > defaults.
+    Config precedence (high to low): CLI > explicit --config > local > global >
+    env > defaults.
     This is a regression test for the reorder in config.py where local config
     was moved after env vars so it wins.
     """
@@ -475,10 +490,11 @@ def test_local_config_overrides_env_vars(monkeypatch, clean_environment):
         assert "from-local/**" in config.indexing.exclude
 
 
-def test_cli_overrides_local_config(clean_environment):
+def test_cli_overrides_local_config(hermetic_environment):
     """CLI arguments must override local .chunkhound.json.
 
-    Config precedence (high to low): CLI > explicit --config > local > global > env > defaults.
+    Config precedence (high to low): CLI > explicit --config > local > global >
+    env > defaults.
     Complementary to test_local_config_overrides_env_vars.
     """
     from types import SimpleNamespace
@@ -510,7 +526,7 @@ def test_cli_overrides_local_config(clean_environment):
         assert "from-cli/**" in config.indexing.exclude
 
 
-def test_explicit_config_file_overrides_local_config(clean_environment):
+def test_explicit_config_file_overrides_local_config(hermetic_environment):
     """Explicit config files must win over auto-discovered local config."""
     from types import SimpleNamespace
 
@@ -550,7 +566,7 @@ def test_explicit_config_file_overrides_local_config(clean_environment):
         assert "from-explicit/**" in config.indexing.exclude
 
 
-def test_env_config_file_overrides_local_config(monkeypatch, clean_environment):
+def test_env_config_file_overrides_local_config(monkeypatch, hermetic_environment):
     """CHUNKHOUND_CONFIG_FILE must behave like an explicit config file."""
     with windows_safe_tempdir() as temp_path:
         local_config_path = temp_path / ".chunkhound.json"
@@ -585,7 +601,7 @@ def test_env_config_file_overrides_local_config(monkeypatch, clean_environment):
         assert "from-env-file/**" in config.indexing.exclude
 
 
-def test_map_command_uses_config_parent_for_workspace_root(clean_environment):
+def test_map_command_uses_config_parent_for_workspace_root(hermetic_environment):
     """`map` must treat explicit config files as the workspace root, not args.path."""
     from types import SimpleNamespace
 
@@ -615,8 +631,11 @@ def test_map_command_uses_config_parent_for_workspace_root(clean_environment):
         assert config.database.path == workspace_root.resolve() / ".chunkhound" / "db"
 
 
-def test_global_config_provides_defaults_and_is_overridden_by_local(monkeypatch, clean_environment):
-    """Global config (via CHUNKHOUND_GLOBAL_CONFIG_FILE) supplies cross-project defaults.
+def test_global_config_provides_defaults_and_is_overridden_by_local(
+    monkeypatch, hermetic_environment
+):
+    """Global config (via CHUNKHOUND_GLOBAL_CONFIG_FILE) supplies cross-project
+    defaults.
 
     Local .chunkhound.json and explicit config override globals (deep merge).
     """
@@ -626,7 +645,11 @@ def test_global_config_provides_defaults_and_is_overridden_by_local(monkeypatch,
         global_cfg.write_text(
             json.dumps(
                 {
-                    "embedding": {"provider": "openai", "api_key": "gkey", "model": "gmodel"},
+                    "embedding": {
+                        "provider": "openai",
+                        "api_key": "gkey",
+                        "model": "gmodel",
+                    },
                     "indexing": {"batch_size": 42},
                 }
             )
@@ -646,7 +669,7 @@ def test_global_config_provides_defaults_and_is_overridden_by_local(monkeypatch,
 
 
 def test_global_local_deep_merge_partial_overrides_and_list_replacement(
-    monkeypatch, clean_environment
+    monkeypatch, hermetic_environment
 ):
     """Global + local demonstrate deep merge for objects and list replacement.
 
@@ -695,7 +718,8 @@ def test_global_local_deep_merge_partial_overrides_and_list_replacement(
                     "embedding": {"api_key": "project-voyage-key"},
                     # Different model for this project (provider from global survives)
                     "llm": {"model": "claude-3-opus-20240229"},
-                    # Research tuning override (other research fields from global survive)
+                    # Research tuning override (other research fields from global
+                    # survive)
                     "research": {"algorithm": "v3"},
                     # Project-specific excludes fully replace global's list
                     "indexing": {
@@ -735,9 +759,7 @@ def test_global_local_deep_merge_partial_overrides_and_list_replacement(
         assert any("my-project-vendor" in p for p in effective)
         assert any("node_modules" in p for p in effective)  # built-in default present
         # global's list is gone from the raw exclude (replaced)
-        assert not any(
-            "global-exclude-pattern" in p for p in c.indexing.exclude
-        )
+        assert not any("global-exclude-pattern" in p for p in c.indexing.exclude)
 
         # global_config_file / local_config_file still recorded
         assert paths_equal(c.global_config_file, global_cfg)

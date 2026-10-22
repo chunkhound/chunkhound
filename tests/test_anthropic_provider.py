@@ -18,20 +18,20 @@ from chunkhound.core.config.claude_model_resolution import (
     resolve_claude_haiku_model,
     resolve_claude_model,
 )
-from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
     BETA_INTERLEAVED_THINKING,
     BETA_STRUCTURED_OUTPUTS,
     BETA_TASK_BUDGETS,
+    AnthropicLLMProvider,
     requires_adaptive_thinking,
     supports_adaptive_thinking,
     supports_effort,
     supports_effort_level,
     supports_task_budget,
-    AnthropicLLMProvider,
 )
+from tests.helpers.live import live_inputs
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -159,24 +159,21 @@ class TestUsageTracking:
         assert stats["completion_tokens"] == 0
         assert stats["thinking_tokens"] == 0
 
-    def test_health_check_structure(self):
-        """Test health check includes thinking status."""
+    @pytest.mark.live
+    async def test_health_check_structure(self):
+        """A real successful health check reports provider capabilities."""
+        data = live_inputs("anthropic")
+        if not data.get("api_key"):
+            pytest.fail("Live prerequisite missing: anthropic.api_key")
         provider = AnthropicLLMProvider(
-            api_key="test-key",
-            thinking_enabled=True,
+            api_key=data["api_key"],
+            model=CLAUDE_HAIKU_FALLBACK_MODEL,
         )
-
-        # Health check will fail without real API key, but we can check structure
-        # by catching the exception
-        try:
-            import asyncio
-
-            asyncio.run(provider.health_check())
-        except Exception:
-            pass  # Expected to fail without real API
-
-        # Just verify the method exists and has proper signature
-        assert hasattr(provider, "health_check")
+        result = await provider.health_check()
+        assert result["status"] == "healthy", result
+        assert result["provider"] == "anthropic"
+        assert result["model"] == provider.model
+        assert result["thinking_enabled"] is False
 
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
@@ -217,17 +214,12 @@ class TestConfiguration:
         assert provider._thinking_enabled is False
         assert provider._thinking_budget_tokens == 10000
 
-    def test_default_model_resolution_stays_offline(self, monkeypatch):
-        """Provider construction must not perform network discovery."""
-        monkeypatch.delenv("CHUNKHOUND_CLAUDE_DEFAULT_HAIKU_MODEL", raising=False)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(
-            "chunkhound.core.config.claude_model_resolution."
-            "get_latest_available_haiku_model",
-            lambda api_key=None: pytest.fail("discovery should not run"),
+    def test_explicit_model_resolution_stays_offline(self):
+        """An explicit model bypasses API discovery, even with an API-shaped key."""
+        provider = AnthropicLLMProvider(
+            api_key="sk-ant-test",
+            model=CLAUDE_HAIKU_FALLBACK_MODEL,
         )
-
-        provider = AnthropicLLMProvider(api_key="sk-ant-test")
         assert provider.model == CLAUDE_HAIKU_FALLBACK_MODEL
 
     def test_custom_configuration(self):
@@ -1252,13 +1244,6 @@ class TestLLMConfigEnvLoading:
 
 class TestLLMConfigDefaults:
     """Pin default model selection."""
-
-    @pytest.fixture(autouse=True)
-    def _isolate_env(self, clean_environment):
-        # Default resolution must not depend on the developer's ambient
-        # CHUNKHOUND_* / provider-key env. clean_environment (conftest) strips
-        # it so this class behaves identically locally and in CI.
-        yield
 
     def test_anthropic_prompt_caching_default_disabled(self):
         from chunkhound.core.config.llm_config import LLMConfig

@@ -13,10 +13,9 @@ Scenario:
   2. Re-index /workspace/repo1 → repo2/lib/b.py must NOT be deleted
 """
 
-import os
+from pathlib import Path
 
 import pytest
-from pathlib import Path
 
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.types.common import Language
@@ -24,6 +23,7 @@ from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
+from tests.helpers.isolation import run_control
 
 
 class _DummyConfig:
@@ -49,7 +49,7 @@ def _db_paths(db: DuckDBProvider) -> set[str]:
 
 
 @pytest.mark.skipif(
-    os.environ.get("CHUNKHOUND_ALLOW_PROCESSPOOL", "0") != "1",
+    run_control("CHUNKHOUND_ALLOW_PROCESSPOOL", "0") != "1",
     reason="Requires ProcessPool-friendly environment (SemLock).",
 )
 @pytest.mark.asyncio

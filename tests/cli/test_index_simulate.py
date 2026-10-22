@@ -6,18 +6,15 @@ These tests will fail until the subcommand is implemented.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
 
-
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 15) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+from tests.helpers.cli import run_cli, run_cli_in_process
 
 
 def test_index_simulate_help() -> None:
-    proc = _run(["chunkhound", "index", "--help"], timeout=20)
+    proc = run_cli_in_process(["index", "--help"])
     assert proc.returncode == 0, proc.stderr
     assert "simulate" in proc.stdout.lower()
 
@@ -30,9 +27,11 @@ async def test_index_simulate_lists_files(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# demo\n")
 
     # Use defaults; expect at least python file included
-    proc = _run(["chunkhound", "index", "--simulate", str(tmp_path)], timeout=30)
+    proc = run_cli(["index", "--simulate", str(tmp_path)], cwd=tmp_path)
     assert proc.returncode == 0, proc.stderr
 
     out = proc.stdout.strip().splitlines()
     # Output is a sorted list of relative paths; ensure a.py appears
-    assert any(line.endswith("src/a.py") for line in out), f"Unexpected simulate output: {out!r}"
+    assert any(line.endswith("src/a.py") for line in out), (
+        f"Unexpected simulate output: {out!r}"
+    )

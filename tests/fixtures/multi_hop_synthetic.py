@@ -124,7 +124,11 @@ class SyntheticGraphDatabase:
         chunks: list[SyntheticChunk],
         query_results: dict[tuple[float, ...], list[int]],
         neighbors: dict[int, list[int]],
+        semantic_result_window_cap: int | None = None,
     ) -> None:
+        self.semantic_result_window_cap = semantic_result_window_cap
+        self.candidate_budget_exhausted = False
+        self.semantic_calls: list[dict[str, Any]] = []
         self._chunks = {chunk.chunk_id: chunk for chunk in chunks}
         self._query_results = query_results
         self._neighbors = neighbors
@@ -139,6 +143,7 @@ class SyntheticGraphDatabase:
         threshold: float | None = None,
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        self.semantic_calls.append({"page_size": page_size, "offset": offset})
         chunk_ids = self._query_results[tuple(query_embedding)]
         results = [
             self._chunk_to_result(self._chunks[chunk_id]) for chunk_id in chunk_ids
@@ -196,7 +201,10 @@ class SyntheticGraphDatabase:
             "page_size": page_size,
             "has_more": offset + page_size < total,
             "next_offset": (offset + page_size if offset + page_size < total else None),
-            "total": total,
+            # Semantic search has no exact total (mirrors the DuckDB provider
+            # contract); multi-hop callers compute their own total from results.
+            "total": None,
+            "candidate_budget_exhausted": self.candidate_budget_exhausted,
         }
 
 

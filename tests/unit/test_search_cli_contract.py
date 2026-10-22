@@ -70,6 +70,8 @@ async def indexed_project(tmp_path):
 
     config = Config(
         database=DatabaseConfig(path=":memory:", provider="duckdb"),
+        embedding=None,
+        embeddings_disabled=True,
         indexing=IndexingConfig(include=["*.py"]),
         target_dir=tmp_path,
     )
@@ -81,7 +83,10 @@ async def indexed_project(tmp_path):
     )
     await indexing_service.process_directory(tmp_path, no_embeddings=True)
 
-    yield tmp_path, services
+    try:
+        yield tmp_path, services
+    finally:
+        services.provider.disconnect()
 
 
 async def _regex_search(services, query, **kwargs):

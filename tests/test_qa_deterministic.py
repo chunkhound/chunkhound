@@ -8,7 +8,6 @@ No mocks - tests the full integration path users experience.
 """
 
 import asyncio
-import os
 import shutil
 import subprocess
 import tempfile
@@ -20,16 +19,12 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
-from chunkhound.mcp_server.tools import execute_tool, search_impl
+from chunkhound.mcp_server.tools import search_impl
 from chunkhound.services.realtime.service import RealtimeIndexingService
+from tests.helpers.embedding_config import create_embedding_manager_for_tests
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
-)
-
-from tests.helpers.embedding_config import (
-    get_embedding_config_for_tests,
-    build_embedding_config_from_dict,
 )
 
 # =============================================================================
@@ -37,43 +32,43 @@ from tests.helpers.embedding_config import (
 # =============================================================================
 
 # Timeout & Wait Durations
-INITIAL_SCAN_WAIT_SECONDS = 2.0           # Wait for initial scan after service start
-CONCURRENT_SETUP_WAIT_SECONDS = 3.0       # Wait before concurrent operations
-PAGINATION_SETUP_WAIT_SECONDS = 3.0       # Wait after creating pagination test files
-SEARCH_ITERATION_DELAY_SECONDS = 0.2      # Delay between search iterations
-FILE_OPERATION_DELAY_SECONDS = 0.3        # Delay between file operations
-STABILITY_CHECK_INTERVAL_SECONDS = 2.0    # Interval between stability checks
-INDEXING_POLL_INTERVAL_SECONDS = 0.5      # Polling interval for indexing completion
-RIPGREP_TIMEOUT_SECONDS = 10              # Timeout for ripgrep subprocess
+INITIAL_SCAN_WAIT_SECONDS = 2.0  # Wait for initial scan after service start
+CONCURRENT_SETUP_WAIT_SECONDS = 3.0  # Wait before concurrent operations
+PAGINATION_SETUP_WAIT_SECONDS = 3.0  # Wait after creating pagination test files
+SEARCH_ITERATION_DELAY_SECONDS = 0.2  # Delay between search iterations
+FILE_OPERATION_DELAY_SECONDS = 0.3  # Delay between file operations
+STABILITY_CHECK_INTERVAL_SECONDS = 2.0  # Interval between stability checks
+INDEXING_POLL_INTERVAL_SECONDS = 0.5  # Polling interval for indexing completion
+RIPGREP_TIMEOUT_SECONDS = 10  # Timeout for ripgrep subprocess
 
 # Budget Constants (used in timeout calculations)
-BASE_OVERHEAD_SECONDS = 60                # Fixture setup, initial scan, etc.
-BUDGET_PER_LANGUAGE_SECONDS = 12          # Per-language budget (Windows CI worst case)
-SEARCH_VALIDATION_BUDGET_SECONDS = 60     # Reserve for parallel searches + assertions
-INDEXING_CAP_SECONDS = 200.0              # Hard cap for indexing wait (fail fast)
-SINGLE_FILE_INDEXING_MAX_SECONDS = 10.0   # Max wait for single file indexing
+BASE_OVERHEAD_SECONDS = 60  # Fixture setup, initial scan, etc.
+BUDGET_PER_LANGUAGE_SECONDS = 12  # Per-language budget (Windows CI worst case)
+SEARCH_VALIDATION_BUDGET_SECONDS = 60  # Reserve for parallel searches + assertions
+INDEXING_CAP_SECONDS = 200.0  # Hard cap for indexing wait (fail fast)
+SINGLE_FILE_INDEXING_MAX_SECONDS = 10.0  # Max wait for single file indexing
 
 # Threshold Constants
-MIN_MAJOR_LANGUAGES_REQUIRED = 3          # Minimum major languages that must work
-MIN_TOTAL_LANGUAGES_REQUIRED = 3          # Minimum total languages that must work
-LOW_SUCCESS_RATE_THRESHOLD = 0.5          # Below this = low success rate warning
-AVG_SEARCH_TIME_LIMIT_SECONDS = 2.0       # Max acceptable average search time
-MAX_SEARCH_TIME_LIMIT_SECONDS = 5.0       # Max acceptable single search time
-FILE_REFLECTION_MAX_SECONDS = 10.0        # Max time for file changes to reflect
-SEARCH_EXECUTION_MAX_SECONDS = 5.0        # Max time for search execution
-SEARCH_GOOD_THRESHOLD_SECONDS = 1.0       # Below = good search performance
-SEARCH_ACCEPTABLE_THRESHOLD_SECONDS = 3.0 # Below = acceptable search performance
+MIN_MAJOR_LANGUAGES_REQUIRED = 3  # Minimum major languages that must work
+MIN_TOTAL_LANGUAGES_REQUIRED = 3  # Minimum total languages that must work
+LOW_SUCCESS_RATE_THRESHOLD = 0.5  # Below this = low success rate warning
+AVG_SEARCH_TIME_LIMIT_SECONDS = 2.0  # Max acceptable average search time
+MAX_SEARCH_TIME_LIMIT_SECONDS = 5.0  # Max acceptable single search time
+FILE_REFLECTION_MAX_SECONDS = 10.0  # Max time for file changes to reflect
+SEARCH_EXECUTION_MAX_SECONDS = 5.0  # Max time for search execution
+SEARCH_GOOD_THRESHOLD_SECONDS = 1.0  # Below = good search performance
+SEARCH_ACCEPTABLE_THRESHOLD_SECONDS = 3.0  # Below = acceptable search performance
 
 # Test Data Constants
-NUM_PAGINATION_TEST_FILES = 15            # Files to create for pagination test
-NUM_BASE_CONCURRENT_FILES = 3             # Base files for concurrent test
-NUM_CONCURRENT_SEARCHES = 10              # Searches during concurrent operations
-NUM_RAPID_MODIFICATIONS = 5               # File modifications in rapid test
-MAX_PAGINATION_PAGES = 10                 # Safety limit for pagination loop
-MAX_STABILITY_CHECKS = 10                 # Retry attempts for chunk stability
-MIN_EXPECTED_CHUNKS_PAGINATION = 15       # Minimum chunks for pagination test
-EXPECTED_CHUNKS_PER_FILE = 2              # Expected chunks per substantial file
-DEFAULT_PAGE_SIZE = 10                    # Standard pagination page size
+NUM_PAGINATION_TEST_FILES = 15  # Files to create for pagination test
+NUM_BASE_CONCURRENT_FILES = 3  # Base files for concurrent test
+NUM_CONCURRENT_SEARCHES = 10  # Searches during concurrent operations
+NUM_RAPID_MODIFICATIONS = 5  # File modifications in rapid test
+MAX_PAGINATION_PAGES = 10  # Safety limit for pagination loop
+MAX_STABILITY_CHECKS = 10  # Retry attempts for chunk stability
+MIN_EXPECTED_CHUNKS_PAGINATION = 15  # Minimum chunks for pagination test
+EXPECTED_CHUNKS_PER_FILE = 2  # Expected chunks per substantial file
+DEFAULT_PAGE_SIZE = 10  # Standard pagination page size
 
 
 def timeout_for_language_coverage() -> int:
@@ -89,7 +84,8 @@ def timeout_for_language_coverage() -> int:
 
 
 class TestQADeterministic:
-    """Deterministic QA test suite - converts manual testing into automated validation."""
+    """Deterministic QA test suite - converts manual testing into automated
+    validation."""
 
     @pytest.fixture
     async def qa_setup(self):
@@ -102,17 +98,6 @@ class TestQADeterministic:
         # Ensure database directory exists
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Get embedding config using centralized helper
-        # Only enable embeddings when explicitly requested via environment variable
-        #
-        # This test suite is intended to be deterministic and fast. When real API
-        # keys are present, enabling embeddings can drastically increase runtime
-        # (network calls + embedding generation), often exceeding pytest-timeout.
-        embedding_config = None
-        if os.getenv("CH_TEST_QA_ENABLE_EMBEDDINGS") == "1":
-            config_dict = get_embedding_config_for_tests()
-            embedding_config = build_embedding_config_from_dict(config_dict)
-
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
 
@@ -120,7 +105,7 @@ class TestQADeterministic:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            embedding=embedding_config,
+            embedding=None,
             indexing={
                 "include": ["*"],
                 "exclude": ["*.log", "__pycache__/"],
@@ -129,7 +114,9 @@ class TestQADeterministic:
         )
 
         # Create services - real MCP server components
-        services = create_services(db_path, config)
+        services = create_services(
+            db_path, config, create_embedding_manager_for_tests(None)
+        )
         services.provider.connect()
 
         realtime_service = RealtimeIndexingService(services, config)
@@ -170,7 +157,8 @@ class TestQADeterministic:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_file_lifecycle_search_validation(self, qa_setup):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window, tracked in issue #254
+    async def test_file_lifecycle_search_validation(self, qa_setup):
+        # Windows CI polling can miss the second write within 45s (issue #254).
         """QA Items 1-4: Test file lifecycle with search validation."""
         services, realtime_service, watch_dir, _ = qa_setup
 
@@ -194,18 +182,26 @@ class ExistingClass:
 
         # Search for existing content
         existing_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="existing_function", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="existing_function",
+            page_size=10,
+            offset=0,
         )
 
         # Try semantic search if available, skip if not
         existing_semantic = None
         try:
             existing_semantic = await search_impl(
-                services=services, embedding_manager=None,
-                type="semantic", query="existing function QA testing", page_size=10, offset=0,
+                services=services,
+                embedding_manager=None,
+                type="semantic",
+                query="existing function QA testing",
+                page_size=10,
+                offset=0,
             )
-            semantic_count = len(existing_semantic.get('results', []))
+            semantic_count = len(existing_semantic.get("results", []))
         except Exception as e:
             print(f"⚠ Semantic search skipped: {e}")
             semantic_count = "N/A"
@@ -214,7 +210,9 @@ class ExistingClass:
             "Should find existing file content with regex"
         )
         print(
-            f"✓ Existing file search: regex={len(existing_regex.get('results', []))}, semantic={semantic_count}"
+            f"✓ Existing file search: "
+            f"regex={len(existing_regex.get('results', []))}, "
+            f"semantic={semantic_count}"
         )
 
         # QA Item 2: Add new file and search for it
@@ -237,17 +235,25 @@ class NewlyAddedClass:
 
         # Search for new content
         new_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="newly_added_content_unique_string", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="newly_added_content_unique_string",
+            page_size=10,
+            offset=0,
         )
 
         # Try semantic search if available
         try:
             new_semantic = await search_impl(
-                services=services, embedding_manager=None,
-                type="semantic", query="newly added function QA validation", page_size=10, offset=0,
+                services=services,
+                embedding_manager=None,
+                type="semantic",
+                query="newly added function QA validation",
+                page_size=10,
+                offset=0,
             )
-            new_semantic_count = len(new_semantic.get('results', []))
+            new_semantic_count = len(new_semantic.get("results", []))
         except Exception:
             new_semantic_count = "N/A"
 
@@ -255,7 +261,9 @@ class NewlyAddedClass:
             "Should find newly added file content with regex"
         )
         print(
-            f"✓ New file search: regex={len(new_regex.get('results', []))}, semantic={new_semantic_count}"
+            f"✓ New file search: "
+            f"regex={len(new_regex.get('results', []))}, "
+            f"semantic={new_semantic_count}"
         )
 
         # QA Item 3: Edit existing file - adding, deleting, and modifying content
@@ -280,10 +288,16 @@ def added_during_edit():
         assert found, "Added content should be searchable"
 
         added_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="added_content_edit_qa", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="added_content_edit_qa",
+            page_size=10,
+            offset=0,
         )
-        assert len(added_regex.get('results', [])) > 0, "Should find content added during edit"
+        assert len(added_regex.get("results", [])) > 0, (
+            "Should find content added during edit"
+        )
         print("✓ Edit (add content): Found added content")
 
         # 3b: Delete some content and modify existing
@@ -308,13 +322,21 @@ def added_during_edit():
 
         # Check modification worked
         modified_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="MODIFIED_existing_content", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="MODIFIED_existing_content",
+            page_size=10,
+            offset=0,
         )
         # Check deletion worked - search for the actual class definition
         deleted_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="class ExistingClass:", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="class ExistingClass:",
+            page_size=10,
+            offset=0,
         )
 
         assert len(modified_regex.get("results", [])) > 0, (
@@ -331,13 +353,19 @@ def added_during_edit():
         delete_target.unlink()
 
         # Wait for deletion to be processed
-        removed = await realtime_service.wait_for_file_removed(delete_target, timeout=get_fs_event_timeout())
+        removed = await realtime_service.wait_for_file_removed(
+            delete_target, timeout=get_fs_event_timeout()
+        )
         assert removed, "Deleted file should be removed"
 
         # Search for deleted file content
         deleted_file_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="newly_added_content_unique_string", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="newly_added_content_unique_string",
+            page_size=10,
+            offset=0,
         )
 
         assert len(deleted_file_regex.get("results", [])) == 0, (
@@ -356,24 +384,24 @@ def added_during_edit():
 
         # Create language-specific content templates
         content_templates = {
-            Language.PYTHON: 'def qa_test_function():\n    """Python QA test"""\n    return "python_qa_unique"',
-            Language.JAVASCRIPT: 'function qaTestFunction() {\n    // JavaScript QA test\n    return "javascript_qa_unique";\n}',
-            Language.TYPESCRIPT: 'function qaTestFunction(): string {\n    // TypeScript QA test\n    return "typescript_qa_unique";\n}',
-            Language.TSX: 'function QAComponent(): JSX.Element {\n    // TSX QA test\n    return <div>tsx_qa_unique</div>;\n}',
-            Language.JSX: 'function QAComponent() {\n    // JSX QA test\n    return <div>jsx_qa_unique</div>;\n}',
-            Language.JAVA: 'public class QATest {\n    // Java QA test\n    public String test() { return "java_qa_unique"; }\n}',
-            Language.CSHARP: 'public class QATest {\n    // C# QA test\n    public string Test() { return "csharp_qa_unique"; }\n}',
-            Language.GO: 'package main\n\n// Go QA test\nfunc qaTestFunction() string {\n    return "go_qa_unique"\n}',
-            Language.RUST: 'fn qa_test_function() -> &\'static str {\n    // Rust QA test\n    "rust_qa_unique"\n}',
-            Language.C: '#include <stdio.h>\n\n// C QA test\nchar* qa_test_function() {\n    return "c_qa_unique";\n}',
-            Language.CPP: '#include <string>\n\n// C++ QA test\nstd::string qaTestFunction() {\n    return "cpp_qa_unique";\n}',
-            Language.METAL: '// Metal QA test (MSL is C++14)\nconst char* qaTestFunction() {\n    return "metal_qa_unique";\n}',
-            Language.BASH: '#!/bin/bash\n# Bash QA test\nqa_test_function() {\n    echo "bash_qa_unique"\n}',
-            Language.MARKDOWN: "# QA Test\n\nThis is a **markdown QA test** with `markdown_qa_unique` content.",
-            Language.JSON: '{\n    "qa_test": true,\n    "content": "json_qa_unique",\n    "type": "qa_validation"\n}',
-            Language.YAML: 'qa_test: true\ncontent: "yaml_qa_unique"\ntype: qa_validation',
-            Language.TOML: '[qa_test]\ncontent = "toml_qa_unique"\ntype = "qa_validation"',
-            Language.TEXT: "Plain text QA test file.\nContains: text_qa_unique\nFor validation purposes.",
+            Language.PYTHON: 'def qa_test_function():\n    """Python QA test"""\n    return "python_qa_unique"',  # noqa: E501 -- generated language fixture
+            Language.JAVASCRIPT: 'function qaTestFunction() {\n    // JavaScript QA test\n    return "javascript_qa_unique";\n}',  # noqa: E501 -- generated language fixture
+            Language.TYPESCRIPT: 'function qaTestFunction(): string {\n    // TypeScript QA test\n    return "typescript_qa_unique";\n}',  # noqa: E501 -- generated language fixture
+            Language.TSX: "function QAComponent(): JSX.Element {\n    // TSX QA test\n    return <div>tsx_qa_unique</div>;\n}",  # noqa: E501 -- generated language fixture
+            Language.JSX: "function QAComponent() {\n    // JSX QA test\n    return <div>jsx_qa_unique</div>;\n}",  # noqa: E501 -- generated language fixture
+            Language.JAVA: 'public class QATest {\n    // Java QA test\n    public String test() { return "java_qa_unique"; }\n}',  # noqa: E501 -- generated language fixture
+            Language.CSHARP: 'public class QATest {\n    // C# QA test\n    public string Test() { return "csharp_qa_unique"; }\n}',  # noqa: E501 -- generated language fixture
+            Language.GO: 'package main\n\n// Go QA test\nfunc qaTestFunction() string {\n    return "go_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.RUST: 'fn qa_test_function() -> &\'static str {\n    // Rust QA test\n    "rust_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.C: '#include <stdio.h>\n\n// C QA test\nchar* qa_test_function() {\n    return "c_qa_unique";\n}',  # noqa: E501 -- generated language fixture
+            Language.CPP: '#include <string>\n\n// C++ QA test\nstd::string qaTestFunction() {\n    return "cpp_qa_unique";\n}',  # noqa: E501 -- generated language fixture
+            Language.METAL: '// Metal QA test (MSL is C++14)\nconst char* qaTestFunction() {\n    return "metal_qa_unique";\n}',  # noqa: E501 -- generated language fixture
+            Language.BASH: '#!/bin/bash\n# Bash QA test\nqa_test_function() {\n    echo "bash_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.MARKDOWN: "# QA Test\n\nThis is a **markdown QA test** with `markdown_qa_unique` content.",  # noqa: E501 -- generated language fixture
+            Language.JSON: '{\n    "qa_test": true,\n    "content": "json_qa_unique",\n    "type": "qa_validation"\n}',  # noqa: E501 -- generated language fixture
+            Language.YAML: 'qa_test: true\ncontent: "yaml_qa_unique"\ntype: qa_validation',  # noqa: E501 -- generated language fixture
+            Language.TOML: '[qa_test]\ncontent = "toml_qa_unique"\ntype = "qa_validation"',  # noqa: E501 -- generated language fixture
+            Language.TEXT: "Plain text QA test file.\nContains: text_qa_unique\nFor validation purposes.",  # noqa: E501 -- generated language fixture
             Language.VUE: """<template>
   <div class="qa-test">
     <h1>{{ message }}</h1>
@@ -406,27 +434,27 @@ function qaTestFunction() {
     color: blue;
   }
 </style>""",
-            Language.GROOVY: 'def qaTestFunction() {\n    // Groovy QA test\n    return "groovy_qa_unique"\n}',
-            Language.KOTLIN: 'fun qaTestFunction(): String {\n    // Kotlin QA test\n    return "kotlin_qa_unique"\n}',
-            Language.MAKEFILE: '.PHONY: qa_test\n# Makefile QA test\nqa_test:\n\t@echo "makefile_qa_unique"',
-            Language.MATLAB: '% MATLAB QA test\nfunction result = qa_test_function()\n    result = "matlab_qa_unique";\nend',
-            Language.LUA: '-- Lua QA test\nfunction qa_test_function()\n    return "lua_qa_unique"\nend',
-            Language.HASKELL: '-- Haskell QA test\nqaTestFunction :: String\nqaTestFunction = "haskell_qa_unique"',
-            Language.HCL: '# HCL QA test\nvariable "qa_test" {\n  default = "hcl_qa_unique"\n}',
-            Language.DART: '// Dart QA test\nString qaTestFunction() {\n  return "dart_qa_unique";\n}',
-            Language.OBJC: '// Objective-C QA test\n@implementation QATest\n- (NSString *)qaTestMethod {\n    return @"objc_qa_unique";\n}\n@end',
-            Language.PHP: '<?php\n// PHP QA test\nfunction qa_test_function() {\n    return "php_qa_unique";\n}',
-            Language.SWIFT: '// Swift QA test\nfunc qaTestFunction() -> String {\n    return "swift_qa_unique"\n}',
-            Language.POWERSHELL: '# PowerShell QA test\nfunction Get-QaTest {\n    return "powershell_qa_unique"\n}',
-            Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',
+            Language.GROOVY: 'def qaTestFunction() {\n    // Groovy QA test\n    return "groovy_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.KOTLIN: 'fun qaTestFunction(): String {\n    // Kotlin QA test\n    return "kotlin_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.MAKEFILE: '.PHONY: qa_test\n# Makefile QA test\nqa_test:\n\t@echo "makefile_qa_unique"',  # noqa: E501 -- generated language fixture
+            Language.MATLAB: '% MATLAB QA test\nfunction result = qa_test_function()\n    result = "matlab_qa_unique";\nend',  # noqa: E501 -- generated language fixture
+            Language.LUA: '-- Lua QA test\nfunction qa_test_function()\n    return "lua_qa_unique"\nend',  # noqa: E501 -- generated language fixture
+            Language.HASKELL: '-- Haskell QA test\nqaTestFunction :: String\nqaTestFunction = "haskell_qa_unique"',  # noqa: E501 -- generated language fixture
+            Language.HCL: '# HCL QA test\nvariable "qa_test" {\n  default = "hcl_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.DART: '// Dart QA test\nString qaTestFunction() {\n  return "dart_qa_unique";\n}',  # noqa: E501 -- generated language fixture
+            Language.OBJC: '// Objective-C QA test\n@implementation QATest\n- (NSString *)qaTestMethod {\n    return @"objc_qa_unique";\n}\n@end',  # noqa: E501 -- generated language fixture
+            Language.PHP: '<?php\n// PHP QA test\nfunction qa_test_function() {\n    return "php_qa_unique";\n}',  # noqa: E501 -- generated language fixture
+            Language.SWIFT: '// Swift QA test\nfunc qaTestFunction() -> String {\n    return "swift_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.POWERSHELL: '# PowerShell QA test\nfunction Get-QaTest {\n    return "powershell_qa_unique"\n}',  # noqa: E501 -- generated language fixture
+            Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',  # noqa: E501 -- generated language fixture
             Language.PDF: None,  # PDF is binary, skip content template
-            Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
-            Language.ELIXIR: 'defmodule QATest do\n  # Elixir QA test\n  def test, do: "elixir_qa_unique"\nend',
-            Language.HTML: '<!DOCTYPE html>\n<html>\n<body>\n  <!-- HTML QA test -->\n  <p>html_qa_unique</p>\n</body>\n</html>',
-            Language.CSS: '/* CSS QA test */\n.qa-test {\n  content: "css_qa_unique";\n  color: blue;\n}',
-            Language.SCSS: '/* SCSS QA test */\n$color: blue;\n.qa-test {\n  content: "scss_qa_unique";\n  color: $color;\n}',
-            Language.JINJA: '<!DOCTYPE html>\n<html>\n<body>\n  {# Jinja QA test #}\n  <p>{{ "jinja_qa_unique" }}</p>\n</body>\n</html>',
-            Language.TWINCAT: '<?xml version="1.0" encoding="utf-8"?>\n<TcPlcObject Version="1.1.0.1">\n  <POU Name="QA_TEST" Id="{00000000-0000-0000-0000-000000000001}">\n    <Declaration><![CDATA[PROGRAM QA_TEST\nVAR\n  bFlag : BOOL := TRUE;\nEND_VAR]]></Declaration>\n    <Implementation>\n      <ST><![CDATA[IF bFlag THEN\n  (* twincat_qa_unique *)\nEND_IF]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>',
+            Language.SQL: "-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT 'sql_qa_unique'\n);",  # noqa: E501 -- generated language fixture
+            Language.ELIXIR: 'defmodule QATest do\n  # Elixir QA test\n  def test, do: "elixir_qa_unique"\nend',  # noqa: E501 -- generated language fixture
+            Language.HTML: "<!DOCTYPE html>\n<html>\n<body>\n  <!-- HTML QA test -->\n  <p>html_qa_unique</p>\n</body>\n</html>",  # noqa: E501 -- generated language fixture
+            Language.CSS: '/* CSS QA test */\n.qa-test {\n  content: "css_qa_unique";\n  color: blue;\n}',  # noqa: E501 -- generated language fixture
+            Language.SCSS: '/* SCSS QA test */\n$color: blue;\n.qa-test {\n  content: "scss_qa_unique";\n  color: $color;\n}',  # noqa: E501 -- generated language fixture
+            Language.JINJA: '<!DOCTYPE html>\n<html>\n<body>\n  {# Jinja QA test #}\n  <p>{{ "jinja_qa_unique" }}</p>\n</body>\n</html>',  # noqa: E501 -- generated language fixture
+            Language.TWINCAT: '<?xml version="1.0" encoding="utf-8"?>\n<TcPlcObject Version="1.1.0.1">\n  <POU Name="QA_TEST" Id="{00000000-0000-0000-0000-000000000001}">\n    <Declaration><![CDATA[PROGRAM QA_TEST\nVAR\n  bFlag : BOOL := TRUE;\nEND_VAR]]></Declaration>\n    <Implementation>\n      <ST><![CDATA[IF bFlag THEN\n  (* twincat_qa_unique *)\nEND_IF]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>',  # noqa: E501 -- generated language fixture
         }
 
         # Create extension mapping for file creation
@@ -459,7 +487,8 @@ function qaTestFunction() {
             Language.HASKELL: ".hs",
             Language.HCL: ".tf",
             Language.DART: ".dart",
-            # OBJC shares .m with MATLAB - content-based detection (language_detector.py)
+            # OBJC shares .m with MATLAB - content-based detection
+            # (language_detector.py)
             # disambiguates via ObjC markers (@implementation in template above).
             Language.OBJC: ".m",
             Language.PHP: ".php",
@@ -477,15 +506,20 @@ function qaTestFunction() {
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)
-        testable_languages = {lang for lang in Language if lang not in (Language.UNKNOWN, Language.GIT_DIFF)}
+        testable_languages = {
+            lang
+            for lang in Language
+            if lang not in (Language.UNKNOWN, Language.GIT_DIFF)
+        }
         missing_templates = testable_languages - set(content_templates.keys())
         missing_extensions = testable_languages - set(extension_map.keys())
         # Languages must be in BOTH dicts to be tested
         uncovered = missing_templates | missing_extensions
 
+        missing = sorted(lang.value for lang in uncovered)
         assert not uncovered, (
-            f"Language(s) missing from test coverage: {sorted(l.value for l in uncovered)}. "
-            f"Add content template and extension mapping for each new language to this test."
+            f"Language(s) missing from test coverage: {missing}. "
+            "Add content template and extension mapping for each language."
         )
 
         created_files = []
@@ -518,7 +552,9 @@ function qaTestFunction() {
         # Note: Windows CI may need longer due to ReadDirectoryChangesW unreliability,
         # but we cap at INDEXING_CAP_SECONDS to fail fast rather than hang
         total_timeout = timeout_for_language_coverage()
-        available_for_indexing = total_timeout - BASE_OVERHEAD_SECONDS - SEARCH_VALIDATION_BUDGET_SECONDS
+        available_for_indexing = (
+            total_timeout - BASE_OVERHEAD_SECONDS - SEARCH_VALIDATION_BUDGET_SECONDS
+        )
         max_wait = min(available_for_indexing, INDEXING_CAP_SECONDS)
         poll_interval = INDEXING_POLL_INTERVAL_SECONDS
         start_time = time.monotonic()
@@ -535,12 +571,13 @@ function qaTestFunction() {
 
         # Final stats check with informative failure if indexing incomplete
         db_stats = await services.indexing_coordinator.get_stats()
-        indexed_files = db_stats.get('files', 0)
+        indexed_files = db_stats.get("files", 0)
         print(f"📊 Final: {indexed_files} files, {db_stats.get('chunks', 0)} chunks")
 
         if indexed_files < expected_file_count:
             pytest.fail(
-                f"Only {indexed_files}/{expected_file_count} files indexed after {elapsed:.1f}s. "
+                f"Only {indexed_files}/{expected_file_count} files indexed "
+                f"after {elapsed:.1f}s. "
                 f"This may indicate indexing performance issues on CI."
             )
 
@@ -551,10 +588,14 @@ function qaTestFunction() {
             """Validate a single language's content is searchable."""
             try:
                 regex_results = await search_impl(
-                    services=services, embedding_manager=None,
-                    type="regex", query=pattern, page_size=10, offset=0,
+                    services=services,
+                    embedding_manager=None,
+                    type="regex",
+                    query=pattern,
+                    page_size=10,
+                    offset=0,
                 )
-                if len(regex_results.get('results', [])) > 0:
+                if len(regex_results.get("results", [])) > 0:
                     return (language.value, True, None)
                 return (language.value, False, "regex not found")
             except Exception as e:
@@ -565,7 +606,9 @@ function qaTestFunction() {
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         successful_languages = [lang for lang, success, _ in results if success]
-        failed_languages = [f"{lang} ({err})" for lang, success, err in results if not success]
+        failed_languages = [
+            f"{lang} ({err})" for lang, success, err in results if not success
+        ]
 
         print(f"✓ Languages successfully tested: {len(successful_languages)}")
         print(f"✓ Successful languages: {successful_languages}")
@@ -579,22 +622,32 @@ function qaTestFunction() {
             lang for lang in successful_languages if lang in major_languages
         ]
 
-        assert len(working_major) >= MIN_MAJOR_LANGUAGES_REQUIRED, f"At least {MIN_MAJOR_LANGUAGES_REQUIRED} major languages should work, got: {working_major}"
+        assert len(working_major) >= MIN_MAJOR_LANGUAGES_REQUIRED, (
+            f"At least {MIN_MAJOR_LANGUAGES_REQUIRED} major languages should "
+            f"work, got: {working_major}"
+        )
 
         # Realistic expectation - at least some languages should work
         # This test reveals which languages actually work in the current system
-        assert len(successful_languages) >= MIN_TOTAL_LANGUAGES_REQUIRED, f"At least {MIN_TOTAL_LANGUAGES_REQUIRED} languages should work, got {len(successful_languages)}: {successful_languages}"
+        assert len(successful_languages) >= MIN_TOTAL_LANGUAGES_REQUIRED, (
+            f"At least {MIN_TOTAL_LANGUAGES_REQUIRED} languages should work, "
+            f"got {len(successful_languages)}: {successful_languages}"
+        )
 
         # Report findings for manual review
         success_rate = (
             len(successful_languages) / len(created_files) if created_files else 0
         )
         print(
-            f"📊 Language success rate: {success_rate:.1%} ({len(successful_languages)}/{len(created_files)})"
+            f"📊 Language success rate: {success_rate:.1%} "
+            f"({len(successful_languages)}/{len(created_files)})"
         )
 
         if success_rate < LOW_SUCCESS_RATE_THRESHOLD:
-            print("⚠ LOW SUCCESS RATE: This may indicate indexing or parsing issues with some languages")
+            print(
+                "⚠ LOW SUCCESS RATE: This may indicate indexing or parsing "
+                "issues with some languages"
+            )
 
     @pytest.mark.asyncio
     async def test_concurrent_operations_and_timing(self, qa_setup):
@@ -621,8 +674,12 @@ function qaTestFunction() {
                 try:
                     start_time = time.time()
                     results = await search_impl(
-                        services=services, embedding_manager=None,
-                        type="regex", query="concurrent_qa_test", page_size=50, offset=0,
+                        services=services,
+                        embedding_manager=None,
+                        type="regex",
+                        query="concurrent_qa_test",
+                        page_size=50,
+                        offset=0,
                     )
                     end_time = time.time()
 
@@ -718,7 +775,8 @@ class RapidClass_{i}:
             f"✓ Successful searches: {len(successful_searches)}/{len(search_results)}"
         )
         print(
-            f"✓ Successful modifications: {len(successful_modifications)}/{len(modification_results)}"
+            f"✓ Successful modifications: "
+            f"{len(successful_modifications)}/{len(modification_results)}"
         )
 
         # Key assertions for QA item 7
@@ -735,20 +793,30 @@ class RapidClass_{i}:
             avg_search_time = sum(search_times) / len(search_times)
             max_search_time = max(search_times)
             print(
-                f"✓ Search timing: avg={avg_search_time:.3f}s, max={max_search_time:.3f}s"
+                f"✓ Search timing: avg={avg_search_time:.3f}s, "
+                f"max={max_search_time:.3f}s"
             )
 
             # Search should not block - reasonable performance expected
-            assert avg_search_time < AVG_SEARCH_TIME_LIMIT_SECONDS, f"Average search time should be < {AVG_SEARCH_TIME_LIMIT_SECONDS}s, got {avg_search_time:.3f}s"
-            assert max_search_time < MAX_SEARCH_TIME_LIMIT_SECONDS, f"Max search time should be < {MAX_SEARCH_TIME_LIMIT_SECONDS}s, got {max_search_time:.3f}s"
+            assert avg_search_time < AVG_SEARCH_TIME_LIMIT_SECONDS, (
+                f"Average search time should be < {AVG_SEARCH_TIME_LIMIT_SECONDS}s, "
+                f"got {avg_search_time:.3f}s"
+            )
+            assert max_search_time < MAX_SEARCH_TIME_LIMIT_SECONDS, (
+                f"Max search time should be < {MAX_SEARCH_TIME_LIMIT_SECONDS}s, "
+                f"got {max_search_time:.3f}s"
+            )
 
     @pytest.mark.asyncio
     async def test_pagination_comprehensive(self, qa_setup):
         """QA Item 8: Test pagination functionality comprehensively.
 
-        Tests ChunkHound's chunk-based search pagination against ripgrep's line-based search.
-        Note: ChunkHound searches semantic chunks, so a chunk containing multiple pattern
-        occurrences counts as 1 result, while ripgrep counts each line occurrence separately.
+        Tests ChunkHound's chunk-based search pagination against ripgrep's
+        line-based search.
+        Note: ChunkHound searches semantic chunks, so a chunk containing
+        multiple pattern
+        occurrences counts as 1 result, while ripgrep counts each line
+        occurrence separately.
         This explains the expected discrepancy between result counts.
         """
         services, realtime_service, watch_dir, _ = qa_setup
@@ -757,10 +825,16 @@ class RapidClass_{i}:
 
         # 1. Search for non-existing value (should return empty)
         non_existing_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="non_existing_unique_pattern_qa_test_12345", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="non_existing_unique_pattern_qa_test_12345",
+            page_size=10,
+            offset=0,
         )
-        assert len(non_existing_results.get('results', [])) == 0, "Non-existing pattern should return empty results"
+        assert len(non_existing_results.get("results", [])) == 0, (
+            "Non-existing pattern should return empty results"
+        )
         print("✓ Pagination test 1: Non-existing pattern returns empty")
 
         # 2. Create single file with unique content (no pagination needed)
@@ -773,10 +847,16 @@ class RapidClass_{i}:
         await asyncio.sleep(PAGINATION_SETUP_WAIT_SECONDS)
 
         single_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="single_unique_result_qa_test", page_size=10, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="single_unique_result_qa_test",
+            page_size=10,
+            offset=0,
         )
-        assert len(single_results.get('results', [])) == 1, "Single unique pattern should return exactly 1 result"
+        assert len(single_results.get("results", [])) == 1, (
+            "Single unique pattern should return exactly 1 result"
+        )
         print("✓ Pagination test 2: Single result handled correctly")
 
         # 3. Create many files with common pattern to test pagination
@@ -823,16 +903,16 @@ PAGINATION_METADATA_{file_num} = {{
 class PaginationDataProcessor_{file_num}:
     """
     Data processing class for pagination test {file_num}.
-    
+
     This class handles various data processing operations for pagination
     testing including data validation, transformation, and storage.
     Each instance manages its own state and provides methods for
     comprehensive data manipulation.
     """
-    
+
     def __init__(self, test_id: int = {file_num}):
         """Initialize the pagination data processor.
-        
+
         Args:
             test_id: Unique identifier for this test instance
         """
@@ -840,16 +920,16 @@ class PaginationDataProcessor_{file_num}:
         self.pattern = "{pattern}"
         self.data_store = []
         self.processed_count = 0
-        
+
     def process_pagination_data(self, data: List[Dict]) -> Dict[str, Any]:
         """Process pagination data and return results.
-        
+
         This method takes input data, processes it according to pagination
         test requirements, and returns structured results with metadata.
-        
+
         Args:
             data: List of data dictionaries to process
-            
+
         Returns:
             Dictionary containing processed results and metadata
         """
@@ -860,7 +940,7 @@ class PaginationDataProcessor_{file_num}:
             "processed_items": [],
             "timestamp": datetime.datetime.now().isoformat()
         }}
-        
+
         for idx, item in enumerate(data):
             processed_item = {{
                 "original_index": idx,
@@ -871,53 +951,53 @@ class PaginationDataProcessor_{file_num}:
             }}
             results["processed_items"].append(processed_item)
             self.processed_count += 1
-            
+
         return results
-    
+
     def validate_pagination_results(self, results: Dict) -> bool:
         """Validate pagination processing results.
-        
+
         Performs comprehensive validation of pagination processing results
         to ensure data integrity and correct processing behavior.
-        
+
         Args:
             results: Results dictionary from process_pagination_data
-            
+
         Returns:
             True if validation passes, False otherwise
         """
         required_keys = ["test_id", "pattern", "input_count", "processed_items"]
-        
+
         for key in required_keys:
             if key not in results:
                 return False
-                
+
         if results["test_id"] != self.test_id:
             return False
-            
+
         if results["pattern"] != "{pattern}":
             return False
-            
+
         return len(results["processed_items"]) == results["input_count"]
 
 class PaginationTestManager_{file_num}:
     """
     Manager class for coordinating pagination tests.
-    
+
     This class provides high-level coordination for pagination testing,
     managing multiple data processors and aggregating results across
     different test scenarios.
     """
-    
+
     def __init__(self):
         self.processors = []
         self.test_results = []
         self.global_pattern = "{pattern}"
-        
+
     def add_processor(self, processor: PaginationDataProcessor_{file_num}) -> None:
         """Add a data processor to the test manager."""
         self.processors.append(processor)
-        
+
     def run_pagination_tests(self) -> Dict[str, Any]:
         """Execute pagination tests across all registered processors."""
         test_summary = {{
@@ -926,59 +1006,66 @@ class PaginationTestManager_{file_num}:
             "test_file": "pagination_test_{file_num_padded}.py",
             "individual_results": []
         }}
-        
+
         for processor in self.processors:
             test_data = [
-                {{"id": j, "value": "{pattern}_data_" + str(j) + "_processor_{file_num}"}}
+                {{
+                    "id": j,
+                    "value": "{pattern}_data_"
+                    + str(j)
+                    + "_processor_{file_num}",
+                }}
                 for j in range(5)
             ]
-            
+
             results = processor.process_pagination_data(test_data)
             validation_passed = processor.validate_pagination_results(results)
-            
+
             test_summary["individual_results"].append({{
                 "processor_id": processor.test_id,
                 "validation_passed": validation_passed,
                 "processed_count": len(results.get("processed_items", [])),
                 "pattern_matches": [
-                    item.get("pattern_match", "") 
+                    item.get("pattern_match", "")
                     for item in results.get("processed_items", [])
                 ]
             }})
-            
+
         return test_summary
 
 def pagination_function_{file_num}():
     """
     Main pagination test function for test case {file_num}.
-    
+
     This function demonstrates pagination functionality by creating
     test data, processing it through pagination components, and
     returning results that can be searched and validated.
-    
+
     Returns:
         String containing pattern for search validation
     """
     processor = PaginationDataProcessor_{file_num}()
     manager = PaginationTestManager_{file_num}()
     manager.add_processor(processor)
-    
+
     test_results = manager.run_pagination_tests()
-    
+
     # Return searchable pattern for test validation
     return "{pattern}_result_{file_num}_function"
 
 def pagination_utility_{file_num}(input_data: Optional[List] = None) -> str:
     """
     Utility function for pagination testing.
-    
+
     Provides utility functionality for pagination tests including
     data preparation, result formatting, and pattern generation.
     """
     if input_data is None:
         input_data = ["default_data_" + str(j) for j in range(3)]
-        
-    processed = ["{pattern}_utility_" + str(item) + "_{file_num}" for item in input_data]
+
+    processed = [
+        "{pattern}_utility_" + str(item) + "_{file_num}" for item in input_data
+    ]
     return "{pattern}_utility_result_{file_num}"
 
 # Module-level execution for pagination testing
@@ -986,7 +1073,7 @@ if __name__ == "__main__":
     print("Executing pagination test module {file_num}")
     result = pagination_function_{file_num}()
     utility_result = pagination_utility_{file_num}()
-    
+
     print("Pattern: {pattern}")
     print("Function result: " + str(result))
     print("Utility result: " + str(utility_result))
@@ -1005,8 +1092,11 @@ if __name__ == "__main__":
         for _ in range(MAX_STABILITY_CHECKS):
             await asyncio.sleep(STABILITY_CHECK_INTERVAL_SECONDS)
             stats = await services.indexing_coordinator.get_stats()
-            current_chunks = stats.get('chunks', 0)
-            if stable_count == current_chunks and current_chunks >= MIN_EXPECTED_CHUNKS_PAGINATION:
+            current_chunks = stats.get("chunks", 0)
+            if (
+                stable_count == current_chunks
+                and current_chunks >= MIN_EXPECTED_CHUNKS_PAGINATION
+            ):
                 break
             stable_count = current_chunks
         else:
@@ -1023,8 +1113,12 @@ if __name__ == "__main__":
 
         while page_count < max_pages:
             page_results = await search_impl(
-                services=services, embedding_manager=None,
-                type="regex", query=common_pattern, page_size=page_size, offset=offset,
+                services=services,
+                embedding_manager=None,
+                type="regex",
+                query=common_pattern,
+                page_size=page_size,
+                offset=offset,
             )
 
             page_data = page_results.get("results", [])
@@ -1036,7 +1130,8 @@ if __name__ == "__main__":
             offset += page_size
 
             print(
-                f"Page {page_count}: {len(page_data)} results (offset={offset - page_size})"
+                f"Page {page_count}: {len(page_data)} results "
+                f"(offset={offset - page_size})"
             )
 
             # Check pagination metadata if available
@@ -1048,25 +1143,33 @@ if __name__ == "__main__":
                 print(f"  Pagination metadata: {pagination}")
 
         print(
-            f"✓ Pagination test 3: Retrieved {len(all_results)} total results across {page_count} pages"
+            f"✓ Pagination test 3: Retrieved {len(all_results)} total results "
+            f"across {page_count} pages"
         )
 
         # Validate pagination worked correctly
-        # Note: May not find all files if some aren't processed yet - test pagination behavior with available data
+        # Note: May not find all files if some aren't processed yet - test
+        # pagination behavior with available data
         assert len(all_results) >= 10, (
-            f"Should find reasonable number of results for pagination testing, got {len(all_results)}"
+            f"Should find reasonable number of results for pagination "
+            f"testing, got {len(all_results)}"
         )
         assert page_count >= 2, (
-            f"Should require multiple pages with page_size={page_size}, used {page_count} pages"
+            f"Should require multiple pages with page_size={page_size}, "
+            f"used {page_count} pages"
         )
 
         # Report actual vs expected for manual review
         expected_chunks = NUM_PAGINATION_TEST_FILES * EXPECTED_CHUNKS_PER_FILE
-        # Note: Due to cAST algorithm's semantic chunking, files may be merged into fewer chunks
+        # Note: Due to cAST algorithm's semantic chunking, files may be merged
+        # into fewer chunks
         # than expected based on size. This is by design for better semantic coherence.
         if len(all_results) < expected_chunks:
             processing_rate = len(all_results) / expected_chunks
-            print(f"📊 Chunk processing rate: {processing_rate:.1%} ({len(all_results)}/{expected_chunks} expected chunks)")
+            print(
+                f"📊 Chunk processing rate: {processing_rate:.1%} "
+                f"({len(all_results)}/{expected_chunks} expected chunks)"
+            )
 
         # 4. Compare with external validation using ripgrep if available
         try:
@@ -1099,12 +1202,17 @@ if __name__ == "__main__":
                 )
 
                 # Allow some variance due to different matching behavior
-                # ChunkHound uses chunk-based search (semantic units) vs ripgrep's line-based search
-                # A chunk containing multiple pattern occurrences counts as 1 result in ChunkHound
-                # but each line occurrence counts as 1 result in ripgrep, hence the large discrepancy
+                # ChunkHound uses chunk-based search (semantic units) vs ripgrep's
+                # line-based search
+                # A chunk containing multiple pattern occurrences counts as 1 result
+                # in ChunkHound
+                # but each line occurrence counts as 1 result in ripgrep, hence
+                # the large discrepancy
                 match_ratio = len(all_results) / max(rg_total_matches, 1)
                 assert 0.05 <= match_ratio <= 3.0, (
-                    f"ChunkHound uses chunk-based search (semantic units) vs ripgrep's line-based search: {len(all_results)} chunks vs {rg_total_matches} line matches"
+                    f"ChunkHound uses chunk-based search (semantic units) vs "
+                    f"ripgrep's line-based search: {len(all_results)} chunks vs "
+                    f"{rg_total_matches} line matches"
                 )
 
             else:
@@ -1119,21 +1227,36 @@ if __name__ == "__main__":
 
         # 5. Test edge cases
         # Test offset beyond available results
-        # Use total_count from pagination metadata, not len(all_results) which may be partial
+        # Use total_count from pagination metadata, not len(all_results) which may
+        # be partial
         actual_total = total_count if total_count > 0 else len(all_results)
         beyond_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query=common_pattern, page_size=10, offset=actual_total + 100,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query=common_pattern,
+            page_size=10,
+            offset=actual_total + 100,
         )
-        assert len(beyond_results.get('results', [])) == 0, f"Offset {actual_total + 100} beyond total {actual_total} should return empty"
+        assert len(beyond_results.get("results", [])) == 0, (
+            f"Offset {actual_total + 100} beyond total {actual_total} "
+            "should return empty"
+        )
 
         # Test large page size
         large_page_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query=common_pattern, page_size=100, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query=common_pattern,
+            page_size=100,
+            offset=0,
         )
-        large_page_count = len(large_page_results.get('results', []))
-        assert large_page_count <= actual_total, f"Large page size should not exceed total ({large_page_count} <= {actual_total})"
+        large_page_count = len(large_page_results.get("results", []))
+        assert large_page_count <= actual_total, (
+            "Large page size should not exceed total "
+            f"({large_page_count} <= {actual_total})"
+        )
 
         print("✓ Pagination edge cases handled correctly")
 
@@ -1161,15 +1284,19 @@ if __name__ == "__main__":
         poll_interval = INDEXING_POLL_INTERVAL_SECONDS
         start_time = time.monotonic()
 
-        while (elapsed := time.monotonic() - start_time) < max_wait:
+        while time.monotonic() - start_time < max_wait:
             await asyncio.sleep(poll_interval)
 
             search_results = await search_impl(
-                services=services, embedding_manager=None,
-                type="regex", query="timing_validation_unique_content", page_size=10, offset=0,
+                services=services,
+                embedding_manager=None,
+                type="regex",
+                query="timing_validation_unique_content",
+                page_size=10,
+                offset=0,
             )
 
-            if len(search_results.get('results', [])) > 0:
+            if len(search_results.get("results", [])) > 0:
                 indexing_time = time.monotonic() - start_time
                 break
         else:
@@ -1178,8 +1305,12 @@ if __name__ == "__main__":
         # Test search performance
         search_start = time.time()
         performance_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="function", page_size=50, offset=0,
+            services=services,
+            embedding_manager=None,
+            type="regex",
+            query="function",
+            page_size=50,
+            offset=0,
         )
         search_time = time.time() - search_start
 
@@ -1210,7 +1341,9 @@ if __name__ == "__main__":
         print(f"   Real-time indexing: {'✅ WORKING' if indexing_ok else '❌ SLOW'}")
         search_good = search_time < SEARCH_GOOD_THRESHOLD_SECONDS
         search_ok = search_time < SEARCH_ACCEPTABLE_THRESHOLD_SECONDS
-        search_status = '✅ GOOD' if search_good else '⚠ ACCEPTABLE' if search_ok else '❌ SLOW'
+        search_status = (
+            "✅ GOOD" if search_good else "⚠ ACCEPTABLE" if search_ok else "❌ SLOW"
+        )
         print(f"   Search performance: {search_status}")
         print("   Non-blocking searches: ✅ VERIFIED")
 

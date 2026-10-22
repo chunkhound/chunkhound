@@ -310,6 +310,16 @@ class DatabaseProvider(Protocol):
         ...
 
     # Search Operations
+    @property
+    def semantic_result_window_cap(self) -> int | None:
+        """Return the exclusive upper bound of the semantic result window.
+
+        ``None`` means the provider imposes no window restriction. A provider
+        with a cap rejects windows crossing it; callers must keep
+        ``offset + page_size <= cap``.
+        """
+        return None
+
     def search_semantic(
         self,
         query_embedding: list[float],
@@ -328,8 +338,19 @@ class DatabaseProvider(Protocol):
             model: Embedding model name
             page_size: Number of results per page
             offset: Starting position for pagination
-            threshold: Optional similarity threshold
-            path_filter: Optional relative path to limit search scope (e.g., 'src/', 'tests/')
+            threshold: Inclusive similarity floor
+                (results have similarity >= threshold; e.g., legacy distance 0.2 → threshold 0.8)
+            path_filter: Optional relative path to limit search scope
+                (e.g., 'src/', 'tests/')
+
+        Providers may use approximate indexes, so filtered pages can contain
+        fewer results than ``page_size``. Results include parsed chunk metadata.
+        Pagination always includes ``offset``, ``page_size``, and ``has_more``;
+        ``total`` is ``None`` when the provider cannot determine an exact count.
+        Follow ``has_more``/``next_offset`` instead of assuming a total.
+
+        Provider-specific indexing, metric, and window-cap capabilities are
+        documented by each provider.
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -352,11 +373,12 @@ class DatabaseProvider(Protocol):
             provider: Embedding provider name
             model: Embedding model name
             limit: Maximum number of results to return
-            threshold: Optional similarity threshold
+            threshold: Inclusive similarity floor (results have similarity >= threshold)
+                (e.g., legacy distance 0.2 → threshold 0.8)
             path_filter: Optional relative path to limit search scope
 
         Returns:
-            List of similar chunks with scores and metadata
+            List of similar chunks with scores and parsed chunk metadata
         """
         ...
 
@@ -376,11 +398,12 @@ class DatabaseProvider(Protocol):
             provider: Embedding provider name
             model: Embedding model name
             limit: Maximum number of results to return
-            threshold: Optional similarity threshold
+            threshold: Inclusive similarity floor (results have similarity >= threshold)
+                (e.g., legacy distance 0.2 → threshold 0.8)
             path_filter: Optional relative path to limit search scope
 
         Returns:
-            List of similar chunks with scores and metadata
+            List of similar chunks with scores and parsed chunk metadata
         """
         ...
 
@@ -560,12 +583,10 @@ class DatabaseProvider(Protocol):
         ...
 
     def measure_fragmentation(self) -> float:
-        """Return fragmentation ratio. Fully stateless.
+        """Return current_size / estimated_live_size. Fully stateless.
 
-        Uses PRAGMA database_size, pragma_storage_info (block allocation
-        metadata), and os.path.getsize to compare actual file size against
-        the estimated minimum live data size.
-        < 1.5 = healthy, > 3.0 = fragmented, > 5.0 = significantly fragmented.
+        Uses the larger of free-block ratio and dead-row ratio. A clean
+        database is ~1.0; 2.0 means about half the file is reclaimable.
         """
         ...
 

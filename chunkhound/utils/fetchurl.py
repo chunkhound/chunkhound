@@ -124,8 +124,39 @@ def _derive_page_title(
     return _normalize_title(candidate)
 
 
+def _parse_ip_literal(
+    host: str | int,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Return the parsed address for numeric hosts; None for DNS names."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def _reject_blocked_address(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address, hostname: str
+) -> None:
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        raise FetchUrlError(
+            f"Blocked address {str(ip)!r} for {hostname!r} "
+            f"(loopback/private/link-local/reserved/multicast/unspecified)"
+        )
+
+
 async def _validate_url_and_resolve(url: str) -> None:
     """SSRF pre-check. Rejects non-http(s), missing host, and private IPs.
+
+    Literal IP hosts are classified directly — no resolver call. This keeps
+    the check deterministic and stops an offline socket guard from masking
+    SSRF rejection with its own transport error.
 
     DNS lookup runs in a worker thread — cold-cache getaddrinfo can
     block for hundreds of ms and would stall the event loop if called
@@ -144,29 +175,21 @@ async def _validate_url_and_resolve(url: str) -> None:
     if hostname is None:
         raise FetchUrlError(f"URL has no hostname: {url!r}")
 
+    literal = _parse_ip_literal(hostname)
+    if literal is not None:
+        _reject_blocked_address(literal, hostname)
+        return
+
     try:
         addrs = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
     except socket.gaierror as e:
         raise FetchUrlError(f"DNS resolution failed for {hostname!r}: {e}") from e
 
     for family, _type, _proto, _canon, sockaddr in addrs:
-        ip_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
+        ip = _parse_ip_literal(sockaddr[0])
+        if ip is None:
             continue
-        if (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise FetchUrlError(
-                f"Blocked address {ip_str!r} for {hostname!r} "
-                f"(loopback/private/link-local/reserved/multicast/unspecified)"
-            )
+        _reject_blocked_address(ip, hostname)
 
 
 def _classify_and_raise_if_terminal(e: BaseException) -> None:
@@ -281,8 +304,7 @@ async def _fetch_with_retry(
                             else "no retries remain."
                         )
                         warning_callback(
-                            f"Browser died mid-fetch ({type(e).__name__}: {e}); "
-                            f"{tail}"
+                            f"Browser died mid-fetch ({type(e).__name__}: {e}); {tail}"
                         )
                     browser = None
                     last_exc = e
@@ -331,9 +353,7 @@ def _annotate_parent_headers(chunks: list[Chunk]) -> list[Chunk]:
     last_header: str | None = None
     for chunk in ordered:
         if _is_markdown_heading(chunk):
-            first_line = next(
-                (ln for ln in chunk.code.splitlines() if ln.strip()), ""
-            )
+            first_line = next((ln for ln in chunk.code.splitlines() if ln.strip()), "")
             last_header = first_line.strip()
             result.append(chunk)  # heading itself: parent_header stays None
         else:
@@ -367,10 +387,10 @@ def _raise_if_pdf_unavailable(chunks: list[Chunk]) -> None:
 class FetchExtract:
     """Single-pass extraction result from a fetched URL."""
 
-    kind: str            # ".md" | ".pdf"
-    text: str            # raw Markdown or joined PDF chunk-code
+    kind: str  # ".md" | ".pdf"
+    text: str  # raw Markdown or joined PDF chunk-code
     chunks: list[Chunk]  # annotated on .md, verbatim on .pdf
-    title: str           # resolved via _derive_page_title
+    title: str  # resolved via _derive_page_title
 
 
 def extract(
@@ -448,7 +468,9 @@ async def run_fetchurl(
     will render them twice.
     """
     kind, payload, source_metadata = await _fetch_with_retry(
-        url, config, warning_callback=warning_callback,
+        url,
+        config,
+        warning_callback=warning_callback,
     )
     fx = extract(kind, payload, url, source_metadata)
     if verbose_log:
@@ -461,7 +483,7 @@ async def run_fetchurl(
             f"Fetched PDF at {url}, but could not extract text content.\n"
             f"Detail: {detail}\n\n"
             f"The PDF may be encrypted, password-protected, or corrupt. "
-            f"No content is available to answer the query."
+            f"No content is available to answer the query.",
         )
 
     # Fetch succeeded but produced nothing usable to dispatch: 0-chunk PDF
@@ -489,8 +511,13 @@ async def run_fetchurl(
     if verbose_log:
         verbose_log(f"option=chunk-rerank, chunks_before={len(fx.chunks)}")
     return await option_chunk_rerank(
-        fx.chunks, query, url, fx.title,
-        embedding_provider, llm_manager, config,
+        fx.chunks,
+        query,
+        url,
+        fx.title,
+        embedding_provider,
+        llm_manager,
+        config,
         warning_callback=warning_callback,
     )
 
@@ -512,11 +539,16 @@ async def option_truncate(
 
     if query:
         user = fetchurl_prompts.FOCUSED_USER_TEMPLATE.format(
-            url=url, title=title, query=query, content=truncated,
+            url=url,
+            title=title,
+            query=query,
+            content=truncated,
         )
     else:
         user = fetchurl_prompts.GENERIC_USER_TEMPLATE.format(
-            url=url, title=title, content=truncated,
+            url=url,
+            title=title,
+            content=truncated,
         )
 
     return await _complete_and_wrap(llm_manager, user, url)
@@ -590,7 +622,8 @@ async def option_chunk_rerank(
         end = min(start + max_batch, len(documents))
         batch = documents[start:end]
         batch_results = await embedding_provider.rerank(
-            query=query, documents=batch,
+            query=query,
+            documents=batch,
         )
         total_rerank_results += len(batch_results)
         for r in batch_results:
@@ -661,6 +694,9 @@ async def option_chunk_rerank(
     body = "\n\n---\n\n".join(body_parts)
 
     user = fetchurl_prompts.FOCUSED_USER_TEMPLATE.format(
-        url=url, title=title, query=query, content=body,
+        url=url,
+        title=title,
+        query=query,
+        content=body,
     )
     return await _complete_and_wrap(llm_manager, user, url)

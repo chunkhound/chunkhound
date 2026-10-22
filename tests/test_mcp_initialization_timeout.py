@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+from tests.helpers.cli import cli_command
 from tests.utils import JsonRpcTimeoutError, SubprocessJsonRpcClient
 from tests.utils.windows_compat import database_cleanup_context, windows_safe_tempdir
 
@@ -60,7 +61,7 @@ class TestMCPInitializationTimeout:
 
 def function_{i}():
     '''Function {i} for testing initialization timeout.
-    
+
     This function has extensive documentation to create more chunks
     during the parsing and indexing process. The goal is to simulate
     a real-world codebase that would take significant time to process.
@@ -71,25 +72,25 @@ def function_{i}():
         "description": "A test function that does various operations",
         "operations": [
             "data_processing",
-            "file_handling", 
+            "file_handling",
             "network_requests",
             "database_operations"
         ]
     }}
-    
+
     # Perform some operations
     for operation in data["operations"]:
         process_operation(operation, data["id"])
-        
+
     return data
 
 class Class_{i}:
     '''Class {i} for testing large directory initialization.
-    
+
     This class contains multiple methods and properties to increase
     the parsing and chunking work during initialization.
     '''
-    
+
     def __init__(self):
         self.data = {{
             "class_id": {i},
@@ -101,15 +102,15 @@ class Class_{i}:
                 "author": "test_system"
             }}
         }}
-    
+
     def method_{i}(self):
         '''Method {i} implementation.'''
         return self.function_{i}()
-        
+
     def function_{i}(self):
         '''Another function in class {i}.'''
         return f"class_value_{{self.data['class_id']}}"
-        
+
     def process_data(self):
         '''Process data for class {i}.'''
         results = []
@@ -172,12 +173,7 @@ CONFIGURATION_{i} = {{
                 mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
 
                 proc = await asyncio.create_subprocess_exec(
-                    "uv",
-                    "run",
-                    "chunkhound",
-                    "mcp",
-                    "--no-daemon",
-                    str(temp_path),
+                    *cli_command("mcp", "--no-daemon", str(temp_path)),
                     cwd=temp_path,
                     env=mcp_env,
                     stdin=asyncio.subprocess.PIPE,
@@ -258,12 +254,7 @@ CONFIGURATION_{i} = {{
                 mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
 
                 proc = await asyncio.create_subprocess_exec(
-                    "uv",
-                    "run",
-                    "chunkhound",
-                    "mcp",
-                    "--no-daemon",
-                    str(temp_path),
+                    *cli_command("mcp", "--no-daemon", str(temp_path)),
                     cwd=temp_path,
                     env=mcp_env,
                     stdin=asyncio.subprocess.PIPE,
@@ -325,12 +316,7 @@ CONFIGURATION_{i} = {{
                 mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
 
                 proc = await asyncio.create_subprocess_exec(
-                    "uv",
-                    "run",
-                    "chunkhound",
-                    "mcp",
-                    "--no-daemon",
-                    str(temp_path),
+                    *cli_command("mcp", "--no-daemon", str(temp_path)),
                     cwd=temp_path,
                     env=mcp_env,
                     stdin=asyncio.subprocess.PIPE,
@@ -419,12 +405,7 @@ CONFIGURATION_{i} = {{
                 mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
 
                 proc = await asyncio.create_subprocess_exec(
-                    "uv",
-                    "run",
-                    "chunkhound",
-                    "mcp",
-                    "--no-daemon",
-                    str(temp_path),
+                    *cli_command("mcp", "--no-daemon", str(temp_path)),
                     cwd=temp_path,
                     env=mcp_env,
                     stdin=asyncio.subprocess.PIPE,

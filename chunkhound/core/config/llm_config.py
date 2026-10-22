@@ -26,7 +26,6 @@ from pydantic_settings import (
     SecretsSettingsSource,
     SettingsConfigDict,
 )
-from typing_extensions import assert_never
 
 from chunkhound.core.config.claude_model_resolution import (
     CLAUDE_HAIKU_SENTINEL,
@@ -35,6 +34,7 @@ from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
 from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.core.utils.openai_utils import is_official_openai_endpoint
 
+from ._settings import _ChunkhoundBaseSettings, apply_source_policy
 from ._utils import _parse_env_bool
 
 REASONING_EFFORT_PROVIDERS: tuple[str, ...] = (
@@ -82,9 +82,7 @@ class _LLMEnvSettingsSource(EnvSettingsSource):
         decoded = _decode_output_limit_source_value(field_name, value)
         if decoded is not value:
             return decoded
-        return super().prepare_field_value(
-            field_name, field, value, value_is_complex
-        )
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
 
 
 class _LLMDotEnvSettingsSource(DotEnvSettingsSource):
@@ -100,9 +98,7 @@ class _LLMDotEnvSettingsSource(DotEnvSettingsSource):
         decoded = _decode_output_limit_source_value(field_name, value)
         if decoded is not value:
             return decoded
-        return super().prepare_field_value(
-            field_name, field, value, value_is_complex
-        )
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
 
 
 class _LLMSecretsSettingsSource(SecretsSettingsSource):
@@ -118,9 +114,7 @@ class _LLMSecretsSettingsSource(SecretsSettingsSource):
         decoded = _decode_output_limit_source_value(field_name, value)
         if decoded is not value:
             return decoded
-        return super().prepare_field_value(
-            field_name, field, value, value_is_complex
-        )
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
 
 
 NO_KEY_PROVIDERS: tuple[str, ...] = (
@@ -199,7 +193,7 @@ def _parse_llm_provider_arg(value: str) -> str:
     return normalized
 
 
-class LLMConfig(BaseSettings):
+class LLMConfig(_ChunkhoundBaseSettings):
     """
     LLM configuration for ChunkHound deep research.
 
@@ -237,16 +231,22 @@ class LLMConfig(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Parse environment strings while keeping constructor values strict."""
-        return (
+        """Parse environment strings while keeping constructor values strict.
+
+        Honors the context-local source policy: when the env layer is
+        suppressed, only ``init_settings`` survives so the custom
+        env/dotenv/secrets sources — including their strict output-limit
+        decoding — are not consulted and no ``CHUNKHOUND_LLM_*`` var leaks
+        past an env-layer gate. Normal construction keeps the custom
+        decoding sources unchanged.
+        """
+        return apply_source_policy(
             init_settings,
             _LLMEnvSettingsSource(settings_cls),
             _LLMDotEnvSettingsSource(
                 settings_cls,
                 env_file=getattr(dotenv_settings, "env_file", None),
-                env_file_encoding=getattr(
-                    dotenv_settings, "env_file_encoding", None
-                ),
+                env_file_encoding=getattr(dotenv_settings, "env_file_encoding", None),
             ),
             _LLMSecretsSettingsSource(
                 settings_cls,
@@ -1016,9 +1016,8 @@ class LLMConfig(BaseSettings):
             # User must set model in provider/model format.
             return ("", "")
         else:
-            # Type-level exhaustiveness check — mypy will flag if a new
-            # LLMProviderLiteral variant is added without a matching branch.
-            assert_never(provider)
+            # Registry membership does not narrow the provider union for mypy.
+            raise AssertionError(f"Unhandled LLM provider: {provider!r}")
 
     def get_default_models(self) -> tuple[str, str]:
         """
@@ -1123,13 +1122,13 @@ class LLMConfig(BaseSettings):
         return None
 
     def _is_custom_openai_endpoint(self) -> bool:
-        """Return whether this config targets a non-official OpenAI-compatible endpoint."""
+        """Return whether this config targets a non-official endpoint."""
         return not is_official_openai_endpoint(self.base_url)
 
     def _require_explicit_model_for_custom_openai(
         self, roles: tuple[str, ...]
     ) -> list[str]:
-        """Return roles that rely on a custom OpenAI endpoint without valid model selection."""
+        """Return roles that need explicit model selection on custom endpoints."""
         if not self._is_custom_openai_endpoint():
             return []
 
@@ -1196,7 +1195,8 @@ class LLMConfig(BaseSettings):
         if registry_provider_roles:
             roles_text = ", ".join(registry_provider_roles)
             missing.append(
-                f"explicit model selection required for registry provider roles: {roles_text}"
+                "explicit model selection required for registry provider roles:"
+                f" {roles_text}"
             )
 
         custom_endpoint_roles = [
@@ -1353,7 +1353,10 @@ class LLMConfig(BaseSettings):
             "--llm-map-hyde-provider",
             type=_parse_llm_provider_arg,
             metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
-            help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
+            help=(
+                "Override provider for Code Mapper HyDE planning"
+                " (falls back to synthesis)"
+            ),
         )
         parser.add_argument(
             "--llm-map-hyde-model",

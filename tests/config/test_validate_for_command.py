@@ -14,26 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from chunkhound.core.config.config import Config, ConfigErrorCode
-
-
-@pytest.fixture(autouse=True)
-def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip CHUNKHOUND_* env vars and redirect HOME so global configs
-    and dev-shell env leakage cannot interfere with sub-config construction.
-    """
-    import os
-
-    for key in list(os.environ):
-        if key.startswith("CHUNKHOUND_") or key in {
-            "VOYAGE_API_KEY",
-            "OPENAI_API_KEY",
-        }:
-            monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
 
 def _codes(config: Config, command: str) -> list[ConfigErrorCode]:

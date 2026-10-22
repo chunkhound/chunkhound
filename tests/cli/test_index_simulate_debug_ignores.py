@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
-
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 25) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+from tests.helpers.cli import run_cli
 
 
 def test_simulate_debug_ignores_prints_context(tmp_path: Path) -> None:
     # Create a trivial file so simulate has something to traverse
     (tmp_path / "README.md").write_text("hi")
 
-    proc = _run(["chunkhound", "index", "--simulate", str(tmp_path), "--debug-ignores"])
+    proc = run_cli(
+        ["index", "--simulate", str(tmp_path), "--debug-ignores"], cwd=tmp_path
+    )
     assert proc.returncode == 0, proc.stderr
 
     # Debug info should be printed to stderr to avoid corrupting stdout
@@ -32,7 +31,10 @@ def test_simulate_debug_ignores_prints_context(tmp_path: Path) -> None:
 def test_simulate_debug_ignores_with_json_is_clean(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("print('x')\n")
 
-    proc = _run(["chunkhound", "index", "--simulate", str(tmp_path), "--json", "--debug-ignores"])
+    proc = run_cli(
+        ["index", "--simulate", str(tmp_path), "--json", "--debug-ignores"],
+        cwd=tmp_path,
+    )
     assert proc.returncode == 0, proc.stderr
 
     # Stdout should be valid JSON and not contain debug text
@@ -42,4 +44,3 @@ def test_simulate_debug_ignores_with_json_is_clean(tmp_path: Path) -> None:
 
     # Debug text goes to stderr
     assert "[debug-ignores] Active sources:" in proc.stderr
-

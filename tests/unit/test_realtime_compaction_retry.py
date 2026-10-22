@@ -335,3 +335,44 @@ async def test_delete_batch_compaction_retry_budget_exhaustion(
     assert str(file_b) in service.failed_files
     assert service._last_error is not None
     assert "retry budget exhausted" in service._last_error
+
+
+@pytest.mark.asyncio
+async def test_idle_compaction_check_runs_after_queue_drains(
+    service: RealtimeIndexingService,
+    tmp_path: Path,
+) -> None:
+    """A write burst must get a compaction check before the loop blocks again."""
+    target_file = tmp_path / "idle_compact.py"
+    target_file.write_text("def idle_compact():\n    return 1\n", encoding="utf-8")
+    compacted = asyncio.Event()
+
+    async def process_file(
+        file_path: Path, skip_embeddings: bool = False
+    ) -> dict[str, int]:
+        assert file_path == target_file
+        assert skip_embeddings is True
+        return {"chunks": 1, "embeddings": 0}
+
+    async def compact_if_needed_async() -> bool:
+        compacted.set()
+        return False
+
+    service.services = SimpleNamespace(
+        indexing_coordinator=SimpleNamespace(process_file=process_file),
+        provider=SimpleNamespace(
+            flush=AsyncMock(),
+            compact_if_needed_async=compact_if_needed_async,
+        ),
+    )
+    service.add_file = AsyncMock(return_value=True)
+
+    await service._enqueue_mutation(service._build_mutation("scan", target_file))
+    process_task = asyncio.create_task(service._process_loop())
+    service.process_task = process_task
+    try:
+        await asyncio.wait_for(compacted.wait(), timeout=2.0)
+    finally:
+        process_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await process_task

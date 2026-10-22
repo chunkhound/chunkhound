@@ -555,9 +555,15 @@ class DuckDBEmbeddingRepository:
 
                 # Ensure HNSW indexes exist for semantic search after small batch insert
                 # Note: _ensure_embedding_table_exists automatically creates standard HNSW indexes
-                # This check verifies the index exists for this dimension
-                if self._provider_instance and hasattr(
-                    self._provider_instance, "get_existing_vector_indexes"
+                # This check verifies the index exists for this dimension.
+                # Requires hnsw_enabled attr (fail-closed: providers without it skip index check)
+                # and hnsw_enabled=True: exact search needs no index and resurrecting
+                # one would fight the config.
+                if (
+                    self._provider_instance
+                    and hasattr(self._provider_instance, "hnsw_enabled")
+                    and self._provider_instance.hnsw_enabled
+                    and hasattr(self._provider_instance, "get_existing_vector_indexes")
                 ):
                     existing_indexes = (
                         self._provider_instance.get_existing_vector_indexes()

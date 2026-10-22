@@ -40,6 +40,19 @@ fn emit_progress_gil(cb: &Option<Py<PyAny>>, phase: &str, current: u64, total: u
     }
 }
 
+/// Pick the progress phase that matches what the store thread will actually do.
+/// Pure so the full matrix stays unit-testable without a DB or GIL.
+fn write_phase(compaction: bool, hnsw_enabled: bool, hnsw_available: bool) -> &'static str {
+    match (compaction, hnsw_enabled, hnsw_available) {
+        (true, true, true) => "write-compact",
+        (true, true, false) => "write-compact-unavailable",
+        (true, false, _) => "write-compact-disabled",
+        (false, true, true) => "write-index",
+        (false, true, false) => "write-index-unavailable",
+        (false, false, _) => "write-index-disabled",
+    }
+}
+
 /// Like `emit_progress_gil` but passes a 4th `chunks` value (cumulative chunks
 /// written so far). Used by the write-data phase so the Python progress bar can
 /// display true throughput as chunks/s instead of cumulative batches/min. The
@@ -105,13 +118,16 @@ impl IndexingPipeline {
     ///
     /// progress_callback receives ``(phase: str, current: int, total: int)``
     /// at phase transitions.  Phases: ``"diff"``, ``"parse"``, ``"embed"``,
-    /// ``"write-prepare"``, ``"write-data"``, ``"write-index"``,
-    /// ``"write-compact"``, ``"write-done"``, ``"done"``. Only one of
-    /// ``"write-index"``/``"write-compact"`` fires per run — compaction
-    /// rebuilds indexes as part of its own rewrite, so the two never both
-    /// run. ``"write-index"`` arrives as ``(0, 1)`` when the indexes are
-    /// about to be rebuilt and as ``(1, 1)`` when the run changed no rows
-    /// and they were left in place.
+    /// ``"write-prepare"``, ``"write-data"``, one ``write-index*`` or
+    /// ``write-compact*`` phase, ``"write-done"``, ``"done"``.
+    ///
+    /// The index/compact phase names carry the actual HNSW outcome so
+    /// progress consumers never claim work that did not happen:
+    /// - ``"write-index"``: ``(0, 1)`` = build; ``(1, 1)`` = left in place.
+    /// - ``"write-index-disabled"`` / ``"write-index-unavailable"``: no build.
+    /// - ``"write-compact"``: compaction runs and rebuilds indexes.
+    /// - ``"write-compact-disabled"`` / ``"write-compact-unavailable"``:
+    ///   compaction runs without an index rebuild.
     #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false, analytics_recorder=None, analytics_handle=0))]
     #[allow(clippy::too_many_arguments)] // Mirrors run()'s existing shape; analytics is two more optional, orthogonal params.
     fn run(
@@ -234,6 +250,7 @@ impl IndexingPipeline {
             compaction_threshold: self.config.compaction_threshold,
             compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
             insert_batch_size: self.config.db_batch_size.max(1),
+            hnsw_enabled: self.config.duckdb_hnsw_enabled,
         };
 
         // Ensure parent directory exists (DuckDB doesn't auto-create it).
@@ -395,6 +412,7 @@ impl IndexingPipeline {
                 compaction_threshold,
                 compaction_min_size_bytes,
                 insert_batch_size,
+                hnsw_enabled: self.config.duckdb_hnsw_enabled,
             };
             let backend: Box<dyn DbBackend> = create_backend(db_config);
             let db_entries: Vec<DbFileEntry> = backend.read_file_states()?;
@@ -665,13 +683,13 @@ impl IndexingPipeline {
                 let skip_hnsw_bracket =
                     Self::close_backend_on_err(backend.as_mut(), skip_decision)?;
                 if skip_hnsw_bracket {
-                    log::info!("[hnsw-drop] skipped: nothing to write, delete or compact");
+                    log::info!("[hnsw-cleanup] skipped: nothing to write, delete or compact");
                 } else {
                     let t_hnsw_drop = Instant::now();
                     let drop_hnsw_result = backend.drop_all_hnsw_indexes();
                     Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
                     log::info!(
-                        "[hnsw-drop] done in {:.3}s",
+                        "[hnsw-cleanup] done in {:.3}s",
                         t_hnsw_drop.elapsed().as_secs_f64()
                     );
                 }
@@ -840,13 +858,15 @@ impl IndexingPipeline {
                 // no indexes, then rebuilds them via `reopen()` — on both
                 // its success path (`run_attach_copy_compaction`) and its
                 // failure-fallback path (`reopen_after_compaction_failure`).
-                // So `run_compaction()` *always* leaves the database with a
-                // rebuilt HNSW index. Calling `ensure_all_hnsw_indexes()`
-                // beforehand would just mean building the (CPU-intensive,
-                // see `SET threads = 8` there) index once, throwing it away
-                // during compaction, then building it again from scratch —
-                // do not restore that call here without also removing the
-                // `run_compaction()` branch's reliance on `reopen()`.
+                // When HNSW is enabled and available, `run_compaction()`
+                // leaves the database with a rebuilt HNSW index. Calling
+                // `ensure_all_hnsw_indexes()` beforehand would just mean
+                // building the (CPU-intensive, see `SET threads = 8` there)
+                // index once, throwing it away during compaction, then
+                // building it again from scratch. When HNSW is disabled or
+                // VSS is unavailable, `reopen()`'s ensure call creates no
+                // indexes (it still clears bulk mode). Do not restore a
+                // pre-compaction ensure call here.
                 //
                 // Never compact after a disk-limit trip: the EXPORT/IMPORT
                 // rewrite needs a full second copy of the database on disk
@@ -868,8 +888,13 @@ impl IndexingPipeline {
                     let needs_compaction = !skip_hnsw_bracket
                         && disk_limit_hit.is_none()
                         && backend.needs_compaction().map_err(|e| e.to_string())?;
+                    let phase = write_phase(
+                        needs_compaction,
+                        backend.hnsw_enabled(),
+                        backend.hnsw_available(),
+                    );
                     if needs_compaction {
-                        emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
+                        emit_progress_gil(&store_progress_cb, phase, 0, 1);
                         backend.run_compaction().map_err(|e| e.to_string())?;
                     } else {
                         if disk_limit_hit.is_some() {
@@ -881,16 +906,17 @@ impl IndexingPipeline {
                             } else {
                                 log::info!(
                                     "[store] skipping compaction after disk-limit trip; \
-                                     rebuilding HNSW indexes only"
+                                     ensuring HNSW indexes only"
                                 );
                             }
                         }
-                        // Still emitted when there is nothing to rebuild:
-                        // the progress consumer resolves its index and
-                        // compact bars on whichever of these two phases
-                        // fires. A skipped build reports itself complete.
-                        let index_done = u64::from(skip_hnsw_bracket);
-                        emit_progress_gil(&store_progress_cb, "write-index", index_done, 1);
+                        // `write-index` is the only non-compaction phase that
+                        // does real index work. Every other phase (left in
+                        // place, disabled, unavailable) reports complete.
+                        let index_done = u64::from(skip_hnsw_bracket || phase != "write-index");
+                        emit_progress_gil(&store_progress_cb, phase, index_done, 1);
+                        // Runs for disabled/unavailable too: it resets HNSW
+                        // bulk mode even when it creates nothing.
                         if !skip_hnsw_bracket {
                             backend
                                 .ensure_all_hnsw_indexes()
@@ -1156,15 +1182,18 @@ impl IndexingPipeline {
     /// Whether the store thread can leave the HNSW indexes exactly as
     /// `open()` left them, instead of dropping them and building them again.
     ///
-    /// True only when the run changes no rows (`nothing_to_write`: no batch
-    /// to insert, no orphan to delete) and no compaction is due. Compaction
-    /// is excluded because it rebuilds the indexes itself, through
-    /// `reopen()`, with the metrics `drop_all_hnsw_indexes()` captures.
+    /// True only when the backend maintains HNSW, the run changes no rows
+    /// (`nothing_to_write`: no batch to insert, no orphan to delete) and no
+    /// compaction is due. Compaction is excluded because it rebuilds the
+    /// indexes itself, through `reopen()`, with the metrics
+    /// `drop_all_hnsw_indexes()` captures. A disabled backend can never skip:
+    /// skipping exists to avoid the expensive *rebuild*, which disabled mode
+    /// never performs, so its drop must always run to clear leftover indexes.
     fn can_skip_hnsw_bracket(
         backend: &dyn DbBackend,
         nothing_to_write: bool,
     ) -> Result<bool, DbError> {
-        Ok(nothing_to_write && !backend.needs_compaction()?)
+        Ok(backend.hnsw_enabled() && nothing_to_write && !backend.needs_compaction()?)
     }
 
     /// Run a fallible backend setup step (`open`/`drop_all_hnsw_indexes`),
@@ -1679,6 +1708,7 @@ mod tests {
         close_called: Cell<bool>,
         /// `None` makes `needs_compaction()` fail.
         compaction_due: Option<bool>,
+        hnsw_enabled: bool,
     }
 
     impl DbBackend for FakeBackend {
@@ -1717,6 +1747,10 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn hnsw_enabled(&self) -> bool {
+            self.hnsw_enabled
+        }
     }
 
     #[test]
@@ -1726,6 +1760,7 @@ mod tests {
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
             compaction_due: Some(false),
+            hnsw_enabled: true,
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1743,6 +1778,7 @@ mod tests {
             fail_drop_hnsw: true,
             close_called: Cell::new(false),
             compaction_due: Some(false),
+            hnsw_enabled: true,
         };
         let drop_result = backend.drop_all_hnsw_indexes();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, drop_result);
@@ -1760,6 +1796,7 @@ mod tests {
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
             compaction_due: Some(false),
+            hnsw_enabled: true,
         };
         let open_result = backend.open();
         let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
@@ -1778,6 +1815,7 @@ mod tests {
             fail_drop_hnsw: false,
             close_called: Cell::new(false),
             compaction_due,
+            hnsw_enabled: true,
         }
     }
 
@@ -1816,10 +1854,36 @@ mod tests {
     }
 
     #[test]
+    fn test_hnsw_bracket_not_skipped_when_hnsw_disabled() {
+        // Disabled HNSW has no rebuild to save, so the drop must always run
+        // to clear indexes left by an earlier enabled run — even when this
+        // run writes nothing.
+        let mut backend = backend_with_compaction(Some(false));
+        backend.hnsw_enabled = false;
+        assert!(
+            !IndexingPipeline::can_skip_hnsw_bracket(&backend, true).unwrap(),
+            "a disabled backend must never leave stale HNSW indexes in place"
+        );
+    }
+
+    #[test]
     fn test_hnsw_bracket_decision_does_not_ask_about_compaction_when_writing() {
         // A failing compaction check must not turn an ordinary writing run
         // into an error at this point; the post-write check reports it.
         let backend = backend_with_compaction(None);
         assert!(!IndexingPipeline::can_skip_hnsw_bracket(&backend, false).unwrap());
+    }
+
+    #[test]
+    fn test_write_phase_reports_actual_hnsw_outcome() {
+        // Progress consumers must never claim a build that will not happen.
+        assert_eq!(write_phase(false, true, true), "write-index");
+        assert_eq!(write_phase(false, true, false), "write-index-unavailable");
+        assert_eq!(write_phase(false, false, true), "write-index-disabled");
+        assert_eq!(write_phase(false, false, false), "write-index-disabled");
+        assert_eq!(write_phase(true, true, true), "write-compact");
+        assert_eq!(write_phase(true, true, false), "write-compact-unavailable");
+        assert_eq!(write_phase(true, false, true), "write-compact-disabled");
+        assert_eq!(write_phase(true, false, false), "write-compact-disabled");
     }
 }

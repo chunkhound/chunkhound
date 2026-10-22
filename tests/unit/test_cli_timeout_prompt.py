@@ -1,160 +1,84 @@
-import io
 import json
-import sys
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+from chunkhound.api.cli.commands import run as run_mod
+from chunkhound.core.config.config import Config
+
+
+@pytest.fixture
+def timeout_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    coord = AsyncMock()
+    coord.resolve_rust_pipeline_decision = Mock(return_value=False)
+    coord._db = SimpleNamespace(
+        drop_all_hnsw_indexes=lambda: None,
+        ensure_all_hnsw_indexes=lambda: None,
+    )
+    coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
+    coord.process_directory.return_value = {
+        "status": "success",
+        "files_processed": 0,
+        "total_chunks": 0,
+        "skipped": 0,
+        # Real indexing returns absolute paths, independent of the caller cwd.
+        "skipped_due_to_timeout": [str(tmp_path / "big.bin")],
+    }
+    coord.compact_database_with_metrics.return_value = {"status": "skipped"}
+    monkeypatch.setattr(run_mod, "configure_registry", lambda *a, **kw: None)
+    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: coord)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
+async def run_timeout_prompt(project: Path) -> None:
+    args = Namespace(
+        path=project,
+        verbose=False,
+        no_embeddings=True,
+        include=None,
+        exclude=None,
+        db=None,
+    )
+    config = Config(
+        target_dir=project,
+        database={"provider": "duckdb", "path": project / ".chunkhound" / "db"},
+    )
+    await run_mod.run_command(args, config)
 
 
 @pytest.mark.asyncio
 async def test_timeout_prompt_adds_exclusions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_coordinator, capsys
 ):
-    # Mock coordinator that returns canned values (no actual indexing needed)
-    coord = AsyncMock()
-    coord._db = SimpleNamespace(
-        drop_all_hnsw_indexes=lambda: None,
-        ensure_all_hnsw_indexes=lambda: None,
-    )
-    coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
-    coord.process_directory.return_value = {
-        "status": "success",
-        "files_processed": 0,
-        "total_chunks": 0,
-        "skipped": 0,
-        "skipped_due_to_timeout": ["big.bin"],
-    }
-    coord.compact_database_with_metrics.return_value = {
-        "status": "skipped",
-        "reason": "unsupported",
-    }
-
-    # Patch registry hooks used by run_command
-    from chunkhound.api.cli.commands import run as run_mod
-
-    monkeypatch.setattr(
-        run_mod, "configure_registry", lambda cfg, on_model_drift=None: None
-    )
-    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: coord)
-
-    # Pretend we are in a TTY and accept the prompt
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    config_path = tmp_path / ".chunkhound.json"
+    config_path.write_text("{}\n")
     monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
     monkeypatch.delenv("CHUNKHOUND_NO_PROMPTS", raising=False)
     monkeypatch.setattr("builtins.input", lambda *_: "y")
 
-    # Create minimal config file in the target directory
-    proj_dir = tmp_path
-    config_path = proj_dir / ".chunkhound.json"
-    config_path.write_text(json.dumps({}, indent=2))
+    await run_timeout_prompt(tmp_path)
 
-    # Build args and config
-    args = Namespace(
-        path=proj_dir,  # pass Path, validation expects Path object
-        verbose=False,
-        no_embeddings=True,
-        include=None,
-        exclude=None,
-        # Required by validation helpers but not used due to our patches
-        db=None,
-    )
+    assert "Skipped Due to Timeout" in capsys.readouterr().out
+    assert "big.bin" in json.loads(config_path.read_text())["indexing"]["exclude"]
 
-    # Build a minimal Config object
-    from chunkhound.core.config.config import Config as CoreConfig
-    from chunkhound.core.config.database_config import DatabaseConfig
 
-    db_cfg = DatabaseConfig(provider="duckdb", path=proj_dir / ".chunkhound" / "db")
-    cfg = CoreConfig(target_dir=proj_dir)
-    # Assign after creation (pydantic validate_assignment enabled)
-    cfg.database = db_cfg
-
-    # Run
-    # Capture stdout by temporarily redirecting the Rich console to a string buffer
-    buf = io.StringIO()
-    real_stdout = sys.stdout
-    sys.stdout = buf
-    try:
-        await run_mod.run_command(args, cfg)
-    finally:
-        sys.stdout = real_stdout
-
-    out = buf.getvalue()
-    assert "Skipped Due to Timeout" in out
-
-    # Verify that the exclusion was appended
-    data = json.loads(config_path.read_text())
-    assert "indexing" in data and "exclude" in data["indexing"]
-    assert "big.bin" in data["indexing"]["exclude"]
+def reject_input(*_):
+    raise AssertionError("MCP mode must not request interactive input")
 
 
 @pytest.mark.asyncio
 async def test_timeout_prompt_skipped_in_mcp_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout_coordinator, capsys
 ):
-    """CHUNKHOUND_MCP_MODE=1 must prevent input() call and show info instead."""
-    coord = AsyncMock()
-    coord._db = SimpleNamespace(
-        drop_all_hnsw_indexes=lambda: None,
-        ensure_all_hnsw_indexes=lambda: None,
-    )
-    coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
-    coord.process_directory.return_value = {
-        "status": "success",
-        "files_processed": 0,
-        "total_chunks": 0,
-        "skipped": 0,
-        "skipped_due_to_timeout": ["big.bin"],
-    }
-    coord.compact_database_with_metrics.return_value = {
-        "status": "skipped",
-        "reason": "unsupported",
-    }
-
-    from chunkhound.api.cli.commands import run as run_mod
-
-    # Patch registry hooks used by run_command
-    monkeypatch.setattr(
-        run_mod, "configure_registry", lambda cfg, on_model_drift=None: None
-    )
-    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: coord)
-
-    # Force MCP mode, pretend we are in TTY, but ensure input() would raise if called
+    """CHUNKHOUND_MCP_MODE=1 must prevent input() and config writes."""
     monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr(
-        "builtins.input",
-        lambda *_: (_ for _ in ()).throw(RuntimeError("input called")),
-    )
+    monkeypatch.setattr("builtins.input", reject_input)
 
-    # Minimal config
-    proj_dir = tmp_path
-    args = Namespace(
-        path=proj_dir,
-        verbose=False,
-        no_embeddings=True,
-        include=None,
-        exclude=None,
-        db=None,
-    )
+    await run_timeout_prompt(tmp_path)
 
-    from chunkhound.core.config.config import Config as CoreConfig
-    from chunkhound.core.config.database_config import DatabaseConfig
-
-    db_cfg = DatabaseConfig(provider="duckdb", path=proj_dir / ".chunkhound" / "db")
-    cfg = CoreConfig(target_dir=proj_dir)
-    cfg.database = db_cfg
-
-    # Capture stdout
-    buf = io.StringIO()
-    real_stdout = sys.stdout
-    sys.stdout = buf
-    try:
-        await run_mod.run_command(args, cfg)
-    finally:
-        sys.stdout = real_stdout
-
-    out = buf.getvalue()
+    out = capsys.readouterr().out
     assert "files timed out" in out or "prompts disabled" in out
+    assert not (tmp_path / ".chunkhound.json").exists()

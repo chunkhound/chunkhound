@@ -17,8 +17,7 @@ to every project directory. Project-local files override the global layer.
 import copy
 import json
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import nullcontext
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -27,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
+from ._settings import suppressed_env_sources
 from .analytics_config import AnalyticsConfig
 from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
@@ -74,45 +74,10 @@ class ConfigErrorCode(str, Enum):
 PERSISTENCE_HAZARD_COMMANDS: frozenset[str] = frozenset({"index", "mcp", "research"})
 
 
-# Env prefixes for every nested BaseSettings model. The persisted-gate
-# snapshot suppresses these so the outer skip_layers={"env"} is honest —
-# without it, EmbeddingConfig/LLMConfig/ResearchConfig/FetchUrlConfig
-# re-read env inside their own constructors and mask hazards that a
-# remote-config rule would persist. MCPConfig is a plain BaseModel and
+# Nested BaseSettings honor a context-local source policy (see
+# ``config._settings``) so env-layer skips suppress their own env sources
+# without mutating ``os.environ``. MCPConfig is a plain BaseModel and
 # needs no suppression.
-# When adding a new BaseSettings subconfig, add its env_prefix here.
-_NESTED_BASESETTINGS_ENV_PREFIXES: tuple[str, ...] = (
-    "CHUNKHOUND_EMBEDDING_",
-    "CHUNKHOUND_LLM_",
-    "CHUNKHOUND_RESEARCH_",
-    "CHUNKHOUND_FETCHURL_",
-)
-
-
-@contextmanager
-def _hide_nested_basesettings_env() -> Iterator[None]:
-    """Temporarily pop nested-BaseSettings env vars from ``os.environ``.
-
-    Matching is case-insensitive because the nested BaseSettings models
-    are configured with ``case_sensitive=False``; a lowercase env like
-    ``chunkhound_llm_api_key`` is still honored by pydantic and would
-    otherwise bypass this guard.
-
-    NOT thread-safe: mutates process-global ``os.environ``; do not call
-    concurrently with other code that reads ``CHUNKHOUND_*`` env vars.
-
-    See ``Config.snapshot_for_persisted_gate`` for the contract this
-    protects.
-    """
-    saved = {
-        k: os.environ.pop(k)
-        for k in list(os.environ)
-        if k.upper().startswith(_NESTED_BASESETTINGS_ENV_PREFIXES)
-    }
-    try:
-        yield
-    finally:
-        os.environ.update(saved)
 
 
 class Config(BaseModel):
@@ -285,40 +250,13 @@ class Config(BaseModel):
             self._mark_exclude_user_supplied(kwargs)
             Config.deep_merge(config_data, kwargs)
 
-        # Special handling for EmbeddingConfig
-        if "embedding" in config_data and isinstance(config_data["embedding"], dict):
-            # Create EmbeddingConfig instance with the data
-            config_data["embedding"] = EmbeddingConfig(**config_data["embedding"])
-
-        # Special handling for LLMConfig
-        if "llm" in config_data and isinstance(config_data["llm"], dict):
-            # Create LLMConfig instance with the data
-            config_data["llm"] = LLMConfig(**config_data["llm"])
-
-        # Special handling for ResearchConfig
-        if "research" in config_data and isinstance(config_data["research"], dict):
-            # Create ResearchConfig instance with the data
-            config_data["research"] = ResearchConfig(**config_data["research"])
-
-        # Special handling for FetchUrlConfig
-        if "fetchurl" in config_data and isinstance(config_data["fetchurl"], dict):
-            # Create FetchUrlConfig instance with the data
-            config_data["fetchurl"] = FetchUrlConfig(**config_data["fetchurl"])
-
-        # Special handling for RemoteConfig. `RemoteConfig | None` follows the
-        # `embedding | None` / `llm | None` pattern (no default_factory), so
-        # Pydantic will not auto-coerce a dict from env/kwargs; this block is
-        # load-bearing.
-        if "remote_config" in config_data and isinstance(
-            config_data["remote_config"], dict
-        ):
-            config_data["remote_config"] = RemoteConfig(**config_data["remote_config"])
-
-        # Add target_dir to config_data for initialization
         config_data["target_dir"] = target_dir
 
-        # Initialize the model
-        super().__init__(**config_data)
+        # One scope covers nested dict validation and missing-field factories,
+        # including future settings fields. Supplied values need no factory call.
+        policy = suppressed_env_sources() if "env" in skips else nullcontext()
+        with policy:
+            super().__init__(**config_data)
 
     @staticmethod
     def _mark_exclude_user_supplied(data: dict[str, Any]) -> None:
@@ -548,7 +486,10 @@ class Config(BaseModel):
 
     @staticmethod
     def deep_merge(base: dict[str, Any], update: dict[str, Any]) -> None:
-        """Merge ``update`` into ``base`` in place: nested dicts recurse, all other values overwrite."""
+        """Merge ``update`` into ``base`` in place.
+
+        Nested dicts recurse; all other values overwrite.
+        """
         for key, value in update.items():
             if key in base and isinstance(base[key], dict) and isinstance(value, dict):
                 Config.deep_merge(base[key], value)
@@ -646,19 +587,19 @@ class Config(BaseModel):
         ``snapshot_for_delta_gate`` (every layer of the current process).
         Both must accept (``E_post ⊆ E_pre``) or the payload is discarded.
 
-        ``_hide_nested_basesettings_env`` is required because
-        ``EmbeddingConfig`` / ``LLMConfig`` / ``ResearchConfig`` /
-        ``FetchUrlConfig`` are ``pydantic_settings.BaseSettings`` and re-read
-        env vars inside their own constructors (both the special-handling
-        block and the ``default_factory`` path in ``super().__init__``),
-        defeating the outer ``skip_layers={"env"}`` alone.
+        The env layer is skipped, which (via ``Config.__init__``'s nested
+        construction) suppresses each nested BaseSettings' own env sources
+        through the context-local source policy (``config._settings``):
+        model validation and default factories run within that scope, so a
+        standing ``CHUNKHOUND_*`` env var or
+        one-off flag cannot mask a newly persisted hazard. No env vars are
+        mutated, so concurrent readers are unaffected.
         """
-        with _hide_nested_basesettings_env():
-            return cls(
-                args=None,
-                skip_layers={"env", "local_config", "config_file", "cli"},
-                global_override=global_dict,
-            )
+        return cls(
+            args=None,
+            skip_layers={"env", "local_config", "config_file", "cli"},
+            global_override=global_dict,
+        )
 
     @classmethod
     def snapshot_for_delta_gate(

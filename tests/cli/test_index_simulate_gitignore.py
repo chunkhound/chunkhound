@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+from tests.helpers.cli import init_git_repository, run_cli
 
 
 def test_simulate_respects_nested_gitignore(tmp_path: Path) -> None:
     repo = tmp_path
+    init_git_repository(repo)
 
     (repo / ".gitignore").write_text("""/only-at-root.txt
 """)
@@ -32,7 +30,7 @@ def test_simulate_respects_nested_gitignore(tmp_path: Path) -> None:
     # Force gitignore-only mode via local config
     (repo / ".chunkhound.json").write_text('{"indexing": {"exclude": ".gitignore"}}\n')
 
-    proc = _run(["chunkhound", "index", "--simulate", str(repo)])
+    proc = run_cli(["index", "--simulate", str(repo)], cwd=repo)
     assert proc.returncode == 0, proc.stderr
     out = set(proc.stdout.strip().splitlines())
 

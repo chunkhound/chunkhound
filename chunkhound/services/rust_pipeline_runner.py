@@ -25,8 +25,15 @@ from rich.progress import Progress, TaskID
 
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
-from chunkhound.pipeline_bridge import run_rust_pipeline
-from chunkhound.services.progress_utils import _update_speed_field, format_bytes
+from chunkhound.pipeline_bridge import (
+    resolve_duckdb_hnsw_enabled,
+    run_rust_pipeline,
+)
+from chunkhound.services.progress_utils import (
+    _start_task_once,
+    _update_speed_field,
+    format_bytes,
+)
 
 
 class RustProgressBridge:
@@ -50,6 +57,7 @@ class RustProgressBridge:
         diff_task: TaskID | None,
         embed_task: TaskID | None,
         compact_db_file: str,
+        hnsw_enabled: bool,
     ) -> None:
         self._pr = progress
         self._pt = parse_task
@@ -70,6 +78,10 @@ class RustProgressBridge:
         self._diff_reset_done = False
         self._parse_reset_done = False
         self._compact_info: str | None = None
+        self._hnsw_enabled = hnsw_enabled
+        # `write-done` finalizes the index row only while a real build runs;
+        # every other outcome is already complete.
+        self._index_building = False
 
         # Read by run_rust_indexing_phase after run_rust_pipeline() returns.
         self.diff_elapsed = 0.0
@@ -77,6 +89,39 @@ class RustProgressBridge:
         self.compact_size_before: int | None = None
         self.compact_size_after: int | None = None
         self.compact_reduction_pct: float | None = None
+
+    def _mark_data_done(self) -> None:
+        self._pr.update(self._data_task, completed=self._data_task_total, info="done")
+
+    def _mark_index(
+        self, info: str, *, running: bool = False, visible: bool = True
+    ) -> None:
+        # Hide the row once the phase proves no index work can happen.
+        # Availability is known only after Rust opens the DB, so a VSS-less
+        # run shows the row until its write phase.
+        self._pr.update(self._index_task, visible=visible)
+        if running:
+            self._pr.reset(self._index_task, start=True)
+        else:
+            _start_task_once(self._pr, self._index_task)
+            self._pr.update(self._index_task, completed=1)
+        self._pr.update(self._index_task, info=info)
+        self._index_building = running
+
+    def _mark_compact(self, info: str, *, running: bool = False) -> None:
+        if running:
+            self._pr.reset(self._compact_task, start=True)
+        else:
+            _start_task_once(self._pr, self._compact_task)
+            self._pr.update(self._compact_task, completed=1)
+        self._pr.update(self._compact_task, info=info)
+        self._compact_info = info
+
+    def _snapshot_compact_size(self) -> None:
+        try:
+            self.compact_size_before = os.path.getsize(self._compact_db_file)
+        except OSError:
+            self.compact_size_before = None
 
     def __call__(self, phase: str, current: int, total: int, chunks: int = 0) -> None:
         # `chunks` is the cumulative chunk count, sent only by the
@@ -135,14 +180,11 @@ class RustProgressBridge:
         elif phase == "write":
             # Backward compat: old Rust extensions emit one "write"
             # callback with no sub-phase breakdown.
-            _pr.reset(self._data_task, start=True)
-            _pr.update(self._data_task, completed=1, info="done")
-            if self._index_task is not None:
-                _pr.reset(self._index_task, start=True)
-                _pr.update(self._index_task, completed=1, info="done")
-            if self._compact_task is not None:
-                _pr.reset(self._compact_task, start=True)
-                _pr.update(self._compact_task, completed=1, info="done")
+            self._mark_data_done()
+            # Old extensions do not emit the disabled/unavailable phases, so
+            # the config flag is the only signal available here.
+            self._mark_index("done", visible=self._hnsw_enabled)
+            self._mark_compact("done")
         elif phase == "write-prepare":
             # Python's DuckDB connection is already closed by now
             # (disconnected before run_rust_pipeline() was even called) —
@@ -175,73 +217,54 @@ class RustProgressBridge:
             else:
                 _pr.update(self._data_task, info="writing...")
         elif phase == "write-index":
-            # Data write done; compaction wasn't needed — build the HNSW
-            # index directly, or leave it in place when the run changed no
-            # rows (the phase then arrives already complete, as (1, 1)).
-            # The compact bar never runs on this path —
-            # resolve it to "not needed" right away (reset+finish
-            # together) so it doesn't sit unstarted and then get stamped
-            # "done" by write-done/done below, which used to render as a
-            # started-but-never-ticked zombie bar (elapsed stuck at
-            # "-:--:--" with a live spinner).
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
-            _pr.reset(self._index_task, start=True)
-            _pr.update(self._index_task, info="building...")
-            _pr.reset(self._compact_task, start=True)
-            _pr.update(self._compact_task, completed=1, info="not needed")
-            self._compact_info = "not needed"
+            # Data write done; compaction wasn't needed. (0, 1) means a real
+            # build runs; (1, 1) means the run changed nothing and the
+            # indexes were left in place. Only the build path starts the
+            # index clock.
+            self._mark_data_done()
+            if current >= total:
+                self._mark_index("up to date (no changes)")
+            else:
+                self._mark_index("building...", running=True)
+            self._mark_compact("not needed")
+        elif phase == "write-index-disabled":
+            self._mark_data_done()
+            self._mark_index("disabled (not built)", visible=False)
+            self._mark_compact("not needed")
+        elif phase == "write-index-unavailable":
+            self._mark_data_done()
+            self._mark_index("skipped (VSS unavailable)", visible=False)
+            self._mark_compact("not needed")
         elif phase == "write-compact":
-            # Data write done; compaction is needed. Compaction rebuilds
-            # the HNSW index as part of its own EXPORT/IMPORT rewrite, so
-            # "write-index" never fires in this path — the index bar
-            # never runs on its own here. Resolve it immediately (mirrors
-            # the write-index branch above) instead of leaving it
-            # unstarted for write-done/done to stamp "done" on top of a
-            # zombie bar.
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
-            _pr.reset(self._index_task, start=True)
-            _pr.update(
-                self._index_task, completed=1, info="included in compaction"
-            )
-            _pr.reset(self._compact_task, start=True)
-            _pr.update(
-                self._compact_task, info="compacting (includes index rebuild)..."
-            )
+            # Compaction rebuilds the HNSW index through reopen(), so the
+            # index bar must not run on its own here.
+            self._mark_data_done()
+            self._mark_index("maintained during compaction")
+            self._mark_compact("compacting (with index)...", running=True)
             self.compact_ran = True
-            # write-compact firing at all already means the Rust backend
-            # decided real compaction is needed (backend.needs_compaction()
-            # == True) — that decision doesn't depend on whether any files
-            # were reparsed this run, so always snapshot the pre-compaction
-            # size.
-            try:
-                self.compact_size_before = os.path.getsize(self._compact_db_file)
-            except OSError:
-                self.compact_size_before = None
+            self._snapshot_compact_size()
+        elif phase == "write-compact-disabled":
+            self._mark_data_done()
+            self._mark_index("not built (HNSW disabled)", visible=False)
+            self._mark_compact("compacting (no index)...", running=True)
+            self.compact_ran = True
+            self._snapshot_compact_size()
+        elif phase == "write-compact-unavailable":
+            self._mark_data_done()
+            self._mark_index("not built (VSS unavailable)", visible=False)
+            self._mark_compact("compacting (no index)...", running=True)
+            self.compact_ran = True
+            self._snapshot_compact_size()
         elif phase == "write-done":
-            # Final wrap-up. _index_task and _compact_task were already
-            # resolved above by whichever of write-index/write-compact
-            # actually fired; only the compact bar's final size/ratio text
-            # (when compaction ran) still needs filling in here, once
-            # compaction has actually completed.
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
+            # Final wrap-up. The index phase already resolved the index bar;
+            # only a real build needs its final "done" tick. The compact
+            # bar's final size/ratio text is filled in here after compaction
+            # actually completes.
+            self._mark_data_done()
             if self.compact_ran:
                 if self.compact_size_before is not None:
                     try:
-                        self.compact_size_after = os.path.getsize(
-                            self._compact_db_file
-                        )
+                        self.compact_size_after = os.path.getsize(self._compact_db_file)
                         pct = (
                             (self.compact_size_before - self.compact_size_after)
                             / self.compact_size_before
@@ -260,27 +283,18 @@ class RustProgressBridge:
                         self._compact_info = "done"
                 else:
                     self._compact_info = "done"
-                _pr.update(
-                    self._compact_task, completed=1, info=self._compact_info
-                )
-            else:
-                # write-index path: the compact bar was already resolved
-                # to "not needed" above; only the index bar (still running
-                # since write-index started it) needs finishing.
-                _pr.update(self._index_task, completed=1, info="done")
+                _pr.update(self._compact_task, completed=1, info=self._compact_info)
+            elif self._index_building:
+                self._mark_index("done")
         elif phase == "done":
             # Ensure the write bars are at 100%. The parse and embed bars
             # don't need re-finalizing here — both phases always receive
             # an exact final (total, total) call of their own before
             # "done" fires, in both the sequential and streaming pipeline
             # paths. _index_task/_compact_task are already resolved by
-            # write-index/write-compact/write-done above — only re-sync
+            # write-index*/write-compact*/write-done above — only re-sync
             # _data_task here.
-            _pr.update(
-                self._data_task,
-                completed=self._data_task_total,
-                info="done",
-            )
+            self._mark_data_done()
 
 
 @dataclass
@@ -332,6 +346,9 @@ async def run_rust_indexing_phase(
         else False
     )
     skip_embeddings = embeddings_disabled_by_config or embedding_provider is None
+    # Same resolver the config dict uses, so the bar cannot disagree with
+    # the Rust writer about whether HNSW is enabled.
+    hnsw_enabled = resolve_duckdb_hnsw_enabled(config)
 
     # ── Progress callback for Rust pipeline ─────────────────
     # Maps Rust phases → Rich progress bars.
@@ -363,7 +380,12 @@ async def run_rust_indexing_phase(
             "  └─ Writing data", total=1, speed="", info="", start=False
         )
         index_task: TaskID = progress.add_task(
-            "  └─ Building indexes", total=1, speed="", info="", start=False
+            "  └─ Vector index (HNSW)",
+            total=1,
+            speed="",
+            info="",
+            start=False,
+            visible=hnsw_enabled,
         )
         compact_task: TaskID = progress.add_task(
             "  └─ Compacting", total=1, speed="", info="", start=False
@@ -382,6 +404,7 @@ async def run_rust_indexing_phase(
             diff_task=diff_task,
             embed_task=embed_task,
             compact_db_file=compact_db_file,
+            hnsw_enabled=hnsw_enabled,
         )
     progress_cb = progress_bridge
 

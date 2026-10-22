@@ -168,7 +168,7 @@ def test_cleanup_same_provider_does_not_inherit_synthesis_reasoning_effort() -> 
 
 
 def test_cleanup_accepts_local_openai_compatible_llm_without_api_key(
-    clean_environment,
+    hermetic_environment,
     tmp_path,
 ) -> None:
     config = Config(
@@ -177,7 +177,7 @@ def test_cleanup_accepts_local_openai_compatible_llm_without_api_key(
             "provider": "openai",
             "model": "llama3.2",
             "base_url": "http://localhost:11434/v1",
-        }
+        },
     )
     formatter = RichOutputFormatter()
 
@@ -191,7 +191,7 @@ def test_cleanup_accepts_local_openai_compatible_llm_without_api_key(
 
 
 def test_cleanup_rejects_custom_openai_compatible_llm_without_explicit_model(
-    clean_environment,
+    hermetic_environment,
     tmp_path,
 ) -> None:
     config = Config(
@@ -199,7 +199,7 @@ def test_cleanup_rejects_custom_openai_compatible_llm_without_explicit_model(
         llm={
             "provider": "openai",
             "base_url": "http://localhost:11434/v1",
-        }
+        },
     )
     formatter = RichOutputFormatter()
 

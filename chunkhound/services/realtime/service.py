@@ -83,6 +83,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _EVENT_PRESSURE_OVERLOADED_EVENTS = 100
     _EVENT_PRESSURE_ELEVATED_COALESCED_UPDATES = 5
     _EVENT_PRESSURE_OVERLOADED_COALESCED_UPDATES = 20
+    _COMPACTION_IDLE_INTERVAL_SECONDS = 300.0
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
@@ -189,6 +190,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._last_processing_started_path: str | None = None
         self._last_processing_completed_at: str | None = None
         self._last_processing_completed_path: str | None = None
+        self._last_compaction_check_at: float | None = None
         self._filtered_event_count = 0
         self._suppressed_duplicate_count = 0
         self._translation_error_count = 0

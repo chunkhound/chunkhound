@@ -1,18 +1,76 @@
-import os
-import subprocess
-import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
+import execnet
 import pytest
 from loguru import logger
 
 from chunkhound.watchman_runtime.loader import is_packaged_watchman_runtime_available
+from tests.helpers.isolation import (
+    ARTIFACTS_KEY,
+    CONTROLS_KEY,
+    bootstrap_isolation,
+    isolate_session_cwd,
+    prepare_local_worker,
+    sandbox_context,
+)
+from tests.helpers.live import (
+    LIVE_KEY,
+    add_live_options,
+    apply_live_environment,
+    configure_live,
+    prepare_live_test,
+    require_cli,
+    restrict_network,
+    select_live,
+)
 
 logger.remove()
 
 _WATCHMAN_RUNTIME_VALIDATION_ENV = "CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION"
+_HNSW_REQUIRED_ENV = "CHUNKHOUND_REQUIRE_HNSW"
+_HNSW_SKIP_PROBE_ENV = "CHUNKHOUND_SKIP_HNSW_PROBE"
 
 
-def pytest_configure(config):
+def _probe_hnsw_capability() -> tuple[bool, str]:
+    """Verify that the locally installed DuckDB VSS extension supports HNSW.
+
+    Collection must remain offline. The required CI lane installs VSS before
+    pytest starts; ordinary environments skip HNSW tests when ``LOAD`` fails.
+    """
+    connection = None
+    try:
+        import duckdb
+
+        connection = duckdb.connect(":memory:")
+        connection.execute("SET autoinstall_known_extensions = false")
+        connection.execute("LOAD vss")
+        connection.execute("CREATE TABLE hnsw_probe (embedding FLOAT[3])")
+        connection.execute(
+            "CREATE INDEX hnsw_probe_index ON hnsw_probe USING HNSW "
+            "(embedding) WITH (metric = 'cosine')"
+        )
+        row = connection.execute(
+            "SELECT index_name FROM duckdb_indexes() "
+            "WHERE index_name = 'hnsw_probe_index'"
+        ).fetchone()
+        return row is not None, "HNSW index probe returned no catalog entry"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    add_live_options(parser)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    configure_live(config)
+    bootstrap_isolation(config)
     config.addinivalue_line(
         "markers",
         "heavy: mark tests that generate large synthetic trees (skipped by default)",
@@ -24,11 +82,54 @@ def pytest_configure(config):
     )
 
 
-def pytest_collection_modifyitems(config, items):
-    run_heavy = os.getenv("CHUNKHOUND_RUN_HEAVY_TESTS") == "1"
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    isolate_session_cwd(session.config)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_newgateway(gateway: execnet.Gateway) -> None:
+    prepare_local_worker(gateway)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node: Any) -> None:
+    # Workers inherit sanitized env; send declared inputs through xdist instead.
+    node.workerinput["live_inputs"] = node.config.stash[LIVE_KEY]
+    node.workerinput["isolation_controls"] = dict(node.config.stash[CONTROLS_KEY])
+    node.workerinput["isolation_artifacts"] = str(node.config.stash[ARTIFACTS_KEY])
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Function]
+) -> None:
+    select_live(config, items)
+    controls = config.stash[CONTROLS_KEY]
+    run_heavy = controls.get("CHUNKHOUND_RUN_HEAVY_TESTS") == "1"
     native_watchman_ready = is_packaged_watchman_runtime_available() or (
-        os.getenv(_WATCHMAN_RUNTIME_VALIDATION_ENV) == "1"
+        controls.get(_WATCHMAN_RUNTIME_VALIDATION_ENV) == "1"
     )
+    hnsw_items = [item for item in items if "hnsw" in item.keywords]
+    hnsw_required = controls.get(_HNSW_REQUIRED_ENV) == "1"
+    if hnsw_required and not hnsw_items:
+        pytest.fail("CHUNKHOUND_REQUIRE_HNSW=1 but no tests are marked hnsw")
+    if hnsw_items:
+        if controls.get(_HNSW_SKIP_PROBE_ENV) == "1" and not hnsw_required:
+            hnsw_ready, hnsw_reason = False, f"{_HNSW_SKIP_PROBE_ENV}=1"
+        else:
+            hnsw_ready, hnsw_reason = _probe_hnsw_capability()
+        if not hnsw_ready:
+            if hnsw_required:
+                pytest.fail(
+                    "CHUNKHOUND_REQUIRE_HNSW=1 but DuckDB HNSW is unavailable: "
+                    f"{hnsw_reason}",
+                    pytrace=False,
+                )
+            skip_hnsw = pytest.mark.skip(
+                reason=f"DuckDB HNSW is unavailable: {hnsw_reason}"
+            )
+            for item in hnsw_items:
+                item.add_marker(skip_hnsw)
     if run_heavy:
         skip_heavy = None
     else:
@@ -52,117 +153,59 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_native_watchman)
 
 
-def _discover_free_opencode_models() -> list[str]:
-    """Discover currently free OpenCode model slugs."""
+@pytest.fixture(scope="session")
+def opencode_models() -> list[str]:
+    """Use only the deliberately supplied live model list."""
+    data = require_cli("opencode")
+    if data.get("binary", "opencode") != "opencode":
+        pytest.fail("OpenCode must be available as 'opencode' on PATH")
+    models = data.get("models")
+    if (
+        not isinstance(models, list)
+        or not models
+        or not all(isinstance(m, str) for m in models)
+    ):
+        pytest.fail("Live prerequisite missing: opencode.models list")
+    return models
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Function) -> None:
+    prepare_live_test(item)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_teardown(
+    item: pytest.Item, nextitem: pytest.Item | None
+) -> Iterator[None]:
     try:
-        result = subprocess.run(
-            ["opencode", "models"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return []
-
-        models = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if "free" in line.lower():
-                # Extract just the model slug (first whitespace-delimited token)
-                slug = line.split()[0]
-                if "/" not in slug:
-                    continue
-                models.append(slug)
-        return models
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return []
-
-
-# Probe timeout: below the integration test's 30s to bound fixture latency.
-_OPENCODE_PROBE_TIMEOUT = 20
-# Tests use models[0] only; probe up to 4 candidates to find one servable model.
-_MAX_OPENCODE_PROBES = 4
-
-
-def _probe_opencode_model(slug: str) -> tuple[bool, str | None]:
-    """Return (servable, reason) by running one minimal JSON-mode request.
-
-    Invokes the CLI the same way OpenCodeCLIProvider does (temp cwd,
-    --format json) and reuses its NDJSON classifier to check the success path.
-    A catalog entry marked free is not proof the
-    upstream serves it, so tests skip rather than fail when no candidate is
-    servable.
-    """
-    from chunkhound.providers.llm.opencode_cli_provider import (
-        OpenCodeCLIProvider,
-    )
-
-    provider = OpenCodeCLIProvider(model=slug, max_retries=1)
-    try:
-        result = subprocess.run(
-            ["opencode", "run", "--model", slug, "--format", "json"],
-            input=b"ping\n",
-            capture_output=True,
-            timeout=_OPENCODE_PROBE_TIMEOUT,
-            cwd=tempfile.gettempdir(),
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"probe timed out after {_OPENCODE_PROBE_TIMEOUT}s"
-    except OSError as exc:
-        return False, f"probe could not run the opencode CLI: {exc}"
-
-    stderr_msg = result.stderr.decode("utf-8", errors="replace")
-    # intentional: reuse production parser so probe and provider agree on "usable"
-    parsed = provider._parse_json_output(
-        result.stdout, stderr_msg, result.returncode, model=slug
-    )
-    if parsed.action == "success":
-        return True, None
-    if parsed.action == "retry_plain":
-        return False, "JSON probe unsupported or returned no text"
-    return False, parsed.error_message or "JSON probe failed without a message"
+        return (yield)
+    finally:
+        restrict_network()
 
 
 @pytest.fixture(scope="session")
-def free_opencode_models() -> list[str]:
-    """Discover free OpenCode model slugs that actually serve requests."""
-    models = _discover_free_opencode_models()
-    if not models:
-        pytest.skip("No free OpenCode models available")
-
-    servable: list[str] = []
-    rejected: list[tuple[str, str]] = []
-    for slug in models:
-        if len(servable) >= 1 or len(servable) + len(rejected) >= _MAX_OPENCODE_PROBES:
-            break
-        ok, reason = _probe_opencode_model(slug)
-        if ok:
-            servable.append(slug)
-        else:
-            rejected.append((slug, reason))
-
-    if not servable:
-        reasons = "; ".join(f"{slug}: {reason}" for slug, reason in rejected)
-        pytest.skip(f"No servable free OpenCode models ({reasons})")
-    return servable
+def test_run_controls(pytestconfig: pytest.Config) -> Any:
+    """Declared runner inputs captured before environment sanitization."""
+    return pytestconfig.stash[CONTROLS_KEY]
 
 
-@pytest.fixture
-def clean_environment(monkeypatch):
-    """Ensure tests run with a clean environment.
+@pytest.fixture(autouse=True)
+def live_environment(
+    request: pytest.FixtureRequest,
+    hermetic_environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pytestconfig: pytest.Config,
+) -> None:
+    if (
+        request.node.get_closest_marker("live") is not None
+        and "environment" in pytestconfig.stash[LIVE_KEY]
+    ):
+        apply_live_environment(monkeypatch)
 
-    - Unset CHUNKHOUND_* variables that can alter discovery/backends.
-    - Unset common embedding API keys to avoid accidental network init.
-    """
-    to_clear = [k for k in os.environ.keys() if k.startswith("CHUNKHOUND_")]
-    to_clear += [
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "VOYAGE_API_KEY",
-        "ANTHROPIC_API_KEY",
-    ]
-    for k in to_clear:
-        monkeypatch.delenv(k, raising=False)
-    yield
+
+@pytest.fixture(autouse=True)
+def hermetic_environment(tmp_path: Path, pytestconfig: pytest.Config) -> Iterator[Path]:
+    """Explicit dependency for resources that must close before sandbox cleanup."""
+    with sandbox_context(tmp_path.resolve(), pytestconfig.stash[ARTIFACTS_KEY]) as home:
+        yield home

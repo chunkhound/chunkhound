@@ -7,6 +7,9 @@ OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
 VOYAGE_DEFAULT_MODEL = "voyage-3.5"
 VOYAGE_DEFAULT_RERANK_MODEL = "rerank-2.5"
 
+# Bounds HNSW candidate widening and the DB side of diff/DB merged search.
+HNSW_CANDIDATE_BUDGET = 10_000
+
 # Superseded embedding models mapped to their current replacement, per provider.
 # Surfaced as a suggestion only: adopting one re-embeds the whole index, so the
 # choice stays with the operator. Keyed by provider so a colliding model name on

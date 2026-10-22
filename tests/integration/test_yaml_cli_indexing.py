@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.cli import cli_command
+
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "yaml"
 
 
@@ -22,7 +24,7 @@ def test_cli_indexes_yaml_repo(tmp_path):
     env["CHUNKHOUND_DATABASE__PATH"] = str(db_path)
     env.setdefault("CHUNKHOUND_DATABASE__PROVIDER", "duckdb")
 
-    cmd = ["uv", "run", "chunkhound", "index", str(workdir), "--no-embeddings"]
+    cmd = cli_command("index", str(workdir), "--no-embeddings")
     result = subprocess.run(
         cmd,
         capture_output=True,

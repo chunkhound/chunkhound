@@ -16,13 +16,12 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_database_with_dependencies
-
-
-import os
+from tests.helpers.cli import cli_command
+from tests.helpers.isolation import run_control
 
 
 @pytest.mark.skipif(
-    os.environ.get("CHUNKHOUND_ALLOW_PROCESSPOOL", "0") != "1",
+    run_control("CHUNKHOUND_ALLOW_PROCESSPOOL", "0") != "1",
     reason="Requires ProcessPool-friendly environment (SemLock).",
 )
 @pytest.mark.asyncio
@@ -54,12 +53,7 @@ async def test_root_level_file_is_indexed_with_defaults(tmp_path):
     )
 
     proc = await asyncio.create_subprocess_exec(
-        "uv",
-        "run",
-        "chunkhound",
-        "index",
-        str(project_dir),
-        "--no-embeddings",
+        *cli_command("index", str(project_dir), "--no-embeddings"),
         cwd=str(project_dir),
         env=env,
         stdout=asyncio.subprocess.PIPE,

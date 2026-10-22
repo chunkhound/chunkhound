@@ -14,7 +14,13 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from tests.contracts.pipeline_harness import index_with_rust
+from tests.contracts.mock_embed import MOCK_DIMS
+from tests.contracts.pipeline_harness import (
+    IndexResult,
+    files_table_paths,
+    hnsw_index_names,
+    index_with_rust,
+)
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
@@ -25,13 +31,55 @@ def _write_many_fixture_files(project_dir: Path, count: int) -> None:
         (project_dir / f"mod_{i}.py").write_text(f"def fn_{i}():\n    return {i}\n")
 
 
-def _indexed_paths(db_dir: Path) -> set[str]:
+def _disk_limit_trip(
+    db_dir: Path, project_dir: Path = FIXTURE_DIR, *, skip_embeddings: bool = True
+) -> tuple[IndexResult, list[str]]:
+    """Force compaction eligibility but stop writes at the disk limit."""
+    phases: list[str] = []
+    result = index_with_rust(
+        project_dir,
+        db_dir,
+        skip_embeddings=skip_embeddings,
+        incremental=True,
+        disk_usage_limit_mb=0.0,
+        compaction_threshold=0.0,
+        compaction_min_size_mb=0,
+        progress_callback=lambda phase, current, total: phases.append(phase),
+    )
+    assert result.disk_limit_exceeded is True
+    assert not any(phase.startswith("write-compact") for phase in phases)
+    return result, phases
+
+
+def _seed_indexed_project(tmp_path: Path) -> tuple[Path, Path, IndexResult]:
+    project_dir, db_dir = tmp_path / "project", tmp_path / "db"
+    _write_many_fixture_files(project_dir, count=5)
+    before = index_with_rust(project_dir, db_dir)
+    assert before.chunks_written > 0
+    assert before.embedding_tuples
+    assert hnsw_index_names(db_dir)
+    return project_dir, db_dir, before
+
+
+def _assert_hnsw_search_usable(db_dir: Path) -> None:
     conn = duckdb.connect(str(db_dir / "chunks.db"))
     try:
-        rows = conn.execute("SELECT path FROM files").fetchall()
+        conn.execute("LOAD vss")
+        chunk_id, vector = conn.execute(
+            f"SELECT chunk_id, embedding FROM embeddings_{MOCK_DIMS} LIMIT 1"
+        ).fetchone()
+        query = (
+            "SELECT chunk_id, "
+            f"array_cosine_distance(embedding, ?::FLOAT[{MOCK_DIMS}]) AS distance "
+            f"FROM embeddings_{MOCK_DIMS} ORDER BY distance LIMIT 1"
+        )
+        plan = conn.execute("EXPLAIN " + query, [vector]).fetchall()
+        assert "HNSW_INDEX_SCAN" in str(plan)
+        found_id, distance = conn.execute(query, [vector]).fetchone()
+        assert found_id == chunk_id
+        assert distance == pytest.approx(0.0, abs=1e-6)
     finally:
         conn.close()
-    return {row[0] for row in rows}
 
 
 class TestDiskUsageLimitRust:
@@ -52,8 +100,7 @@ class TestDiskUsageLimitRust:
             assert result.disk_limit_current_mb is not None
             assert result.disk_limit_max_mb == 0.0
             assert result.chunks_written == 0, (
-                "no chunks should be written once the very first pre-write "
-                "check trips"
+                "no chunks should be written once the very first pre-write check trips"
             )
 
     @pytest.mark.asyncio
@@ -71,42 +118,33 @@ class TestDiskUsageLimitRust:
 
     @pytest.mark.asyncio
     async def test_disk_limit_trip_skips_compaction(self):
-        """A disk-limit trip must never trigger compaction (which would
-        transiently roughly double disk usage via its EXPORT/IMPORT rewrite —
-        the opposite of what a disk-limit trip should do). Forces compaction
-        eligibility (compaction_threshold=0.0, compaction_min_size_mb=0 --
-        the same forcing technique as test_compaction_before_index.py) at the
-        same time as disk_usage_limit_mb=0.0, so without the fix
-        "write-compact" would fire; with it, only "write-index" (the cheap
-        HNSW-only rebuild) must fire instead.
+        """A disk-limit trip must never trigger compaction.
+
+        Compaction's EXPORT/IMPORT rewrite transiently roughly doubles disk
+        usage — the opposite of what a disk-limit trip should do. Forces
+        compaction eligibility (compaction_threshold=0.0,
+        compaction_min_size_mb=0 -- the same technique as
+        test_compaction_before_index.py) plus disk_usage_limit_mb=0.0, so
+        without the fix a `write-compact*` phase would fire.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            db_dir = Path(tmp) / "db"
+            _disk_limit_trip(Path(tmp) / "db")
 
-            phases_seen: list[str] = []
-
-            def progress_callback(phase: str, current: int, total: int) -> None:
-                phases_seen.append(phase)
-
-            result = index_with_rust(
-                FIXTURE_DIR,
-                db_dir,
-                skip_embeddings=True,
-                disk_usage_limit_mb=0.0,
-                compaction_threshold=0.0,
-                compaction_min_size_mb=0,
-                progress_callback=progress_callback,
-            )
-
-            assert result.disk_limit_exceeded is True
-            assert "write-compact" not in phases_seen, (
-                "compaction must not run after a disk-limit trip -- it would "
-                "transiently roughly double disk usage right after "
-                "determining disk is already over budget"
-            )
-            assert "write-index" in phases_seen, (
-                "the cheap HNSW-only rebuild must still run in compaction's place"
-            )
+    @pytest.mark.hnsw
+    @pytest.mark.asyncio
+    async def test_disk_limit_trip_preserves_data_and_searchable_index(self, tmp_path):
+        """A rejected update keeps persisted data and a usable HNSW index."""
+        project_dir, db_dir, before = _seed_indexed_project(tmp_path)
+        (project_dir / "mod_0.py").write_text("def changed():\n    return 999\n")
+        result, phases = _disk_limit_trip(db_dir, project_dir, skip_embeddings=False)
+        assert result.chunks_written == 0
+        assert result.chunk_tuples == before.chunk_tuples
+        assert result.embedding_tuples == before.embedding_tuples
+        assert files_table_paths(db_dir) == {row[0] for row in before.chunk_tuples}
+        assert "write-index" in phases
+        assert "write-index-unavailable" not in phases
+        assert hnsw_index_names(db_dir)
+        _assert_hnsw_search_usable(db_dir)
 
     @pytest.mark.asyncio
     async def test_disk_limit_trip_drains_in_flight_batches_without_hanging(self):
@@ -166,7 +204,7 @@ class TestDiskUsageLimitRust:
             first = index_with_rust(project_dir, db_dir, skip_embeddings=True)
             assert first.disk_limit_exceeded is False
             assert first.chunks_written > 0
-            assert _indexed_paths(db_dir) == {"keep.py", "orphan.py"}
+            assert files_table_paths(db_dir) == {"keep.py", "orphan.py"}
 
             orphan.unlink()
 
@@ -183,7 +221,7 @@ class TestDiskUsageLimitRust:
                 "the trip fires before insert recv, so no replacement rows "
                 "should be written"
             )
-            paths = _indexed_paths(db_dir)
+            paths = files_table_paths(db_dir)
             assert "orphan.py" not in paths, (
                 "orphan deletes must run even when the DB is already over "
                 "the disk limit"

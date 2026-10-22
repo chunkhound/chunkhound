@@ -722,6 +722,7 @@ mod upsert_tests {
             compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
+            hnsw_enabled: true,
         };
         let mut backend = DuckDbHnswBackend::new(config);
         backend.open().expect("open");
@@ -783,6 +784,7 @@ mod upsert_tests {
             compaction_threshold: Some(0.3),
             compaction_min_size_bytes: 52_428_800,
             insert_batch_size: 100,
+            hnsw_enabled: true,
         };
         let mut backend = DuckDbHnswBackend::new(config);
         backend.open().expect("open");

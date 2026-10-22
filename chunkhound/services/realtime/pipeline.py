@@ -1435,6 +1435,42 @@ class RealtimePipelineMixin:
             self._set_error(f"Error indexing new directory {dir_path}: {e}")
         finally:
             self._record_processing_finished(dir_path, completed=completed)
+
+    async def _maybe_compact_when_idle(self) -> None:
+        """Run one compaction check after a write burst, before blocking on the queue.
+
+        The sampled check in the executor only runs after write operations. A
+        burst can cross the compaction threshold and then stop, leaving the
+        file at its high-water mark. Checking here closes that gap without a
+        polling loop; the cooldown avoids re-checking after every sparse event.
+        """
+        now = time.monotonic()
+        last = self._last_compaction_check_at
+        # None = never checked yet (also covers a monotonic clock below the
+        # cooldown right after boot).
+        if (
+            last is not None
+            and now - last < self._COMPACTION_IDLE_INTERVAL_SECONDS
+        ):
+            return
+        if (
+            not self.file_queue.empty()
+            or self.pending_files
+            or self._pending_mutations
+        ):
+            return
+        self._last_compaction_check_at = now
+        provider = getattr(self.services, "provider", None)
+        compact = getattr(provider, "compact_if_needed_async", None)
+        if not callable(compact):
+            return
+        try:
+            await compact()
+        except DatabaseTemporarilyUnavailableError:
+            pass
+        except Exception as error:
+            self._debug(f"Idle compaction check failed: {error}")
+
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
@@ -1444,6 +1480,7 @@ class RealtimePipelineMixin:
         while True:
             try:
                 if buffered_mutation is None:
+                    await self._maybe_compact_when_idle()
                     _, _, queued_mutation = await self.file_queue.get()
                     mutation, owned_when_dequeued = self._prepare_dequeued_mutation(
                         queued_mutation

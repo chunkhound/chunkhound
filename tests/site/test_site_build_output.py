@@ -1,4 +1,3 @@
-import os
 import re
 import subprocess
 import tempfile
@@ -6,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.site.html_helpers import attributes, canonical_href, meta_tag_content
+from tests.site.html_helpers import canonical_href, meta_tag_content
 from tests.site.png_helpers import png_dimensions
 from tests.site.tsx_runner import run_tsx_raw, sanitized_subprocess_env
 
@@ -39,7 +38,9 @@ def _expected_docs_version(
     root: Path = ROOT,
     version_file: Path = VERSION_FILE,
 ) -> str:
-    env_version = os.environ.get("CHUNKHOUND_DOCS_VERSION", "").strip()
+    from tests.helpers.isolation import run_control
+
+    env_version = run_control("CHUNKHOUND_DOCS_VERSION", "").strip()
     if env_version:
         return _normalize_version(env_version)
 
@@ -202,7 +203,9 @@ def test_site_build_outputs_platform_aware_onboarding() -> None:
     assert "chunkhound autodoc --assets-only --out-dir docs-site/" in cli_reference
     assert "chunkhound autodoc --out-dir site/" not in cli_reference
     assert "Complete reference for all ChunkHound CLI commands" in cli_reference
-    assert "embedding providers, database backends, and indexing behavior" in configuration
+    assert (
+        "embedding providers, database backends, and indexing behavior" in configuration
+    )
     assert '<nav class="nav-tabs"' not in homepage
     sidebar_tag = re.search(r'<aside class="docs-sidebar"[^>]*>', docs_home)
     assert sidebar_tag is not None
@@ -271,7 +274,10 @@ def test_homepage_and_readme_use_qualified_locality_and_language_claims() -> Non
     assert "with local providers" in homepage
     assert "local-provider option" in homepage
     assert "Semantic search requires an embedding provider" in readme
-    assert "research requires an LLM provider and an embedding provider with reranking support" in readme
+    assert (
+        "research requires an LLM provider and an embedding provider "
+        "with reranking support" in readme
+    )
     assert "zero-code-egress" in readme
     assert "- [Docs](https://chunkhound.ai/docs/getting-started/)" in readme
 
@@ -305,8 +311,7 @@ def test_built_site_has_og_meta_tags() -> None:
     assert meta_tag_content(homepage, "property", "og:url") == "https://chunkhound.ai/"
     assert meta_tag_content(homepage, "property", "og:title") == expected_title
     assert (
-        meta_tag_content(homepage, "property", "og:description")
-        == expected_description
+        meta_tag_content(homepage, "property", "og:description") == expected_description
     )
     assert meta_tag_content(homepage, "name", "twitter:title") == expected_title
     assert (

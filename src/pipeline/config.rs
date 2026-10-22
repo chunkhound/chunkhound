@@ -86,6 +86,9 @@ pub(crate) struct PipelineConfig {
 
     // Feature toggles
     pub skip_embeddings: bool,
+    /// Mirrors Python's `DatabaseConfig.duckdb_hnsw_enabled`: when false the
+    /// writer must never create HNSW indexes (existing ones are still dropped).
+    pub duckdb_hnsw_enabled: bool,
 
     // Pass-through (parse callback)
     pub per_file_timeout_secs: f64,
@@ -128,6 +131,7 @@ impl PipelineConfig {
             mtime_epsilon_seconds: extract_or(dict, "mtime_epsilon_seconds", 0.01)?,
             do_cleanup: extract_or(dict, "do_cleanup", true)?,
             skip_embeddings: extract_or(dict, "skip_embeddings", false)?,
+            duckdb_hnsw_enabled: extract_or(dict, "duckdb_hnsw_enabled", true)?,
 
             per_file_timeout_secs: extract_or(dict, "per_file_timeout_secs", 3.0)?,
             per_file_timeout_min_size_kb: extract_or(dict, "per_file_timeout_min_size_kb", 128u64)?

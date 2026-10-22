@@ -1,18 +1,31 @@
-import pytest
 from pathlib import Path
+
+import pytest
 
 try:
     from chunkhound_native import scan_files as _scan_files
+
     _RUST_AVAILABLE = True
 except (ImportError, AttributeError):
     _scan_files = None
     _RUST_AVAILABLE = False
 
-requires_rust = pytest.mark.skipif(not _RUST_AVAILABLE, reason="Rust extension not built")
+requires_rust = pytest.mark.skipif(
+    not _RUST_AVAILABLE, reason="Rust extension not built"
+)
+
+
+@pytest.fixture
+def project_dir(tmp_path: Path) -> Path:
+    """Keep scanned inputs separate from the test's private runtime artifacts."""
+    project = tmp_path / "scan-project"
+    project.mkdir()
+    return project
 
 
 @requires_rust
-def test_scan_files_matches_python_walker(tmp_path, monkeypatch):
+def test_scan_files_matches_python_walker(project_dir, monkeypatch):
+    tmp_path = project_dir
     import chunkhound.utils.file_patterns as fp
 
     (tmp_path / "a.py").write_text("x = 1")
@@ -33,7 +46,8 @@ def test_scan_files_matches_python_walker(tmp_path, monkeypatch):
 
 
 @requires_rust
-def test_skip_dirs_prunes_excluded(tmp_path):
+def test_skip_dirs_prunes_excluded(project_dir):
+    tmp_path = project_dir
     cache = tmp_path / "__pycache__"
     cache.mkdir()
     (cache / "mod.cpython-312.pyc").write_bytes(b"")
@@ -44,14 +58,16 @@ def test_skip_dirs_prunes_excluded(tmp_path):
 
 
 @requires_rust
-def test_returns_empty_for_unknown_extension(tmp_path):
+def test_returns_empty_for_unknown_extension(project_dir):
+    tmp_path = project_dir
     (tmp_path / "file.py").write_text("x = 1")
     result = _scan_files(str(tmp_path), ["xyz_never_exists"])
     assert result == []
 
 
 @requires_rust
-def test_include_all_matches_unknown_extensions(tmp_path):
+def test_include_all_matches_unknown_extensions(project_dir):
+    tmp_path = project_dir
     (tmp_path / "known.py").write_text("x = 1")
     (tmp_path / "unknown.xyz").write_text("?")
 
@@ -60,25 +76,27 @@ def test_include_all_matches_unknown_extensions(tmp_path):
     assert result == {str(tmp_path / "known.py"), str(tmp_path / "unknown.xyz")}
 
 
-def test_python_fallback_when_rust_disabled(tmp_path, monkeypatch):
-    """Python path is taken when CHUNKHOUND_USE_RUST=0 even if the extension is present."""
+def test_python_fallback_when_rust_disabled(project_dir, monkeypatch):
+    """CHUNKHOUND_USE_RUST=0 selects Python even with the extension present."""
     import chunkhound.utils.file_patterns as fp
+
+    tmp_path = project_dir
 
     (tmp_path / "a.py").write_text("x = 1")
     (tmp_path / "b.rs").write_text("fn main() {}")
 
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
-    files, _ = fp.walk_directory_tree(
-        tmp_path, tmp_path, ["**/*.py"], [], {}
-    )
+    files, _ = fp.walk_directory_tree(tmp_path, tmp_path, ["**/*.py"], [], {})
 
     assert {p.name for p in files} == {"a.py"}
 
 
 @requires_rust
-def test_walk_directory_tree_uses_rust_path(tmp_path, monkeypatch):
-    """Integration: env-var gate + _fnmatch_to_gitignore + scan_files all wired together."""
+def test_walk_directory_tree_uses_rust_path(project_dir, monkeypatch):
+    """The environment gate enables native scanning with translated patterns."""
     import chunkhound.utils.file_patterns as fp
+
+    tmp_path = project_dir
 
     (tmp_path / "a.py").write_text("x = 1")
     (tmp_path / "b.md").write_text("# hi")
@@ -93,11 +111,13 @@ def test_walk_directory_tree_uses_rust_path(tmp_path, monkeypatch):
 
 
 @requires_rust
-def test_index_unknown_files_sentinel_uses_rust_fast_path(tmp_path, monkeypatch):
+def test_index_unknown_files_sentinel_uses_rust_fast_path(project_dir, monkeypatch):
     """`"**/*"` (the index_unknown_files sentinel) must still take the Rust
     fast path instead of silently falling back to the slow Python os.walk.
     """
     import chunkhound.utils.file_patterns as fp
+
+    tmp_path = project_dir
 
     (tmp_path / "known.py").write_text("x = 1")
     (tmp_path / "unknown.xyz").write_text("?")
@@ -112,9 +132,7 @@ def test_index_unknown_files_sentinel_uses_rust_fast_path(tmp_path, monkeypatch)
     monkeypatch.setattr(fp, "_rust_scan_files", spy)
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
 
-    files, _ = fp.walk_directory_tree(
-        tmp_path, tmp_path, ["**/*.py", "**/*"], [], {}
-    )
+    files, _ = fp.walk_directory_tree(tmp_path, tmp_path, ["**/*.py", "**/*"], [], {})
 
     assert calls, (
         "the Rust fast path should have been invoked, not the slow os.walk fallback"
@@ -124,9 +142,11 @@ def test_index_unknown_files_sentinel_uses_rust_fast_path(tmp_path, monkeypatch)
 
 
 @requires_rust
-def test_index_unknown_files_sentinel_parity(tmp_path, monkeypatch):
+def test_index_unknown_files_sentinel_parity(project_dir, monkeypatch):
     """Rust and Python paths must agree on results for the "**/*" sentinel."""
     import chunkhound.utils.file_patterns as fp
+
+    tmp_path = project_dir
 
     (tmp_path / "known.py").write_text("x = 1")
     (tmp_path / "unknown.xyz").write_text("?")
@@ -147,7 +167,7 @@ def test_index_unknown_files_sentinel_parity(tmp_path, monkeypatch):
 
 
 @requires_rust
-def test_heavy_dir_anchor_conflict_declines_rust_fast_path(tmp_path, monkeypatch):
+def test_heavy_dir_anchor_conflict_declines_rust_fast_path(project_dir, monkeypatch):
     """An include pattern explicitly anchored into a HEAVY_DIRS-named
     directory (e.g. node_modules) alongside the unrestricted "**/*" sentinel
     must decline the Rust fast path, not silently drop that subtree via
@@ -161,6 +181,7 @@ def test_heavy_dir_anchor_conflict_declines_rust_fast_path(tmp_path, monkeypatch
     """
     import chunkhound.utils.file_patterns as fp
 
+    tmp_path = project_dir
     nm = tmp_path / "node_modules"
     nm.mkdir()
     (nm / "dep.ts").write_text("x")
@@ -169,9 +190,7 @@ def test_heavy_dir_anchor_conflict_declines_rust_fast_path(tmp_path, monkeypatch
     patterns = ["node_modules/**/*.ts", "**/*"]
 
     calls = []
-    monkeypatch.setattr(
-        fp, "_rust_scan_files", lambda *a, **kw: calls.append(kw) or []
-    )
+    monkeypatch.setattr(fp, "_rust_scan_files", lambda *a, **kw: calls.append(kw) or [])
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
     files_with_rust_enabled, _ = fp.walk_directory_tree(
         tmp_path, tmp_path, patterns, [], {}
@@ -194,9 +213,11 @@ def test_heavy_dir_anchor_conflict_declines_rust_fast_path(tmp_path, monkeypatch
 
 
 @requires_rust
-def test_exclude_patterns_parity(tmp_path, monkeypatch):
+def test_exclude_patterns_parity(project_dir, monkeypatch):
     """Both paths must produce identical results when exclude_patterns are supplied."""
     import chunkhound.utils.file_patterns as fp
+
+    tmp_path = project_dir
 
     (tmp_path / "keep.py").write_text("x = 1")
     nm = tmp_path / "node_modules"
@@ -226,9 +247,11 @@ def test_exclude_patterns_parity(tmp_path, monkeypatch):
 
 
 @requires_rust
-def test_exact_names_parity(tmp_path, monkeypatch):
+def test_exact_names_parity(project_dir, monkeypatch):
     """Parity: exact filename patterns like Makefile are found by both paths."""
     import chunkhound.utils.file_patterns as fp
+
+    tmp_path = project_dir
 
     (tmp_path / "Makefile").write_text("all:")
     (tmp_path / "skip.py").write_text("x = 1")
@@ -246,9 +269,11 @@ def test_exact_names_parity(tmp_path, monkeypatch):
     assert len(rust_files) == 2
 
 
-def test_max_files_forces_python_path(tmp_path, monkeypatch):
+def test_max_files_forces_python_path(project_dir, monkeypatch):
     """Rust path is bypassed when max_files is set; Python path enforces the cap."""
     import chunkhound.utils.file_patterns as fp
+
+    tmp_path = project_dir
 
     for i in range(5):
         (tmp_path / f"f{i}.py").write_text("x = 1")
@@ -265,6 +290,7 @@ def test_max_files_forces_python_path(tmp_path, monkeypatch):
 def test_native_extra_has_exact_names():
     """Installed chunkhound-native wheel must expose the exact_names parameter."""
     import inspect
+
     sig = inspect.signature(_scan_files)
     assert "exact_names" in sig.parameters, (
         "chunkhound-native wheel is too old — missing exact_names. "
@@ -276,6 +302,7 @@ def test_native_extra_has_exact_names():
 def test_native_extra_has_include_all():
     """Installed chunkhound-native wheel must expose the include_all parameter."""
     import inspect
+
     sig = inspect.signature(_scan_files)
     assert "include_all" in sig.parameters, (
         "chunkhound-native wheel is too old — missing include_all. "

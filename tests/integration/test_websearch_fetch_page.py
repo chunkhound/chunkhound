@@ -99,6 +99,11 @@ async def chrome_browser() -> AsyncIterator[zd.Browser]:
             "--headless=new",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            # Private HOME must not trigger macOS developer-keychain prompts.
+            "--use-mock-keychain",
+            # Host proxy and external extensions are not declared test inputs.
+            "--no-proxy-server",
+            "--disable-extensions",
         ],
         browser_executable_path=chrome_path,
     )

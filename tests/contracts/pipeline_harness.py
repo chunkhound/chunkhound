@@ -29,8 +29,8 @@ class IndexResult:
         default_factory=list
     )
     # (file_path, chunk_type, symbol, provider, model, dims, embedding[:8]) — sorted
-    embedding_tuples: list[tuple[str, str, str, str, str, int, tuple[float, ...]]] = field(
-        default_factory=list
+    embedding_tuples: list[tuple[str, str, str, str, str, int, tuple[float, ...]]] = (
+        field(default_factory=list)
     )
     errors: list[str] = field(default_factory=list)
     # Mirrors Python's DiskUsageLimitExceededError contract — set when a
@@ -53,6 +53,7 @@ def disconnect_registry_db() -> None:
     """
     try:
         from chunkhound.registry import get_registry
+
         registry = get_registry()
         db = registry.get_provider("database")
         if db is not None and hasattr(db, "disconnect"):
@@ -185,7 +186,8 @@ def _collect_embedding_tuples(
     conn = duckdb.connect(str(db_file))
     # Find dimensions from any embedding table
     tables = conn.execute(
-        "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'embeddings_%'"
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name LIKE 'embeddings_%'"
     ).fetchall()
     tuples: list[tuple[str, str, str, str, str, int, tuple[float, ...]]] = []
     for (table_name,) in tables:
@@ -269,6 +271,7 @@ def index_with_rust(
     compaction_threshold: float = 0.60,
     compaction_min_size_mb: int = 10,
     disk_usage_limit_mb: float | None = None,
+    duckdb_hnsw_enabled: bool = True,
     progress_callback=None,
 ) -> IndexResult:
     """Index *fixture_dir* using the Rust pipeline."""
@@ -288,6 +291,7 @@ def index_with_rust(
         do_cleanup=do_cleanup,
         embedding_provider=MOCK_PROVIDER,
         embedding_model=MOCK_MODEL,
+        duckdb_hnsw_enabled=duckdb_hnsw_enabled,
     )
 
     pipeline = IndexingPipeline(config_dict)
@@ -412,13 +416,16 @@ def assert_identical(result_a: IndexResult, result_b: IndexResult) -> None:
     """
     # Top-level counts
     assert result_a.files_processed == result_b.files_processed, (
-        f"files_processed mismatch: {result_a.files_processed} != {result_b.files_processed}"
+        f"files_processed mismatch: {result_a.files_processed} != "
+        f"{result_b.files_processed}"
     )
     assert result_a.chunks_written == result_b.chunks_written, (
-        f"chunks_written mismatch: {result_a.chunks_written} != {result_b.chunks_written}"
+        f"chunks_written mismatch: {result_a.chunks_written} != "
+        f"{result_b.chunks_written}"
     )
     assert result_a.embeddings_generated == result_b.embeddings_generated, (
-        f"embeddings_generated mismatch: {result_a.embeddings_generated} != {result_b.embeddings_generated}"
+        f"embeddings_generated mismatch: {result_a.embeddings_generated} != "
+        f"{result_b.embeddings_generated}"
     )
 
     a_errors = sorted(result_a.errors)
@@ -469,6 +476,19 @@ def default_rust_config(
     }
     config.update(overrides)
     return config
+
+
+def hnsw_index_names(db_dir: Path) -> set[str]:
+    """Names of HNSW indexes on embeddings tables in *db_dir*."""
+    conn = duckdb.connect(str(db_dir / "chunks.db"))
+    try:
+        rows = conn.execute(
+            "SELECT index_name FROM duckdb_indexes() "
+            "WHERE table_name LIKE 'embeddings_%'"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {name for (name,) in rows if "hnsw" in name.lower()}
 
 
 def collect_table_counts(db_dir: Path) -> dict[str, int]:
