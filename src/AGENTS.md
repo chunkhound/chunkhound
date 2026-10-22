@@ -66,8 +66,8 @@ CPU/IO-bound work) are defined once in the root `AGENTS.md` under `RUST_RULES`
 
 **Threading model** (`pipeline/pipeline.rs:416-440`): three persistent OS
 threads — parse, embed, store — connected by two bounded `mpsc` channels
-(capacity 2 each). While the store thread writes batch N to DuckDB (and, on the
-final batch, rebuilds HNSW indexes and compacts), the embed thread is already
+(capacity 2 each). While the store thread writes batch N to DuckDB (and, after
+the final batch, rebuilds HNSW indexes or compacts), the embed thread is already
 embedding batch N+1 and the parse thread is already parsing batch N+2. The
 bounded channels provide backpressure since parsed/embedded batches are
 memory-heavy (source text, then float vectors). The caller must release the GIL
@@ -75,7 +75,8 @@ before entering `.run()`; each thread re-acquires the GIL independently via
 `Python::with_gil()`. The store thread reuses the existing HNSW "bulk mode"
 bracket (`drop_all_hnsw_indexes()` → N incremental writes →
 `ensure_all_hnsw_indexes()`) that the Python path already used, so no new
-DB-layer mechanism was needed for this.
+DB-layer mechanism was needed for this. A run with nothing to write, delete or
+compact skips the bracket and leaves the indexes in place.
 
 **Error handling**: `DbError`/`ScanError` (`error.rs`) always convert to
 `PyRuntimeError`. On the Python side, `chunkhound/pipeline_bridge.py` wraps any
@@ -151,5 +152,5 @@ Call chain for reference: `IndexingCoordinator.process_directory()` →
 | Anchor-pruning bug in the Python fallback scanner | Known, **unfixed** — pre-existing in the slow path, not caused by the Rust split. | `chunkhound/utils/file_patterns.py` comments |
 | DuckDB FK / `ON CONFLICT DO UPDATE` two-phase write pattern | Inherent DuckDB limitation (can't `ON CONFLICT DO UPDATE` on an FK parent row), worked around with a two-phase pre-transaction delete/insert; documented atomicity gap between the phases. | `db/duckdb_backend/write.rs` |
 | Cross-process DB reopen (open pipeline's DB in a separate process after close) | Verify current status before relying on it — the test is phrased as a hard guard, suggesting this was, or may still be, an unmet requirement. | `tests/contracts/test_reopen_after_close.py` |
-| Platform/wheel coverage (Intel macOS, musl/pre-manylinux_2_34, no sdist, air-gapped builds) | Deliberate, documented gaps — not duplicated here. | Root `AGENTS.md`, `RUST_COMMANDS` section |
+| Platform/wheel coverage (Intel macOS, musl/pre-manylinux_2_31 i.e. glibc < 2.31, no sdist, air-gapped builds) | Deliberate, documented gaps — not duplicated here. Linux wheels target glibc 2.31 (Ubuntu 20.04); the bundled Watchman runtime separately needs glibc 2.36, so older hosts default to the watchdog backend. | `.github/actions/build-native-wheel/action.yml` description; `chunkhound/watchman_runtime/platforms/linux-x86_64/manifest.json` (`min_glibc`) |
 | Embedding deduplication/reuse | Absent by design; it never existed in this pipeline. Deferred to a future content-hash→vector lookup backed by a chunk-granularity `content_hash` column; a bare bloom filter is insufficient. | Future follow-up plan |

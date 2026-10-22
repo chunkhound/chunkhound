@@ -177,13 +177,26 @@ def test_build_native_wheel_action_defaults_out_dir_to_dist() -> None:
     assert out_dir["required"] is False
     assert out_dir["default"] == "dist"
 
-    runs = {step["name"]: step.get("run", "") for step in action["runs"]["steps"]}
-    build_run = runs["Build native wheel"]
+    steps = {step["name"]: step for step in action["runs"]["steps"]}
+    runs = {name: step.get("run", "") for name, step in steps.items()}
+    linux_build = steps["Build native wheel (Linux, manylinux_2_31 container)"]
+    other_build_run = runs["Build native wheel (macOS/Windows)"]
     smoke_run = runs["Smoke test native wheel API"]
-    assert build_run.count('--out "${{ inputs.out-dir }}/"') == 2, (
-        "both Linux and non-Linux maturin invocations must write into out-dir"
+    # The Linux build resolves inputs.out-dir on the host and bind-mounts it
+    # separately at /out, supporting both workspace-relative and absolute
+    # values. The macOS/Windows build writes --out on the host.
+    assert linux_build["env"]["OUT_DIR"] == "${{ inputs.out-dir }}"
+    assert 'OUT_DIR="$(realpath "$OUT_DIR")"' in linux_build["run"]
+    assert '-v "$OUT_DIR":/out' in linux_build["run"]
+    # auditwheel, not the runner's glibc, decides the published Linux tag.
+    assert (
+        'auditwheel repair --plat "manylinux_2_31_$(uname -m)" --wheel-dir /out'
+        in linux_build["run"]
     )
-    assert 'WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"' in smoke_run
+    assert '--out "${{ inputs.out-dir }}/"' in other_build_run
+    # realpath keeps workspace-relative inputs working and preserves absolute ones.
+    assert 'WHEEL_DIR="$(realpath "${{ inputs.out-dir }}")"' in smoke_run
+    assert smoke_run.index("WHEEL_DIR=") < smoke_run.index('cd "$TMP_DIR"')
 
 
 def test_prepare_release_enforces_supported_matrix_for_runtime_verifier() -> None:
@@ -448,7 +461,7 @@ def test_source_tree_copy_ignore_excludes_transient_repo_state() -> None:
 def test_main_runs_host_compatible_wheels_and_source_fallback(
     tmp_path: Path, monkeypatch
 ) -> None:
-    linux_wheel = tmp_path / "chunkhound-0.0.0-py3-none-manylinux_2_34_x86_64.whl"
+    linux_wheel = tmp_path / "chunkhound-0.0.0-py3-none-manylinux_2_31_x86_64.whl"
     windows_wheel = tmp_path / "chunkhound-0.0.0-py3-none-win_amd64.whl"
     linux_wheel.write_text("wheel", encoding="utf-8")
     windows_wheel.write_text("wheel", encoding="utf-8")
