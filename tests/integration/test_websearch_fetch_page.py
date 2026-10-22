@@ -33,7 +33,7 @@ import pytest_asyncio
 from chunkhound.utils.websearch_core import (
     _CHROME_PATHS,
     _fetch_page,
-    _launch_chrome,
+    _managed_browser,
     _resolve_chrome_path,
 )
 
@@ -82,24 +82,18 @@ async def _wait_for_target_count(
 async def chrome_browser() -> AsyncIterator[zd.Browser]:
     """Per-test Chrome. Function-scoped so target counts start clean.
 
-    Uses the production ``_resolve_chrome_path`` + ``_launch_chrome`` so the
-    explicit-path probe, version check, and cold-start-tolerant launch budget
-    that ``fetch_and_save`` relies on are exercised here — a Chrome <124 or
-    otherwise unverifiable binary returns ``None`` and skips the test instead
-    of letting it hit the silent-event-drop loop in zendriver's listener.
+    Uses the production ``_managed_browser`` so launch flags, Chrome
+    resolution, the late-completion guard, and bounded stop are exercised
+    here. No usable Chrome skips; a resolvable Chrome that fails to launch
+    fails the test.
     """
-    chrome_path = _resolve_chrome_path()
-    if chrome_path is None:
-        pytest.skip("No Chrome resolvable via _resolve_chrome_path")
-
-    browser = await _launch_chrome(chrome_path)
-    try:
+    if _resolve_chrome_path() is None:
+        pytest.skip("No usable Chrome")
+    warnings: list[str] = []
+    async with _managed_browser(warnings.append) as browser:
+        if browser is None:
+            pytest.fail(f"Chrome launch failed: {'; '.join(warnings)}")
         yield browser
-    finally:
-        try:
-            await asyncio.wait_for(browser.stop(), timeout=10)
-        except asyncio.TimeoutError:
-            pass
 
 
 async def test_fetch_page_html_branch(

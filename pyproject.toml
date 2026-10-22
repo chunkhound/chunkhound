@@ -125,8 +125,6 @@ dependencies = [
     # Response.charset workaround). Bumping requires re-validating the
     # response-event race ordering and the async-handler dispatch path.
     "zendriver==0.15.3",
-    # Direct import in websearch_core._register_chrome_exit; keep it explicit.
-    "asyncio-atexit>=1.0.1",
     "chunkhound-native>=5.2.0",
 ]
 
