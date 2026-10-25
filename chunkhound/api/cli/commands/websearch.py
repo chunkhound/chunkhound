@@ -29,10 +29,16 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     embedding_manager = setup_embedding_manager(formatter, config)
     llm_manager = setup_llm_manager(formatter, config)
 
+    def _warning_to_stderr(message: str) -> None:
+        print(f"[WARN] {message}", file=sys.stderr)
+
     def _on_query_failure(q: str, e: urllib.error.URLError) -> None:
-        formatter.warning(
+        _warning_to_stderr(
             f"DDG query failed ({q!r}): {e.reason}; continuing with remaining queries"
         )
+
+    def _progress_to_stderr(message: str) -> None:
+        print(f"[PROGRESS] {message}", file=sys.stderr)
 
     timeout_s = websearch_timeout()
     try:
@@ -46,7 +52,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
                 embedding_manager=embedding_manager,
                 llm_manager=llm_manager,
                 previous_query=previous_query,
-                progress_callback=formatter.progress_indicator,
+                progress_callback=_progress_to_stderr,
                 progress=research_progress,
                 failure_callback=_on_query_failure,
                 timeout_s=timeout_s,
@@ -68,5 +74,5 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(f"Research failed: {exc}")
         sys.exit(1)
     for warning in warnings:
-        formatter.warning(warning)
+        _warning_to_stderr(warning)
     formatter.text_block(str(result.get("answer", "")))

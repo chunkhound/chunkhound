@@ -78,11 +78,14 @@ async def test_websearch_command_runs_research_in_process(
 async def test_websearch_command_keeps_progress_off_stdout(
     monkeypatch, providers, capsys
 ) -> None:
-    monkeypatch.setattr(
-        websearch_core, "search_multi", AsyncMock(return_value=search_results())
-    )
+    async def search(queries, limit, progress_callback, **kwargs):
+        progress_callback("Searching page 1...")
+        return search_results()
 
-    async def pages(*args, **kwargs):
+    monkeypatch.setattr(websearch_core, "search_multi", search)
+
+    async def pages(urls, progress_callback=None, warning_callback=None):
+        progress_callback(f"Fetching {urls[0]}...")
         yield "https://example.invalid/page", ".md", "# In memory"
 
     async def research(query, page_stream, *args, **kwargs):
@@ -100,8 +103,14 @@ async def test_websearch_command_keeps_progress_off_stdout(
     await ws_mod.websearch_command(make_args(), MagicMock())
 
     captured = capsys.readouterr()
-    assert "scanning pages" not in captured.out
-    assert "scanning pages" in captured.err
+    for message in (
+        "Searching page 1",
+        "Found 1 results",
+        "Fetching https://example.invalid/page",
+        "scanning pages",
+    ):
+        assert message not in captured.out
+        assert message in captured.err
 
 
 @pytest.mark.asyncio
