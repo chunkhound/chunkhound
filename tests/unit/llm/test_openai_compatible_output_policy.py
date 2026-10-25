@@ -38,25 +38,25 @@ def _manager_provider(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("name", "cap_field"),
+    ("name", "cap_field", "omission"),
     [
-        ("deepseek", "max_tokens"),
-        ("grok", "max_completion_tokens"),
-        ("openrouter", "max_tokens"),
-        ("orcarouter", "max_tokens"),
-        ("requesty", "max_tokens"),
+        ("deepseek", "max_tokens", OutputLimitCapability.SUPPORTED),
+        ("grok", "max_completion_tokens", OutputLimitCapability.SUPPORTED),
+        ("openrouter", "max_tokens", OutputLimitCapability.SUPPORTED),
+        ("orcarouter", "max_tokens", OutputLimitCapability.SUPPORTED),
+        ("requesty", "max_tokens", OutputLimitCapability.SUPPORTED),
+        ("api-route", "max_tokens", OutputLimitCapability.UNKNOWN),
     ],
 )
-async def test_canonical_builtin_provider_managed_request_omits_cap(
+async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
     name: str,
     cap_field: str,
+    omission: OutputLimitCapability,
 ) -> None:
     marker = f"canonical-{name}-omit"
     with _server(marker) as server:
         provider = _manager_provider(name)
-        assert (
-            provider.output_limit_metadata.omission is OutputLimitCapability.SUPPORTED
-        )
+        assert provider.output_limit_metadata.omission is omission
 
         await provider._client.close()
         provider._client = AsyncOpenAI(
@@ -77,9 +77,12 @@ async def test_canonical_builtin_provider_managed_request_omits_cap(
             await provider._client.close()
 
         body = server.requests[0]["json"]
-        assert cap_field not in body
-        assert "max_tokens" not in body
-        assert "max_completion_tokens" not in body
+        if omission is OutputLimitCapability.SUPPORTED:
+            assert "max_tokens" not in body
+            assert "max_completion_tokens" not in body
+        else:
+            assert body[cap_field] == 64_000
+            assert "max_completion_tokens" not in body
 
 
 @pytest.mark.asyncio
@@ -91,6 +94,7 @@ async def test_canonical_builtin_provider_managed_request_omits_cap(
         ("openrouter", "max_tokens"),
         ("orcarouter", "max_tokens"),
         ("requesty", "max_tokens"),
+        ("api-route", "max_tokens"),
         ("opper", "max_tokens"),
     ],
 )
