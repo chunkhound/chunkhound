@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from chunkhound.utils.websearch_pipeline import (
+    NoPagesFetchedError,
     run_websearch,
     websearch_discovery_timeout,
 )
@@ -35,6 +36,40 @@ async def test_discovery_timeout_does_not_wait_for_full_budget(monkeypatch) -> N
             llm_manager=None,
             timeout_s=0.08,
         )
+
+
+@pytest.mark.asyncio
+async def test_all_fetch_failures_stop_before_research(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries",
+        AsyncMock(return_value=["q"]),
+    )
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi",
+        AsyncMock(return_value=[("T", "https://example.invalid/p", "s")]),
+    )
+
+    async def no_pages(*args, **kwargs):
+        if False:
+            yield
+
+    research = AsyncMock()
+    monkeypatch.setattr("chunkhound.utils.websearch_core.fetch_pages", no_pages)
+    monkeypatch.setattr(
+        "chunkhound.services.web_research_service.research_web_pages", research
+    )
+
+    with pytest.raises(NoPagesFetchedError, match="No pages could be fetched"):
+        await run_websearch(
+            "q",
+            limit=1,
+            config=None,
+            embedding_manager=None,
+            llm_manager=None,
+            timeout_s=30,
+        )
+
+    research.assert_not_awaited()
 
 
 @pytest.mark.asyncio

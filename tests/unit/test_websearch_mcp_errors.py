@@ -83,6 +83,22 @@ async def test_partial_fetch_warnings_render_bullets(monkeypatch, patched) -> No
 
 
 @pytest.mark.asyncio
+async def test_all_fetch_failures_raise_specific_mcperror(monkeypatch, patched) -> None:
+    async def no_pages(*args, **kwargs):
+        if False:
+            yield
+
+    research = AsyncMock()
+    monkeypatch.setattr(websearch_core, "fetch_pages", no_pages)
+    monkeypatch.setattr(web_research_service, "research_web_pages", research)
+
+    with pytest.raises(MCPError, match="No pages could be fetched for 'query'"):
+        await invoke()
+
+    research.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_research_failure_raises_mcperror(monkeypatch, patched) -> None:
     monkeypatch.setattr(
         web_research_service,

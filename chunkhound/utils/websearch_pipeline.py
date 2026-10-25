@@ -113,31 +113,34 @@ async def run_websearch(
             progress_callback(f"Found {len(results)} results, fetching content...")
 
         warnings: list[str] = []
-        got_page = False
-
-        async def pages() -> AsyncIterator[Page]:
-            nonlocal got_page
-            async for page in fetch_pages(
-                [url for _, url, _ in results],
-                progress_callback,
-                warnings.append,
-            ):
-                got_page = True
-                yield page
-
-        result = await research_web_pages(
-            query,
-            pages(),
-            config,
-            embedding_manager,
-            llm_manager,
-            progress=progress,
-            warning_callback=warnings.append,
-            previous_query=previous_query,
+        fetched_pages = fetch_pages(
+            [url for _, url, _ in results],
+            progress_callback,
+            warnings.append,
         )
-        if not got_page:
-            raise NoPagesFetchedError(f"No pages could be fetched for {query!r}")
-        return result, warnings
+        try:
+            first_page = await anext(fetched_pages, None)
+            if first_page is None:
+                raise NoPagesFetchedError(f"No pages could be fetched for {query!r}")
+
+            async def pages() -> AsyncIterator[Page]:
+                yield first_page
+                async for page in fetched_pages:
+                    yield page
+
+            result = await research_web_pages(
+                query,
+                pages(),
+                config,
+                embedding_manager,
+                llm_manager,
+                progress=progress,
+                warning_callback=warnings.append,
+                previous_query=previous_query,
+            )
+            return result, warnings
+        finally:
+            await fetched_pages.aclose()
 
     try:
         return await asyncio.wait_for(_run(), timeout=total)
