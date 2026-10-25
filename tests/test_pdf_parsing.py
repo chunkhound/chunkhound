@@ -329,3 +329,20 @@ class TestPDFIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+def test_importing_parser_mappings_does_not_import_pymupdf():
+    """`import pymupdf` loads an ONNX layout model when pymupdf-layout is installed, and
+    every parse worker imports all mappings. PyMuPDF must load only when a PDF is parsed."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import chunkhound.parsers.mappings\n"
+        "import chunkhound.parsers.mappings.pdf\n"
+        "print('pymupdf' in sys.modules)\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False"
