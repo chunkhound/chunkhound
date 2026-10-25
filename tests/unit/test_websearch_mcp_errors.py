@@ -100,7 +100,7 @@ async def test_timeout_raises_mcperror(monkeypatch, patched) -> None:
         await asyncio.Event().wait()
 
     monkeypatch.setattr(web_research_service, "research_web_pages", blocked)
-    monkeypatch.setattr(websearch_core, "websearch_timeout", lambda: 0.01)
+    monkeypatch.setattr(websearch_core, "websearch_timeout", lambda: 0.08)
 
     with pytest.raises(MCPError, match="websearch timed out"):
         await invoke()
@@ -110,9 +110,11 @@ async def test_timeout_raises_mcperror(monkeypatch, patched) -> None:
 async def test_cancellation_propagates_and_cancels_research(
     monkeypatch, patched
 ) -> None:
+    started = asyncio.Event()
     cancelled = asyncio.Event()
 
     async def blocked(*args, **kwargs):
+        started.set()
         try:
             await asyncio.Event().wait()
         finally:
@@ -120,7 +122,7 @@ async def test_cancellation_propagates_and_cancels_research(
 
     monkeypatch.setattr(web_research_service, "research_web_pages", blocked)
     task = asyncio.create_task(invoke())
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), timeout=1)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):

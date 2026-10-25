@@ -18,7 +18,9 @@ def _patch_codex_cli_provider() -> None:
     except Exception:
         return
 
-    async def _stub_run_exec(self, text, cwd=None, max_tokens=1024, timeout=None, model=None):
+    async def _stub_run_exec(
+        self, text, cwd=None, max_tokens=1024, timeout=None, model=None
+    ):
         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
         if mark:
             try:
@@ -51,11 +53,14 @@ def _force_code_research_synthesis() -> None:
     except Exception:
         return
 
-    async def _stub_deep_research_impl(*, services, embedding_manager, llm_manager, query, progress=None):
+    async def _stub_deep_research_impl(
+        *, services, embedding_manager, llm_manager, query, progress=None
+    ):
         # Ensure we have an LLM manager even if server didn't configure one
         if llm_manager is None:
             try:
                 from chunkhound.llm_manager import LLMManager  # type: ignore
+
                 llm_manager = LLMManager(
                     {"provider": "codex-cli", "model": "codex"},
                     {"provider": "codex-cli", "model": "codex"},
@@ -68,7 +73,9 @@ def _force_code_research_synthesis() -> None:
 
     try:
         tools_mod.deep_research_impl = _stub_deep_research_impl  # type: ignore[assignment]
-        tools_mod.TOOL_REGISTRY["code_research"].implementation = _stub_deep_research_impl  # type: ignore[index]
+        tools_mod.TOOL_REGISTRY[
+            "code_research"
+        ].implementation = _stub_deep_research_impl  # type: ignore[index]
     except Exception:
         pass
 
@@ -85,6 +92,7 @@ def _patch_capability_checks() -> None:
     try:
         # Patch the tool registry entry to not require embeddings/reranker
         from chunkhound.mcp_server.tools import TOOL_REGISTRY
+
         if "code_research" in TOOL_REGISTRY:
             tool = TOOL_REGISTRY["code_research"]
             tool.requires_embeddings = False
@@ -112,10 +120,11 @@ def _patch_websearch_for_tests() -> None:
         pass
 
     try:
-        from chunkhound.utils import websearch_core as ws_core
         from chunkhound.services import web_research_service as web_research
+        from chunkhound.utils import websearch_core as ws_core
 
         ws_core.search  # noqa: B018
+        ws_core.search_multi  # noqa: B018
         ws_core.fetch_pages  # noqa: B018
         web_research.research_web_pages  # noqa: B018
 
@@ -140,7 +149,13 @@ def _patch_websearch_for_tests() -> None:
                 pass
             return {"answer": "ANSWER"}
 
+        async def _stub_search_multi(
+            queries, limit, progress_callback=None, failure_callback=None
+        ):
+            return _stub_search(queries[0] if queries else "", limit)
+
         ws_core.search = _stub_search  # type: ignore[assignment]
+        ws_core.search_multi = _stub_search_multi  # type: ignore[assignment]
         ws_core.fetch_pages = _stub_fetch_pages  # type: ignore[assignment]
         web_research.research_web_pages = _stub_research  # type: ignore[assignment]
     except ImportError:

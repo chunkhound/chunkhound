@@ -853,14 +853,12 @@ async def websearch_impl(
         Markdown research answer plus an optional fetch-warning block.
     """
     from chunkhound.mcp_server.common import MCPError
-    from chunkhound.services.web_research_service import Page, research_web_pages
-    from chunkhound.utils.websearch_core import (
-        clamp_limit,
-        fetch_pages,
-        search_multi,
-        websearch_timeout,
+    from chunkhound.utils.websearch_core import clamp_limit, websearch_timeout
+    from chunkhound.utils.websearch_pipeline import (
+        EmptyWebSearchError,
+        NoPagesFetchedError,
+        run_websearch,
     )
-    from chunkhound.utils.websearch_expansion import expand_web_queries
 
     if config is None:
         config = Config.from_environment()
@@ -871,56 +869,30 @@ async def websearch_impl(
     limit = clamp_limit(limit)
     timeout_s = websearch_timeout()
 
-    async def _run() -> tuple[dict, list[str]]:
-        queries = await expand_web_queries(
-            query, llm_manager, previous_query=previous_query
-        )
-        try:
-            results = await search_multi(queries, limit, None)
-        except urllib.error.HTTPError as e:
-            raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
-        except urllib.error.URLError as e:
-            raise MCPError(f"Web search failed: {e.reason}") from e
-        if not results:
-            raise MCPError(f"No results found for {query!r}")
-
-        warnings: list[str] = []
-        got_page = False
-
-        async def pages() -> AsyncIterator[Page]:
-            nonlocal got_page
-            async for page in fetch_pages(
-                [url for _, url, _ in results],
-                progress_callback=None,
-                warning_callback=warnings.append,
-            ):
-                got_page = True
-                yield page
-
-        research_result = await research_web_pages(
-            query,
-            pages(),
-            config,
-            embedding_manager,
-            llm_manager,
-            warning_callback=warnings.append,
-            previous_query=previous_query,
-        )
-        if not got_page:
-            raise MCPError(f"No pages could be fetched for {query!r}")
-        return research_result, warnings
-
     try:
-        research_result, warnings = await asyncio.wait_for(_run(), timeout=timeout_s)
-    except MCPError:
-        raise
-    except asyncio.TimeoutError:
-        raise MCPError(f"websearch timed out after {timeout_s:.0f}s") from None
+        research_result, warnings = await run_websearch(
+            query,
+            limit=limit,
+            config=config,
+            embedding_manager=embedding_manager,
+            llm_manager=llm_manager,
+            previous_query=previous_query,
+            timeout_s=timeout_s,
+        )
+    except EmptyWebSearchError as e:
+        raise MCPError(str(e).split(" — ", 1)[0]) from e
+    except urllib.error.HTTPError as e:
+        raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
+    except urllib.error.URLError as e:
+        raise MCPError(f"Web search failed: {e.reason}") from e
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        raise MCPError(str(e)) from None
     except asyncio.CancelledError:
         raise
+    except NoPagesFetchedError as e:
+        raise MCPError(str(e)) from e
     except Exception as exc:
         raise MCPError(f"Web research failed: {exc}") from exc
-
     answer = str(research_result.get("answer", "")).rstrip()
     return f"{answer}{_format_fetch_warnings(warnings)}"
 

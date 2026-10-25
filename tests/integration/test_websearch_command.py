@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from chunkhound.api.cli.commands import websearch as ws_mod
+from chunkhound.services import web_research_service
+from chunkhound.utils import websearch_core, websearch_expansion
 
 
 def make_args(
@@ -28,7 +30,9 @@ def providers(monkeypatch):
     llm = MagicMock()
     monkeypatch.setattr(ws_mod, "setup_embedding_manager", lambda *_: embedding)
     monkeypatch.setattr(ws_mod, "setup_llm_manager", lambda *_: llm)
-    monkeypatch.setattr(ws_mod, "expand_web_queries", AsyncMock(return_value=["q"]))
+    monkeypatch.setattr(
+        websearch_expansion, "expand_web_queries", AsyncMock(return_value=["q"])
+    )
     return embedding, llm
 
 
@@ -37,7 +41,7 @@ async def test_websearch_command_runs_research_in_process(
     monkeypatch, providers
 ) -> None:
     monkeypatch.setattr(
-        ws_mod, "search_multi", AsyncMock(return_value=search_results())
+        websearch_core, "search_multi", AsyncMock(return_value=search_results())
     )
 
     async def pages(*args, **kwargs):
@@ -51,8 +55,8 @@ async def test_websearch_command_runs_research_in_process(
         seen["progress"] = hasattr(kwargs["progress"], "emit_event")
         return {"answer": "ANSWER"}
 
-    monkeypatch.setattr(ws_mod, "fetch_pages", pages)
-    monkeypatch.setattr(ws_mod, "research_web_pages", research)
+    monkeypatch.setattr(websearch_core, "fetch_pages", pages)
+    monkeypatch.setattr(web_research_service, "research_web_pages", research)
     rendered: list[str] = []
     monkeypatch.setattr(
         ws_mod.RichOutputFormatter,
@@ -75,7 +79,7 @@ async def test_websearch_command_keeps_progress_off_stdout(
     monkeypatch, providers, capsys
 ) -> None:
     monkeypatch.setattr(
-        ws_mod, "search_multi", AsyncMock(return_value=search_results())
+        websearch_core, "search_multi", AsyncMock(return_value=search_results())
     )
 
     async def pages(*args, **kwargs):
@@ -87,8 +91,8 @@ async def test_websearch_command_keeps_progress_off_stdout(
             pass
         return {"answer": "ANSWER"}
 
-    monkeypatch.setattr(ws_mod, "fetch_pages", pages)
-    monkeypatch.setattr(ws_mod, "research_web_pages", research)
+    monkeypatch.setattr(websearch_core, "fetch_pages", pages)
+    monkeypatch.setattr(web_research_service, "research_web_pages", research)
     monkeypatch.setattr(
         ws_mod.RichOutputFormatter, "text_block", lambda self, text: None
     )
@@ -105,8 +109,8 @@ async def test_websearch_timeout_covers_query_expansion(monkeypatch, providers) 
     async def blocked(*args, **kwargs):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(ws_mod, "expand_web_queries", blocked)
-    monkeypatch.setattr(ws_mod, "websearch_timeout", lambda: 0.01)
+    monkeypatch.setattr(websearch_expansion, "expand_web_queries", blocked)
+    monkeypatch.setattr(ws_mod, "websearch_timeout", lambda: 0.04)
 
     with pytest.raises(SystemExit) as exc:
         await ws_mod.websearch_command(make_args(), MagicMock())
@@ -115,9 +119,31 @@ async def test_websearch_timeout_covers_query_expansion(monkeypatch, providers) 
 
 
 @pytest.mark.asyncio
+async def test_websearch_research_timeout_exits_124(monkeypatch, providers) -> None:
+    monkeypatch.setattr(
+        websearch_core, "search_multi", AsyncMock(return_value=search_results())
+    )
+
+    async def pages(*args, **kwargs):
+        yield "https://example.invalid/page", ".md", "# In memory"
+
+    async def blocked(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(websearch_core, "fetch_pages", pages)
+    monkeypatch.setattr(web_research_service, "research_web_pages", blocked)
+    monkeypatch.setattr(ws_mod, "websearch_timeout", lambda: 0.04)
+
+    with pytest.raises(SystemExit) as exitinfo:
+        await ws_mod.websearch_command(make_args(), MagicMock())
+
+    assert exitinfo.value.code == 124
+
+
+@pytest.mark.asyncio
 async def test_websearch_command_urlerror_exits_1(monkeypatch, providers) -> None:
     monkeypatch.setattr(
-        ws_mod,
+        websearch_core,
         "search_multi",
         AsyncMock(side_effect=urllib.error.URLError("boom")),
     )
@@ -130,7 +156,7 @@ async def test_websearch_command_urlerror_exits_1(monkeypatch, providers) -> Non
 
 @pytest.mark.asyncio
 async def test_websearch_command_empty_results_exits_10(monkeypatch, providers) -> None:
-    monkeypatch.setattr(ws_mod, "search_multi", AsyncMock(return_value=[]))
+    monkeypatch.setattr(websearch_core, "search_multi", AsyncMock(return_value=[]))
 
     with pytest.raises(SystemExit) as exc:
         await ws_mod.websearch_command(make_args("zero"), MagicMock())
@@ -149,9 +175,9 @@ async def test_websearch_cli_previous_query_reaches_expansion(
         captured["previous_query"] = previous_query
         return [query]
 
-    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(websearch_expansion, "expand_web_queries", capturing_expand)
     monkeypatch.setattr(
-        ws_mod, "search_multi", AsyncMock(return_value=search_results())
+        websearch_core, "search_multi", AsyncMock(return_value=search_results())
     )
 
     async def pages(*args, **kwargs):
@@ -163,8 +189,8 @@ async def test_websearch_cli_previous_query_reaches_expansion(
             pass
         return {"answer": "ANSWER"}
 
-    monkeypatch.setattr(ws_mod, "fetch_pages", pages)
-    monkeypatch.setattr(ws_mod, "research_web_pages", research)
+    monkeypatch.setattr(websearch_core, "fetch_pages", pages)
+    monkeypatch.setattr(web_research_service, "research_web_pages", research)
 
     await ws_mod.websearch_command(make_args(previous_query="prior"), MagicMock())
 
@@ -182,9 +208,9 @@ async def test_websearch_cli_empty_previous_query_treated_as_none(
         captured["previous_query"] = previous_query
         return [query]
 
-    monkeypatch.setattr(ws_mod, "expand_web_queries", capturing_expand)
+    monkeypatch.setattr(websearch_expansion, "expand_web_queries", capturing_expand)
     monkeypatch.setattr(
-        ws_mod, "search_multi", AsyncMock(return_value=search_results())
+        websearch_core, "search_multi", AsyncMock(return_value=search_results())
     )
 
     async def pages(*args, **kwargs):
@@ -196,8 +222,8 @@ async def test_websearch_cli_empty_previous_query_treated_as_none(
             pass
         return {"answer": "ANSWER"}
 
-    monkeypatch.setattr(ws_mod, "fetch_pages", pages)
-    monkeypatch.setattr(ws_mod, "research_web_pages", research)
+    monkeypatch.setattr(websearch_core, "fetch_pages", pages)
+    monkeypatch.setattr(web_research_service, "research_web_pages", research)
 
     await ws_mod.websearch_command(make_args(previous_query=""), MagicMock())
 

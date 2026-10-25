@@ -6,16 +6,14 @@ import argparse
 import asyncio
 import sys
 import urllib.error
-from collections.abc import AsyncIterator
 
 from chunkhound.core.config.config import Config
-from chunkhound.services.web_research_service import Page, research_web_pages
-from chunkhound.utils.websearch_core import (
-    fetch_pages,
-    search_multi,
-    websearch_timeout,
+from chunkhound.utils.websearch_core import websearch_timeout
+from chunkhound.utils.websearch_pipeline import (
+    EmptyWebSearchError,
+    NoPagesFetchedError,
+    run_websearch,
 )
-from chunkhound.utils.websearch_expansion import expand_web_queries
 
 from ..utils.provider_setup import setup_embedding_manager, setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
@@ -37,72 +35,38 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         )
 
     timeout_s = websearch_timeout()
-
-    async def _run() -> tuple[dict, list[str]] | None:
-        queries = await expand_web_queries(
-            args.query, llm_manager, previous_query=previous_query
-        )
-        results = await search_multi(
-            queries,
-            args.limit,
-            formatter.progress_indicator,
-            failure_callback=_on_query_failure,
-        )
-        if not results:
-            formatter.error(
-                f"No results found for {args.query!r} — "
-                "DDG HTML structure may have changed"
-            )
-            return None
-        formatter.progress_indicator(
-            f"Found {len(results)} results, fetching content..."
-        )
-        warnings: list[str] = []
-        got_page = False
-
-        async def pages() -> AsyncIterator[Page]:
-            nonlocal got_page
-            async for page in fetch_pages(
-                [url for _, url, _ in results],
-                formatter.progress_indicator,
-                warnings.append,
-            ):
-                got_page = True
-                yield page
-
+    try:
         # Progress is append-only noise; keep stdout for the answer so
         # piped `chunkhound websearch` stays machine-readable.
         with TreeProgressDisplay(output=sys.stderr) as research_progress:
-            result = await research_web_pages(
+            result, warnings = await run_websearch(
                 args.query,
-                pages(),
-                config,
-                embedding_manager,
-                llm_manager,
-                progress=research_progress,
-                warning_callback=warnings.append,
+                limit=args.limit,
+                config=config,
+                embedding_manager=embedding_manager,
+                llm_manager=llm_manager,
                 previous_query=previous_query,
+                progress_callback=formatter.progress_indicator,
+                progress=research_progress,
+                failure_callback=_on_query_failure,
+                timeout_s=timeout_s,
             )
-        if not got_page:
-            formatter.error(f"No pages could be fetched for {args.query!r}")
-            raise RuntimeError("no pages fetched")
-        return result, warnings
-
-    try:
-        outcome = await asyncio.wait_for(_run(), timeout=timeout_s)
+    except EmptyWebSearchError as e:
+        formatter.error(str(e))
+        # 10 = empty results (distinct from 1=fetch/research error, 124=timeout).
+        sys.exit(10)
     except urllib.error.URLError as e:
         formatter.error(f"Web search failed: {e.reason}")
         sys.exit(1)
-    except asyncio.TimeoutError:
-        formatter.error(f"websearch timed out after {timeout_s:.0f}s")
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        formatter.error(str(e))
         sys.exit(124)
+    except NoPagesFetchedError as e:
+        formatter.error(str(e))
+        sys.exit(1)
     except Exception as exc:
         formatter.error(f"Research failed: {exc}")
         sys.exit(1)
-    if outcome is None:
-        # 10 = empty results (distinct from 1=fetch/research error, 124=timeout).
-        sys.exit(10)
-    result, warnings = outcome
     for warning in warnings:
         formatter.warning(warning)
     formatter.text_block(str(result.get("answer", "")))
