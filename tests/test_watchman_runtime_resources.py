@@ -85,7 +85,7 @@ def _build_deb_archive(*, data_member_name: str, tar_payload: bytes) -> bytes:
                 PurePosixPath("lib/libzstd.so.1"),
             ),
             "unix_socket",
-            ("manylinux_2_34_x86_64",),
+            ("manylinux_2_31_x86_64",),
             {"LD_LIBRARY_PATH": (PurePosixPath("lib"),)},
             9,
         ),

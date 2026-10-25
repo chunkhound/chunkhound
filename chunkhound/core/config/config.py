@@ -287,6 +287,12 @@ class Config(BaseModel):
             self._mark_exclude_user_supplied(kwargs)
             Config.deep_merge(config_data, kwargs)
 
+        # VOYAGE_API_KEY only fills in a missing key for the voyageai provider.
+        # Apply it after every layer is merged, so a provider chosen by a
+        # config file or a CLI flag gets the key too, not only an env provider.
+        if "env" not in skips:
+            self._apply_voyage_api_key_fallback(config_data)
+
         # Special handling for EmbeddingConfig
         if "embedding" in config_data and isinstance(config_data["embedding"], dict):
             # Create EmbeddingConfig instance with the data
@@ -333,6 +339,18 @@ class Config(BaseModel):
         """Merge environment-variable-derived values into ``config_data``."""
         env_vars = self._load_env_vars()
         Config.deep_merge(config_data, env_vars)
+
+    @staticmethod
+    def _apply_voyage_api_key_fallback(config_data: dict[str, Any]) -> None:
+        """Use ``VOYAGE_API_KEY`` when the merged embedding config selects
+        voyageai and no layer supplied an API key."""
+        embedding = config_data.get("embedding")
+        if not isinstance(embedding, dict) or embedding.get("api_key"):
+            return
+        if embedding.get("provider") != "voyageai":
+            return
+        if voyage_key := os.getenv("VOYAGE_API_KEY"):
+            embedding["api_key"] = voyage_key
 
     def _apply_global_json(
         self,

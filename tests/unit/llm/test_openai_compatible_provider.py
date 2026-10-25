@@ -114,6 +114,36 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "api-route",
+            "model": "gpt-6.1-sol",
+            "expected_name": "api-route",
+            "expected_base_url": "https://global.api-route.com/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'api-route'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="api-route",
+    ),
+    pytest.param(
+        {
+            "provider": "opper",
+            "model": "gpt-5.4-mini",
+            "expected_name": "opper",
+            "expected_base_url": "https://api.opper.ai/v3/compat",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'opper'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="opper",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -266,6 +296,8 @@ class TestFactoryPipeline:
             "openrouter": 10,
             "orcarouter": 10,
             "requesty": 10,
+            "api-route": 10,
+            "opper": 10,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected
