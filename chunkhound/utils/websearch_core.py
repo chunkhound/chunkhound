@@ -19,9 +19,9 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, TypeVar
 
 from loguru import logger
 
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     import zendriver as zd
 
 _MAX_FETCH_CONCURRENCY = 5
+
+T = TypeVar("T")
 
 WEBSEARCH_LIMIT_MAX = 100
 
@@ -397,15 +399,56 @@ def _read_bounded(resp: IO[bytes], max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
 
 
 def _check_page_size(body: bytes, max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
-    """Reject an already-materialized body that exceeds `max_bytes`.
-
-    CDP hands back a page's full body in one RPC response -- there's no
-    incremental read to bound like `_read_bounded` does for urllib, so this
-    is a post-hoc check on what Chrome already buffered.
-    """
+    """Reject an already-materialized body that exceeds `max_bytes`."""
     if len(body) > max_bytes:
         raise ValueError(f"Response exceeds maximum page size of {max_bytes} bytes")
     return body
+
+
+def _declared_page_size(headers: dict[str, Any]) -> int | None:
+    """Return a valid non-negative Content-Length from CDP headers, if present."""
+    raw = next(
+        (value for key, value in headers.items() if key.casefold() == "content-length"),
+        None,
+    )
+    if raw is None:
+        return None
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _raise_if_page_too_large(size: int) -> None:
+    if size > _MAX_PAGE_BYTES:
+        raise ValueError(
+            f"Response exceeds maximum page size of {_MAX_PAGE_BYTES} bytes"
+        )
+
+
+async def _await_with_page_limit(
+    awaitable: Awaitable[T], oversized: asyncio.Event
+) -> T:
+    """Abort a CDP operation as soon as streamed response bytes exceed the cap."""
+    operation = asyncio.ensure_future(awaitable)
+    limit = asyncio.create_task(oversized.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {operation, limit}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if limit in done and oversized.is_set():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+            _raise_if_page_too_large(_MAX_PAGE_BYTES + 1)
+        return await operation
+    except BaseException:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        raise
+    finally:
+        limit.cancel()
+        await asyncio.gather(limit, return_exceptions=True)
 
 
 def _fetch(params: dict[str, str]) -> str:
@@ -579,6 +622,9 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         main_response: asyncio.Future[cdp.network.ResponseReceived] = (
             asyncio.get_running_loop().create_future()
         )
+        main_request_id: cdp.network.RequestId | None = None
+        received_by_request: dict[cdp.network.RequestId, int] = {}
+        oversized = asyncio.Event()
 
         # Handler MUST be ``async def``. zendriver 0.15.3's sync-dispatch
         # path reassigns ``event`` in the listener scope before the
@@ -595,10 +641,21 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             if event.loader_id == nav_loader_id:
                 main_response.set_result(event)
 
+        async def on_data(event: cdp.network.DataReceived) -> None:
+            if main_request_id is not None and event.request_id != main_request_id:
+                return
+            received = received_by_request.get(event.request_id, 0) + max(
+                event.data_length, event.encoded_data_length
+            )
+            received_by_request[event.request_id] = received
+            if event.request_id == main_request_id and received > _MAX_PAGE_BYTES:
+                oversized.set()
+
         # Register the handler BEFORE Network.enable. Events that fire
         # during the enable round-trip would otherwise land before the
         # handler exists and be silently dropped.
         tab.add_handler(cdp.network.ResponseReceived, on_response)
+        tab.add_handler(cdp.network.DataReceived, on_data)
         await tab.send(cdp.network.enable())
 
         # Non-blocking navigate — does NOT wait for load. Bound the send
@@ -625,6 +682,16 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
         response_event = await asyncio.wait_for(main_response, timeout=30)
         response = response_event.response
+        main_request_id = response_event.request_id
+        main_received = received_by_request.get(main_request_id, 0)
+        received_by_request.clear()
+        received_by_request[main_request_id] = main_received
+        if main_received > _MAX_PAGE_BYTES:
+            oversized.set()
+            _raise_if_page_too_large(main_received)
+        declared_size = _declared_page_size(response.headers)
+        if declared_size is not None:
+            _raise_if_page_too_large(declared_size)
         ct = _normalize_ct(
             response.headers.get("content-type") or response.headers.get("Content-Type")
         )
@@ -679,10 +746,17 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             return "application/pdf", body, "utf-8"
 
         if ct in {"text/plain", "text/markdown"}:
-            await asyncio.wait_for(tab.wait(), timeout=30)
+            await asyncio.wait_for(
+                _await_with_page_limit(tab.wait(), oversized), timeout=30
+            )
             body_text, base64_encoded = await asyncio.wait_for(
-                tab.send(
-                    cdp.network.get_response_body(request_id=response_event.request_id)
+                _await_with_page_limit(
+                    tab.send(
+                        cdp.network.get_response_body(
+                            request_id=response_event.request_id
+                        )
+                    ),
+                    oversized,
                 ),
                 timeout=30,
             )
@@ -696,10 +770,27 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
 
-        # Bounded load wait — replaces page.wait_for_load_state("load")'s
-        # implicit 30s timeout.
-        await asyncio.wait_for(tab.wait(), timeout=30)
-        html_str = await tab.get_content()
+        # Bound both network transfer and DOM growth before get_content copies
+        # the rendered HTML into Python. Content-Length catches declared large
+        # bodies; DataReceived catches chunked/lying servers; the UTF-8 length
+        # check catches JavaScript-expanded DOMs.
+        await asyncio.wait_for(
+            _await_with_page_limit(tab.wait(), oversized), timeout=30
+        )
+        snapshot = await tab.evaluate(
+            f"""(() => {{
+                const html = document.documentElement.outerHTML;
+                const size = new TextEncoder().encode(html).length;
+                return size > {_MAX_PAGE_BYTES} ? {{oversized: true}} : {{html}};
+            }})()"""
+        )
+        if not isinstance(snapshot, dict):
+            raise ValueError("Unable to snapshot rendered page")
+        if snapshot.get("oversized") is True:
+            _raise_if_page_too_large(_MAX_PAGE_BYTES + 1)
+        html_str = snapshot.get("html")
+        if not isinstance(html_str, str):
+            raise ValueError("Unable to snapshot rendered page")
         return ct, _check_page_size(html_str.encode("utf-8")), "utf-8"
     finally:
         if not tab_closed:
