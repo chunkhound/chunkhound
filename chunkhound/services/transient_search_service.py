@@ -17,6 +17,10 @@ _MIN_OVERFETCH = 50
 # Hard ceiling on (offset + page_size). Deep paging past this raises rather
 # than growing the heap toward the corpus. Both-mode uses overfetch instead.
 _MAX_RESULT_WINDOW = 2000
+# Hybrid position scoring must use one fixed semantic snapshot across pages.
+# Both-mode keeps this below the general paging window so it does not turn
+# every hybrid query into a 2000-hit DB request.
+_HYBRID_BOTH_SNAPSHOT_SIZE = 500
 
 
 def _overfetch_factor() -> int:
@@ -303,6 +307,35 @@ class TransientSearchService:
         # Overfetch-sized heaps from both sources, independent of offset.
         # Not the 2000-hit paging ceiling — that only rejects deep offsets.
         snapshot_size = _candidate_pool_size(page_size)
+        merged = await self._search_both_snapshot(
+            query=query,
+            snapshot_size=snapshot_size,
+            threshold=threshold,
+            path_filter=path_filter,
+            provider=provider,
+            model=model,
+            force_strategy=force_strategy,
+            time_limit=time_limit,
+            result_limit=result_limit,
+        )
+        available = min(len(merged), snapshot_size)
+        page = self._pagination(page_size, offset, available)
+        return merged[offset : offset + page_size], page
+
+    async def _search_both_snapshot(
+        self,
+        *,
+        query: str,
+        snapshot_size: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None = None,
+        model: str | None = None,
+        force_strategy: str | None = None,
+        time_limit: float | None = None,
+        result_limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch and merge equal bounded snapshots from transient and DB sources."""
         transient_task = asyncio.create_task(
             self._search_transient(
                 query,
@@ -331,10 +364,7 @@ class TransientSearchService:
         (transient_results, _), (db_results, _) = await _await_pair(
             transient_task, db_task
         )
-        merged = self._merge(transient_results, db_results, threshold)
-        available = min(len(merged), snapshot_size)
-        page = self._pagination(page_size, offset, available)
-        return merged[offset : offset + page_size], page
+        return self._merge(transient_results, db_results, threshold)
 
     @staticmethod
     def _merge(
@@ -413,10 +443,20 @@ class TransientSearchService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
-        if self._vector_source != "db" and offset + page_size > _MAX_RESULT_WINDOW:
+        hybrid_window = (
+            _HYBRID_BOTH_SNAPSHOT_SIZE
+            if self._vector_source == "both"
+            else _MAX_RESULT_WINDOW
+        )
+        outside_window = (
+            offset >= hybrid_window
+            if self._vector_source == "both"
+            else offset + page_size > hybrid_window
+        )
+        if self._vector_source != "db" and outside_window:
             raise ValueError(
-                f"offset+page_size ({offset + page_size}) exceeds the maximum "
-                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+                f"requested page at offset {offset} exceeds the maximum supported "
+                f"window ({hybrid_window}) for diff/web hybrid search"
             )
         candidate_limit = offset + page_size + 1
         # Hybrid ranking uses list position, so every page of a query must
@@ -457,8 +497,15 @@ class TransientSearchService:
                     offset=0,
                     threshold=threshold,
                 )
-            # Bypass search_semantic so a 2000-hit freeze does not turn
-            # both-mode into a 2000-hit DB query. Regex still comes from DB.
+            if self._vector_source == "both":
+                merged = await self._search_both_snapshot(
+                    query=query,
+                    snapshot_size=_HYBRID_BOTH_SNAPSHOT_SIZE,
+                    threshold=threshold,
+                    path_filter=None,
+                )
+                available = min(len(merged), _HYBRID_BOTH_SNAPSHOT_SIZE)
+                return merged, self._pagination(fetch_size, 0, available)
             return await self._search_transient(
                 query, fetch_size, 0, threshold, None, limit=fetch_size
             )
@@ -481,6 +528,20 @@ class TransientSearchService:
             semantic_results, regex_results = await _await_pair(
                 semantic_task, regex_task
             )
+        if self._vector_source == "both":
+            # A diff result owns its source location. Do not let a DB regex hit
+            # reintroduce the stale indexed copy under a different chunk_id.
+            diff_locations = {
+                (result.get("file_path"), result.get("start_line"))
+                for result in semantic_results
+                if str(result.get("chunk_id", "")).startswith("diff:")
+            }
+            regex_results = [
+                result
+                for result in regex_results
+                if (result.get("file_path"), result.get("start_line"))
+                not in diff_locations
+            ]
         combined = ResultEnhancer().combine_search_results(
             semantic_results=semantic_results,
             regex_results=regex_results,
@@ -490,11 +551,9 @@ class TransientSearchService:
         available = (
             len(combined)
             if self._vector_source == "db"
-            else min(len(combined), _MAX_RESULT_WINDOW)
+            else min(len(combined), hybrid_window)
         )
-        has_more = available > offset + page_size and (
-            self._vector_source == "db" or offset + 2 * page_size <= _MAX_RESULT_WINDOW
-        )
+        has_more = available > offset + page_size
         return combined[offset : offset + page_size], {
             "offset": offset,
             "page_size": page_size,

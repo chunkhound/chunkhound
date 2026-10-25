@@ -607,3 +607,191 @@ async def test_both_mode_pagination_fields_unaffected_by_fixed_fetch_size() -> N
     assert pagination["total"] == 2
     assert pagination["has_more"] is False
     assert pagination["next_offset"] is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_includes_diff_db_and_regex_results() -> None:
+    chunks = [make_chunk("diff", file_path="diff.py", code="target")]
+    original = make_original(
+        [
+            {
+                "chunk_id": "db-semantic",
+                "file_path": "db.py",
+                "start_line": 1,
+                "content": "database semantic",
+                "similarity": 0.9,
+                "score": 0.9,
+            }
+        ],
+        [
+            {
+                "chunk_id": "db-regex",
+                "file_path": "regex.py",
+                "start_line": 1,
+                "content": "regex match",
+            }
+        ],
+    )
+    service = TransientSearchService(
+        original,
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_hybrid(
+        "query", regex_pattern="match", page_size=10
+    )
+
+    assert {result["file_path"] for result in results} == {
+        "diff.py",
+        "db.py",
+        "regex.py",
+    }
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_diff_wins_duplicate_db_location() -> None:
+    chunks = [
+        make_chunk("diff", file_path="shared.py", start_line=7, code="historical diff")
+    ]
+    original = make_original(
+        [
+            {
+                "chunk_id": "db-duplicate",
+                "file_path": "shared.py",
+                "start_line": 7,
+                "content": "database copy",
+                "similarity": 1.0,
+                "score": 1.0,
+            }
+        ]
+    )
+    service = TransientSearchService(
+        original,
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_hybrid("query", page_size=10)
+
+    assert len(results) == 1
+    assert results[0]["content"] == "historical diff"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_uses_stable_bounded_db_snapshot_across_pages() -> None:
+    requested_sizes: list[int] = []
+
+    async def db_search(**kwargs):
+        requested_sizes.append(kwargs["page_size"])
+        return [], {
+            "offset": 0,
+            "page_size": kwargs["page_size"],
+            "has_more": False,
+            "next_offset": None,
+            "total": 0,
+        }
+
+    def service() -> TransientSearchService:
+        original = make_original()
+        original.search_semantic = AsyncMock(side_effect=db_search)
+        return TransientSearchService(
+            original,
+            stream_chunks([]),
+            "both",
+            embedding_manager(),
+            VectorCache(max_entries=0),
+        )
+
+    await service().search_hybrid("query", page_size=10, offset=0)
+    await service().search_hybrid("query", page_size=10, offset=40)
+
+    assert requested_sizes == [500, 500]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_cancels_db_snapshot_when_diff_stream_fails() -> None:
+    cancelled = asyncio.Event()
+    original = make_original()
+
+    async def hanging_db(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    original.search_semantic = hanging_db
+
+    async def broken_stream() -> AsyncIterator[list]:
+        raise RuntimeError("diff stream failed")
+        yield []  # pragma: no cover
+
+    service = TransientSearchService(
+        original,
+        broken_stream,
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    with pytest.raises(RuntimeError, match="diff stream failed"):
+        await service.search_hybrid("query")
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_drops_regex_copy_at_diff_owned_location() -> None:
+    chunks = [
+        make_chunk("diff", file_path="shared.py", start_line=7, code="historical diff")
+    ]
+    stale = {
+        "chunk_id": "db-stale",
+        "file_path": "shared.py",
+        "start_line": 7,
+        "content": "stale working tree copy",
+        "similarity": 1.0,
+        "score": 1.0,
+    }
+    service = TransientSearchService(
+        make_original([stale], [stale]),
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_hybrid("query", regex_pattern="stale")
+
+    assert len(results) == 1
+    assert results[0]["content"] == "historical diff"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_exposes_final_partial_snapshot_page() -> None:
+    chunks = [
+        make_chunk(f"diff-{index}", file_path=f"diff-{index}.py", code="target")
+        for index in range(500)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    first, first_page = await service.search_hybrid("query", page_size=300)
+    final, final_page = await service.search_hybrid("query", page_size=300, offset=300)
+
+    assert len(first) == 300
+    assert first_page["total"] == 500
+    assert first_page["has_more"] is True
+    assert first_page["next_offset"] == 300
+    assert len(final) == 200
+    assert final_page["has_more"] is False
+    assert final_page["next_offset"] is None
