@@ -3,6 +3,7 @@
 import asyncio
 import heapq
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
@@ -416,6 +417,52 @@ class TransientSearchService:
             pattern, page_size=page_size, offset=offset, path_filter=path_filter
         )
 
+    async def _search_transient_regex(
+        self,
+        pattern: str,
+        page_size: int,
+        offset: int,
+        path_filter: str | None,
+        *,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Search streamed chunks without consulting the indexed working tree."""
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+            )
+        expression = re.compile(pattern)
+        path_prefix = self._validate_path_filter(path_filter)
+        effective_limit = limit if limit is not None else offset + page_size
+        matches: list[dict[str, Any]] = []
+        total = 0
+
+        async def scan() -> None:
+            nonlocal total
+            async for chunks in self._chunk_stream():
+                for chunk in chunks:
+                    path = str(chunk.file_path).replace("\\", "/")
+                    if path_prefix and not path.startswith(path_prefix):
+                        continue
+                    if expression.search(chunk.code) is None:
+                        continue
+                    total += 1
+                    if len(matches) < effective_limit:
+                        matches.append(self._chunk_to_dict(chunk, 0.0))
+
+        try:
+            await asyncio.wait_for(scan(), timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Diff/web regex search timed out after "
+                f"{_TRANSIENT_SEARCH_TIMEOUT_SECONDS}s streaming transient content. "
+                "Narrow the commit range or pattern, or use vector_source='db'."
+            ) from None
+        return matches[offset : offset + page_size], self._pagination(
+            page_size, offset, total
+        )
+
     async def search_regex_async(
         self,
         pattern: str,
@@ -424,13 +471,65 @@ class TransientSearchService:
         path_filter: str | None = None,
         query: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        return await self._original.search_regex_async(
-            pattern,
-            page_size=page_size,
-            offset=offset,
-            path_filter=path_filter,
-            query=query,
+        if self._vector_source == "db":
+            return await self._original.search_regex_async(
+                pattern,
+                page_size=page_size,
+                offset=offset,
+                path_filter=path_filter,
+                query=query,
+            )
+        if self._vector_source == "diff":
+            return await self._search_transient_regex(
+                pattern, page_size, offset, path_filter
+            )
+
+        snapshot_size = min(
+            max(offset + page_size, _candidate_pool_size(page_size)),
+            _MAX_RESULT_WINDOW,
         )
+        transient_task = asyncio.create_task(
+            self._search_transient_regex(
+                pattern, snapshot_size, 0, path_filter, limit=snapshot_size
+            )
+        )
+        db_task = asyncio.create_task(
+            self._original.search_regex_async(
+                pattern,
+                page_size=snapshot_size,
+                offset=0,
+                path_filter=path_filter,
+                query=query,
+            )
+        )
+        (transient_results, _), (db_results, _) = await _await_pair(
+            transient_task, db_task
+        )
+        merged = self._merge_regex(transient_results, db_results)
+        return merged[offset : offset + page_size], self._pagination(
+            page_size, offset, len(merged)
+        )
+
+    @staticmethod
+    def _merge_regex(
+        transient_results: list[dict[str, Any]],
+        db_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Merge regex snapshots while treating diff locations as authoritative."""
+        merged = list(transient_results)
+        seen_ids = {str(result.get("chunk_id", "")) for result in transient_results}
+        transient_locations = {
+            (result.get("file_path"), result.get("start_line"))
+            for result in transient_results
+        }
+        for result in db_results:
+            chunk_id = str(result.get("chunk_id", ""))
+            location = (result.get("file_path"), result.get("start_line"))
+            if chunk_id in seen_ids or location in transient_locations:
+                continue
+            seen_ids.add(chunk_id)
+            merged.append(result)
+        return merged
 
     async def search_hybrid(
         self,

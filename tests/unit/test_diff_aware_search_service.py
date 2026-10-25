@@ -384,7 +384,7 @@ async def test_hybrid_pagination_does_not_skip_ranked_candidates():
         make_original(regex_results=regex_results),
         chunks,
         embeddings,
-        "diff",
+        "both",
         make_embedding_manager([[1.0, 0.0, 0.0]]),
     )
 
@@ -438,7 +438,7 @@ async def test_hybrid_pagination_handles_source_continuation():
         original,
         [chunk],
         [[1.0, 0.0, 0.0]],
-        "diff",
+        "both",
         make_embedding_manager([[1.0, 0.0, 0.0]]),
     )
 
@@ -485,7 +485,7 @@ async def test_hybrid_overlap_has_same_ranking_on_every_page():
         make_original(regex_results=regex_results),
         chunks,
         embeddings,
-        "diff",
+        "both",
         make_embedding_manager([[1.0, 0.0, 0.0]]),
     )
 
@@ -596,23 +596,73 @@ async def test_pagination_offset_and_page_size():
 
 
 # ---------------------------------------------------------------------------
-# search_regex_async always delegates
+# Regex source isolation
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_search_regex_async_delegates_regardless_of_vector_source():
-    """search_regex_async always delegates to original, regardless of vector_source."""
+async def test_search_regex_async_diff_mode_never_queries_database():
+    """Historical regex augmentation must not mix in working-tree chunks."""
+    original = make_original(
+        regex_results=[{"file_path": "current.py", "content": "target"}]
+    )
+    chunks = [make_chunk("historical", code="def target(): pass")]
+    svc = DiffAwareSearchService(
+        original, chunks, [[1.0, 0.0, 0.0]], "diff", make_embedding_manager([])
+    )
+
+    results, pagination = await svc.search_regex_async("target")
+
+    original.search_regex_async.assert_not_awaited()
+    assert [result["content"] for result in results] == ["def target(): pass"]
+    assert pagination["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_search_regex_async_db_mode_delegates_to_database():
     reg_results = [{"file_path": "src/x.py", "content": "match"}]
     original = make_original(regex_results=reg_results)
-    manager = make_embedding_manager([])
+    svc = DiffAwareSearchService(
+        original, [], [], "db", make_embedding_manager([])
+    )
 
-    for source in ("diff", "db", "both"):
-        original.search_regex_async.reset_mock()
-        svc = DiffAwareSearchService(original, [], [], source, manager)
-        results, _ = await svc.search_regex_async("pattern.*")
-        original.search_regex_async.assert_called_once()
-        assert results == reg_results
+    results, _ = await svc.search_regex_async("pattern.*")
+
+    original.search_regex_async.assert_awaited_once()
+    assert results == reg_results
+
+
+@pytest.mark.asyncio
+async def test_search_regex_async_both_mode_merges_and_prefers_diff_location():
+    chunks = [make_chunk("changed", file_path="shared.py", code="target in diff")]
+    db_results = [
+        {
+            "chunk_id": "stale",
+            "file_path": "shared.py",
+            "start_line": 1,
+            "content": "target in working tree",
+        },
+        {
+            "chunk_id": "db-only",
+            "file_path": "other.py",
+            "start_line": 1,
+            "content": "target elsewhere",
+        },
+    ]
+    svc = DiffAwareSearchService(
+        make_original(regex_results=db_results),
+        chunks,
+        [[1.0, 0.0, 0.0]],
+        "both",
+        make_embedding_manager([]),
+    )
+
+    results, _ = await svc.search_regex_async("target")
+
+    assert [result["content"] for result in results] == [
+        "target in diff",
+        "target elsewhere",
+    ]
 
 
 # ---------------------------------------------------------------------------
