@@ -84,21 +84,18 @@ async def read_transient_sources_with_budget(
             grouped.setdefault(path, []).append(chunk)
     contents: dict[str, str] = {}
     remaining_tokens = max_tokens
+    chunks_are_source = bool(getattr(provider, "transient_chunks_are_source", False))
     for path, matches in grouped.items():
         if byte_budget <= 0 or (remaining_tokens is not None and remaining_tokens <= 0):
             break
-        # Let refetch failures propagate: silently using a changed revision
-        # would invalidate citations, even if other sources were readable.
-        source = await resolve_source_text_async(provider, path)
-        if not source:
-            continue
         per_file = min(byte_budget, 64_000)
-        # Four bytes per Unicode code point is a conservative UTF-8 bound.
-        if len(source) * 4 <= per_file:
-            excerpt = source
-        else:
+        max_chars = per_file // 4
+        if chunks_are_source:
+            # Git history results already contain the requested revision's diff
+            # hunks. They are authoritative evidence: consulting the working
+            # tree here could substitute newer code or lose deleted files.
             pieces: list[str] = []
-            remaining_chars = per_file // 4
+            remaining_chars = max_chars
             for match in matches:
                 text = match.get("content") or match.get("code") or ""
                 piece = text[:remaining_chars]
@@ -107,8 +104,29 @@ async def read_transient_sources_with_budget(
                     remaining_chars -= len(piece) + 7
                 if remaining_chars <= 0:
                     break
-            excerpt = "\n\n...\n\n".join(pieces)[: per_file // 4]
-        del source
+            excerpt = "\n\n...\n\n".join(pieces)[:max_chars]
+        else:
+            # Let refetch failures propagate: silently using a changed revision
+            # would invalidate citations, even if other sources were readable.
+            source = await resolve_source_text_async(provider, path)
+            if not source:
+                continue
+            # Four bytes per Unicode code point is a conservative UTF-8 bound.
+            if len(source) * 4 <= per_file:
+                excerpt = source
+            else:
+                pieces = []
+                remaining_chars = max_chars
+                for match in matches:
+                    text = match.get("content") or match.get("code") or ""
+                    piece = text[:remaining_chars]
+                    if piece:
+                        pieces.append(piece)
+                        remaining_chars -= len(piece) + 7
+                    if remaining_chars <= 0:
+                        break
+                excerpt = "\n\n...\n\n".join(pieces)[:max_chars]
+            del source
         if remaining_tokens is not None:
             low, high = 0, len(excerpt)
             while low < high:
@@ -125,7 +143,7 @@ async def read_transient_sources_with_budget(
                 remaining_tokens -= llm.estimate_tokens(excerpt)
     if chunks and not contents:
         raise RuntimeError(
-            "No readable web source evidence within the synthesis budget"
+            "No readable transient source evidence within the synthesis budget"
         )
     return contents
 

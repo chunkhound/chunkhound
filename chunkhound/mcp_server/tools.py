@@ -51,6 +51,20 @@ MAX_ALLOWED_TOKENS = 25000
 MAX_DIFF_CHUNK_CHARS = 10_000
 _TRANSIENT_BATCH_SIZE = 100
 _TRANSIENT_VECTOR_CACHE = VectorCache.from_env()
+_DIFF_SOURCE_BUDGET_BYTES = 1_000_000
+
+
+class _DiffResearchProvider:
+    """Delegate DB access while marking search chunks as source evidence."""
+
+    transient_source_budget_bytes = _DIFF_SOURCE_BUDGET_BYTES
+    transient_chunks_are_source = True
+
+    def __init__(self, provider: Any) -> None:
+        self._provider = provider
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
 
 
 def _format_fetch_warnings(warnings: list[str]) -> str:
@@ -621,7 +635,10 @@ async def _inject_diff_service(
         embedding_manager=embedding_manager,
         vector_cache=_TRANSIENT_VECTOR_CACHE,
     )
-    return services._replace(search_service=diff_service)
+    return services._replace(
+        provider=_DiffResearchProvider(services.provider),
+        search_service=diff_service,
+    )
 
 
 @register_tool(

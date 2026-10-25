@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.embeddings import EmbeddingManager, LocalEmbeddingResult
+from chunkhound.services.research.shared.file_reader import FileReader
 from chunkhound.services.transient_search_service import TransientSearchService
 
 # ---------------------------------------------------------------------------
@@ -183,6 +184,55 @@ async def test_deep_research_injects_diff_service_on_commit_range():
     assert isinstance(received_services.search_service, TransientSearchService), (
         f"Expected TransientSearchService, got {type(received_services.search_service)}"
     )
+
+
+@pytest.mark.asyncio
+async def test_deep_research_synthesizes_from_diff_when_file_is_not_on_disk():
+    """Historical diff hunks remain available when the working-tree file is absent."""
+    from chunkhound.mcp_server.tools import deep_research_impl
+
+    services = _make_services(_make_original_search_service())
+    services.provider.get_base_directory.return_value = "/path/that/does/not/exist"
+    em = _make_embedding_manager()
+    llm_manager = MagicMock()
+    llm_manager.get_utility_provider.return_value.estimate_tokens.side_effect = len
+
+    def _fake_factory_create(**kwargs):
+        db_services = kwargs["db_services"]
+        research = MagicMock()
+
+        async def deep_research(query, previous_query=None):
+            chunks, _ = await db_services.search_service.search_semantic(query)
+            evidence = await FileReader(db_services).read_files_with_budget(
+                chunks, llm_manager
+            )
+            assert list(evidence) == ["src/auth.py"]
+            assert "def logout(user):" in evidence["src/auth.py"]
+            return {"answer": evidence["src/auth.py"]}
+
+        research.deep_research = deep_research
+        return research
+
+    with (
+        patch(
+            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            _stream_fake_diff,
+        ),
+        patch(
+            "chunkhound.services.research.factory.ResearchServiceFactory.create",
+            side_effect=_fake_factory_create,
+        ),
+    ):
+        result = await deep_research_impl(
+            services=services,
+            embedding_manager=em,
+            llm_manager=llm_manager,
+            query="how does logout work?",
+            commit_range="HEAD~2..HEAD",
+        )
+
+    assert "def logout(user):" in result["answer"]
+    services.provider.get_base_directory.assert_not_called()
 
 
 @pytest.mark.asyncio
