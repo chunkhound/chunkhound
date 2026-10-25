@@ -261,6 +261,45 @@ class CitationManager:
 
         return sorted(set(invalid_refs))  # Return unique sorted list
 
+    def neutralize_invalid_citations(
+        self, text: str, file_reference_map: dict[str, int]
+    ) -> tuple[str, list[int]]:
+        """Remove [N] markers that do not resolve to a reference.
+
+        Uses :meth:`validate_citation_references` as the validity oracle and
+        deletes only the invalid markers, leaving the surrounding prose and all
+        valid citations byte-identical. Reference numbering is never rewritten.
+
+        Args:
+            text: Text containing [N] citations
+            file_reference_map: Valid reference numbers (file_path -> number)
+
+        Returns:
+            Tuple of (text with invalid markers removed, sorted unique invalid
+            reference numbers)
+
+        Examples:
+            >>> text = "Algorithm [1] uses [999]"
+            >>> ref_map = {"src/main.py": 1}
+            >>> cleaned, invalid = manager.neutralize_invalid_citations(text, ref_map)
+            >>> cleaned
+            'Algorithm [1] uses '
+            >>> invalid
+            [999]
+        """
+        invalid_refs = self.validate_citation_references(text, file_reference_map)
+        if not invalid_refs:
+            return text, []
+
+        invalid_set = set(invalid_refs)
+
+        def _drop_invalid(match: re.Match[str]) -> str:
+            if int(match.group(0)[1:-1]) in invalid_set:
+                return ""
+            return match.group(0)
+
+        return _CITATION_PATTERN.sub(_drop_invalid, text), invalid_refs
+
     def build_sources_footer(
         self,
         chunks: list[dict[str, Any]],
