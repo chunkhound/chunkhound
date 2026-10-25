@@ -812,7 +812,6 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_CONFIG_FILE` | Path to config file (alternative to `--config`) |
 | `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Web search subprocess timeout in seconds (default: 600) |
 | `CHUNKHOUND_DEBUG` | Enable debug logging |
-| `VOYAGE_API_KEY` | Fallback API key for VoyageAI provider |
 
 ## Advanced routing
 
