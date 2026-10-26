@@ -50,7 +50,7 @@ async def test_query_expansion_prefers_bulk_semantic_capability() -> None:
 
 
 @pytest.mark.asyncio
-async def test_query_expansion_tolerates_shared_bulk_failure() -> None:
+async def test_query_expansion_propagates_shared_bulk_failure() -> None:
     search_service = MagicMock()
     search_service.search_semantic_many = AsyncMock(
         side_effect=TimeoutError("transient source failed")
@@ -58,14 +58,13 @@ async def test_query_expansion_tolerates_shared_bulk_failure() -> None:
     search = make_search(search_service)
     search.extract_symbols_from_chunks = AsyncMock(return_value=[])
 
-    results = await search.unified_search(
-        "root",
-        ResearchContext(root_query="root"),
-        expanded_queries=["one", "two"],
-        skip_rerank=True,
-    )
-
-    assert results == []
+    with pytest.raises(TimeoutError, match="transient source failed"):
+        await search.unified_search(
+            "root",
+            ResearchContext(root_query="root"),
+            expanded_queries=["one", "two"],
+            skip_rerank=True,
+        )
 
 
 @pytest.mark.asyncio
