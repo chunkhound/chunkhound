@@ -135,6 +135,20 @@ class TransientSearchService:
             return await self._embedding_manager.embed_texts(texts)
         return await self._embedding_manager.embed_texts(texts, provider_name=provider)
 
+    def _cache_namespace(self, result: Any) -> dict[str, Any]:
+        embedding_provider = getattr(
+            self._embedding_manager, "_embedding_provider", None
+        )
+        endpoint = getattr(embedding_provider, "base_url", "")
+        deployment = getattr(embedding_provider, "_azure_deployment", "")
+        return {
+            "provider": result.provider,
+            "model": result.model,
+            "dims": result.dims,
+            "endpoint": endpoint if isinstance(endpoint, str) else "",
+            "deployment": deployment if isinstance(deployment, str) else "",
+        }
+
     async def _search_transient(
         self,
         query: str,
@@ -183,11 +197,7 @@ class TransientSearchService:
         if not query_result.embeddings:
             return [], self._pagination(page_size, offset, 0)
         query_vector = self._normalise(query_result.embeddings[0])
-        cache_ns = {
-            "provider": query_result.provider,
-            "model": query_result.model,
-            "dims": query_result.dims,
-        }
+        cache_ns = self._cache_namespace(query_result)
         path_prefix = self._validate_path_filter(path_filter)
         effective_limit = (
             limit
@@ -311,11 +321,7 @@ class TransientSearchService:
         query_vectors = np.stack(
             [self._normalise(vector) for vector in query_result.embeddings]
         )
-        cache_ns = {
-            "provider": query_result.provider,
-            "model": query_result.model,
-            "dims": query_result.dims,
-        }
+        cache_ns = self._cache_namespace(query_result)
         path_prefix = self._validate_path_filter(path_filter)
         effective_limit = (
             limit

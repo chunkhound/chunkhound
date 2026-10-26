@@ -57,14 +57,28 @@ def test_vector_cache_max_entries_zero_disables_storage() -> None:
     assert len(cache) == 0
 
 
-def test_vector_cache_namespaces_provider_model_and_dims() -> None:
+def test_vector_cache_namespaces_embedding_space() -> None:
     cache = VectorCache(max_entries=10, ttl_seconds=60)
-    cache.put("same", [1.0, 0.0], provider="a", model="m", dims=2)
+    namespace = {
+        "provider": "a",
+        "model": "m",
+        "dims": 2,
+        "endpoint": "https://one.example/v1",
+        "deployment": "deployment-a",
+    }
+    cache.put("same", [1.0, 0.0], **namespace)
 
-    assert cache.get("same", provider="b", model="m", dims=2) is None
-    assert cache.get("same", provider="a", model="other", dims=2) is None
-    assert cache.get("same", provider="a", model="m", dims=3) is None
-    assert _vector(cache, "same", provider="a", model="m", dims=2) == [1.0, 0.0]
+    assert cache.get("same", **{**namespace, "provider": "b"}) is None
+    assert cache.get("same", **{**namespace, "model": "other"}) is None
+    assert cache.get("same", **{**namespace, "dims": 3}) is None
+    assert (
+        cache.get(
+            "same", **{**namespace, "endpoint": "https://two.example/v1"}
+        )
+        is None
+    )
+    assert cache.get("same", **{**namespace, "deployment": "deployment-b"}) is None
+    assert _vector(cache, "same", **namespace) == [1.0, 0.0]
 
 
 def test_vector_cache_stores_hashes_and_vectors_not_text() -> None:

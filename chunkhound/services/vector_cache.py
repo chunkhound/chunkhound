@@ -56,8 +56,19 @@ class VectorCache:
             ttl_seconds=_env_int(CACHE_TTL_ENV, 300),
         )
 
-    def _key(self, text: str, provider: str, model: str, dims: int) -> str:
-        return f"{provider}\0{model}\0{dims}\0{compute_text_hash(text)}"
+    def _key(
+        self,
+        text: str,
+        provider: str,
+        model: str,
+        dims: int,
+        endpoint: str,
+        deployment: str,
+    ) -> str:
+        namespace = "\0".join(
+            ("v2", provider, endpoint, deployment, model, str(dims), "float32")
+        )
+        return f"{namespace}\0{compute_text_hash(text)}"
 
     def get(
         self,
@@ -66,13 +77,15 @@ class VectorCache:
         provider: str = "",
         model: str = "",
         dims: int = 0,
+        endpoint: str = "",
+        deployment: str = "",
     ) -> npt.NDArray[np.float32] | None:
         """Return a cached vector, refreshing its LRU position and TTL.
 
         TTL measures time since last access, not since insertion, so entries
         still being queried are never evicted out from under a live session.
         """
-        key = self._key(text, provider, model, dims)
+        key = self._key(text, provider, model, dims, endpoint, deployment)
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -98,12 +111,14 @@ class VectorCache:
         provider: str = "",
         model: str = "",
         dims: int = 0,
+        endpoint: str = "",
+        deployment: str = "",
     ) -> None:
         """Cache a vector unless caching is disabled."""
         if self.max_entries == 0:
             return
 
-        key = self._key(text, provider, model, dims)
+        key = self._key(text, provider, model, dims, endpoint, deployment)
         stored = np.asarray(vector, dtype=np.float32).copy()
         with self._lock:
             self._entries[key] = (stored, time.monotonic())

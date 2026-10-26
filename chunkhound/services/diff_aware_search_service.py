@@ -23,6 +23,8 @@ class _PreloadedVectorCache(VectorCache):
         provider: str = "",
         model: str = "",
         dims: int = 0,
+        endpoint: str = "",
+        deployment: str = "",
     ) -> npt.NDArray[np.float32] | None:
         return super().get(text)
 
@@ -34,6 +36,8 @@ class _PreloadedVectorCache(VectorCache):
         provider: str = "",
         model: str = "",
         dims: int = 0,
+        endpoint: str = "",
+        deployment: str = "",
     ) -> None:
         super().put(text, vector)
 
