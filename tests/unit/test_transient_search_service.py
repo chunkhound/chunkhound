@@ -561,6 +561,24 @@ async def test_both_mode_pagination_stops_at_overfetch_pool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_both_mode_does_not_return_results_beyond_reported_total() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(2100)
+    ]
+    service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "both", embedding_manager()
+    )
+
+    results, page = await service.search_semantic("query", page_size=10, offset=45)
+
+    assert len(results) == 5
+    assert page["total"] == 50
+    assert page["has_more"] is False
+    assert page["next_offset"] is None
+
+
+@pytest.mark.asyncio
 async def test_both_mode_has_no_continuation_for_filtered_out_corpus() -> None:
     chunks = [
         make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")

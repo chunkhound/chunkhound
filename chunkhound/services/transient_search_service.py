@@ -574,7 +574,7 @@ class TransientSearchService:
         )
         available = min(len(merged), snapshot_size)
         page = self._pagination(page_size, offset, available)
-        return merged[offset : offset + page_size], page
+        return merged[offset : min(offset + page_size, available)], page
 
     async def _search_both_snapshot(
         self,
