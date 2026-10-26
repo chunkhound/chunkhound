@@ -9,6 +9,7 @@ T = TypeVar("T")
 _SAFE_REF = re.compile(r"^[a-zA-Z0-9_.^~/:@{}\-]+\Z")
 
 _GIT_DIFF_TIMEOUT_SECONDS = 30
+_GIT_STDOUT_READ_BYTES = 64 * 1024
 
 # Cleanup must not hang even if a descendant keeps a pipe open.
 _GIT_CLEANUP_TIMEOUT_SECONDS = 5
@@ -63,29 +64,9 @@ async def _drain_stderr(stream: asyncio.StreamReader) -> bytes:
             kept_len += min(len(chunk), remaining)
 
 
-async def _readline_unbounded(stream: asyncio.StreamReader) -> bytes:
-    """Read one line, reconstructing lines longer than the internal buffer limit.
-
-    Diffs can legitimately contain very long single lines (e.g. minified
-    bundles or generated lockfiles); a hard cap here would silently reimpose
-    the kind of truncation this streaming rewrite exists to remove.
-    `readline()` itself is unusable for this: on overrun it wraps
-    `LimitOverrunError` into a plain `ValueError` and discards the buffered
-    bytes before raising. `readuntil()` is the lower-level primitive it wraps
-    -- on overrun it raises the original `LimitOverrunError` and leaves the
-    already-read bytes in the internal buffer, so draining exactly that many
-    bytes with `readexactly` and retrying reassembles the full line.
-    """
-    chunks: list[bytes] = []
-    while True:
-        try:
-            chunks.append(await stream.readuntil(b"\n"))
-            return b"".join(chunks)
-        except asyncio.IncompleteReadError as exc:
-            chunks.append(exc.partial)
-            return b"".join(chunks)
-        except asyncio.LimitOverrunError as exc:
-            chunks.append(await stream.readexactly(exc.consumed))
+async def _read_stdout_chunk(stream: asyncio.StreamReader) -> bytes:
+    """Read a bounded stdout block without imposing a line-length limit."""
+    return await stream.read(_GIT_STDOUT_READ_BYTES)
 
 
 async def _cleanup_git_diff_process(
@@ -163,11 +144,25 @@ async def stream_git_diff_file_blocks(
 
         stderr = b""
         try:
+            pending = b""
             while True:
-                line = await await_git(_readline_unbounded(proc.stdout))
-                if not line:
+                data = await await_git(_read_stdout_chunk(proc.stdout))
+                if not data:
                     break
-                decoded = line.decode("utf-8", errors="replace")
+                pending += data
+                lines = pending.splitlines(keepends=True)
+                if lines and not lines[-1].endswith((b"\n", b"\r")):
+                    pending = lines.pop()
+                else:
+                    pending = b""
+                for line in lines:
+                    decoded = line.decode("utf-8", errors="replace")
+                    if decoded.startswith("diff --git ") and block:
+                        yield "".join(block)
+                        block = []
+                    block.append(decoded)
+            if pending:
+                decoded = pending.decode("utf-8", errors="replace")
                 if decoded.startswith("diff --git ") and block:
                     yield "".join(block)
                     block = []

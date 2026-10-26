@@ -30,8 +30,14 @@ class _LineStdout:
         return b""
 
     async def read(self, n: int = -1) -> bytes:
-        # Cleanup reads after kill; these fake processes have no pipe buffer.
-        self._lines.clear()
+        if self._error is not None:
+            raise self._error
+        if self._lines:
+            data = b"".join(self._lines)
+            self._lines.clear()
+            return data
+        if self._hang:
+            await asyncio.Event().wait()
         return b""
 
     async def readuntil(self, separator: bytes = b"\n") -> bytes:
@@ -354,6 +360,30 @@ async def test_stream_stderr_drain_reaches_eof_past_the_cap(
 
     assert proc.stderr._payload == b""
     assert proc.stderr.read_calls > 1
+
+
+@pytest.mark.asyncio
+async def test_stream_buffered_reads_avoid_per_line_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Many ready lines should not spend the liveness budget on scheduling."""
+    import chunkhound.core.git_diff.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_GIT_DIFF_TIMEOUT_SECONDS", 0.05)
+    proc = StreamProcess(
+        lines=[
+            b"diff --git a/a.py b/a.py\n",
+            *([b"+line\n"] * 10_000),
+        ]
+    )
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        blocks = [
+            block
+            async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
+        ]
+
+    assert len(blocks) == 1
+    assert blocks[0].count("+line\n") == 10_000
 
 
 @pytest.mark.asyncio
