@@ -146,20 +146,41 @@ class UnifiedSearch:
             )
 
             page_size = self._config.initial_page_size if self._config else 30
-            search_tasks = [
-                search_service.search_semantic(
-                    query=expanded_q,
-                    page_size=page_size,
-                    # No threshold filtering; elbow detection computes threshold.
-                    threshold=None,
-                    force_strategy="multi_hop",
-                    path_filter=path_filter,
-                    time_limit=time_limit,
-                    result_limit=result_limit,
+            bulk_search = getattr(search_service, "search_semantic_many", None)
+            if asyncio.iscoroutinefunction(bulk_search):
+                try:
+                    search_results = await bulk_search(
+                        expanded_queries,
+                        page_size=page_size,
+                        # No threshold filtering; elbow detection computes threshold.
+                        threshold=None,
+                        force_strategy="multi_hop",
+                        path_filter=path_filter,
+                        time_limit=time_limit,
+                        result_limit=result_limit,
+                    )
+                except Exception as exc:
+                    # Scalar expansion isolated failures via gather. A shared
+                    # transient pass has one failure for every query, but it
+                    # should still degrade to no semantic hits rather than
+                    # aborting the complete research request.
+                    search_results = [exc] * len(expanded_queries)
+            else:
+                search_tasks = [
+                    search_service.search_semantic(
+                        query=expanded_q,
+                        page_size=page_size,
+                        threshold=None,
+                        force_strategy="multi_hop",
+                        path_filter=path_filter,
+                        time_limit=time_limit,
+                        result_limit=result_limit,
+                    )
+                    for expanded_q in expanded_queries
+                ]
+                search_results = await asyncio.gather(
+                    *search_tasks, return_exceptions=True
                 )
-                for expanded_q in expanded_queries
-            ]
-            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
             # Unify results: deduplicate by chunk_id (same pattern as semantic+regex
             # unification).

@@ -254,6 +254,147 @@ class TransientSearchService:
             page_size, offset, qualifying_count
         )
 
+    async def _search_transient_many(
+        self,
+        queries: list[str],
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None,
+        *,
+        limit: int | None = None,
+    ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
+        """Score compatible queries during one pass over the transient source."""
+        try:
+            return await asyncio.wait_for(
+                self._search_transient_many_impl(
+                    queries,
+                    page_size,
+                    offset,
+                    threshold,
+                    path_filter,
+                    provider,
+                    limit=limit,
+                ),
+                timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Diff/web search timed out after "
+                f"{_TRANSIENT_SEARCH_TIMEOUT_SECONDS}s streaming and embedding "
+                "transient content. Narrow the commit range or queries, or use "
+                "vector_source='db' to skip transient embedding."
+            ) from None
+
+    async def _search_transient_many_impl(
+        self,
+        queries: list[str],
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None,
+        *,
+        limit: int | None = None,
+    ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
+        if not queries:
+            return []
+        query_result = await self._embed_texts(queries, provider)
+        if not query_result.embeddings:
+            empty_page = self._pagination(page_size, offset, 0)
+            return [([], dict(empty_page)) for _ in queries]
+        if len(query_result.embeddings) != len(queries):
+            raise RuntimeError(
+                "Embedding provider returned an unexpected number of query vectors"
+            )
+        query_vectors = np.stack(
+            [self._normalise(vector) for vector in query_result.embeddings]
+        )
+        cache_ns = {
+            "provider": query_result.provider,
+            "model": query_result.model,
+            "dims": query_result.dims,
+        }
+        path_prefix = self._validate_path_filter(path_filter)
+        effective_limit = (
+            limit
+            if limit is not None
+            else max(offset + page_size, _candidate_pool_size(page_size))
+        )
+        heaps: list[list[tuple[float, int, dict[str, Any]]]] = [
+            [] for _ in queries
+        ]
+        qualifying_counts = [0] * len(queries)
+        ordinal = 0
+        peak_live_vectors = 0
+
+        async for chunks in self._chunk_stream():
+            filtered = [
+                chunk
+                for chunk in chunks
+                if not path_prefix
+                or (
+                    chunk.file_path
+                    and str(chunk.file_path).replace("\\", "/").startswith(path_prefix)
+                )
+            ]
+            if not filtered:
+                continue
+            vectors: list[Sequence[float] | np.ndarray | None] = [
+                self._vector_cache.get(chunk.code, **cache_ns) for chunk in filtered
+            ]
+            missing_indices = [
+                index for index, vector in enumerate(vectors) if vector is None
+            ]
+            if missing_indices:
+                texts = [filtered[index].code for index in missing_indices]
+                embedded = await self._embed_texts(texts, provider)
+                for index, vector in zip(missing_indices, embedded.embeddings):
+                    vectors[index] = vector
+                    self._vector_cache.put(filtered[index].code, vector, **cache_ns)
+
+            available = [
+                (chunk, self._normalise(vector))
+                for chunk, vector in zip(filtered, vectors)
+                if vector is not None
+            ]
+            if not available:
+                continue
+            chunk_matrix = np.stack([vector for _, vector in available])
+            scores = chunk_matrix @ query_vectors.T
+            peak_live_vectors = max(
+                peak_live_vectors,
+                sum(len(heap) for heap in heaps) + len(available),
+            )
+            for chunk_index, (chunk, _) in enumerate(available):
+                for query_index, heap in enumerate(heaps):
+                    score = float(scores[chunk_index, query_index])
+                    if threshold is not None and score < threshold:
+                        continue
+                    qualifying_counts[query_index] += 1
+                    entry = (score, -ordinal, self._chunk_to_dict(chunk, score))
+                    if len(heap) < effective_limit:
+                        heapq.heappush(heap, entry)
+                    elif entry[:2] > heap[0][:2]:
+                        heapq.heapreplace(heap, entry)
+                ordinal += 1
+
+        self.peak_live_vectors = peak_live_vectors
+        outputs = []
+        for heap, total in zip(heaps, qualifying_counts):
+            ranked = [
+                entry[2]
+                for entry in sorted(heap, key=lambda item: (-item[0], -item[1]))
+            ]
+            outputs.append(
+                (
+                    ranked[offset : offset + page_size],
+                    self._pagination(page_size, offset, total),
+                )
+            )
+        return outputs
+
     @staticmethod
     def _pagination(page_size: int, offset: int, total: int) -> dict[str, Any]:
         has_more = (
@@ -266,6 +407,112 @@ class TransientSearchService:
             "next_offset": offset + page_size if has_more else None,
             "total": total,
         }
+
+    async def search_semantic_many(
+        self,
+        queries: list[str],
+        page_size: int = 10,
+        offset: int = 0,
+        threshold: float | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        path_filter: str | None = None,
+        force_strategy: str | None = None,
+        time_limit: float | None = None,
+        result_limit: int | None = None,
+    ) -> list[tuple[list[dict[str, Any]], dict[str, Any]] | BaseException]:
+        """Search compatible queries while scanning transient content once."""
+        if not queries:
+            return []
+        if self._vector_source == "db":
+            return await asyncio.gather(
+                *(
+                    self._original.search_semantic(
+                        query=query,
+                        page_size=page_size,
+                        offset=offset,
+                        threshold=threshold,
+                        provider=provider,
+                        model=model,
+                        path_filter=path_filter,
+                        force_strategy=force_strategy,
+                        time_limit=time_limit,
+                        result_limit=result_limit,
+                    )
+                    for query in queries
+                ),
+                return_exceptions=True,
+            )
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+            )
+        if self._vector_source == "diff":
+            transient_results = await self._search_transient_many(
+                queries, page_size, offset, threshold, path_filter, provider
+            )
+            return list(transient_results)
+
+        snapshot_size = _candidate_pool_size(page_size)
+        transient_task = asyncio.create_task(
+            self._search_transient_many(
+                queries,
+                snapshot_size,
+                0,
+                None,
+                path_filter,
+                provider,
+                limit=snapshot_size,
+            )
+        )
+        db_tasks = [
+            asyncio.create_task(
+                self._original.search_semantic(
+                    query=query,
+                    page_size=snapshot_size,
+                    offset=0,
+                    threshold=None,
+                    provider=provider,
+                    model=model,
+                    path_filter=path_filter,
+                    force_strategy=force_strategy,
+                    time_limit=time_limit,
+                    result_limit=result_limit,
+                )
+            )
+            for query in queries
+        ]
+        try:
+            transient_results, db_results = await asyncio.gather(
+                transient_task,
+                asyncio.gather(*db_tasks, return_exceptions=True),
+            )
+        except BaseException:
+            transient_task.cancel()
+            for task in db_tasks:
+                task.cancel()
+            await asyncio.gather(
+                transient_task, *db_tasks, return_exceptions=True
+            )
+            raise
+
+        outputs: list[
+            tuple[list[dict[str, Any]], dict[str, Any]] | BaseException
+        ] = []
+        for transient_result, db_result in zip(transient_results, db_results):
+            if isinstance(db_result, BaseException):
+                outputs.append(db_result)
+                continue
+            merged = self._merge(transient_result[0], db_result[0], threshold)
+            available = min(len(merged), snapshot_size)
+            outputs.append(
+                (
+                    merged[offset : offset + page_size],
+                    self._pagination(page_size, offset, available),
+                )
+            )
+        return outputs
 
     async def search_semantic(
         self,

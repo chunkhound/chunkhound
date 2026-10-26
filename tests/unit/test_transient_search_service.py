@@ -117,6 +117,125 @@ async def test_disabled_cache_preserves_ranking() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bulk_search_scans_source_once_and_matches_scalar_ranking() -> None:
+    chunks = [make_chunk("left", code="left"), make_chunk("right", code="right")]
+    stream_calls = 0
+
+    async def counted_stream() -> AsyncIterator[list]:
+        nonlocal stream_calls
+        stream_calls += 1
+        yield chunks
+
+    manager = MagicMock()
+
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        vectors = [
+            [1.0, 0.0] if text in {"left", "left query"} else [0.0, 1.0]
+            for text in texts
+        ]
+        return LocalEmbeddingResult(
+            embeddings=vectors, model="test", provider="test", dims=2
+        )
+
+    manager.embed_texts = AsyncMock(side_effect=embed)
+    service = TransientSearchService(
+        make_original(), counted_stream, "diff", manager, VectorCache(max_entries=0)
+    )
+
+    results = await service.search_semantic_many(
+        ["left query", "right query"], page_size=1
+    )
+
+    assert stream_calls == 1
+    assert [result[0][0]["content"] for result in results] == ["left", "right"]
+    assert [call.args[0] for call in manager.embed_texts.await_args_list] == [
+        ["left query", "right query"],
+        ["left", "right"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_search_empty_query_embeddings_match_scalar_empty_results() -> None:
+    manager = MagicMock()
+    manager.embed_texts = AsyncMock(
+        return_value=LocalEmbeddingResult(
+            embeddings=[], model="test", provider="test", dims=0
+        )
+    )
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks([make_chunk("one")]),
+        "diff",
+        manager,
+        VectorCache(max_entries=0),
+    )
+
+    results = await service.search_semantic_many(["one", "two"])
+
+    assert results == [
+        (
+            [],
+            {
+                "offset": 0,
+                "page_size": 10,
+                "has_more": False,
+                "next_offset": None,
+                "total": 0,
+            },
+        ),
+        (
+            [],
+            {
+                "offset": 0,
+                "page_size": 10,
+                "has_more": False,
+                "next_offset": None,
+                "total": 0,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_both_mode_preserves_per_query_db_merge() -> None:
+    chunks = [make_chunk("left", file_path="shared.py", code="left")]
+    original = make_original()
+
+    async def db_search(**kwargs):
+        query = kwargs["query"]
+        results = [
+            {
+                "chunk_id": f"db-{query}",
+                "file_path": "shared.py" if query == "left query" else "db.py",
+                "start_line": 1,
+                "content": f"database {query}",
+                "similarity": 0.9,
+                "score": 0.9,
+            }
+        ]
+        return results, {"total": 1, "has_more": False}
+
+    original.search_semantic = AsyncMock(side_effect=db_search)
+    service = TransientSearchService(
+        original,
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results = await service.search_semantic_many(
+        ["left query", "right query"], page_size=10
+    )
+
+    assert [item["content"] for item in results[0][0]] == ["left"]
+    assert {item["content"] for item in results[1][0]} == {
+        "left",
+        "database right query",
+    }
+
+
+@pytest.mark.asyncio
 async def test_concurrent_searches_do_not_cross_results() -> None:
     chunks = [make_chunk("left", code="left"), make_chunk("right", code="right")]
     manager = MagicMock()
