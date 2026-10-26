@@ -97,6 +97,67 @@ async def test_second_search_reuses_cached_chunk_embeddings() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_endpoint", "second_deployment"),
+    [
+        ("https://two.example/v1", "deployment-a"),
+        ("https://one.example/v1", "deployment-b"),
+    ],
+)
+async def test_shared_cache_isolates_embedding_provider_instances(
+    second_endpoint: str, second_deployment: str
+) -> None:
+    cache = VectorCache(max_entries=10)
+    chunks = [make_chunk("one", code="one")]
+
+    def manager(
+        endpoint: str, deployment: str, chunk_vector: list[float]
+    ) -> MagicMock:
+        embedding_provider = MagicMock()
+        embedding_provider.base_url = endpoint
+        embedding_provider._azure_deployment = deployment
+        embedding_manager = MagicMock()
+        embedding_manager.get_provider.return_value = embedding_provider
+
+        async def embed(texts: list[str]) -> LocalEmbeddingResult:
+            vectors = [
+                [1.0, 0.0] if text == "query" else chunk_vector for text in texts
+            ]
+            return LocalEmbeddingResult(
+                embeddings=vectors,
+                model="shared-model",
+                provider="shared-provider",
+                dims=2,
+            )
+
+        embedding_manager.embed_texts = AsyncMock(side_effect=embed)
+        return embedding_manager
+
+    first_manager = manager(
+        "https://one.example/v1", "deployment-a", [1.0, 0.0]
+    )
+    second_manager = manager(second_endpoint, second_deployment, [0.0, 1.0])
+
+    first_service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", first_manager, cache
+    )
+    second_service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", second_manager, cache
+    )
+
+    first_results, _ = await first_service.search_semantic("query")
+    second_results, _ = await second_service.search_semantic("query")
+
+    assert first_results[0]["similarity"] == pytest.approx(1.0)
+    assert second_results[0]["similarity"] == pytest.approx(0.0)
+    assert [call.args[0] for call in second_manager.embed_texts.await_args_list] == [
+        ["query"],
+        ["one"],
+    ]
+    second_manager.get_provider.assert_called_once_with("shared-provider")
+
+
+@pytest.mark.asyncio
 async def test_disabled_cache_preserves_ranking() -> None:
     chunks = [make_chunk("one", code="one"), make_chunk("target", code="target")]
 

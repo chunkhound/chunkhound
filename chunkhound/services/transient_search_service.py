@@ -136,9 +136,7 @@ class TransientSearchService:
         return await self._embedding_manager.embed_texts(texts, provider_name=provider)
 
     def _cache_namespace(self, result: Any) -> dict[str, Any]:
-        embedding_provider = getattr(
-            self._embedding_manager, "_embedding_provider", None
-        )
+        embedding_provider = self._embedding_manager.get_provider(result.provider)
         endpoint = getattr(embedding_provider, "base_url", "")
         deployment = getattr(embedding_provider, "_azure_deployment", "")
         return {
