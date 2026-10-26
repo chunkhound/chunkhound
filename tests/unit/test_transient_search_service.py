@@ -882,6 +882,28 @@ async def test_hybrid_both_cancels_db_snapshot_when_diff_stream_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hybrid_both_merges_diff_regex_match_into_semantic_result() -> None:
+    chunks = [
+        make_chunk("diff", file_path="shared.py", start_line=7, code="target")
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_hybrid("query", regex_pattern="target")
+
+    assert len(results) == 1
+    assert results[0]["content"] == "target"
+    assert results[0]["search_type"] == "hybrid"
+    assert "semantic_score" in results[0]
+    assert "regex_score" in results[0]
+
+
+@pytest.mark.asyncio
 async def test_hybrid_both_drops_regex_copy_at_diff_owned_location() -> None:
     chunks = [
         make_chunk("diff", file_path="shared.py", start_line=7, code="historical diff")

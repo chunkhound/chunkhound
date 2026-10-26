@@ -881,19 +881,25 @@ class TransientSearchService:
                 semantic_task, regex_task
             )
         if self._vector_source == "both":
-            # A diff result owns its source location. Do not let a DB regex hit
-            # reintroduce the stale indexed copy under a different chunk_id.
-            diff_locations = {
-                (result.get("file_path"), result.get("start_line"))
+            # A diff result owns its source location. Preserve regex credit when
+            # the current diff content matched, but do not reintroduce a stale
+            # DB copy under a different chunk ID.
+            diff_by_location = {
+                (result.get("file_path"), result.get("start_line")): result
                 for result in semantic_results
                 if str(result.get("chunk_id", "")).startswith("diff:")
             }
-            regex_results = [
-                result
-                for result in regex_results
-                if (result.get("file_path"), result.get("start_line"))
-                not in diff_locations
-            ]
+            reconciled_regex: list[dict[str, Any]] = []
+            for result in regex_results:
+                location = (result.get("file_path"), result.get("start_line"))
+                semantic_result = diff_by_location.get(location)
+                if semantic_result is None:
+                    reconciled_regex.append(result)
+                elif str(result.get("chunk_id", "")).startswith("diff:"):
+                    reconciled_regex.append(
+                        {**result, "chunk_id": semantic_result["chunk_id"]}
+                    )
+            regex_results = reconciled_regex
         combined = ResultEnhancer().combine_search_results(
             semantic_results=semantic_results,
             regex_results=regex_results,
