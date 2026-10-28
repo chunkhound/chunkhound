@@ -562,7 +562,7 @@ The environment variables are `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` and `
 | `output_limits_enabled` | `boolean` | `false` | Restore the exact legacy numeric output limits for research synthesis instead of provider-managed limits. |
 | `output_limit_fallback` | `number` | `64000` | Positive output-token fallback used when a synthesis provider cannot authoritatively omit a limit or declare one. |
 | `claude_append_system_prompt` | `string` | `file` | `file` or `inline`. One mode cannot fit every machine: `file` stays off `cmd.exe` and beside a wrapper's `--append-system-prompt`; `inline` is for a file-flag wrapper or Claude Code older than 2.0.34. |
-| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file and MCP config file, such as Docker or a limited user. |
+| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file, MCP config file and settings file, such as Docker or a limited user. |
 | `codex_reasoning_effort` | `string` | `null` | Default reasoning effort for Codex/OpenAI: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex_reasoning_effort_utility` | `string` | `null` | Reasoning effort override for utility stage |
 | `codex_reasoning_effort_synthesis` | `string` | `null` | Reasoning effort override for synthesis stage |
