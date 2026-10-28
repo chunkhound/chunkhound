@@ -27,8 +27,8 @@ async def handle_token_limit_error(
 
     A batch is split and each part embedded. A single text is cut by
     chunk_text_function; when that returns it whole (the server rejected a
-    text the estimate says fits), it is cut in halves instead, and a half the
-    server rejects again is halved in turn.
+    text the estimate says fits), it is cut in halves instead. An
+    embed_function that routes a rejection back here halves it in turn.
 
     Args:
         texts: List of texts that exceeded token limit
