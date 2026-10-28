@@ -70,20 +70,11 @@ class DatabaseProvider(Protocol):
         ...
 
     def set_rust_pipeline_in_progress(self, active: bool) -> None:
-        """Publish whether the Rust pipeline currently owns write access to
-        the database file.
+        """Keep the flag through native joins, cache cleanup and trusted reconnect.
 
-        This is not set automatically as a side effect of
-        `release_for_rust_pipeline()` — callers must set `True` BEFORE calling
-        that method, closing admission before the release barrier. Start native
-        work only if release succeeds. Keep the flag set until native work and
-        cleanup have actually stopped, then clear it BEFORE reconnecting (also
-        clear it if release fails, without starting native work). Queued opens
-        must recheck admission on the worker before inspecting or reopening.
-        See
-        `chunkhound.services.rust_pipeline_runner.run_rust_indexing_phase()`
-        for the canonical (and currently sole) caller and the exact
-        set/clear boundaries.
+        Clear only after success; failure retains unavailable state and ownership.
+        Queued opens recheck worker admission. Reconnect bypass is a private
+        context capability; this public method's signature is unchanged.
         """
         ...
 

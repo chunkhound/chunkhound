@@ -69,6 +69,7 @@ class SerialDatabaseProvider(ABC):
         self._database_ownership: DatabaseOwnership | None = None
         self._closed = False
         self._closing = False
+        self._rust_pipeline_cleanup: object | None = None
 
         # Create serial executor for all database operations.
         # Timeout comes from DatabaseConfig (JSON/env/CLI); None keeps the
@@ -177,6 +178,10 @@ class SerialDatabaseProvider(ABC):
             raise
         except Exception as e:
             logger.error(f"{self.__class__.__name__} connection failed: {e}")
+            if self._executor._is_rust_reconnect_owner():
+                # Retain partial handles/lease under unavailable guard;
+                # do not finalize executor.
+                raise
             self.disconnect(skip_checkpoint=True)
             raise
 
@@ -250,10 +255,18 @@ class SerialDatabaseProvider(ABC):
             ) from e
 
     def set_rust_pipeline_in_progress(self, active: bool) -> None:
-        """Publish whether the Rust pipeline currently owns the database file."""
+        """Publish exclusive scope ownership; duplicate owners may not clear it."""
+        if active and self._executor.is_rust_pipeline_in_progress():
+            raise DatabaseRustPipelineInProgressError(
+                "Rust indexing operation already owns this provider"
+            )
         with self._ownership_lock:
             if active and (self._closing or self._closed):
                 raise RuntimeError("Database provider is closing or closed")
+            if active and self._executor.is_rust_pipeline_in_progress():
+                raise DatabaseRustPipelineInProgressError(
+                    "Rust indexing operation already owns this provider"
+                )
             self._executor.set_rust_pipeline_in_progress(active)
 
     def is_rust_pipeline_in_progress(self) -> bool:

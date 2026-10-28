@@ -204,12 +204,14 @@ ChunkHound is especially useful for:
 
 ## Central base indexes
 
-Use DuckDB with `chunkhound pull [path] --version latest|-1|-2` to install a
-compatible organization-hosted base, then `chunkhound index [path]` to overlay
-local changes. LanceDB overlay is nonoperational/deferred because changed-file
-updates can leave stale chunks searchable.
-See [Hub client operation and recovery](docs/hub-client.md) for configuration,
-automatic-index behavior, ownership requirements and interruption recovery.
+Use `chunkhound pull [path] --version latest|-1|-2` to install a compatible
+organization-hosted base, then `chunkhound index [path]` to overlay local changes.
+DuckDB and LanceDB support changed/new/deleted-file overlay; DuckDB is recommended
+and LanceDB remains experimental. Pull installs only and may replace local index
+work; checksum/format validation does not establish publisher content freshness.
+See [Hub client operation and recovery](docs/hub-client.md) for archive packaging
+and limits, automatic-index behavior, ownership and spawn requirements, WAL
+provisioning, interruption recovery and cancellation semantics.
 
 ## Community
 

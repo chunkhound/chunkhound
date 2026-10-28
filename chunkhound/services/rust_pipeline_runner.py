@@ -15,17 +15,25 @@ Used by:
   when the Rust pipeline decision (_use_rust) is True.
 """
 
+import asyncio
+import contextvars
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from rich.progress import Progress, TaskID
 
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
-from chunkhound.pipeline_bridge import run_rust_pipeline
+from chunkhound.pipeline_bridge import (
+    RustPipelineCleanupError,
+    RustRunResources,
+    run_rust_pipeline,
+)
+from chunkhound.providers.database.serial_executor import _rust_reconnect_scope
 from chunkhound.services.progress_utils import _update_speed_field, format_bytes
 
 
@@ -301,6 +309,11 @@ class RustPhaseResult:
     compact_reduction_pct: float | None
 
 
+def _reconnect_after_rust(db: DatabaseProvider) -> None:
+    with _rust_reconnect_scope(getattr(db, "_executor")):
+        db.connect()
+
+
 async def run_rust_indexing_phase(
     *,
     db: DatabaseProvider,
@@ -399,13 +412,9 @@ async def run_rust_indexing_phase(
     # The provider retains native shared ownership while its backend handles are
     # closed. Native work independently owns a shared lease for its entire run.
     # Parser pools use spawn, so children cannot inherit either database state or
-    # lease descriptors. run_rust_pipeline drains cancelled workers and embed-cache
-    # cleanup before this function clears the guard and reconnects in finally.
-    # `released_for_rust` tracks whether we *attempted* release, not
-    # whether it succeeded — release_for_rust_pipeline() can raise after
-    # only partially closing its two connections (see its docstring), and
-    # the reconnect in `finally` below must still run in that case, or a
-    # long-lived server process is left permanently disconnected.
+    # lease descriptors. Keep the guard and per-run resources through native joins,
+    # embed-cache cleanup and trusted reconnect. A failed release must never start
+    # native work; a failed cleanup/reconnect retains unavailable ownership.
     #
     # Deliberately NOT gated on `db.is_connected`: that property only
     # reflects the connection manager's connection, not the executor's
@@ -416,57 +425,49 @@ async def run_rust_indexing_phase(
     # still ran below, producing a second native writer on the same file
     # with no guard at all. release_for_rust_pipeline() is idempotent (it
     # tolerates already-closed connections), so it's always safe to call.
-    released_for_rust = False
-    release_error: Exception | None = None
-    if db is not None:
-        released_for_rust = True
-        # Publish "Rust owns the file" *before* release starts, not after it
-        # returns: release_for_rust_pipeline() runs a CHECKPOINT that can take
-        # seconds, and the fast-fail guard on new submissions only helps if
-        # it's live for that whole window. Setting the flag only after release
-        # completes left a gap where a concurrent op could pass the stale
-        # guard, queue behind the disconnect, and open a fresh connection just
-        # as Rust starts — a single-writer lock error.
-        db.set_rust_pipeline_in_progress(True)
-        try:
-            db.release_for_rust_pipeline()
-        except Exception as e:
-            release_error = e
-            # Release failed, so Rust never takes ownership (see the `raise
-            # release_error` below) — don't leave other callers fast-failing
-            # against a database Python still owns.
-            db.set_rust_pipeline_in_progress(False)
-
+    resources = RustRunResources()
+    error: BaseException | None = None
+    rust_stats: dict[str, Any] = {}
+    # If guard publication fails, this scope owns nothing and clears nothing.
+    db.set_rust_pipeline_in_progress(True)
+    setattr(db, "_rust_pipeline_cleanup", resources)
     try:
-        if release_error is not None:
-            # Don't hand write ownership to Rust on an ambiguously-closed
-            # connection — release_for_rust_pipeline()'s docstring requires
-            # this. Still falls through to the reconnect attempt below.
-            raise release_error
-        rust_stats = await run_rust_pipeline(
-            files_to_process,
-            db_path=db_path,
-            project_root=directory,
-            force_reindex=force_reindex,
-            skip_embeddings=skip_embeddings,
-            do_cleanup=do_cleanup,
-            config=config,
-            progress_callback=progress_cb,
+        release = asyncio.get_running_loop().run_in_executor(
+            None, contextvars.copy_context().run, db.release_for_rust_pipeline,
         )
+        resources.release_future = release
+        await resources.drain.wait(release)
+        if not resources.token.is_cancelled():
+            rust_stats = await run_rust_pipeline(
+                files_to_process, db_path=db_path, project_root=directory,
+                force_reindex=force_reindex, skip_embeddings=skip_embeddings,
+                do_cleanup=do_cleanup, config=config, progress_callback=progress_cb,
+                _resources=resources,
+            )
+    except BaseException as caught:
+        error = caught
     finally:
-        # Reopen the Python-side DuckDB connection whether or not
-        # the Rust pipeline succeeded — release_for_rust_pipeline()
-        # kept the executor alive; connect() creates a fresh
-        # thread-local connection inside that executor. Without
-        # this in a finally, a raised exception (embed/DB-write
-        # failure, Rust panic surfaced as PyErr, release_for_rust_pipeline()
-        # itself failing, etc.) leaves db permanently disconnected for the
-        # rest of the process's life.
-        if released_for_rust and db is not None:
-            # Clear before connect(): connect()'s own defense-in-depth
-            # check would otherwise reject this trusted reconnect.
-            db.set_rust_pipeline_in_progress(False)
-            db.connect()
+        if not resources.native_started and resources.cleanup_future is None:
+            resources.cache_closed = True
+        if resources.safe_to_reconnect:
+            try:
+                reconnect = asyncio.get_running_loop().run_in_executor(
+                    None, contextvars.copy_context().run, _reconnect_after_rust, db,
+                )
+                resources.reconnect_future = reconnect
+                await resources.drain.wait(reconnect)
+            except BaseException as cleanup_error:
+                logger.error(
+                    "Database reconnect failed: {}", type(cleanup_error).__name__
+                )
+                error = RustPipelineCleanupError(resources)
+            else:
+                setattr(db, "_rust_pipeline_cleanup", None)
+                db.set_rust_pipeline_in_progress(False)
+        else:
+            logger.error("Rust cleanup incomplete; database remains unavailable")
+            error = RustPipelineCleanupError(resources)
+    resources.drain.finish(error)
 
     diff_elapsed = 0.0
     compact_ran = False

@@ -638,3 +638,31 @@ def test_reconnect_after_release_checks_live_format(tmp_path):
         assert snapshot(tmp_path) == before
     finally:
         provider.disconnect(skip_checkpoint=True)
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_same_provider_connect_recovers_after_install_contention(tmp_path, read_only):
+    path = tmp_path / "chunks.db"
+    seed = DuckDBProvider(path, base_directory=tmp_path)
+    seed.connect()
+    seed.close()
+    provider = DuckDBProvider(
+        path, base_directory=tmp_path, config=DatabaseConfig(read_only=read_only)
+    )
+    lease = native.acquire_install_lease(str(path), "duckdb")
+    try:
+        before = snapshot(tmp_path)
+        with pytest.raises(native.DatabaseBusyError):
+            provider.connect()
+        assert not provider.is_connected
+        assert snapshot(tmp_path) == before
+        lease.close()
+        provider.connect()
+        assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+        assert provider.get_stats()["files"] == 0
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+    finally:
+        lease.close()
+        provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()

@@ -380,8 +380,20 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
+        if (
+            self._executor.is_rust_pipeline_in_progress()
+            and not self._executor._is_rust_reconnect_owner()
+        ):
+            raise DatabaseRustPipelineInProgressError(
+                "Rust indexing pipeline owns the database — connection refused "
+                "until it finishes"
+            )
         had_ownership = self._database_ownership is not None
         self._reconnect_preflight_passed = False
+        # Refusal here precedes every backend handle. Keep this provider and its
+        # executor available for a later attempt; initialization failures below
+        # still use the existing ownership-aware cleanup policy.
+        self._ensure_database_ownership()
         try:
             # Fast-fail if compaction owns the database — connection_manager's
             # recovery path would otherwise undo the in-progress compaction.
@@ -396,7 +408,10 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "Database compaction in progress — connection refused until "
                     "compaction completes"
                 )
-            if self._executor.is_rust_pipeline_in_progress():
+            if (
+                self._executor.is_rust_pipeline_in_progress()
+                and not self._executor._is_rust_reconnect_owner()
+            ):
                 logger.info(
                     "Rust indexing pipeline owns the database — refusing "
                     "connection until it finishes"
@@ -427,6 +442,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             raise
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
+            if self._executor._is_rust_reconnect_owner():
+                # Retain partial handles/lease under unavailable guard;
+                # do not finalize executor.
+                raise
             if not had_ownership or self._reconnect_preflight_passed:
                 self.disconnect(skip_checkpoint=True)
             raise

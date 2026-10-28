@@ -22,6 +22,12 @@ from chunkhound.database import Database
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
 )
+from chunkhound.providers.database.duckdb.live_connections import (
+    close_duckdb_connection,
+    compatible_duckdb_cursor,
+    exclusive_duckdb_compaction,
+    register_duckdb_connection,
+)
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 from chunkhound.providers.database.ownership import DatabaseReaderCloseError
@@ -844,3 +850,164 @@ def test_rust_release_closes_all_retained_handles_or_preserves_lease_for_retry(
         for reference in handles:
             if reference() is not None:
                 real_close(reference())
+
+
+@pytest.mark.parametrize("phase", ["open", "close", "swap"])
+def test_paused_lifecycle_on_one_database_does_not_block_another(
+    tmp_path, monkeypatch, phase
+):
+    path_a = tmp_path / "a" / "chunks.db"
+    path_b = tmp_path / "b" / "chunks.db"
+    first = DuckDBProvider(path_a, base_directory=tmp_path)
+    second = DuckDBProvider(path_b, base_directory=tmp_path)
+    if phase != "open":
+        first.connect()
+    paused = threading.Event()
+    release = threading.Event()
+    real_connect = duckdb.connect
+    real_close = duckdb.DuckDBPyConnection.close
+    real_replace = os.replace
+    manager = first.connection
+
+    def pause():
+        paused.set()
+        assert release.wait(10)
+
+    def paused_connect(database, *args, **kwargs):
+        conn = real_connect(database, *args, **kwargs)
+        if str(database) == str(path_a) and not paused.is_set():
+            pause()
+        return conn
+
+    def paused_close(conn):
+        if conn is manager and not paused.is_set():
+            pause()
+        return real_close(conn)
+
+    def paused_replace(src, dst, *args, **kwargs):
+        if str(src) == str(path_a) and str(dst).endswith(".compact_backup"):
+            pause()
+        return real_replace(src, dst, *args, **kwargs)
+
+    if phase == "open":
+        monkeypatch.setattr(duckdb, "connect", paused_connect)
+        operation = first.connect
+    elif phase == "close":
+        monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", paused_close)
+        operation = first.close
+    else:
+        monkeypatch.setattr(os, "replace", paused_replace)
+        operation = first.compact_database
+
+    worker, finished = start_call(operation, "database-a-lifecycle")
+    other = None
+    try:
+        assert paused.wait(10)
+
+        def use_other_database():
+            second.connect()
+            assert second.execute_query("SELECT 42 AS value") == [{"value": 42}]
+            second.close()
+            native.acquire_install_lease(str(path_b), "duckdb").close()
+
+        other, other_finished = start_call(use_other_database, "database-b-lifecycle")
+        other_finished.result(timeout=5)
+        assert not finished.done(), "database A must still be held at the boundary"
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path_a), "duckdb")
+    finally:
+        release.set()
+        worker.join(15)
+        if other is not None:
+            other.join(15)
+        first.close()
+        second.close()
+    finished.result(timeout=1)
+    assert not worker.is_alive()
+    assert other is not None and not other.is_alive()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_same_path_waiters_remain_exclusive_after_last_connection_closes(
+    tmp_path, read_only
+):
+    path = tmp_path / "chunks.db"
+    # Different spelling must use the same canonical admission entry.
+    alias = tmp_path / "missing" / ".." / "chunks.db"
+    conn = duckdb.connect(str(path))
+    register_duckdb_connection(path, False, conn)
+    entered = threading.Event()
+    release = threading.Event()
+    waiting = None
+    arriving = None
+
+    def wait_on_same_path():
+        with compatible_duckdb_cursor(
+            alias, read_only=read_only, retained_connections=[]
+        ) as cursor:
+            assert cursor is None
+            entered.set()
+            assert release.wait(10)
+
+    try:
+        with exclusive_duckdb_compaction(path, (conn,)):
+            waiting, waited = start_call(wait_on_same_path, "same-path-waiter")
+            with pytest.raises(concurrent.futures.TimeoutError):
+                waited.result(timeout=0.1)
+            close_duckdb_connection(conn)
+            # The last handle is gone, but the active owner and its waiter
+            # must keep one shared admission object alive.
+        assert entered.wait(5)
+
+        def arrive_after_close():
+            with exclusive_duckdb_compaction(path, ()):
+                return "admitted"
+
+        arriving, arrived = start_call(arrive_after_close, "same-path-arrival")
+        with pytest.raises(concurrent.futures.TimeoutError):
+            arrived.result(timeout=0.1)
+        release.set()
+        waited.result(timeout=5)
+        assert arrived.result(timeout=5) == "admitted"
+    finally:
+        release.set()
+        if waiting is not None:
+            waiting.join(15)
+        if arriving is not None:
+            arriving.join(15)
+        close_duckdb_connection(conn)
+    assert waiting is not None and not waiting.is_alive()
+    assert arriving is not None and not arriving.is_alive()
+
+
+def test_failed_close_keeps_foreign_compaction_excluded(tmp_path, monkeypatch):
+    path = tmp_path / "chunks.db"
+    first = DuckDBProvider(path, base_directory=tmp_path)
+    second = DuckDBProvider(path, base_directory=tmp_path)
+    first.connect()
+    second.connect()
+    manager = first.connection
+    real_close = duckdb.DuckDBPyConnection.close
+
+    def fail_manager_close(conn):
+        if conn is manager:
+            raise OSError("retained manager")
+        return real_close(conn)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(duckdb.DuckDBPyConnection, "close", fail_manager_close)
+            with pytest.raises(OSError, match="retained manager"):
+                first.close()
+            assert manager.execute("SELECT 42").fetchone() == (42,)
+            with pytest.raises(RuntimeError, match="another.*(provider|connection)"):
+                second.compact_database()
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        first.close()
+        second.compact_database()
+        assert second.execute_query("SELECT 42 AS value") == [{"value": 42}]
+    finally:
+        first.close()
+        second.close()
+    native.acquire_install_lease(str(path), "duckdb").close()

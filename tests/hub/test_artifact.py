@@ -17,6 +17,7 @@ import lance
 import pyarrow as pa
 import pytest
 
+from chunkhound.core.config.hub_config import ArchiveLimits
 from chunkhound.hub.artifact import extract, prepare, verify_candidate
 from chunkhound.hub.errors import HubDatabaseMismatch, HubUnavailable
 from chunkhound.hub.manifest import MatchKey, select_manifest
@@ -667,4 +668,376 @@ async def test_prepare_uses_independent_temporary_workspaces(tmp_path, hub_http)
             assert first != second
             assert first.exists() and second.exists()
         assert first.exists() and not second.exists()
+    assert set(tmp_path.iterdir()) == entries
+
+
+@pytest.mark.parametrize(
+    "archive_format", [tarfile.USTAR_FORMAT, tarfile.GNU_FORMAT, tarfile.PAX_FORMAT]
+)
+def test_ordinary_publisher_directory_and_file_modes_are_accepted(
+    tmp_path, archive_format
+):
+    archive = tmp_path / "ordinary.tar.gz"
+    with tarfile.open(archive, "w:gz", format=archive_format) as tar:
+        for name, kind, mode, data in [
+            ("lancedb.lancedb", tarfile.DIRTYPE, 0o755, b""),
+            ("lancedb.lancedb/data", tarfile.REGTYPE, 0o644, b"payload"),
+        ]:
+            info = tarfile.TarInfo(name)
+            info.type, info.mode, info.size = kind, mode, len(data)
+            info.uid = info.gid = 12345
+            info.mtime = 1
+            tar.addfile(info, io.BytesIO(data))
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    candidate = extract(archive, stage, "lancedb")
+    assert (candidate / "data").read_bytes() == b"payload"
+    assert candidate.stat().st_mtime > 1
+    assert (candidate / "data").stat().st_mtime > 1
+
+
+@pytest.mark.parametrize("kind", [tarfile.DIRTYPE, tarfile.REGTYPE])
+@pytest.mark.parametrize("special", [0o4000, 0o2000, 0o1000])
+def test_special_permission_bits_are_refused_for_files_and_directories(
+    tmp_path, kind, special
+):
+    name = "lancedb.lancedb" if kind == tarfile.DIRTYPE else "lancedb.lancedb/data"
+    archive = tar_archive(
+        tmp_path / "special.tar.gz", [(name, kind, b"", 0o644 | special)]
+    )
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    with pytest.raises(HubUnavailable):
+        extract(archive, stage, "lancedb")
+    assert list(stage.iterdir()) == []
+
+
+@pytest.mark.parametrize("execute", [0o100, 0o010, 0o001])
+def test_executable_regular_files_are_refused(tmp_path, execute):
+    archive = tar_archive(
+        tmp_path / "executable.tar.gz",
+        [("chunks.db", tarfile.REGTYPE, b"", 0o644 | execute)],
+    )
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    with pytest.raises(HubUnavailable):
+        extract(archive, stage, "duckdb")
+    assert list(stage.iterdir()) == []
+
+
+def raw_archive(tmp_path, raw, name="quota.tar.gz"):
+    path = tmp_path / name
+    path.write_bytes(gzip.compress(raw))
+    return path
+
+
+def raw_regular(name, payload=b"", *, pax=None, header_size=None):
+    info = tarfile.TarInfo(name)
+    info.mode = 0o644
+    info.size = len(payload) if header_size is None else header_size
+    info.pax_headers = pax or {}
+    return (
+        info.tobuf(format=tarfile.PAX_FORMAT) + payload + b"\0" * (-len(payload) % 512)
+    )
+
+
+def quota_stage(tmp_path, name):
+    stage = tmp_path / name
+    stage.mkdir()
+    return stage
+
+
+@pytest.mark.parametrize("extensions", [0, 1, 2])
+def test_physical_extension_headers_count_toward_member_limit(tmp_path, extensions):
+    extension = tarfile.TarInfo.create_pax_global_header({"comment": "ok"})
+    archive = raw_archive(tmp_path, extension * extensions + raw_regular("chunks.db"))
+    exact = extensions + 1
+    assert extract(
+        archive,
+        quota_stage(tmp_path, "exact"),
+        "duckdb",
+        limits=ArchiveLimits(max_members=exact),
+    ).exists()
+    if exact > 1:
+        stage = quota_stage(tmp_path, "over")
+        with pytest.raises(HubUnavailable, match="member"):
+            extract(
+                archive, stage, "duckdb", limits=ArchiveLimits(max_members=exact - 1)
+            )
+        assert not (stage / "chunks.db").exists()
+
+
+def test_next_regular_header_is_refused_at_physical_member_limit(tmp_path):
+    # Explicit headers exceed the cap while retained paths remain within it:
+    # repeat global metadata before the two ordinary members.
+    extension = tarfile.TarInfo.create_pax_global_header({"comment": "ok"})
+    archive = raw_archive(
+        tmp_path,
+        extension * 2
+        + raw_regular("lancedb.lancedb/a")
+        + raw_regular("lancedb.lancedb/b"),
+    )
+    stage = quota_stage(tmp_path, "stage")
+    with pytest.raises(HubUnavailable, match="member"):
+        extract(archive, stage, "lancedb", limits=ArchiveLimits(max_members=3))
+    assert (stage / "lancedb.lancedb/a").exists()
+    assert not (stage / "lancedb.lancedb/b").exists()
+    assert extract(
+        archive,
+        quota_stage(tmp_path, "exact"),
+        "lancedb",
+        limits=ArchiveLimits(max_members=4),
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    "kind", [tarfile.XGLTYPE, tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME]
+)
+@pytest.mark.parametrize("count", [32, 33])
+def test_fixed_extension_chain_boundary(tmp_path, kind, count):
+    if kind == tarfile.GNUTYPE_LONGNAME:
+        info = tarfile.TarInfo("longname")
+        info.type = kind
+        payload = b"chunks.db\0"
+        info.size = len(payload)
+        extension = info.tobuf() + payload.ljust(512, b"\0")
+    else:
+        extension = tarfile.TarInfo._create_pax_generic_header(
+            {"comment": "ok"}, kind, "utf-8"
+        )
+    archive = raw_archive(tmp_path, extension * count + raw_regular("chunks.db"))
+    stage = quota_stage(tmp_path, "stage")
+    if count == 33:
+        with pytest.raises(HubUnavailable, match="extension"):
+            extract(archive, stage, "duckdb")
+        assert list(stage.iterdir()) == []
+    else:
+        assert extract(archive, stage, "duckdb").exists()
+
+
+def test_extension_chain_guard_resets_between_members(tmp_path):
+    extension = tarfile.TarInfo.create_pax_global_header({"comment": "ok"})
+    archive = raw_archive(
+        tmp_path,
+        extension * 32
+        + raw_regular("lancedb.lancedb/a")
+        + extension * 32
+        + raw_regular("lancedb.lancedb/b"),
+    )
+    candidate = extract(archive, quota_stage(tmp_path, "stage"), "lancedb")
+    assert {p.name for p in candidate.iterdir()} == {"a", "b"}
+
+
+def test_extension_special_mode_is_refused_before_metadata_processing(tmp_path):
+    info = tarfile.TarInfo("extended")
+    info.type = tarfile.XHDTYPE
+    info.mode = 0o4000
+    info.size = 0
+    archive = raw_archive(tmp_path, info.tobuf() + raw_regular("chunks.db"))
+    stage = quota_stage(tmp_path, "stage")
+    with pytest.raises(HubUnavailable):
+        extract(archive, stage, "duckdb")
+    assert list(stage.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "field", ["max_members", "max_path_depth", "max_path_bytes", "max_total_path_bytes"]
+)
+def test_effective_paths_and_implicit_prefixes_have_exact_budgets(tmp_path, field):
+    name = "lancedb.lancedb/İ/data"
+    prefixes = ["lancedb.lancedb", "lancedb.lancedb/İ", name]
+    exact = {
+        "max_members": 3,
+        "max_path_depth": 3,
+        "max_path_bytes": len(name.encode("utf-8")),
+        "max_total_path_bytes": sum(
+            len(p.encode("utf-8")) + len(p.casefold().encode("utf-8")) for p in prefixes
+        ),
+    }[field]
+    # PAX makes the effective path differ from its short physical-header name.
+    archive = raw_archive(tmp_path, raw_regular("short", b"x", pax={"path": name}))
+    stage = quota_stage(tmp_path, "over")
+    with pytest.raises(HubUnavailable):
+        extract(archive, stage, "lancedb", limits=ArchiveLimits(**{field: exact - 1}))
+    assert list(stage.iterdir()) == []
+    candidate = extract(
+        archive,
+        quota_stage(tmp_path, "exact"),
+        "lancedb",
+        limits=ArchiveLimits(**{field: exact}),
+    )
+    assert (candidate / "İ/data").read_bytes() == b"x"
+
+
+def test_direct_extraction_uses_default_limits_and_accepts_explicit_increase(tmp_path):
+    name = "lancedb.lancedb/" + "/".join(["a"] * 31 + ["data"])
+    archive = raw_archive(tmp_path, raw_regular(name))
+    stage = quota_stage(tmp_path, "default")
+    with pytest.raises(HubUnavailable, match="depth"):
+        extract(archive, stage, "lancedb")
+    assert list(stage.iterdir()) == []
+    candidate = extract(
+        archive,
+        quota_stage(tmp_path, "raised"),
+        "lancedb",
+        limits=ArchiveLimits(max_path_depth=33),
+    )
+    assert (candidate / "/".join(["a"] * 31 + ["data"])).exists()
+
+
+def test_later_explicit_directories_do_not_recharge_implicit_paths(tmp_path):
+    name = "lancedb.lancedb/a/data"
+    prefixes = ["lancedb.lancedb", "lancedb.lancedb/a", name]
+    archive = tar_archive(
+        tmp_path / "explicit.tar.gz",
+        [
+            (name, tarfile.REGTYPE, b"x", 0o644),
+            (prefixes[1], tarfile.DIRTYPE, b"", 0o755),
+            (prefixes[0], tarfile.DIRTYPE, b"", 0o755),
+        ],
+    )
+    budget = sum(len(p.encode()) + len(p.casefold().encode()) for p in prefixes)
+    candidate = extract(
+        archive,
+        quota_stage(tmp_path, "stage"),
+        "lancedb",
+        limits=ArchiveLimits(max_members=3, max_total_path_bytes=budget),
+    )
+    assert (candidate / "a/data").read_bytes() == b"x"
+
+
+def test_retained_path_budget_is_aggregate_across_members(tmp_path):
+    names = ["lancedb.lancedb/a", "lancedb.lancedb/b"]
+    prefixes = ["lancedb.lancedb", *names]
+    budget = sum(len(p.encode()) + len(p.casefold().encode()) for p in prefixes)
+    archive = raw_archive(tmp_path, b"".join(raw_regular(name) for name in names))
+    stage = quota_stage(tmp_path, "over")
+    with pytest.raises(HubUnavailable, match="path"):
+        extract(
+            archive,
+            stage,
+            "lancedb",
+            limits=ArchiveLimits(max_total_path_bytes=budget - 1),
+        )
+    assert (stage / names[0]).exists()
+    assert not (stage / names[1]).exists()
+    assert extract(
+        archive,
+        quota_stage(tmp_path, "exact"),
+        "lancedb",
+        limits=ArchiveLimits(max_total_path_bytes=budget),
+    ).exists()
+
+
+def test_effective_pax_payload_is_checked_before_offending_file_creation(tmp_path):
+    raw = raw_regular("lancedb.lancedb/first", b"ab")
+    raw += raw_regular(
+        "lancedb.lancedb/second", b"cde", pax={"size": "3"}, header_size=0
+    )
+    archive = raw_archive(tmp_path, raw)
+    stage = quota_stage(tmp_path, "over")
+    with pytest.raises(HubUnavailable, match="extracted"):
+        extract(archive, stage, "lancedb", limits=ArchiveLimits(max_extracted_bytes=4))
+    assert (stage / "lancedb.lancedb/first").read_bytes() == b"ab"
+    assert not (stage / "lancedb.lancedb/second").exists()
+    candidate = extract(
+        archive,
+        quota_stage(tmp_path, "exact"),
+        "lancedb",
+        limits=ArchiveLimits(max_extracted_bytes=5),
+    )
+    assert (candidate / "second").read_bytes() == b"cde"
+
+
+@pytest.mark.parametrize("tail_kind", ["none", "padding", "trailing", "concatenated"])
+def test_every_decompressed_byte_counts_including_tar_read_ahead(tmp_path, tail_kind):
+    metadata = tarfile.TarInfo.create_pax_global_header({"comment": "metadata"})
+    raw = metadata + raw_regular("chunks.db", b"x")
+    tail = b""
+    if tail_kind != "none":
+        raw += b"\0" * 1024
+        tail = b"\0" * (2 * CHUNK) if tail_kind == "padding" else b"trailing" * CHUNK
+    body = gzip.compress(raw + tail)
+    if tail_kind == "concatenated":
+        body = gzip.compress(raw) + gzip.compress(tail)
+    archive = tmp_path / "stream.tar.gz"
+    archive.write_bytes(body)
+    exact = len(raw) + len(tail)
+    with pytest.raises(HubUnavailable, match="decompressed"):
+        extract(
+            archive,
+            quota_stage(tmp_path, "over"),
+            "duckdb",
+            limits=ArchiveLimits(max_decompressed_bytes=exact - 1),
+        )
+    candidate = extract(
+        archive,
+        quota_stage(tmp_path, "exact"),
+        "duckdb",
+        limits=ArchiveLimits(max_decompressed_bytes=exact),
+    )
+    assert candidate.read_bytes() == b"x"
+
+
+def test_decompression_stops_after_one_overflow_probe(tmp_path, monkeypatch):
+    archive = raw_archive(tmp_path, raw_regular("chunks.db", b"x" * (4 * CHUNK)))
+    emitted = []
+    requested = []
+    real_read = gzip.GzipFile.read
+
+    def measured_read(stream, size=-1):
+        requested.append(size)
+        data = real_read(stream, size)
+        emitted.append(len(data))
+        return data
+
+    # Third-party I/O boundary: prove output admitted by the extraction reader,
+    # not a private helper call count. Gzip's internal buffers are not this API.
+    monkeypatch.setattr(gzip.GzipFile, "read", measured_read)
+    with pytest.raises(HubUnavailable, match="decompressed"):
+        extract(
+            archive,
+            quota_stage(tmp_path, "stage"),
+            "duckdb",
+            limits=ArchiveLimits(max_decompressed_bytes=512),
+        )
+    assert sum(emitted) == 513
+    assert all(0 <= n <= 513 for n in requested)
+
+
+def test_crc_is_checked_after_tar_eof_at_exact_decompressed_budget(tmp_path):
+    raw = raw_regular("chunks.db") + b"\0" * 1024
+    raw_tail = b"accepted trailing output"
+    damaged = bytearray(gzip.compress(raw_tail))
+    damaged[-8] ^= 1
+    archive = tmp_path / "crc.tar.gz"
+    archive.write_bytes(gzip.compress(raw) + damaged)
+    with pytest.raises(HubUnavailable):
+        extract(
+            archive,
+            quota_stage(tmp_path, "stage"),
+            "duckdb",
+            limits=ArchiveLimits(max_decompressed_bytes=len(raw) + len(raw_tail)),
+        )
+
+
+async def test_prepare_budget_refusal_cleans_stage_and_preserves_installed_state(
+    tmp_path, hub_http
+):
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    for suffix in ["", ".wal", ".root.json", ".embedding.json"]:
+        (installed / ("chunks.db" + suffix)).write_bytes(b"keep")
+    archive = tar_archive(
+        tmp_path / "candidate.tar.gz", [("chunks.db", tarfile.REGTYPE, b"xx", 0o644)]
+    )
+    selected = selected_archive(archive, hub_http)
+    before = snapshot(tmp_path)
+    entries = set(tmp_path.iterdir())
+    with pytest.raises(HubUnavailable, match="extracted"):
+        async with prepare(
+            selected, tmp_path, limits=ArchiveLimits(max_extracted_bytes=1)
+        ):
+            pytest.fail("Over-budget candidate was yielded")
+    assert snapshot(tmp_path) == before
     assert set(tmp_path.iterdir()) == entries

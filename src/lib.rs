@@ -4,6 +4,7 @@
 // fires in the proc-macro expansion, not in the function's textual body. Fixed upstream in PyO3 0.23+.
 #![allow(clippy::useless_conversion)]
 mod analytics;
+mod cancellation;
 mod database_coordination;
 mod db;
 mod embed;
@@ -471,6 +472,12 @@ fn chunkhound_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(scan_files, m)?)?;
 
+    m.add_class::<cancellation::PipelineCancellationToken>()?;
+    m.add(
+        "PipelineCancelledError",
+        m.py()
+            .get_type_bound::<cancellation::PipelineCancelledError>(),
+    )?;
     m.add_class::<pipeline::IndexingPipeline>()?;
     m.add_class::<pipeline::PipelineReport>()?;
     m.add_class::<pipeline::ParseCallConfig>()?;

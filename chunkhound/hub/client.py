@@ -126,7 +126,12 @@ async def _pull(config: Config, rel: str, automatic: bool) -> bool:
         selected.version.artifact.bytes,
     )
     state = PreparationState()
-    async with prepare(selected, work_parent=target.parent, state=state) as candidate:
+    async with prepare(
+        selected,
+        work_parent=target.parent,
+        state=state,
+        limits=config.hub.archive_limits,
+    ) as candidate:
 
         def commit() -> bool:
             return install_candidate(

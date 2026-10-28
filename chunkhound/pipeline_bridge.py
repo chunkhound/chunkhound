@@ -5,6 +5,7 @@ existing Python parsing and embedding infrastructure to the contract expected
 by Rust.
 """
 
+import asyncio
 import atexit
 import contextvars
 import functools
@@ -15,7 +16,7 @@ from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from loguru import logger
 
@@ -24,11 +25,9 @@ from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipeline
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.parsers.parser_factory import create_parser_for_language
-from chunkhound.utils.async_worker import await_worker_completion
+from chunkhound.utils.async_worker import WorkerDrain
 
 if TYPE_CHECKING:
-    import asyncio
-
     from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
 @dataclass
@@ -54,62 +53,82 @@ class _EmbedThreadCache:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS = 10.0
-"""Per-provider bound on provider.shutdown() during cleanup -- a hung
-close (e.g. a stuck socket) must not block the whole indexing run."""
+class _CancellationToken(Protocol):
+    def cancel(self) -> None: ...
+    def is_cancelled(self) -> bool: ...
+    @property
+    def cleanup_complete(self) -> bool: ...
 
 
-def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
-    """Close this run's per-thread embedding HTTP clients and event loops.
+def _new_cancellation_token() -> _CancellationToken:
+    from chunkhound_native import PipelineCancellationToken
 
-    ``_embed_batch`` caches one OpenAI/httpx ``AsyncClient`` and one asyncio
-    loop per rayon worker OS thread, in ``cache``. Those clients must be
-    closed on the *same* loop they were bound to, via
-    ``loop.run_until_complete`` -- which requires this thread to have no
-    running loop of its own. The sole caller, ``run_rust_pipeline()``,
-    guarantees that by submitting this to the event loop's executor, off
-    the thread running the caller's event loop.
+    return cast(_CancellationToken, PipelineCancellationToken())
 
-    Each provider's shutdown is individually bounded by
-    ``_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS`` -- a hung close (e.g. a
-    stuck socket) must not block the whole indexing run.
-    """
-    import asyncio
 
+@dataclass
+class RustRunResources:
+    token: _CancellationToken = field(default_factory=_new_cancellation_token)
+    cache: _EmbedThreadCache = field(default_factory=_EmbedThreadCache)
+    drain: WorkerDrain = field(init=False)
+    native_started: bool = False
+    cache_closed: bool = False
+    release_future: asyncio.Future[None] | None = None
+    native_future: asyncio.Future[Any] | None = None
+    cleanup_future: asyncio.Future[None] | None = None
+    reconnect_future: asyncio.Future[None] | None = None
+
+    def __post_init__(self) -> None:
+        self.drain = WorkerDrain(self.token.cancel)
+
+    @property
+    def safe_to_reconnect(self) -> bool:
+        return self.cache_closed and (
+            not self.native_started or bool(self.token.cleanup_complete)
+        )
+
+class RustPipelineCleanupError(RuntimeError):
+    def __init__(self, resources: RustRunResources) -> None:
+        super().__init__("Rust indexing cleanup failed; database remains unavailable")
+        self.resources = resources
+
+
+def _shutdown_embed_thread_resources(cache: _EmbedThreadCache) -> None:
+    failed = False
     with cache.lock:
-        providers = dict(cache.providers)
-        loops = dict(cache.loops)
-        cache.providers.clear()
-        cache.loops.clear()
-
-    for tid, provider in providers.items():
-        loop = loops.pop(tid, None)
+        providers = list(cache.providers.items())
+    for tid, provider in providers:
+        with cache.lock:
+            loop = cache.loops.get(tid)
         if loop is None or loop.is_closed():
+            failed = True
+            logger.error("Embedding cleanup has no usable owner loop")
             continue
         try:
-            loop.run_until_complete(
-                asyncio.wait_for(
-                    provider.shutdown(),
-                    timeout=_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS,
-                )
-            )
-        except asyncio.TimeoutError:
-            logger.debug(
-                "Embedding provider shutdown timed out after {}s for "
-                "thread {}, abandoning it",
-                _EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS,
-                tid,
-            )
-        except Exception as e:
-            logger.debug(
-                "Embedding provider shutdown failed for thread {}: {}", tid, e
-            )
-        if not loop.is_closed():
+            loop.run_until_complete(provider.shutdown())
             loop.close()
-
-    for loop in loops.values():
-        if not loop.is_closed():
-            loop.close()
+        except BaseException as error:
+            failed = True
+            logger.error("Embedding cleanup failed: {}", type(error).__name__)
+        else:
+            with cache.lock:
+                cache.providers.pop(tid, None)
+                cache.loops.pop(tid, None)
+    with cache.lock:
+        unused = [(tid, loop) for tid, loop in cache.loops.items()
+                  if tid not in cache.providers]
+    for tid, loop in unused:
+        try:
+            if not loop.is_closed():
+                loop.close()
+        except BaseException as error:
+            failed = True
+            logger.error("Embedding loop cleanup failed: {}", type(error).__name__)
+        else:
+            with cache.lock:
+                cache.loops.pop(tid, None)
+    if failed:
+        raise RuntimeError("Embedding resource cleanup incomplete")
 
 
 _parse_pool: ProcessPoolExecutor | None = None
@@ -680,7 +699,7 @@ def _cfg_or(obj: Any, attr: str, default: _T, cast: Callable[[Any], _T]) -> _T:
     return cast(value)
 
 
-async def run_rust_pipeline(
+async def _run_rust_pipeline_body(
     files_to_process: list[tuple[Path, str | None]],
     *,
     db_path: Path,
@@ -690,6 +709,7 @@ async def run_rust_pipeline(
     do_cleanup: bool = True,
     config: Any = None,
     progress_callback: Any = None,
+    _resources: RustRunResources,
 ) -> dict[str, Any]:
     """Run the Rust indexing pipeline and return coordinator-compatible stats.
 
@@ -713,14 +733,13 @@ async def run_rust_pipeline(
         ``{"total_files": int, "total_chunks": int, "embeddings_generated": int,
            "elapsed_secs": float, "errors": list[dict]}``
     """
-    import asyncio
-
     from chunkhound_native import (
         DatabaseBusyError,
         DatabaseFilesystemError,
         DatabaseInterruptedError,
         DatabaseLayoutError,
         IndexingPipeline,
+        PipelineCancelledError,
     )
 
     # Resolved here, on the calling task's own thread, before anything hands
@@ -871,7 +890,7 @@ async def run_rust_pipeline(
     # Own cache for this run's embed provider/loop-per-thread state — never
     # shared with any other concurrent or past run_rust_pipeline() call. See
     # _EmbedThreadCache's docstring for why that isolation matters.
-    embed_cache = _EmbedThreadCache()
+    embed_cache = _resources.cache
 
     # Preserve typed coordination failures from construction and pipeline.run().
     # Wrap other failures so callers can distinguish native pipeline failures
@@ -887,6 +906,7 @@ async def run_rust_pipeline(
             contextvars.copy_context().run,
             functools.partial(
                 pipeline.run,
+                cancellation_token=_resources.token,
                 files=file_entries,
                 parse_batch_callback=functools.partial(
                     parse_batch_callback, index_unknown_files=_index_unknown
@@ -916,30 +936,19 @@ async def run_rust_pipeline(
                 ),
             )
         )
-        report = await await_worker_completion(worker)
+        _resources.native_future = worker
+        _resources.native_started = True
+        report = await _resources.drain.wait(worker)
     except (
         DatabaseBusyError,
         DatabaseInterruptedError,
         DatabaseLayoutError,
         DatabaseFilesystemError,
+        PipelineCancelledError,
     ):
         raise
     except Exception as e:
         raise RustPipelineError(reason=str(e)) from e
-    finally:
-        # Close this run's own per-thread httpx clients before the process
-        # event loop is torn down. Must not call loop.run_until_complete on
-        # this thread (the CLI loop is still running). See
-        # _shutdown_embed_thread_resources. Passing embed_cache (rather than
-        # a shared/global cache) ensures this can never close a
-        # concurrently-running sibling run's providers/loops.
-        cleanup = asyncio.get_running_loop().run_in_executor(
-            None,
-            contextvars.copy_context().run,
-            _shutdown_embed_thread_resources,
-            embed_cache,
-        )
-        await await_worker_completion(cleanup)
 
     # Map PipelineReport → coordinator stats dict.
     # `report.errors` entries are Rust-formatted as "{path}: {message}"
@@ -984,3 +993,54 @@ async def run_rust_pipeline(
         "skipped_paths": list(getattr(report, "skipped_paths", None) or []),
         "errors": errors,
     }
+
+
+async def run_rust_pipeline(
+    files_to_process: list[tuple[Path, str | None]], *, db_path: Path,
+    project_root: Path, force_reindex: bool = False, skip_embeddings: bool = False,
+    do_cleanup: bool = True, config: Any = None, progress_callback: Any = None,
+    _resources: RustRunResources | None = None,
+) -> dict[str, Any]:
+    from chunkhound_native import PipelineCancelledError
+
+    owned = _resources is None
+    resources = _resources if _resources is not None else RustRunResources()
+    error: BaseException | None = None
+    result: dict[str, Any] = {}
+    try:
+        if not resources.token.is_cancelled():
+            result = await _run_rust_pipeline_body(
+                files_to_process, db_path=db_path, project_root=project_root,
+                force_reindex=force_reindex, skip_embeddings=skip_embeddings,
+                do_cleanup=do_cleanup, config=config, progress_callback=progress_callback,
+                _resources=resources,
+            )
+    except BaseException as caught:
+        error = caught
+    finally:
+        try:
+            cleanup = asyncio.get_running_loop().run_in_executor(
+                None, contextvars.copy_context().run,
+                _shutdown_embed_thread_resources, resources.cache,
+            )
+            resources.cleanup_future = cleanup
+            await resources.drain.wait(cleanup)
+            resources.cache_closed = True
+        except BaseException as cleanup_error:
+            logger.error("Rust resource cleanup failed: {}", type(cleanup_error).__name__)
+            error = RustPipelineCleanupError(resources)
+    if not resources.safe_to_reconnect:
+        error = RustPipelineCleanupError(resources)
+    if isinstance(error, PipelineCancelledError) and resources.token.is_cancelled():
+        if resources.drain.cancellation is None:
+            resources.drain.cancellation = asyncio.CancelledError()
+        error = None
+    if owned:
+        # Direct callers have no provider retaining failed resources. Attach them
+        # to the delivered cancellation too, rather than discarding that owner.
+        if resources.drain.cancellation is not None and not resources.safe_to_reconnect:
+            setattr(resources.drain.cancellation, "resources", resources)
+        resources.drain.finish(error)
+    elif error is not None:
+        raise error
+    return result

@@ -11,7 +11,10 @@ import sys
 import textwrap
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
+import duckdb
 import pytest
 
 import chunkhound_native as native
@@ -210,7 +213,7 @@ async def test_native_cancellation_drains_before_reconnect(
         with pytest.raises(asyncio.CancelledError):
             await task
         assert provider.is_connected and not provider.is_rust_pipeline_in_progress()
-        assert provider.get_stats()["files"] == 1
+        assert provider.get_stats()["files"] == (0 if paused_stage == "parse" else 1)
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
@@ -315,7 +318,7 @@ def test_asyncio_shutdown_drains_native_handoff_before_reconnect(
         assert cleanup_states == [True]
         assert handoff_states == [(True, True, True)]
         assert provider.is_connected and not provider.is_rust_pipeline_in_progress()
-        assert provider.get_stats()["files"] == 1
+        assert provider.get_stats()["files"] == (0 if paused_stage == "parse" else 1)
     finally:
         release.set()
         resource_loop.close()
@@ -364,6 +367,630 @@ async def test_native_progress_and_resource_shutdown_keep_caller_context(
         request.reset(token)
     assert result["total_files"] == 1
     assert observed == {"progress": "caller-request", "shutdown": "caller-request"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,fail", [
+    ("release", False), ("reconnect", False), ("reconnect", True),
+])
+async def test_handoff_reconnect_are_responsive_guarded_and_drained(
+    tmp_path, monkeypatch, stage, fail
+):
+    from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
+
+    path = tmp_path / "chunks.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    provider.ensure_indexed_root_identity(
+        requested_root=tmp_path, allow_claim_if_missing=True
+    )
+    source = tmp_path / "example.py"
+    source.write_text("def example():\n    return 42\n")
+    manager = provider.connection
+    sidecar = Path(str(path) + ".root.json")
+    started, release, watchdog_fired = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    real_close = duckdb.DuckDBPyConnection.close
+    real_read_text = Path.read_text
+
+    def pause():
+        started.set()
+        assert release.wait(20)
+
+    def paused_close(connection):
+        if stage == "release" and connection is manager and not started.is_set():
+            pause()
+        return real_close(connection)
+
+    def paused_read_text(file, *args, **kwargs):
+        if stage == "reconnect" and file == sidecar and not started.is_set():
+            pause()
+            if fail:
+                raise OSError("reconnect filesystem unavailable")
+        return real_read_text(file, *args, **kwargs)
+
+    def unblock_baseline():
+        watchdog_fired.set()
+        release.set()
+
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", paused_close)
+    monkeypatch.setattr(Path, "read_text", paused_read_text)
+    # A real thread watchdog unblocks the synchronous baseline even if its
+    # event loop cannot service an asyncio timeout. Not a latency SLA.
+    watchdog = threading.Timer(15, unblock_baseline)
+    watchdog.start()
+    task = asyncio.create_task(run_rust_indexing_phase(
+        db=provider, config=None, embedding_provider=None, progress=None,
+        files_to_process=[(source, None)], directory=tmp_path,
+        force_reindex=True, do_cleanup=True, diff_task=None, parse_task=None,
+    ))
+    heartbeats = 0
+    try:
+        assert await asyncio.to_thread(started.wait, 20)
+        assert not watchdog_fired.is_set(), "blocking lifecycle starved event loop"
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0.01)
+            heartbeats += 1
+            assert not release.is_set() and not task.done()
+            assert provider.is_rust_pipeline_in_progress()
+            with pytest.raises(DatabaseRustPipelineInProgressError):
+                provider.execute_query("SELECT 1")
+            with pytest.raises(DatabaseRustPipelineInProgressError):
+                provider.connect()
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        assert heartbeats == 3 and not watchdog_fired.is_set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert provider.is_rust_pipeline_in_progress() is fail
+        if fail:
+            assert provider._rust_pipeline_cleanup is not None
+            with pytest.raises(DatabaseRustPipelineInProgressError):
+                provider.execute_query("SELECT 1")
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        else:
+            assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+            assert provider.get_stats()["files"] == (0 if stage == "release" else 1)
+    finally:
+        release.set()
+        watchdog.cancel()
+        watchdog.join(timeout=5)
+        await asyncio.gather(task, return_exceptions=True)
+        provider.set_rust_pipeline_in_progress(False)  # explicit teardown after joins
+        provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()
+
+
+@pytest.mark.asyncio
+async def test_failed_client_cleanup_retains_unavailable_provider_after_cancel(
+    tmp_path, monkeypatch
+):
+    import chunkhound.pipeline_bridge as bridge
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+    from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
+
+    path = tmp_path / "chunks.db"
+    provider = None
+    tasks, observed, exception_resources = [], [], []
+    entered, release, watchdog_fired = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    watchdog = None
+    fail = True
+
+    class EmbeddingConfig:
+        provider = "contract-callback"
+        model = "fixture"
+        batch_size = 100
+        max_concurrent_batches = 1
+
+        def model_copy(self, *, update):
+            return self
+
+    class Client:
+        closed = False
+
+        async def embed(self, texts):
+            observed.append((self, asyncio.get_running_loop()))
+            return [[1.0, 2.0, 3.0] for _ in texts]
+
+        async def shutdown(self):
+            assert (self, asyncio.get_running_loop()) in observed
+            entered.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            if fail:
+                raise OSError("external client close failed")
+            self.closed = True
+
+    def unblock():
+        watchdog_fired.set()
+        release.set()
+
+    async def own(**kwargs):
+        try:
+            return await run_rust_indexing_phase(**kwargs)
+        except BaseException as error:
+            # Observe Task 2's direct-bridge attachment before Task cancellation
+            # wrappers can discard it; never inject a replacement resource owner.
+            resources = getattr(error, "resources", None)
+            if resources is not None:
+                exception_resources.append(resources)
+            raise
+
+    try:
+        provider = DuckDBProvider(path, base_directory=tmp_path)
+        provider.connect()
+        source = tmp_path / "example.py"
+        source.write_text("def example():\n    return 1\n")
+        monkeypatch.setattr(
+            EmbeddingProviderFactory, "create_provider",
+            staticmethod(lambda config: Client()),
+        )
+        config = SimpleNamespace(
+            embedding=EmbeddingConfig(), embeddings_disabled=False,
+            indexing=SimpleNamespace(max_concurrent=1),
+            database=SimpleNamespace(fragmentation_threshold_pct=None),
+        )
+        watchdog = threading.Timer(40, unblock)
+        watchdog.start()
+        task = asyncio.create_task(own(
+            db=provider, config=config, embedding_provider=Client(), progress=None,
+            files_to_process=[(source, None)], directory=tmp_path,
+            force_reindex=True, do_cleanup=True, diff_task=None, parse_task=None,
+        ))
+        tasks.append(task)
+        assert await asyncio.to_thread(entered.wait, 20)
+        assert not watchdog_fired.is_set(), "watchdog escape is not behavioral RED"
+        assert len(set(observed)) == 1
+        client, owner_loop = observed[0]
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0.01)
+            assert not release.is_set() and not task.done()
+            assert provider.is_rust_pipeline_in_progress()
+            assert not client.closed and not owner_loop.is_closed()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not watchdog_fired.is_set()
+        # Public behavior MUST precede optional Task 3 resource-slot assertions:
+        # the retrospective Task 2 baseline falsely reconnects here.
+        assert provider.is_rust_pipeline_in_progress() and not provider.is_connected
+        with pytest.raises(DatabaseRustPipelineInProgressError):
+            provider.execute_query("SELECT 1")
+        with pytest.raises(DatabaseRustPipelineInProgressError):
+            provider.connect()
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        assert not client.closed and not owner_loop.is_closed()
+        resources = getattr(provider, "_rust_pipeline_cleanup", None)
+        assert resources is not None
+        assert client in resources.cache.providers.values()
+        assert owner_loop in resources.cache.loops.values()
+        assert not resources.cache_closed
+        assert resources.native_future.done() and resources.token.cleanup_complete
+        assert resources.cleanup_future.done()
+    finally:
+        release.set()
+        if watchdog is not None:
+            watchdog.cancel()
+            if watchdog.ident is not None:
+                watchdog.join(timeout=5)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        fail = False  # Explicit recovery only after every owner task has drained.
+        resources = getattr(provider, "_rust_pipeline_cleanup", None)
+        if resources is None and exception_resources:
+            resources = exception_resources[0]
+        recovered = False
+        try:
+            if resources is not None:
+                for future in (resources.native_future, resources.cleanup_future):
+                    assert future is None or future.done()
+                assert not resources.native_started or resources.token.cleanup_complete
+                await asyncio.to_thread(
+                    bridge._shutdown_embed_thread_resources, resources.cache
+                )
+                assert not resources.cache.providers and not resources.cache.loops
+            else:
+                # Setup-only fallback: never close a loop with active work.
+                shutdown_entered = entered.is_set()
+
+                def recover_observed():
+                    for client, loop in set(observed):
+                        if not loop.is_closed():
+                            assert not loop.is_running()
+                            loop.run_until_complete(client.shutdown())
+                            loop.close()
+
+                await asyncio.to_thread(recover_observed)
+                assert not shutdown_entered, "failed shutdown lost its resource owner"
+            assert all(c.closed and loop.is_closed() for c, loop in observed)
+            recovered = True
+        finally:
+            if recovered and provider is not None:
+                if hasattr(provider, "_rust_pipeline_cleanup"):
+                    provider._rust_pipeline_cleanup = None
+                provider.set_rust_pipeline_in_progress(False)
+                provider.close()
+                native.acquire_install_lease(str(path), "duckdb").close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_indexing_scope_cannot_take_active_owner(tmp_path, monkeypatch):
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+    from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
+
+    path = tmp_path / "chunks.db"
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    closing, resume_close, closed = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    watchdog_fired = threading.Event()
+    owner_loops = []
+    tasks = []
+
+    class EmbeddingConfig:
+        provider = "contract-callback"
+        model = "fixture"
+        batch_size = 100
+        max_concurrent_batches = 1
+
+        def model_copy(self, *, update):
+            return self
+
+    class Client:
+        async def embed(self, texts):
+            owner_loops.append(asyncio.get_running_loop())
+            return [[1.0, 2.0, 3.0] for _ in texts]
+
+        async def shutdown(self):
+            assert asyncio.get_running_loop() is owner_loops[0]
+            closing.set()
+            while not resume_close.is_set():
+                await asyncio.sleep(0.01)
+            closed.set()
+
+    def unblock_baseline():
+        watchdog_fired.set()
+        resume_close.set()
+
+    watchdog = threading.Timer(40, unblock_baseline)
+    try:
+        provider.connect()
+        source = tmp_path / "example.py"
+        source.write_text("def example():\n    return 42\n")
+        client = Client()
+        monkeypatch.setattr(
+            EmbeddingProviderFactory,
+            "create_provider",
+            staticmethod(lambda config: client),
+        )
+        config = SimpleNamespace(
+            embedding=EmbeddingConfig(), embeddings_disabled=False,
+            indexing=SimpleNamespace(max_concurrent=1),
+            database=SimpleNamespace(fragmentation_threshold_pct=None),
+        )
+        watchdog.start()
+        first = asyncio.create_task(run_rust_indexing_phase(
+            db=provider, config=config, embedding_provider=client, progress=None,
+            files_to_process=[(source, None)], directory=tmp_path,
+            force_reindex=True, do_cleanup=True, diff_task=None, parse_task=None,
+        ))
+        tasks.append(first)
+        assert await asyncio.to_thread(closing.wait, 20)
+        assert not watchdog_fired.is_set()
+        assert not first.done() and provider.is_rust_pipeline_in_progress()
+        assert not closed.is_set() and not owner_loops[0].is_closed()
+        # Shutdown begins only after the actual native worker has joined.
+        # The baseline has no provider resource slot; admission must fail first.
+        resources = getattr(provider, "_rust_pipeline_cleanup", None)
+        second = asyncio.create_task(run_rust_indexing_phase(
+            db=provider, config=config, embedding_provider=None, progress=None,
+            files_to_process=[], directory=tmp_path,
+            force_reindex=True, do_cleanup=False, diff_task=None, parse_task=None,
+        ))
+        tasks.append(second)
+        done, _ = await asyncio.wait({second}, timeout=10)
+        assert not watchdog_fired.is_set(), "watchdog release is not admission RED"
+        assert second in done, "duplicate scope did not finish bounded observation"
+        with pytest.raises(DatabaseRustPipelineInProgressError):
+            second.result()
+        assert not first.done() and provider.is_rust_pipeline_in_progress()
+        assert not closed.is_set() and not owner_loops[0].is_closed()
+        if hasattr(provider, "_rust_pipeline_cleanup"):
+            assert resources is not None
+            assert provider._rust_pipeline_cleanup is resources
+            assert resources.native_future.done() and resources.token.cleanup_complete
+            assert resources.cache.providers and not resources.cache_closed
+        with pytest.raises(DatabaseRustPipelineInProgressError):
+            provider.execute_query("SELECT 1")
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        assert not watchdog_fired.is_set()
+    finally:
+        resume_close.set()
+        watchdog.cancel()
+        if watchdog.ident is not None:
+            watchdog.join(timeout=5)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_indexing_refuses_while_reconnect_reads_sidecar(
+    tmp_path, monkeypatch
+):
+    from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
+
+    path = tmp_path / "chunks.db"
+    sidecar = Path(str(path) + ".root.json")
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    entered, release, watchdog_fired = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    original_read_text = Path.read_text
+    tasks = []
+    config = SimpleNamespace(
+        embedding=None, embeddings_disabled=True,
+        indexing=SimpleNamespace(max_concurrent=1),
+        database=SimpleNamespace(fragmentation_threshold_pct=None),
+    )
+
+    def paused_read_text(self, *args, **kwargs):
+        if (
+            self == sidecar
+            and provider.is_rust_pipeline_in_progress()
+            and not provider.is_connected
+        ):
+            # This is trusted reconnect, not initial connection/preparation:
+            # native execution and client cleanup have already completed.
+            resources = provider._rust_pipeline_cleanup
+            assert resources.native_started and resources.native_future.done()
+            assert resources.token.cleanup_complete and resources.safe_to_reconnect
+            entered.set()
+            assert release.wait(20), "sidecar read was not released"
+        return original_read_text(self, *args, **kwargs)
+
+    def unblock_baseline():
+        watchdog_fired.set()
+        release.set()
+
+    watchdog = threading.Timer(10, unblock_baseline)
+
+    def start_run():
+        task = asyncio.create_task(run_rust_indexing_phase(
+            db=provider, config=config, embedding_provider=None, progress=None,
+            files_to_process=[], directory=tmp_path, force_reindex=True,
+            do_cleanup=False, diff_task=None, parse_task=None,
+        ))
+        tasks.append(task)
+        return task
+
+    try:
+        provider.connect()
+        # Initial connection defers legacy migration; claim through the real
+        # public filesystem contract before installing the read boundary.
+        provider.ensure_indexed_root_identity(
+            requested_root=tmp_path, allow_claim_if_missing=True
+        )
+        assert sidecar.is_file()
+        monkeypatch.setattr(Path, "read_text", paused_read_text)
+        first = start_run()
+        assert await asyncio.to_thread(entered.wait, 10)
+        assert not first.done() and provider.is_rust_pipeline_in_progress()
+        resources = provider._rust_pipeline_cleanup
+        acquired = provider._ownership_lock.acquire(blocking=False)
+        if acquired:
+            provider._ownership_lock.release()
+        assert not acquired, "reconnect sidecar read must hold the ownership mutex"
+        watchdog.start()
+        second = start_run()
+        done, _ = await asyncio.wait({second}, timeout=5)
+        assert not watchdog_fired.is_set(), (
+            "watchdog release is not loop responsiveness"
+        )
+        assert second in done
+        with pytest.raises(DatabaseRustPipelineInProgressError):
+            second.result()
+        await asyncio.sleep(0)
+        assert not first.done() and provider.is_rust_pipeline_in_progress()
+        assert provider._rust_pipeline_cleanup is resources
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(path), "duckdb")
+        release.set()
+        await first
+        assert provider.is_connected and not provider.is_rust_pipeline_in_progress()
+    finally:
+        release.set()
+        watchdog.cancel()
+        if watchdog.ident is not None:
+            watchdog.join(timeout=5)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()
+
+
+@pytest.mark.asyncio
+async def test_direct_cleanup_failure_preserves_cancellation_and_resources(tmp_path, monkeypatch):
+    import chunkhound.pipeline_bridge as bridge
+    entered, release = threading.Event(), threading.Event()
+    resources = bridge.RustRunResources()
+    loop = asyncio.new_event_loop()
+    class Client:
+        async def shutdown(self):
+            entered.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            raise OSError("external close failure")
+    resources.cache.providers[1] = Client()
+    resources.cache.loops[1] = loop
+    # Supply the pre-seeded per-run resource only at construction; exercise
+    # the public direct caller path (owned=True), including error attachment.
+    monkeypatch.setattr(bridge, "RustRunResources", lambda: resources)
+    task = asyncio.create_task(bridge.run_rust_pipeline(
+        [], db_path=tmp_path, project_root=tmp_path, skip_embeddings=True,
+    ))
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+        assert caught.value.resources is resources
+        assert not loop.is_closed() and resources.cache.providers
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_callback_failure_cannot_abandon_running_worker(tmp_path):
+    from chunkhound.utils.async_worker import WorkerDrain
+
+    path = tmp_path / "chunks.db"
+    lease = native.acquire_database_lease(str(path))
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def work():
+        entered.set()
+        try:
+            assert release.wait(20)
+            return 42
+        finally:
+            finished.set()
+
+    def broken_stop():
+        raise OSError("stop notification failed")
+
+    async def own():
+        drain = WorkerDrain(broken_stop)
+        future = asyncio.get_running_loop().run_in_executor(None, work)
+        try:
+            result = await drain.wait(future)
+        except BaseException as error:
+            drain.finish(error)
+            raise
+        drain.finish()
+        return result
+
+    task = asyncio.create_task(own())
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0.01)
+            assert not task.done() and not finished.is_set()
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(path), "duckdb")
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        lease.close()
+
+
+@pytest.mark.asyncio
+async def test_actual_native_callback_cancel_keeps_owner_through_client_close(
+    tmp_path, monkeypatch
+):
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+    from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
+
+    path = tmp_path / "chunks.db"
+    source = tmp_path / "example.py"
+    source.write_text("def example():\n    return 42\n")
+    provider = DuckDBProvider(path, base_directory=tmp_path)
+    provider.connect()
+    entered, resume_embed = threading.Event(), threading.Event()
+    closing, resume_close = threading.Event(), threading.Event()
+    closed = threading.Event()
+    owner_loops = []
+
+    class EmbeddingConfig:
+        provider = "contract-callback"
+        model = "fixture"
+        batch_size = 100
+        max_concurrent_batches = 1
+
+        def model_copy(self, *, update):
+            return self
+
+    class Client:
+        async def embed(self, texts):
+            owner_loops.append(asyncio.get_running_loop())
+            entered.set()
+            while not resume_embed.is_set():
+                await asyncio.sleep(0.01)
+            return [[1.0, 2.0, 3.0] for _ in texts]
+
+        async def shutdown(self):
+            assert asyncio.get_running_loop() is owner_loops[0]
+            closing.set()
+            while not resume_close.is_set():
+                await asyncio.sleep(0.01)
+            closed.set()
+
+    client = Client()
+    monkeypatch.setattr(
+        EmbeddingProviderFactory, "create_provider", staticmethod(lambda config: client)
+    )
+    config = SimpleNamespace(
+        embedding=EmbeddingConfig(), embeddings_disabled=False,
+        indexing=SimpleNamespace(max_concurrent=1),
+        database=SimpleNamespace(fragmentation_threshold_pct=None),
+    )
+    task = asyncio.create_task(run_rust_indexing_phase(
+        db=provider, config=config, embedding_provider=client, progress=None,
+        files_to_process=[(source, None)], directory=tmp_path,
+        force_reindex=True, do_cleanup=True, diff_task=None, parse_task=None,
+    ))
+    beats = 0
+    try:
+        assert await asyncio.to_thread(entered.wait, 20)
+        assert provider.is_rust_pipeline_in_progress() and not task.done()
+        for phase in ("native-callback", "client-close"):
+            if phase == "client-close":
+                resume_embed.set()
+                assert await asyncio.to_thread(closing.wait, 20)
+            for _ in range(3):
+                task.cancel()
+                await asyncio.sleep(0.01)
+                beats += 1
+                assert not task.done() and not closed.is_set()
+                assert provider.is_rust_pipeline_in_progress()
+                assert not provider.is_connected
+                assert owner_loops and not owner_loops[0].is_closed()
+                with pytest.raises(DatabaseRustPipelineInProgressError):
+                    provider.execute_query("SELECT 1")
+                with pytest.raises(native.DatabaseBusyError):
+                    native.acquire_install_lease(str(path), "duckdb")
+        assert beats == 6
+        resume_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set() and owner_loops[0].is_closed()
+        assert provider.is_connected and not provider.is_rust_pipeline_in_progress()
+        assert provider.get_stats()["files"] == 0
+        assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+    finally:
+        resume_embed.set()
+        resume_close.set()
+        await asyncio.gather(task, return_exceptions=True)
+        provider.close()
+    native.acquire_install_lease(str(path), "duckdb").close()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="SIGKILL owner/child contract")

@@ -139,8 +139,10 @@ Global defaults let you maintain shared settings (e.g. embedding provider + API 
 Configure a full manifest URL in `hub.url` or `CHUNKHOUND_HUB__URL` to use a
 trusted organization-operated base index. `chunkhound pull [path] --version
 latest|-1|-2` explicitly downloads, verifies and installs the selected compatible
-base; it installs only. A subsequent `chunkhound index [path]` overlays local
-changes.
+base; it installs only. A subsequent `chunkhound index [path]` overlays changed,
+new and deleted local files while retaining unchanged base content. Both DuckDB
+and LanceDB support this workflow. DuckDB is recommended; LanceDB remains
+experimental and uses the Python indexing pipeline even when Rust is enabled.
 
 With a hub configured and a usable embedding identity, normal `chunkhound index`
 may automatically download and replace an absent or embedding-misaligned local
@@ -149,37 +151,97 @@ search, simulation, ignore checking and no-embeddings indexing never initiate
 pulls. Configuring a URL does not itself perform a download, but it **enables
 this automatic replacement on a later normal index command**.
 
-**Replacement can discard local index work and require re-indexing.** DuckDB is
-the operational pull-then-overlay backend. LanceDB overlay is
-nonoperational/deferred because changed-file updates can leave stale chunks
-searchable; its ownership, installation, no-pull and interruption/recovery
-contracts remain supported. Format/checksum validation does not establish
-publisher content freshness, and re-pulling an arbitrary validated base is not
-a repair for stale LanceDB data.
+**Replacement can discard local index work and require re-indexing.** Format
+and checksum validation do not establish publisher content freshness. Pull
+alone does not reconcile a base with your checkout or repair arbitrary stale
+publisher rows; ordinary indexing performs the local overlay.
+
+```json
+{
+  "hub": {
+    "url": "https://hub.internal/catalogue?branch=main",
+    "archive_limits": {
+      "max_members": 100000,
+      "max_path_depth": 32,
+      "max_path_bytes": 4096,
+      "max_total_path_bytes": 33554432,
+      "max_extracted_bytes": 34359738368,
+      "max_decompressed_bytes": 42949672960
+    }
+  }
+}
+```
+
+The shown archive limits are defaults, not measured production thresholds.
+Each value must be a positive finite integer; booleans, fractions, zero,
+negative values, `null` and unlimited sentinels are rejected. `max_members`
+bounds physical tar headers (including extension headers) and separately
+retained paths (including implicit parents). Path depth includes the database
+root; path bytes use UTF-8. The aggregate path budget charges original and
+casefolded unique prefixes. The 32 GiB payload limit counts effective regular
+file sizes; the 40 GiB decompressed limit counts all gzip output, including
+metadata, padding, read-ahead and trailing/concatenated output. Larger legitimate
+indexes require larger explicit limits. Metadata guards and the fixed maximum
+of 32 consecutive extension headers still apply.
+
+Environment names are `CHUNKHOUND_HUB__ARCHIVE_LIMITS__` plus the uppercase field,
+for example `CHUNKHOUND_HUB__ARCHIVE_LIMITS__MAX_MEMBERS=200000`. Usual config
+precedence applies: explicit/project/global config can override environment
+values. Limits are client configuration, not administrator-enforced policy;
+there are no archive-limit CLI flags. Exceeding a limit refuses activation and
+preserves the installed database. Live free-space and CRC checks remain active.
+
+Publish gzip-compressed USTAR, GNU or PAX tar archives with one backend root:
+regular file `chunks.db` or directory `lancedb.lancedb`. Ordinary `0755`
+directories and `0644` regular files work; special permission bits, executable
+regular files, links, sparse members and unsafe/conflicting paths are refused.
+Implicit parents and high compression are supported within the limits, without
+a compression-ratio heuristic. Publisher ownership/modes/timestamps are not
+applied. Package a consistent, closed database without WAL or publisher sidecars.
+Manifest v2 is unchanged; extraction budgets do not add a separate compressed
+transfer ceiling.
+
+Organizations choose **HTTP or HTTPS in the URL**, with no extra opt-in setting
+or hub authentication configuration. HTTP supports non-loopback hosts as well
+as `localhost`. The same policy applies independently to each full `artifact.url`
+supplied by a v2 manifest. ChunkHound does not append `/manifest.json` or
+construct artifact URLs relative to the manifest.
+
+HTTPS certificate and hostname verification stay enabled. HTTP-to-HTTP,
+HTTP-to-HTTPS and HTTPS-to-HTTPS redirects are allowed; HTTPS-to-HTTP redirects
+are rejected before the downgraded request, including after an earlier
+HTTP-to-HTTPS upgrade. Malformed URLs, userinfo (`user:password@host`) and
+non-HTTP(S) schemes are rejected. Bounded retries, byte-count and checksum
+verification, and disk-space checks apply to both schemes.
+
+**HTTP provides no protection against network interception or tampering.** A
+checksum delivered through the same untrusted connection does not authenticate
+an artifact. Use HTTPS when that protection is required. Hub URLs may be
+committed in project configuration, unlike the operator-owned
+[remote configuration](#remote-configuration) settings; the remote-config
+transport and scrub policies are unchanged. Do not commit secrets in URLs.
+
+Ordinary encoded paths and query strings are preserved, but standard HTTP
+client path normalization still applies (including literal dot segments).
+Hub-owned errors omit URLs, response bodies and raw transport exception text.
+Default httpx/httpcore diagnostics are suppressed, but explicitly enabling DEBUG
+on their child loggers may expose response headers or redirect URLs; complete
+secret exclusion from third-party debug logs is not guaranteed.
 
 If installation is interrupted, ordinary opens and automatic indexing refuse
 mixed state. Stop database users, then use explicit `chunkhound pull [path]` to
 download and verify a fresh recovery candidate; local work may need re-indexing.
 Do not delete coordination files or restore arbitrary quarantine contents.
+Unknown/uninspectable DuckDB WALs fail closed for both read-only and writable
+opens: provision compatible local VSS explicitly, preserve the originals and
+recover a copy or restore a known-good complete index. Writable reopen is not a
+bypass. Incompatible recognized backups can block opening a healthy live file;
+do not delete them or restore them blindly. Never attach an old WAL to a new base.
+
 See [Hub client operation and recovery](https://github.com/chunkhound/chunkhound/blob/main/docs/hub-client.md)
-for directory-layout, cooperative-locking, recovery and platform limitations.
-There is no atomic multi-file or power-loss rollback guarantee.
-
-```json
-{
-  "hub": {
-    "url": "https://hub.internal/catalogue?branch=main"
-  }
-}
-```
-
-Organizations choose **HTTP or HTTPS in the URL**, with no extra opt-in setting or hub authentication configuration. HTTP supports non-loopback hosts as well as `localhost`. The same policy applies independently to each full `artifact.url` supplied by a v2 manifest. ChunkHound does not append `/manifest.json` or construct artifact URLs relative to the manifest.
-
-HTTPS certificate and hostname verification stay enabled. HTTP-to-HTTP, HTTP-to-HTTPS, and HTTPS-to-HTTPS redirects are allowed; HTTPS-to-HTTP redirects are rejected before the downgraded request, including after an earlier HTTP-to-HTTPS upgrade. Malformed URLs, userinfo (`user:password@host`), and non-HTTP(S) schemes are rejected. Bounded retries, byte-count and checksum verification, and disk-space checks apply to both schemes.
-
-**HTTP provides no protection against network interception or tampering.** A checksum delivered through the same untrusted connection does not authenticate an artifact. Use HTTPS when that protection is required. Hub URLs may be committed in project configuration, unlike the operator-owned [remote configuration](#remote-configuration) settings; the remote-config transport and scrub policies are unchanged. Do not commit secrets in URLs.
-
-Ordinary encoded paths and query strings are preserved, but standard HTTP client path normalization still applies (including literal dot segments). Hub-owned errors omit URLs, response bodies, and raw transport exception text. Default httpx/httpcore diagnostics are suppressed, but explicitly enabling DEBUG on their child loggers may expose response headers or redirect URLs; complete secret exclusion from third-party debug logs is not guaranteed.
+for complete packaging, directory-layout, cooperative-locking, VSS provisioning,
+backup/recovery, spawn and cancellation requirements. There is no atomic
+multi-file or power-loss rollback guarantee.
 
 ## Remote Configuration
 
@@ -528,6 +590,31 @@ DuckDB compaction rebuilds a fresh canonical ChunkHound database file and swaps 
 | `per_file_timeout_min_size_kb` | `number` | `128` | Only apply per-file timeout to files at least this large (KB) |
 
 By default, ChunkHound excludes common noise directories (`node_modules`, `dist`, `__pycache__`, `.git`, lock files, build artifacts). Set `exclude_mode: "config_only"` and `exclude: []` to start with a clean slate.
+
+### Worker start method and cancellation
+
+ChunkHound parser pools explicitly use multiprocessing `spawn`, without
+changing the process-global start method. `CHUNKHOUND_MP_START_METHOD` is no
+longer honored; remove it from deployment configuration. A `fork` override is
+not supported because inherited database ownership descriptors can outlive the
+parent and block installation. Embedded applications must use a spawn-safe
+entry point, including the usual `if __name__ == "__main__":` startup guard.
+
+Cancellation is cooperative and may wait for safe cleanup. Blocking handoff
+and reconnect work are offloaded; all native pipeline stages must join and
+their database-use handles close before reconnection and release of
+ownership/guards. This is not proof that every idle OS worker has exited or
+every safely retained old handle has finalized. An admitted replacement write
+window finishes its required writes; cancellation is not transactional rollback
+and completed writes may remain visible. Repeated cancellation does not skip
+drainage. Cleanup failure leaves the database explicitly unavailable rather
+than claiming recovery.
+
+There is no hard completion deadline for already-running database/network/file
+operations or Python callbacks. Python embedding callbacks already entered may
+drain internal retries, and an arbitrary callback monopolizing the GIL can delay
+the event loop despite offloading. There is no forced worker termination or
+prompt return with detached background cleanup.
 
 ### Exclude Modes
 

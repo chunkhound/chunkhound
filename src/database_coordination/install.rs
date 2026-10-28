@@ -96,6 +96,11 @@ pub(super) fn install_with(
             "candidate must be a separate private database",
         ));
     }
+    if backend == Backend::DuckDb && metadata_optional(&sibling(&candidate, ".wal"))?.is_some() {
+        return Err(LeaseError::Layout(
+            "DuckDB candidate has an adjacent WAL entry",
+        ));
+    }
     let marker = sibling(target, ".chunkhound-install.json");
     if let Some(metadata) = metadata_optional(&marker)? {
         if !metadata.is_file() || metadata.file_type().is_symlink() {

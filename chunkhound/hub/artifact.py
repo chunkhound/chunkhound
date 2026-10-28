@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from threading import RLock
+from typing import Protocol
 
 from loguru import logger
 
+from chunkhound.core.config.hub_config import ArchiveLimits
 from chunkhound.core.embedding_model_drift import resolve_indexed_model
 from chunkhound.hub.errors import (
     HubDatabaseMismatch,
@@ -30,7 +32,35 @@ _DEVICES = {"CON", "PRN", "AUX", "NUL"} | {
 }
 
 
-def extract(archive: Path, stage: Path, backend: str) -> Path:
+class _ByteReader(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
+
+class _BoundedGzipOutput:
+    """Count gzip output, including tar lookahead and post-tar drainage."""
+
+    def __init__(self, source: _ByteReader, maximum: int) -> None:
+        self._source = source
+        self._remaining = maximum
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        requested = CHUNK if size < 0 else min(size, CHUNK)
+        block = self._source.read(min(requested, self._remaining + 1))
+        self._remaining -= len(block)
+        if self._remaining < 0:
+            raise HubUnavailable("Hub archive exceeds decompressed byte limit")
+        return block
+
+
+def extract(
+    archive: Path,
+    stage: Path,
+    backend: str,
+    *,
+    limits: ArchiveLimits | None = None,
+) -> Path:
     """Stream only portable regular files/directories into a caller-owned stage.
 
     The stage must be a private directory; this is not cross-process exclusion
@@ -38,6 +68,7 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
     and timestamps from the publisher are never applied. On failure, the caller
     owns removal of any partially extracted files (``prepare`` does this).
     """
+    resolved_limits: ArchiveLimits = ArchiveLimits() if limits is None else limits
     if backend not in {"duckdb", "lancedb"}:
         raise HubDatabaseMismatch("Hub archive backend is unsupported")
     expected = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
@@ -45,6 +76,10 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
     # Include implicit parents: A/x and a/y collide on portable filesystems too.
     paths: dict[str, tuple[str, bool]] = {}
     metadata_remaining = CHUNK
+    physical_members = 0
+    consecutive_extensions = 0
+    total_path_bytes = 0
+    extracted_bytes = 0
 
     class BoundedTarInfo(tarfile.TarInfo):
         @classmethod
@@ -64,7 +99,25 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
         def _proc_member(self, tar: tarfile.TarFile) -> tarfile.TarInfo:
             # tarfile's extension hook runs BEFORE eager metadata/sparse parsing.
             # Bound aggregate metadata for each yielded member, including chains.
-            nonlocal metadata_remaining
+            nonlocal metadata_remaining, physical_members, consecutive_extensions
+            physical_members += 1
+            if physical_members > resolved_limits.max_members:
+                raise HubUnavailable("Hub archive exceeds physical member limit")
+            if self.mode & 0o7000:
+                raise HubUnavailable("Hub archive contains an unsafe member")
+            extension = self.type in {
+                tarfile.XHDTYPE,
+                tarfile.XGLTYPE,
+                tarfile.SOLARIS_XHDTYPE,
+                tarfile.GNUTYPE_LONGNAME,
+                tarfile.GNUTYPE_LONGLINK,
+            }
+            if extension:
+                consecutive_extensions += 1
+                if consecutive_extensions > 32:
+                    raise HubUnavailable("Hub archive exceeds extension chain limit")
+            else:
+                consecutive_extensions = 0
             # Global PAX state survives yielded members and is copied by the
             # parser. Check it on recursive entry, after a global update but
             # BEFORE any subsequent metadata/member copies. Each update itself
@@ -78,13 +131,7 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
                 raise HubUnavailable("Hub archive metadata exceeds size limit")
             if self.type == tarfile.GNUTYPE_SPARSE:
                 raise HubUnavailable("Hub archive contains an unsafe member")
-            if self.type in {
-                tarfile.XHDTYPE,
-                tarfile.XGLTYPE,
-                tarfile.SOLARIS_XHDTYPE,
-                tarfile.GNUTYPE_LONGNAME,
-                tarfile.GNUTYPE_LONGLINK,
-            }:
+            if extension:
                 metadata_remaining -= max(512, self.size)
                 if self.size < 0 or metadata_remaining < 0:
                     raise HubUnavailable("Hub archive metadata exceeds size limit")
@@ -105,11 +152,27 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
             raise HubUnavailable("Hub extraction stage is not a private directory")
         # gzip validates CRC/length, unlike tarfile's r|gz decompression wrapper.
         with gzip.open(archive, "rb") as compressed:
-            with tarfile.open(
-                fileobj=compressed, mode="r|", tarinfo=BoundedTarInfo, errors="strict"
+            counted = _BoundedGzipOutput(
+                compressed, resolved_limits.max_decompressed_bytes
+            )
+            # r| only needs read(); typeshed also requires write/seek/close.
+            # Keep this adapter non-owning; the gzip context owns the stream.
+            # Preserve the result type despite the suppressed overload mismatch.
+            tar: tarfile.TarFile
+            with tarfile.open(  # type: ignore[call-overload]
+                fileobj=counted, mode="r|", tarinfo=BoundedTarInfo, errors="strict"
             ) as tar:
                 for member in tar:
                     name = member.name
+                    if len(name.encode("utf-8")) > resolved_limits.max_path_bytes:
+                        raise HubUnavailable("Hub archive exceeds path byte limit")
+                    # The tar parser has already removed directory terminators.
+                    # Check depth before constructing PurePosixPath or prefixes.
+                    if (
+                        name.removesuffix("/").count("/") + 1
+                        > resolved_limits.max_path_depth
+                    ):
+                        raise HubUnavailable("Hub archive exceeds path depth limit")
                     path = PurePosixPath(name)
                     parts = path.parts
                     raw_parts = name.removesuffix("/").split("/")
@@ -127,7 +190,8 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
                             p.split(".")[0].rstrip(" ").upper() in _DEVICES
                             for p in parts
                         )
-                        or member.mode & 0o7111
+                        or member.mode & 0o7000
+                        or (member.isfile() and member.mode & 0o111)
                         or not (member.isfile() or member.isdir())
                         or member.issparse()
                         or member.size < 0
@@ -145,6 +209,15 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
                         raise HubDatabaseMismatch(
                             "Hub archive backend shape differs from manifest"
                         )
+                    if member.isfile():
+                        if (
+                            member.size
+                            > resolved_limits.max_extracted_bytes - extracted_bytes
+                        ):
+                            raise HubUnavailable(
+                                "Hub archive exceeds extracted byte limit"
+                            )
+                        extracted_bytes += member.size
                     portable_name = str(path).casefold()
                     if portable_name in seen:
                         raise HubUnavailable(
@@ -154,12 +227,30 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
                     for length in range(1, len(parts) + 1):
                         prefix = "/".join(parts[:length])
                         directory = length < len(parts) or member.isdir()
-                        previous = paths.get(prefix.casefold())
+                        folded = prefix.casefold()
+                        previous = paths.get(folded)
                         if previous is not None and previous != (prefix, directory):
                             raise HubUnavailable(
                                 "Hub archive contains conflicting portable paths"
                             )
-                        paths[prefix.casefold()] = (prefix, directory)
+                        if previous is None:
+                            if len(paths) >= resolved_limits.max_members:
+                                raise HubUnavailable(
+                                    "Hub archive exceeds retained path limit"
+                                )
+                            charge = len(prefix.encode("utf-8")) + len(
+                                folded.encode("utf-8")
+                            )
+                            if (
+                                charge
+                                > resolved_limits.max_total_path_bytes
+                                - total_path_bytes
+                            ):
+                                raise HubUnavailable(
+                                    "Hub archive exceeds total path byte limit"
+                                )
+                            total_path_bytes += charge
+                            paths[folded] = (prefix, directory)
                         if stage.joinpath(*parts[:length]).is_symlink():
                             raise HubUnavailable(
                                 "Hub extraction path contains a symlink"
@@ -187,8 +278,9 @@ def extract(archive: Path, stage: Path, backend: str) -> Path:
                     # Streaming mode on Python <3.13 still caches TarInfo objects.
                     tar.members.clear()  # type: ignore[attr-defined]
                     metadata_remaining = CHUNK
-            # Consume trailing padding and the gzip footer with bounded memory.
-            while compressed.read(CHUNK):
+            # Read-ahead was already charged below tarfile; charge all remaining
+            # output here too, including concatenated gzip streams and CRC checks.
+            while counted.read(CHUNK):
                 pass
         if not seen:
             raise HubDatabaseMismatch("Hub archive lacks its declared database entry")
@@ -274,6 +366,7 @@ async def prepare(
     work_parent: Path,
     *,
     state: PreparationState | None = None,
+    limits: ArchiveLimits | None = None,
 ) -> AsyncIterator[Path]:
     """Yield a verified candidate; defer cleanup if its reader cannot close.
 
@@ -295,7 +388,9 @@ async def prepare(
             )
             stage = directory / "stage"
             stage.mkdir()
-            candidate = extract(archive, stage, selected.variant.db_provider)
+            candidate = extract(
+                archive, stage, selected.variant.db_provider, limits=limits
+            )
             try:
                 verify_candidate(candidate, selected)
             except DatabaseReaderCloseError as error:

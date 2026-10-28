@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 import textwrap
 import threading
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -16,8 +18,15 @@ import pytest
 
 import chunkhound_native as native
 from chunkhound.core.config.config import Config
+from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.mcp_server.common import handle_tool_call
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.registry import ProviderRegistry
+from tests.hub.artifacts import build_database
+from tests.hub.conftest import embedding_http as _embedding_http_fixture
+
+embedding_http = _embedding_http_fixture
 
 
 class ConcreteMCPServer(MCPServerBase):
@@ -525,3 +534,210 @@ async def test_mcp_cleanup_releases_partial_or_retried_database_ownership(
         native.acquire_install_lease(str(target), "duckdb").close()
     finally:
         provider.close()  # Also makes the failing RED run safe to tear down.
+
+
+@pytest.mark.asyncio
+async def test_later_mcp_search_recovers_after_deferred_install_contention(tmp_path):
+    directory = tmp_path / "database"
+    directory.mkdir()
+    target = directory / "chunks.db"
+    seed = DuckDBProvider(target, base_directory=tmp_path)
+    seed.connect()
+    seed.close()
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": directory, "read_only": True},
+        analytics={"enabled": False},
+        skip_layers={"global", "env", "local_config", "config_file", "cli"},
+    )
+    server = ConcreteMCPServer(config)
+    lease = native.acquire_install_lease(str(target), "duckdb")
+    try:
+        await server.initialize()
+        # Model stdio/HTTP lifespan readiness, independent of deferred DB admission.
+        server._initialization_complete.set()
+        provider = server.services.provider
+        assert server._deferred_start_task is not None
+        await server._deferred_start_task
+        assert not provider.is_connected
+
+        async def search():
+            contents = await handle_tool_call(
+                tool_name="search",
+                arguments={"type": "regex", "query": "never_matches"},
+                services=server.services,
+                embedding_manager=server.embedding_manager,
+                initialization_complete=server._initialization_complete,
+                config=config,
+                ensure_services=server.ensure_tool_services,
+            )
+            return contents[0].text
+
+        refused = json.loads(await search())
+        assert refused["error"]["type"] == "DatabaseBusyError"
+        lease.close()
+        result = await search()
+        assert result == "No results found."
+        assert server.services.provider is provider
+        assert provider.is_connected
+    finally:
+        lease.close()
+        await server.cleanup()
+    native.acquire_install_lease(str(target), "duckdb").close()
+
+
+@pytest.mark.parametrize("entry_point", ["factory", "registry"])
+def test_service_construction_is_eager_by_default(tmp_path, entry_point):
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": tmp_path / "database"},
+        analytics={"enabled": False},
+        skip_layers={"global", "env", "local_config", "config_file", "cli"},
+    )
+    if entry_point == "factory":
+        provider = create_services(config.database.get_db_path(), config).provider
+    else:
+        registry = ProviderRegistry()
+        registry.configure(config)
+        provider = registry.get_provider("database")
+    try:
+        # Assert BEFORE a query can implicitly open an executor connection.
+        assert provider.is_connected
+        assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(config.database.get_db_path()), "duckdb")
+    finally:
+        provider.close()
+    native.acquire_install_lease(str(config.database.get_db_path()), "duckdb").close()
+
+
+@pytest.mark.parametrize("config_shape", ["object", "dict"])
+def test_real_factory_defers_database_ownership_only_when_requested(
+    tmp_path, config_shape
+):
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": tmp_path / "database"},
+        analytics={"enabled": False},
+        skip_layers={"global", "env", "local_config", "config_file", "cli"},
+    )
+    target = config.database.get_db_path()
+    registry = ProviderRegistry()
+    services = create_services(
+        target,
+        config if config_shape == "object" else {
+            **config.model_dump(),
+            "skip_layers": {"global", "env", "local_config", "config_file", "cli"},
+        },
+        connect_database=False,
+        registry=registry,
+    )
+    provider = services.provider
+    try:
+        assert not provider.is_connected
+        assert not target.exists()
+        # A real exclusive lease proves construction acquired no hidden DB owner.
+        lease = native.acquire_install_lease(str(target), "duckdb")
+        lease.close()
+        provider.connect()
+        registry.complete_database_initialization()
+        assert provider.is_connected
+        assert services.search_service.search_regex("never_matches")[0] == []
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(target), "duckdb")
+    finally:
+        provider.close()
+    native.acquire_install_lease(str(target), "duckdb").close()
+
+
+@pytest.mark.asyncio
+async def test_lancedb_mcp_search_reads_seeded_index_and_pins_before_indexing(
+    tmp_path, embedding_http
+):
+    directory = tmp_path / "database"
+    target = build_database(
+        directory,
+        backend="lancedb",
+        provider="openai",
+        model="hub-test",
+        dims=8,
+        symbol_prefix="lancedb_ready_marker",
+    )
+    (tmp_path / "source.py").write_text(
+        "def lancedb_ready_marker_0(): return 0\n", encoding="utf-8"
+    )
+    config = Config(
+        target_dir=tmp_path,
+        database={"provider": "lancedb", "path": directory, "read_only": False},
+        embedding={
+            "provider": "openai",
+            "model": "different-configured-model",
+            "output_dims": 16,
+            "api_key": "local-test-key",
+            "base_url": embedding_http.url,
+        },
+        analytics={"enabled": False},
+        skip_layers={"global", "env", "local_config", "config_file", "cli"},
+    )
+    assert config.database.get_db_path() == target
+    server = ConcreteMCPServer(config)
+    try:
+        await server.initialize()
+        # initialize schedules deferred startup without yielding afterward.
+        # Cancel before the next await so neither monitoring nor indexing
+        # can initialize tables and conceal first-tool readiness failures.
+        task = server._deferred_start_task
+        assert task is not None
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+        # Model stdio/HTTP transport readiness, NOT database readiness.
+        server._initialization_complete.set()
+        assert server.services is not None
+        assert server.embedding_manager is not None
+        database_provider = server.services.provider
+        executor = database_provider._executor
+        embedding_provider = server.embedding_manager.get_provider()
+        assert embedding_provider.model == "different-configured-model"
+        assert embedding_provider.dims == 16
+        assert embedding_http.requests == []
+
+        async def search(kind):
+            contents = await handle_tool_call(
+                tool_name="search",
+                arguments={"type": kind, "query": "lancedb_ready_marker_0"},
+                services=server.services,
+                embedding_manager=server.embedding_manager,
+                initialization_complete=server._initialization_complete,
+                config=config,
+                ensure_services=server.ensure_tool_services,
+            )
+            return contents[0].text
+
+        regex = await search("regex")
+        assert "def lancedb_ready_marker_0(): return 0" in regex, regex
+        assert "source.py" in regex, regex
+        assert "No results found." not in regex
+        assert '"error"' not in regex
+        assert server.embedding_manager.get_provider() is embedding_provider
+        assert embedding_provider.model == "hub-test"
+        assert embedding_provider.dims == 8
+        assert config.embedding is not None
+        assert config.embedding.model == "hub-test"
+        assert config.embedding.output_dims == 8
+
+        request_count = len(embedding_http.requests)
+        semantic = await search("semantic")
+        # All 100 vectors are identical: demand a real seeded hit, not
+        # arbitrary tie ordering that happens to return chunk zero.
+        assert "def lancedb_ready_marker_" in semantic, semantic
+        assert "source.py" in semantic, semantic
+        assert "No results found." not in semantic
+        assert '"error"' not in semantic
+        assert len(embedding_http.requests) > request_count
+        assert all(r["model"] == "hub-test" for r in embedding_http.requests)
+        assert server.services.provider is database_provider
+        assert database_provider._executor is executor
+    finally:
+        await server.cleanup()

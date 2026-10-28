@@ -39,6 +39,7 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
     DatabaseRustPipelineInProgressError,
 )
+from chunkhound.registry import ProviderRegistry
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
 from chunkhound.services.realtime.service import RealtimeIndexingService
@@ -101,6 +102,9 @@ class MCPServerBase(ABC):
 
         # Service components - initialized lazily or eagerly based on subclass
         self.services: DatabaseServices | None = None
+        self._service_registry = ProviderRegistry()
+        self._database_services_ready = False
+        self._database_provider_connected_once = False
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
@@ -470,10 +474,14 @@ class MCPServerBase(ABC):
                     self.debug_log(msg)
 
                 # Create services using unified factory (lazy connect for fast init)
+                self._database_services_ready = False
+                self._database_provider_connected_once = False
                 self.services = create_services(
                     db_path=db_path,
                     config=self.config,
                     embedding_manager=self.embedding_manager,
+                    connect_database=False,
+                    registry=self._service_registry,
                 )
 
                 # Determine target path for scanning and watching
@@ -1255,6 +1263,20 @@ class MCPServerBase(ABC):
             await self._connect_provider()
         return self.services
 
+    def _connect_and_initialize_provider(self) -> None:
+        if self.services is None:
+            raise RuntimeError("Services not initialized. Call initialize() first.")
+        # Some backends report executor availability before their first
+        # connect has initialized tables. Remember actual connect success
+        # separately so a completion-only retry does not reconnect.
+        if (
+            not self._database_provider_connected_once
+            or not self.services.provider.is_connected
+        ):
+            self.services.provider.connect()
+            self._database_provider_connected_once = True
+        self._service_registry.complete_database_initialization()
+
     async def _connect_provider(self) -> None:
         """Connect the database provider if not already connected.
 
@@ -1276,13 +1298,19 @@ class MCPServerBase(ABC):
         run_rust_indexing_phase() restore the connection when the
         respective owner finishes.
         """
-        if self.services.provider.is_connected:
+        if self.services.provider.is_connected and self._database_services_ready:
             return
         async with self._connect_lock:
-            if not self.services.provider.is_connected:
+            if (
+                not self.services.provider.is_connected
+                or not self._database_services_ready
+            ):
                 loop = asyncio.get_running_loop()
                 try:
-                    await loop.run_in_executor(None, self.services.provider.connect)
+                    await loop.run_in_executor(
+                        None, self._connect_and_initialize_provider
+                    )
+                    self._database_services_ready = True
                 except DatabaseCompactionInProgressError:
                     log_if_not_mcp(
                         "info",

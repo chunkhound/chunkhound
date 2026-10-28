@@ -73,3 +73,5 @@ DatabaseBusyError = _native_module.DatabaseBusyError
 DatabaseInterruptedError = _native_module.DatabaseInterruptedError
 DatabaseLayoutError = _native_module.DatabaseLayoutError
 DatabaseFilesystemError = _native_module.DatabaseFilesystemError
+PipelineCancellationToken = _native_module.PipelineCancellationToken
+PipelineCancelledError = _native_module.PipelineCancelledError

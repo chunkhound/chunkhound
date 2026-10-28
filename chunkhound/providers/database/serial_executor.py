@@ -9,8 +9,9 @@ import contextvars
 import random
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Any
 
 from loguru import logger
@@ -122,6 +123,20 @@ def _should_sample_auto_compaction(operation_name: str) -> bool:
     return random.randint(0, COMPACT_SAMPLE_INTERVAL - 1) == 0
 
 
+_rust_reconnect_owner: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "rust_reconnect_owner", default=None
+)
+
+
+@contextmanager
+def _rust_reconnect_scope(executor: object) -> Iterator[None]:
+    token = _rust_reconnect_owner.set(executor)
+    try:
+        yield
+    finally:
+        _rust_reconnect_owner.reset(token)
+
+
 class SerialDatabaseExecutor:
     """Thread-safe executor for single-threaded database operations.
 
@@ -197,6 +212,9 @@ class SerialDatabaseExecutor:
         """Return True when the Rust pipeline currently owns the database file."""
         return self._rust_pipeline_in_progress.is_set()
 
+    def _is_rust_reconnect_owner(self) -> bool:
+        return _rust_reconnect_owner.get() is self
+
     def _raise_if_db_unavailable_before_submit(
         self, operation_name: str, _bypass_rust_pipeline_guard: bool = False
     ) -> None:
@@ -205,7 +223,11 @@ class SerialDatabaseExecutor:
             raise DatabaseCompactionInProgressError(
                 "Database compaction in progress — retry in a few seconds"
             )
-        if not _bypass_rust_pipeline_guard and self.is_rust_pipeline_in_progress():
+        if (
+            not _bypass_rust_pipeline_guard
+            and not self._is_rust_reconnect_owner()
+            and self.is_rust_pipeline_in_progress()
+        ):
             raise DatabaseRustPipelineInProgressError(
                 "Rust indexing pipeline owns the database — retry once it finishes"
             )
@@ -225,7 +247,10 @@ class SerialDatabaseExecutor:
         with self._submission_lock:
             if not self._accepting:
                 raise RuntimeError("Database executor is closing or closed")
-            return self._db_executor.submit(self._run_with_cleanup, function, *args)
+            context = contextvars.copy_context()
+            return self._db_executor.submit(
+                context.run, self._run_with_cleanup, function, *args
+            )
 
     def _execute_operation(
         self,
@@ -283,7 +308,15 @@ class SerialDatabaseExecutor:
         self._raise_if_db_unavailable_before_submit("connect")
         future = self._submit(self._prepare_connection, provider)
         return bool(
-            self._wait_for_operation(future, "connect", self.resolve_timeout("connect"))
+            self._wait_for_operation(
+                future,
+                "connect",
+                (
+                    None
+                    if self._is_rust_reconnect_owner()
+                    else self.resolve_timeout("connect")
+                ),
+            )
         )
 
     def _prepare_connection(self, provider: Any) -> bool:
@@ -340,7 +373,9 @@ class SerialDatabaseExecutor:
             result = self._wait_for_operation(
                 future,
                 operation_name,
-                None if operation_name == "disconnect" else timeout_s,
+                None
+                if operation_name == "disconnect" or self._is_rust_reconnect_owner()
+                else timeout_s,
             )
         except DatabaseOperationTimeoutError:
             logger.error(

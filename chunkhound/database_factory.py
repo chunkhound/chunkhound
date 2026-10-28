@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from loguru import logger
 
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.registry import configure_registry, get_registry
+from chunkhound.registry import ProviderRegistry, configure_registry, get_registry
 
 if TYPE_CHECKING:
     from chunkhound.database import Database
@@ -83,6 +83,9 @@ def create_services(
     db_path: Path | str,
     config: dict[str, Any] | Any,
     embedding_manager: EmbeddingManager | None = None,
+    *,
+    connect_database: bool = True,
+    registry: ProviderRegistry | None = None,
 ) -> DatabaseServices:
     """Create clean service bundle for modern internal architecture.
 
@@ -90,13 +93,19 @@ def create_services(
         db_path: Path to database file
         config: Registry configuration (dict or Config object)
         embedding_manager: Optional embedding manager
+        connect_database: Connect eagerly by default. If False, the caller must
+            connect the provider and call registry.complete_database_initialization().
+        registry: Optional caller-owned composition root; defaults to the global
+            registry. Deferred callers must retain/pass their registry for completion.
 
     Returns:
         DatabaseServices bundle with all components
     """
     # This factory owns registry initialization; callers must not configure it
     # first. It does not provide simultaneous-provider ownership/reuse.
-    registry = get_registry()
+    supplied_registry = registry is not None
+    if registry is None:
+        registry = get_registry()
 
     # Always configure the registry with an effective per-call config so that
     # tests using distinct temporary directories get an IndexingCoordinator whose
@@ -125,7 +134,18 @@ def create_services(
         logger.debug(f"Config path normalization failed, using raw config: {exc}")
         effective_config = config
 
-    configure_registry(effective_config)
+    if not supplied_registry and connect_database:
+        # Preserve the established eager composition root and callback behavior.
+        configure_registry(effective_config)
+    else:
+        from chunkhound.core.config.config import Config
+
+        registry_config = (
+            Config(**effective_config)
+            if isinstance(effective_config, dict)
+            else effective_config
+        )
+        registry.configure(registry_config, connect_database=connect_database)
 
     # If embedding_manager is provided, register its provider with the global registry
     # so services use the same instance, held to the index like the registry's own

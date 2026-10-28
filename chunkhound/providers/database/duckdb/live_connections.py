@@ -10,29 +10,61 @@ from typing import Any
 
 import duckdb
 
+
+class _Admission:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.connections: dict[bool, weakref.WeakSet[Any]] = {
+            False: weakref.WeakSet(),
+            True: weakref.WeakSet(),
+        }
+
+
 _lock = threading.RLock()
-_live: dict[tuple[str, bool], weakref.WeakSet[Any]] = {}
+_admissions: weakref.WeakValueDictionary[str, _Admission] = (
+    weakref.WeakValueDictionary()
+)
+_connection_admissions: weakref.WeakKeyDictionary[Any, _Admission] = (
+    weakref.WeakKeyDictionary()
+)
 
 
-def _key(path: Path | str, read_only: bool) -> tuple[str, bool]:
-    return os.path.normcase(str(Path(path).resolve())), read_only
+def _admission(path: Path | str) -> _Admission:
+    # Resolve before taking the bookkeeping mutex: filesystem I/O must not
+    # stop lifecycle progress on unrelated databases.
+    target = os.path.normcase(str(Path(path).resolve()))
+    with _lock:
+        entry = _admissions.get(target)
+        if entry is None:
+            entry = _Admission()
+            _admissions[target] = entry
+        # The return value strongly retains the entry BEFORE the caller waits.
+        return entry
 
 
 def register_duckdb_connection(path: Path | str, read_only: bool, conn: Any) -> None:
     if str(path) == ":memory:":
         return
-    with _lock:
-        _live.setdefault(_key(path, read_only), weakref.WeakSet()).add(conn)
+    entry = _admission(path)
+    with entry.lock:
+        with _lock:
+            entry.connections[read_only].add(conn)
+            _connection_admissions[conn] = entry
 
 
 def close_duckdb_connection(conn: Any) -> None:
     with _lock:
-        # Close before unregistering; a failed close remains represented.
+        entry = _connection_admissions.get(conn)
+    if entry is None:
         conn.close()
-        for key, connections in list(_live.items()):
-            connections.discard(conn)
-            if not connections:
-                del _live[key]
+        return
+    with entry.lock:
+        # Backend I/O is outside _lock; failed close retains both registries.
+        conn.close()
+        with _lock:
+            for connections in entry.connections.values():
+                connections.discard(conn)
+            _connection_admissions.pop(conn, None)
 
 
 def close_retained_duckdb_connections(connections: list[Any]) -> None:
@@ -54,25 +86,28 @@ def close_retained_duckdb_connections(connections: list[Any]) -> None:
 def compatible_duckdb_cursor(
     path: Path | str, *, read_only: bool, retained_connections: list[Any]
 ) -> Iterator[Any | None]:
-    # Admission spans preflight, backend open and registration. Compaction must
-    # not see an empty registry while an open already pins the old database.
+    if str(path) == ":memory:":
+        yield None
+        return
+    entry = _admission(path)
     cursor = None
-    with _lock:
-        if str(path) != ":memory:":
-            for conn in list(_live.get(_key(path, read_only), ())):
-                try:
-                    cursor = conn.cursor()
-                    break
-                except duckdb.ConnectionException:
-                    # Public compatibility callers may have closed their handle.
-                    _live[_key(path, read_only)].discard(conn)
+    with entry.lock:
+        with _lock:
+            candidates = list(entry.connections[read_only])
+        for conn in candidates:
+            try:
+                cursor = conn.cursor()
+                break
+            except duckdb.ConnectionException:
+                # Public compatibility callers may close a handle directly.
+                with _lock:
+                    entry.connections[read_only].discard(conn)
+                    _connection_admissions.pop(conn, None)
         if cursor is not None:
-            # The borrowing manager/provider owns cursor cleanup, not the source
-            # connection or an exception traceback. Failed exit keeps both this
-            # strong reference and registry admission until a successful retry.
             retained_connections.append(cursor)
             register_duckdb_connection(path, read_only, cursor)
         try:
+            # Admission spans preflight, backend open, registration and close.
             yield cursor
         finally:
             if cursor is not None:
@@ -84,19 +119,23 @@ def compatible_duckdb_cursor(
 def exclusive_duckdb_compaction(
     path: Path | str, owned_connections: tuple[Any, ...]
 ) -> Iterator[None]:
-    """Exclude opens until swap/recovery and reconnect finish, or refuse live users.
-
-    This same-process admission gate complements native installation exclusion;
-    it never closes or changes another provider's handles or transactions.
-    """
-    with _lock:
-        target = _key(path, False)[0]
-        for (database, _), connections in _live.items():
-            if database == target and any(
-                all(conn is not owned for owned in owned_connections)
-                for conn in connections
-            ):
-                raise RuntimeError(
-                    "Cannot compact database while another provider connection is live"
-                )
+    """Exclude same-path opens through swap and reconnect, or refuse live users."""
+    if str(path) == ":memory:":
+        yield
+        return
+    entry = _admission(path)
+    with entry.lock:
+        with _lock:
+            connections = [
+                conn
+                for group in entry.connections.values()
+                for conn in group
+            ]
+        if any(
+            all(conn is not owned for owned in owned_connections)
+            for conn in connections
+        ):
+            raise RuntimeError(
+                "Cannot compact database while another provider connection is live"
+            )
         yield

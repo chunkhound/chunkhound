@@ -329,3 +329,93 @@ def test_cross_filesystem_candidate_is_rejected_before_old_database_changes(tmp_
             assert candidate.read_bytes() == b"new"
         finally:
             lease.close()
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "dangling-symlink"])
+@pytest.mark.parametrize("aliased_parent", [False, True])
+def test_duckdb_candidate_wal_entry_is_refused_without_install_mutation(
+    tmp_path, kind, aliased_parent
+):
+    target = tmp_path / "chunks.db"
+    target.write_bytes(b"old database")
+    live_wal = Path(str(target) + ".wal")
+    live_wal.write_bytes(b"old wal")
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    candidate = stage / "chunks.db"
+    candidate.write_bytes(b"new database")
+    wal = Path(str(candidate) + ".wal")
+    referent = tmp_path / "wal-referent"
+    if kind == "file":
+        wal.write_bytes(b"candidate wal")
+    elif kind == "directory":
+        wal.mkdir()
+        (wal / "payload").write_bytes(b"keep directory")
+    else:
+        if kind == "symlink":
+            referent.write_bytes(b"keep referent")
+        try:
+            wal.symlink_to(referent)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+    spelling = candidate
+    if aliased_parent:
+        alias = tmp_path / "alias"
+        try:
+            alias.symlink_to(stage, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlink creation is unavailable")
+        spelling = alias / "chunks.db"
+
+    def tree_state():
+        state = {}
+        for root, directories, files in os.walk(tmp_path, followlinks=False):
+            for name in directories + files:
+                path = Path(root) / name
+                info = path.lstat()
+                if path.is_symlink():
+                    payload = ("symlink", os.readlink(path))
+                elif path.is_dir():
+                    payload = ("directory",)
+                else:
+                    payload = ("file", path.read_bytes())
+                state[str(path.relative_to(tmp_path))] = (
+                    info.st_mode, info.st_mtime_ns, payload
+                )
+        return state
+
+    lease = native.acquire_install_lease(str(target), "duckdb")
+    try:
+        # Snapshot after acquiring the lease: lock-file creation is permitted,
+        # installation mutation is not. Include dangling links and directories.
+        before = tree_state()
+        with pytest.raises(native.DatabaseLayoutError, match="adjacent WAL"):
+            lease.install(str(spelling))
+        assert tree_state() == before
+        assert not lease.interrupted
+        assert candidate.read_bytes() == b"new database"
+        assert target.read_bytes() == b"old database"
+        assert live_wal.read_bytes() == b"old wal"
+    finally:
+        lease.close()
+    native.acquire_database_lease(str(target)).close()
+
+
+def test_lancedb_candidate_adjacent_wal_name_does_not_change_install_behavior(tmp_path):
+    target = tmp_path / "lancedb.lancedb"
+    target.mkdir()
+    (target / "payload").write_bytes(b"old")
+    candidate = tmp_path / "stage" / target.name
+    candidate.mkdir(parents=True)
+    (candidate / "payload").write_bytes(b"new")
+    wal = Path(str(candidate) + ".wal")
+    wal.write_bytes(b"unrelated lance neighbor")
+    lease = native.acquire_install_lease(str(target), "lancedb")
+    try:
+        assert lease.install(str(candidate)) == []
+        assert not lease.interrupted
+    finally:
+        lease.close()
+    assert (target / "payload").read_bytes() == b"new"
+    assert not candidate.exists()
+    assert wal.read_bytes() == b"unrelated lance neighbor"

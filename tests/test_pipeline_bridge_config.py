@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,7 +43,8 @@ class _FakeNativePipeline:
     IndexingPipeline.__init__ was called with; tests that only care about
     run_rust_pipeline's return value can ignore it. `instance.run.return_value`
     defaults to `_fake_report()` -- override it before calling
-    run_rust_pipeline for disk-limit-style tests.
+    run_rust_pipeline for disk-limit-style tests. The represented run marks
+    token completion when its callable exits; it does not model native drainage.
     """
 
     instance: MagicMock
@@ -55,15 +58,38 @@ def fake_native_pipeline(monkeypatch: pytest.MonkeyPatch) -> _FakeNativePipeline
         DatabaseFilesystemError,
         DatabaseInterruptedError,
         DatabaseLayoutError,
+        DatabaseLease,
+        InstallLease,
+        PipelineCancelledError,
+        acquire_database_lease,
     )
 
     captured_config: dict = {}
     instance = MagicMock()
     instance.run.return_value = _fake_report()
 
-    def _init_side_effect(config_dict: dict) -> MagicMock:
+    class _FakeCancellationToken:
+        def __init__(self) -> None:
+            self._cancelled = False
+            self.cleanup_complete = False
+
+        def cancel(self) -> None:
+            self._cancelled = True
+
+        def is_cancelled(self) -> bool:
+            return self._cancelled
+
+    class _RepresentedPipeline:
+        def run(self, **kwargs: object) -> SimpleNamespace:
+            token = kwargs["cancellation_token"]
+            try:
+                return instance.run(**kwargs)
+            finally:
+                token.cleanup_complete = True
+
+    def _init_side_effect(config_dict: dict) -> _RepresentedPipeline:
         captured_config.update(config_dict)
-        return instance
+        return _RepresentedPipeline()
 
     fake_module = types.SimpleNamespace(
         IndexingPipeline=MagicMock(side_effect=_init_side_effect),
@@ -71,6 +97,11 @@ def fake_native_pipeline(monkeypatch: pytest.MonkeyPatch) -> _FakeNativePipeline
         DatabaseFilesystemError=DatabaseFilesystemError,
         DatabaseInterruptedError=DatabaseInterruptedError,
         DatabaseLayoutError=DatabaseLayoutError,
+        PipelineCancelledError=PipelineCancelledError,
+        PipelineCancellationToken=_FakeCancellationToken,
+        DatabaseLease=DatabaseLease,
+        InstallLease=InstallLease,
+        acquire_database_lease=acquire_database_lease,
     )
     monkeypatch.setitem(sys.modules, "chunkhound_native", fake_module)
     return _FakeNativePipeline(instance=instance, captured_config=captured_config)
@@ -367,40 +398,44 @@ def test_embed_thread_http_clients_are_closed_with_their_loops() -> None:
             loop.close()
 
 
-def test_hung_embed_shutdown_is_bounded_by_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A provider.shutdown() that never returns must not hang cleanup
-    forever -- regression test for the missing-timeout half of the
-    PR #380 review's embed-cache finding."""
-    import asyncio
-    import time
-
+def test_embed_shutdown_retains_resources_until_external_work_drains() -> None:
+    """Entered shutdown keeps its client/loop owned until external work drains."""
     from chunkhound import pipeline_bridge
 
-    monkeypatch.setattr(
-        pipeline_bridge, "_EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS", 0.05
-    )
+    entered, release = threading.Event(), threading.Event()
 
-    async def _hang() -> None:
-        await asyncio.sleep(9999)
+    async def _drain_shutdown() -> None:
+        entered.set()
+        while not release.is_set():
+            await asyncio.sleep(0.01)
 
     loop = asyncio.new_event_loop()
     provider = MagicMock()
-    provider.shutdown = _hang
+    provider.shutdown = _drain_shutdown
     cache = pipeline_bridge._EmbedThreadCache()
     cache.providers[999004] = provider
     cache.loops[999004] = loop
 
-    start = time.monotonic()
-    pipeline_bridge._shutdown_embed_thread_resources(cache)
-    elapsed = time.monotonic() - start
-
-    assert elapsed < 5  # bounded by the (monkeypatched) 0.05s timeout, not 9999s
-    assert cache.providers == {}
-    assert cache.loops == {}
-    if not loop.is_closed():
-        loop.close()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            pipeline_bridge._shutdown_embed_thread_resources, cache
+        )
+        try:
+            assert entered.wait(10)
+            assert not future.done()
+            assert not loop.is_closed()
+            assert cache.providers == {999004: provider}
+            assert cache.loops == {999004: loop}
+            release.set()
+            future.result(timeout=10)
+            assert loop.is_closed()
+            assert cache.providers == {}
+            assert cache.loops == {}
+        finally:
+            release.set()
+            future.result(timeout=10)
+            if not loop.is_closed():
+                loop.close()
 
 
 @pytest.mark.asyncio
@@ -440,12 +475,15 @@ async def test_embed_callback_uses_caller_config_not_registry(
     monkeypatch.setitem(sys.modules, "chunkhound.registry", fake_registry)
 
     created_models: list[str | None] = []
+    created_providers: list[MagicMock] = []
+    created_loops: list[asyncio.AbstractEventLoop] = []
 
     def _create_provider(config: EmbeddingConfig) -> MagicMock:
         created_models.append(config.model)
         provider = MagicMock()
         provider.embed = AsyncMock(return_value=[[0.1, 0.2]])
         provider.shutdown = AsyncMock()
+        created_providers.append(provider)
         return provider
 
     monkeypatch.setattr(
@@ -453,6 +491,14 @@ async def test_embed_callback_uses_caller_config_not_registry(
         "create_provider",
         staticmethod(_create_provider),
     )
+
+    def _run_using_callback(**kwargs: object) -> SimpleNamespace:
+        cb = kwargs["embed_batch_callback"]
+        cb(["hello"])
+        created_loops.extend(cb.keywords["cache"].loops.values())
+        return _fake_report()
+
+    fake_native_pipeline.instance.run.side_effect = _run_using_callback
 
     await pipeline_bridge.run_rust_pipeline(
         files_to_process=[],
@@ -468,16 +514,14 @@ async def test_embed_callback_uses_caller_config_not_registry(
 
     cb = fake_native_pipeline.instance.run.call_args.kwargs["embed_batch_callback"]
     cache = cb.keywords["cache"]
-    try:
-        cb(["hello"])
-    finally:
-        cache.providers.clear()
-        for loop in cache.loops.values():
-            if not loop.is_closed():
-                loop.close()
-        cache.loops.clear()
 
     assert created_models == ["caller-model"]
+    assert len(created_providers) == 1
+    created_providers[0].shutdown.assert_awaited_once()
+    assert len(created_loops) == 1
+    assert created_loops[0].is_closed()
+    assert cache.providers == {}
+    assert cache.loops == {}
 
 
 @pytest.mark.asyncio
@@ -521,6 +565,7 @@ async def test_run_rust_pipeline_closes_its_own_embed_resources_after_run(
         incremental: object,
         analytics_recorder: object = None,
         analytics_handle: object = 0,
+        cancellation_token: object = None,
     ) -> SimpleNamespace:
         assert embed_batch_callback is not None
         captured_caches.append(embed_batch_callback.keywords["cache"])

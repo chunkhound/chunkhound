@@ -188,3 +188,59 @@ fn killed_installer_refuses_partial_state_and_fresh_repull_recovers() {
         }
     }
 }
+
+#[test]
+fn candidate_wal_refusal_preserves_candidate_and_live_files() {
+    for directory_entry in [false, true] {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let target = tmp.path().join("chunks.db");
+        let stage = tmp.path().join("stage");
+        fs::create_dir(&stage).expect("stage");
+        let candidate = stage.join("chunks.db");
+        let wal = sibling(&candidate, ".wal");
+        fs::write(&target, b"old").expect("live database");
+        fs::write(sibling(&target, ".wal"), b"old wal").expect("live WAL");
+        fs::write(&candidate, b"new").expect("candidate");
+        if directory_entry {
+            fs::create_dir(&wal).expect("WAL directory entry");
+        } else {
+            fs::write(&wal, b"new wal").expect("candidate WAL");
+        }
+        let lease = acquire_exclusive(&target, Backend::DuckDb).expect("install lease");
+        let mut before = fs::read_dir(tmp.path())
+            .expect("root entries")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect::<Vec<_>>();
+        before.sort();
+        assert!(matches!(
+            install(&lease, Backend::DuckDb, &candidate),
+            Err(LeaseError::Layout(
+                "DuckDB candidate has an adjacent WAL entry"
+            ))
+        ));
+        assert_eq!(fs::read(&target).expect("live preserved"), b"old");
+        assert_eq!(
+            fs::read(sibling(&target, ".wal")).expect("WAL preserved"),
+            b"old wal"
+        );
+        assert_eq!(fs::read(&candidate).expect("candidate preserved"), b"new");
+        assert_eq!(
+            fs::symlink_metadata(&wal)
+                .expect("entry preserved")
+                .is_dir(),
+            directory_entry
+        );
+        if !directory_entry {
+            assert_eq!(fs::read(&wal).expect("candidate WAL preserved"), b"new wal");
+        }
+        let mut after = fs::read_dir(tmp.path())
+            .expect("root entries")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect::<Vec<_>>();
+        after.sort();
+        assert_eq!(after, before, "no marker or quarantine may be created");
+        assert!(!lease.interrupted().expect("interruption state"));
+        drop(lease);
+        drop(acquire_shared(&target).expect("ordinary ownership remains available"));
+    }
+}

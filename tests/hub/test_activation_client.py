@@ -1,7 +1,9 @@
 import asyncio
 import gc
+import hashlib
 import json
 import shutil
+import tarfile
 import threading
 import traceback
 import weakref
@@ -15,6 +17,9 @@ from loguru import logger
 
 import chunkhound.hub.errors as hub_errors
 import chunkhound_native as native
+from chunkhound.core.config.config import Config
+from chunkhound.core.config.hub_config import ArchiveLimits
+from chunkhound.core.embedding_model_drift import ActiveModel, write_active_model
 from chunkhound.hub.client import local_needs_pull, pull
 from chunkhound.hub.errors import HubDatabaseMismatch, HubInstallationInterrupted
 from chunkhound.hub.inspect import inspect_database
@@ -904,3 +909,86 @@ def test_local_reader_retry_does_not_release_borrowed_exclusive_owner(
         # This test is itself the complete enclosing lifecycle, not a borrower.
         owner.close()
     native.acquire_install_lease(str(target), "duckdb").close()
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "max_members",
+        "max_path_depth",
+        "max_path_bytes",
+        "max_total_path_bytes",
+        "max_extracted_bytes",
+        "max_decompressed_bytes",
+    ],
+)
+async def test_public_pull_honors_configured_archive_limits_and_preserves_state(
+    tmp_path, hub_http, monkeypatch, automatic, limit
+):
+    base = config_for(tmp_path / "checkout", hub_http, "lancedb")
+    target = build_database(base.database.path, "lancedb", model="old-model")
+    sidecar = target.with_name(target.name + ".embedding.json")
+    write_active_model(sidecar, ActiveModel("openai", "old-model", 8))
+    neighbor = target.parent / "operator.txt"
+    neighbor.write_text("keep")
+    source = build_database(tmp_path / "published", "lancedb")
+    manifest, route = publish(hub_http, source)
+    # A real publisher tar.add archive, without the fixture's mode-zero filter.
+    ordinary = tmp_path / "ordinary.tar.gz"
+    with tarfile.open(ordinary, "w:gz") as tar:
+        tar.add(source, arcname=source.name)
+    body = ordinary.read_bytes()
+    hub_http.resources[route] = body
+    manifest["embeddings"][0]["versions"][0]["artifact"].update(
+        bytes=len(body), sha256=hashlib.sha256(body).hexdigest()
+    )
+    hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
+    monkeypatch.setenv(f"CHUNKHOUND_HUB__ARCHIVE_LIMITS__{limit.upper()}", "2")
+    config_path = base.target_dir / ".chunkhound.json"
+    config_path.write_text(json.dumps({"hub": {"archive_limits": {limit: 1}}}))
+    config = Config(
+        target_dir=base.target_dir,
+        database=base.database,
+        embedding=base.embedding,
+        hub={"url": base.hub.url},
+        skip_layers={"global", "config_file", "cli"},
+    )
+    assert getattr(config.hub.archive_limits, limit) == 1
+    before = snapshot(target.parent)
+    assert not await pull(config, automatic=automatic)
+    assert snapshot(target.parent) == before
+    assert not list(target.parent.glob(".chunkhound-pull-*"))
+    assert len(hub_http.requests) == 2
+    # Raising the client limits permits this same ordinary published artifact.
+    config.hub.archive_limits = ArchiveLimits()
+    assert await pull(config, automatic=automatic)
+    assert inspect_database(target, "lancedb").groups
+    assert not sidecar.exists()
+    assert neighbor.read_text() == "keep"
+    assert not list(target.parent.glob(".chunkhound-pull-*"))
+
+
+async def test_quota_refusal_preserves_interrupted_install_and_unknown_wal(
+    tmp_path, hub_http
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    target = build_database(config.database.path)
+    files = [
+        target.with_name(target.name + suffix)
+        for suffix in [
+            ".wal",
+            ".root.json",
+            ".embedding.json",
+            ".chunkhound-install.json",
+        ]
+    ]
+    for path in files:
+        path.write_bytes(b"original recovery state")
+    publish(hub_http, build_database(tmp_path / "published"))
+    before = snapshot(target.parent)
+    config.hub.archive_limits = ArchiveLimits(max_extracted_bytes=1)
+    # Explicit pull downloads first: quota refusal must never enter recovery.
+    assert not await pull(config)
+    assert snapshot(target.parent) == before
+    assert not list(target.parent.glob(".chunkhound-pull-*"))
