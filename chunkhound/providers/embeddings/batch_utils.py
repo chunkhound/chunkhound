@@ -5,9 +5,14 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Protocol, TypeVar
 
+from chunkhound.core.utils.token_utils import EMBEDDING_CHARS_PER_TOKEN
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# chunk_text_by_tokens' minimum safety margin; a rejected text this short isn't halved
+MIN_HALVING_CHARS = 200 * EMBEDDING_CHARS_PER_TOKEN
 
 
 async def handle_token_limit_error(
@@ -20,19 +25,27 @@ async def handle_token_limit_error(
 ) -> list[list[float]]:
     """Generic handler for token limit exceeded errors.
 
+    A batch is split and each part embedded. A single text is cut by
+    chunk_text_function; when that returns it whole (the server rejected a
+    text the estimate says fits), it is cut in halves instead, and a half the
+    server rejects again is halved in turn.
+
     Args:
         texts: List of texts that exceeded token limit
         total_tokens: Total estimated tokens in the batch
         token_limit: Maximum tokens allowed (should include safety margin)
         embed_function: Function to embed a batch of texts
         chunk_text_function: Function to chunk a single text by tokens
-        single_text_fallback: Whether to use first chunk as fallback for oversized text
+        single_text_fallback: Return only the first piece's embedding for an
+            oversized text: the first piece the server accepts, so the rest
+            of the text is not embedded
 
     Returns:
         List of embeddings for all texts
 
     Raises:
-        ValueError: If single text can't be chunked further
+        ValueError: If a single text the server rejects is shorter than
+            MIN_HALVING_CHARS
     """
     if len(texts) > 1:
         # Calculate optimal number of splits based on token estimates
@@ -73,10 +86,12 @@ async def handle_token_limit_error(
         chunks = chunk_text_function(text, token_limit)
 
         if len(chunks) == 1:
-            # Text can't be split further, raise error
-            raise ValueError(
-                f"Text too large to embed even after chunking: {len(text)} chars"
-            )
+            if len(text) < MIN_HALVING_CHARS:
+                raise ValueError(
+                    f"Text too large to embed even after chunking: {len(text)} chars"
+                )
+            midpoint = len(text) // 2
+            chunks = [text[:midpoint], text[midpoint:]]
 
         if single_text_fallback:
             # Return embedding of first chunk as representative
