@@ -89,12 +89,7 @@ def _llamacpp_server(fake_openai, max_chars: int, accepted: list[str]):
                     "'type': 'exceed_context_size_error'}}"
                 )
         accepted.extend(inputs)
-        response = MagicMock()
-        response.data = [
-            MagicMock(index=i, embedding=[0.1] * 1536) for i in range(len(inputs))
-        ]
-        response.usage = MagicMock(total_tokens=10)
-        return response
+        return _ok_response()
 
     return create
 
