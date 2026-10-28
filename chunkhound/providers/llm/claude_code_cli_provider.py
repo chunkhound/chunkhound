@@ -333,10 +333,6 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     return stdout.decode("utf-8").strip()
 
                 except asyncio.TimeoutError as e:
-                    # Kill cmd.exe + Node/CLI tree when wrapping a .cmd shim
-                    if process is not None:
-                        await terminate_cli_process(process)
-
                     last_error = RuntimeError(
                         f"CLI command timed out after {request_timeout}s"
                     )
@@ -348,14 +344,17 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 except Exception as e:
                     if isinstance(e, RuntimeError):
                         raise
-                    if process is not None:
-                        await terminate_cli_process(process)
 
                     last_error = RuntimeError(f"CLI command failed: {e}")
                     if attempt < self._max_retries - 1:
                         logger.warning(f"CLI attempt {attempt + 1} failed: {e}")
                         continue
                     raise last_error from e
+
+                finally:
+                    # Kill the CLI if it still runs (timeout, error or cancellation).
+                    if process is not None:
+                        await terminate_cli_process(process)
 
             # Should not reach here, but just in case
             raise last_error or RuntimeError("CLI command failed after retries")

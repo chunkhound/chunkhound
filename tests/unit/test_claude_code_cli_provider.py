@@ -204,6 +204,19 @@ class TestClaudeCodeCLIProvider:
         assert not captured["path"].exists()
 
     @pytest.mark.asyncio
+    async def test_cancel_stops_cli_process(self, provider, monkeypatch):
+        """Cancelling a completion stops the CLI instead of leaving it running."""
+        import sys
+
+        from chunkhound.providers.llm import claude_code_cli_provider as mod
+        from tests.helpers import cli_runs_after_cancel
+
+        monkeypatch.setattr(mod, "resolve_cli_binary", lambda name: sys.executable)
+        assert not await cli_runs_after_cancel(
+            monkeypatch, mod, lambda: provider.complete("Test prompt")
+        )
+
+    @pytest.mark.asyncio
     async def test_complete_disables_tools_with_empty_tools_value(
         self, provider, mock_subprocess
     ):

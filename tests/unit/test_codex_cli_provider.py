@@ -359,3 +359,28 @@ async def test_overlay_write_failure_does_not_launch(
         )
     assert launched is False
     assert not overlay.exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_cancel_stops_cli_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Cancelling a completion stops `codex exec` instead of leaving it running."""
+    import sys
+
+    from chunkhound.providers.llm import codex_cli_provider as mod
+    from tests.helpers import cli_runs_after_cancel
+
+    monkeypatch.setattr(
+        mod, "resolve_cli_binary", lambda name, env_var=None: sys.executable
+    )
+    monkeypatch.setattr(
+        mod.CodexCLIProvider,
+        "_build_overlay_home",
+        lambda self, model_override=None: str(tmp_path),
+    )
+    with patch.object(mod.CodexCLIProvider, "_codex_available", return_value=True):
+        provider = mod.CodexCLIProvider(model="gpt-5")
+    assert not await cli_runs_after_cancel(
+        monkeypatch, mod, lambda: provider.complete("ping")
+    )
