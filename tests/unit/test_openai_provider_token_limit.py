@@ -14,10 +14,26 @@ from tests.unit.provider_test_helpers import _bare_provider, _ok_response
 
 class TestTokenLimitClassifier:
     @pytest.mark.asyncio
-    async def test_input_length_exceeds_context_length_triggers_split_retry(self):
-        """The provider's own reported error phrasing ('input length exceeds
-        the context length') was not covered by either existing condition and
-        propagated as a hard failure instead of triggering split-and-retry.
+    @pytest.mark.parametrize(
+        "error_message",
+        [
+            "Error code: 400 - {'error': {'message': 'the input length "
+            "exceeds the context length', 'type': 'api_error', "
+            "'param': None, 'code': None}}",
+            # llama.cpp server, both of its context-size messages
+            "Error code: 400 - {'error': {'code': 400, 'message': 'request "
+            "(17066 tokens) exceeds the available context size (8192 tokens), "
+            "try increasing it', 'type': 'exceed_context_size_error', "
+            "'n_prompt_tokens': 17066, 'n_ctx': 8192}}",
+            "Error code: 400 - {'error': {'code': 400, 'message': 'input "
+            "(9000 tokens) is larger than the max context size (8192 tokens). "
+            "skipping', 'type': 'exceed_context_size_error', "
+            "'n_prompt_tokens': 9000, 'n_ctx': 8192}}",
+        ],
+    )
+    async def test_context_length_error_triggers_split_retry(self, error_message):
+        """A server's context-length phrasing must trigger split-and-retry,
+        not propagate as a hard failure.
         """
         provider, fake_openai, mod = _bare_provider(retry_attempts=2, retry_delay=0.0)
 
@@ -27,11 +43,7 @@ class TestTokenLimitClassifier:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise fake_openai.BadRequestError(
-                    "Error code: 400 - {'error': {'message': 'the input length "
-                    "exceeds the context length', 'type': 'api_error', "
-                    "'param': None, 'code': None}}"
-                )
+                raise fake_openai.BadRequestError(error_message)
             return _ok_response()
 
         provider._client = MagicMock()
