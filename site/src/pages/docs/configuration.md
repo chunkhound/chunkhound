@@ -507,6 +507,7 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Requesty API. Registry providers require explicit `model`. |
 | API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | API Route API. Registry providers require explicit `model`. |
 | Opper | `opper` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Opper API. Registry providers require explicit `model`. |
+| Obscurify.ai | `obscurify-ai` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Obscurify.ai API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
