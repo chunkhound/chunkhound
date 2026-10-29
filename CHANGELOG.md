@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- **`VOYAGE_API_KEY` is no longer supported** — VoyageAI embedding setups must set `CHUNKHOUND_EMBEDDING__API_KEY` (or `embedding.api_key` in `.chunkhound.json`) instead. If only `VOYAGE_API_KEY` is set, configuration now fails with an error saying what to change, instead of silently using it. Users who already set `CHUNKHOUND_EMBEDDING__API_KEY` or a config-file key are unaffected.
+
 ## [6.1.0] - 2026-10-20
 
 ### Added

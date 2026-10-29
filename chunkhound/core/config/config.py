@@ -285,11 +285,11 @@ class Config(BaseModel):
             self._mark_exclude_user_supplied(kwargs)
             Config.deep_merge(config_data, kwargs)
 
-        # VOYAGE_API_KEY only fills in a missing key for the voyageai provider.
-        # Apply it after every layer is merged, so a provider chosen by a
-        # config file or a CLI flag gets the key too, not only an env provider.
+        # VOYAGE_API_KEY is no longer read. After every layer is merged, fail
+        # loudly when it is the only key a voyageai setup has, so users learn
+        # to rename it instead of silently running without a key.
         if "env" not in skips:
-            self._apply_voyage_api_key_fallback(config_data)
+            self._check_removed_voyage_api_key(config_data)
 
         # Special handling for EmbeddingConfig
         if "embedding" in config_data and isinstance(config_data["embedding"], dict):
@@ -339,16 +339,24 @@ class Config(BaseModel):
         Config.deep_merge(config_data, env_vars)
 
     @staticmethod
-    def _apply_voyage_api_key_fallback(config_data: dict[str, Any]) -> None:
-        """Use ``VOYAGE_API_KEY`` when the merged embedding config selects
-        voyageai and no layer supplied an API key."""
+    def _check_removed_voyage_api_key(config_data: dict[str, Any]) -> None:
+        """Raise when ``VOYAGE_API_KEY`` is the only key a voyageai setup has.
+
+        The variable is no longer read. A configured key (from any layer)
+        or a non-voyageai provider never triggers this, even when
+        ``VOYAGE_API_KEY`` is also set.
+        """
         embedding = config_data.get("embedding")
         if not isinstance(embedding, dict) or embedding.get("api_key"):
             return
         if embedding.get("provider") != "voyageai":
             return
-        if voyage_key := os.getenv("VOYAGE_API_KEY"):
-            embedding["api_key"] = voyage_key
+        if os.getenv("VOYAGE_API_KEY"):
+            raise ValueError(
+                "VOYAGE_API_KEY is no longer supported. Set "
+                "CHUNKHOUND_EMBEDDING__API_KEY (or embedding.api_key in "
+                ".chunkhound.json) instead."
+            )
 
     def _apply_global_json(
         self,
