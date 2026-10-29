@@ -112,6 +112,10 @@ class TransientSearchService:
                 if hasattr(chunk.chunk_type, "value")
                 else chunk.chunk_type
             ),
+            # Research combines these rows with ordinary DB rows in "both"
+            # mode. Keep provenance on each row so historical diff evidence is
+            # not confused with source that can safely be read from disk.
+            "source_provenance": "transient",
             "similarity": score,
             "score": score,
         }

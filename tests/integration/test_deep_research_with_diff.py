@@ -236,6 +236,99 @@ async def test_deep_research_synthesizes_from_diff_when_file_is_not_on_disk():
 
 
 @pytest.mark.asyncio
+async def test_deep_research_both_reads_database_results_from_current_source(tmp_path):
+    """Mixed research keeps diff evidence while expanding DB source normally."""
+    from chunkhound.mcp_server.tools import deep_research_impl
+
+    current_file = tmp_path / "src" / "current.py"
+    current_file.parent.mkdir()
+    current_file.write_text(
+        "from current_dependency import helper\n\n"
+        "def current_function():\n"
+        "    return 'CURRENT_SOURCE_MARKER'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "auth.py").write_text(
+        "def unchanged_helper():\n    return 'SAME_PATH_CURRENT_MARKER'\n",
+        encoding="utf-8",
+    )
+    original_search = _make_original_search_service()
+    original_search.search_semantic.return_value = (
+        [
+            {
+                "chunk_id": 42,
+                "file_path": "src/current.py",
+                "content": "STALE_DB_SNIPPET",
+                "start_line": 3,
+                "end_line": 4,
+                "similarity": 0.9,
+                "score": 0.9,
+            },
+            {
+                "chunk_id": 43,
+                "file_path": "src/auth.py",
+                "content": "STALE_SAME_PATH_SNIPPET",
+                "start_line": 1,
+                "end_line": 2,
+                "similarity": 0.8,
+                "score": 0.8,
+            },
+        ],
+        {"offset": 0, "page_size": 50, "has_more": False, "total": 1},
+    )
+    services = _make_services(original_search)
+    services.provider.get_transient_file_content_async = None
+    services.provider.get_transient_file_content = None
+    services.provider.get_base_directory.return_value = tmp_path
+    em = _make_embedding_manager()
+    llm_manager = MagicMock()
+    llm_manager.get_utility_provider.return_value.estimate_tokens.side_effect = len
+
+    def _fake_factory_create(**kwargs):
+        db_services = kwargs["db_services"]
+        research = MagicMock()
+
+        async def deep_research(query, previous_query=None):
+            chunks, _ = await db_services.search_service.search_semantic(
+                query, force_strategy="single_hop"
+            )
+            evidence = await FileReader(db_services).read_files_with_budget(
+                chunks, llm_manager
+            )
+            return {"answer": dict(evidence)}
+
+        research.deep_research = deep_research
+        return research
+
+    with (
+        patch(
+            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            _stream_fake_diff,
+        ),
+        patch(
+            "chunkhound.services.research.factory.ResearchServiceFactory.create",
+            side_effect=_fake_factory_create,
+        ),
+    ):
+        result = await deep_research_impl(
+            services=services,
+            embedding_manager=em,
+            llm_manager=llm_manager,
+            query="compare logout and the current helper",
+            commit_range="HEAD~2..HEAD",
+            vector_source="both",
+        )
+
+    evidence = result["answer"]
+    assert "def logout(user):" in evidence["src/auth.py"]
+    assert "SAME_PATH_CURRENT_MARKER" in evidence["src/auth.py"]
+    assert "STALE_SAME_PATH_SNIPPET" not in evidence["src/auth.py"]
+    assert "CURRENT_SOURCE_MARKER" in evidence["src/current.py"]
+    assert "current_dependency" in evidence["src/current.py"]
+    assert "STALE_DB_SNIPPET" not in evidence["src/current.py"]
+
+
+@pytest.mark.asyncio
 async def test_deep_research_diff_mode_does_not_call_original_search_semantic():
     """In vector_source='diff' mode, original.search_semantic is NOT called."""
     from chunkhound.mcp_server.tools import deep_research_impl

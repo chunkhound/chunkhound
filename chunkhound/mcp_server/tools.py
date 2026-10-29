@@ -55,10 +55,14 @@ _DIFF_SOURCE_BUDGET_BYTES = 1_000_000
 
 
 class _DiffResearchProvider:
-    """Delegate DB access while marking search chunks as source evidence."""
+    """Delegate DB access while identifying historical diff evidence."""
 
     transient_source_budget_bytes = _DIFF_SOURCE_BUDGET_BYTES
-    transient_chunks_are_source = True
+
+    @staticmethod
+    def transient_chunks_are_source(chunk: dict[str, Any]) -> bool:
+        """Return whether a result contains authoritative historical source."""
+        return chunk.get("source_provenance") == "transient"
 
     def __init__(self, provider: Any) -> None:
         self._provider = provider

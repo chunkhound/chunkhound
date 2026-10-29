@@ -84,48 +84,100 @@ async def read_transient_sources_with_budget(
             grouped.setdefault(path, []).append(chunk)
     contents: dict[str, str] = {}
     remaining_tokens = max_tokens
-    chunks_are_source = bool(getattr(provider, "transient_chunks_are_source", False))
+    source_selector = getattr(provider, "transient_chunks_are_source", False)
+
+    def is_authoritative_source(chunk: dict[str, Any]) -> bool:
+        if callable(source_selector):
+            return bool(source_selector(chunk))
+        return bool(source_selector)
+
+    def selected_excerpt(matches: list[dict[str, Any]], max_chars: int) -> str:
+        pieces: list[str] = []
+        remaining_chars = max_chars
+        for match in matches:
+            text = match.get("content") or match.get("code") or ""
+            piece = text[:remaining_chars]
+            if piece:
+                pieces.append(piece)
+                remaining_chars -= len(piece) + 7
+            if remaining_chars <= 0:
+                break
+        return "\n\n...\n\n".join(pieces)[:max_chars]
+
+    def current_source_excerpt(
+        source: str,
+        matches: list[dict[str, Any]],
+        file_path: str,
+        max_chars: int,
+    ) -> str:
+        lines = source.split("\n")
+        pieces: list[str] = []
+        for match in matches:
+            start_line = match.get("start_line", 1)
+            end_line = match.get("end_line", start_line)
+            expanded_start, expanded_end = expand_to_natural_boundaries(
+                lines, start_line, end_line, match, file_path
+            )
+            if expanded_start == 0 and expanded_end == 0:
+                continue
+            pieces.append("\n".join(lines[max(0, expanded_start - 1) : expanded_end]))
+        return "\n\n...\n\n".join(pieces)[:max_chars]
+
     for path, matches in grouped.items():
         if byte_budget <= 0 or (remaining_tokens is not None and remaining_tokens <= 0):
             break
         per_file = min(byte_budget, 64_000)
         max_chars = per_file // 4
-        if chunks_are_source:
+        authoritative_matches = [
+            match for match in matches if is_authoritative_source(match)
+        ]
+        current_matches = [
+            match for match in matches if not is_authoritative_source(match)
+        ]
+        has_authoritative_source = bool(authoritative_matches)
+        if has_authoritative_source:
             # Git history results already contain the requested revision's diff
             # hunks. They are authoritative evidence: consulting the working
             # tree here could substitute newer code or lose deleted files.
-            pieces: list[str] = []
-            remaining_chars = max_chars
-            for match in matches:
-                text = match.get("content") or match.get("code") or ""
-                piece = text[:remaining_chars]
-                if piece:
-                    pieces.append(piece)
-                    remaining_chars -= len(piece) + 7
-                if remaining_chars <= 0:
-                    break
-            excerpt = "\n\n...\n\n".join(pieces)[:max_chars]
+            if current_matches:
+                # A path can contain changed lines from the diff and unchanged
+                # DB matches elsewhere. Preserve both revisions explicitly:
+                # historical matches use their returned hunks, while DB matches
+                # get context from the current source rather than stale index
+                # snippets. Split the per-file budget so neither source crowds
+                # the other out.
+                historical_chars = max_chars // 2
+                historical = selected_excerpt(authoritative_matches, historical_chars)
+                source = await resolve_source_text_async(provider, path)
+                current = (
+                    current_source_excerpt(
+                        source,
+                        current_matches,
+                        path,
+                        max_chars - len(historical) - 7,
+                    )
+                    if source
+                    else ""
+                )
+                excerpt = "\n\n...\n\n".join(
+                    piece for piece in (historical, current) if piece
+                )[:max_chars]
+                del source
+            else:
+                excerpt = selected_excerpt(authoritative_matches, max_chars)
         else:
-            # Let refetch failures propagate: silently using a changed revision
-            # would invalidate citations, even if other sources were readable.
+            # DB results in a mixed diff+DB search are ordinary current-source
+            # matches. Read their source normally instead of treating the small
+            # search snippets as historical diff hunks.
             source = await resolve_source_text_async(provider, path)
             if not source:
                 continue
             # Four bytes per Unicode code point is a conservative UTF-8 bound.
-            if len(source) * 4 <= per_file:
-                excerpt = source
-            else:
-                pieces = []
-                remaining_chars = max_chars
-                for match in matches:
-                    text = match.get("content") or match.get("code") or ""
-                    piece = text[:remaining_chars]
-                    if piece:
-                        pieces.append(piece)
-                        remaining_chars -= len(piece) + 7
-                    if remaining_chars <= 0:
-                        break
-                excerpt = "\n\n...\n\n".join(pieces)[:max_chars]
+            excerpt = (
+                source
+                if len(source) * 4 <= per_file
+                else current_source_excerpt(source, matches, path, max_chars)
+            )
             del source
         if remaining_tokens is not None:
             low, high = 0, len(excerpt)
@@ -137,6 +189,9 @@ async def read_transient_sources_with_budget(
                     high = middle - 1
             excerpt = excerpt[:low]
         if excerpt:
+            # This helper has selected and budgeted the exact source revision.
+            # Preserve it through synthesis rather than rebuilding it from the
+            # original search snippets.
             contents[path] = BudgetedSourceExcerpt(excerpt)
             byte_budget -= len(excerpt.encode("utf-8"))
             if remaining_tokens is not None:
