@@ -680,6 +680,7 @@ async def search_impl(
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
     vector_source: str = "diff",
+    strategy: Literal["auto", "single_hop", "multi_hop"] = "auto",
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -695,6 +696,7 @@ async def search_impl(
         commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
         last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
         vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
+        strategy: Semantic search strategy. 'auto' (default) uses multi-hop expansion with reranking when the provider supports reranking, else single-hop. 'single_hop' returns one vector search with no expansion or reranking — sub-second, for callers that rerank results themselves. 'multi_hop' requires a reranking provider. Ignored for type='regex'.
 
     Returns:
         Dict with 'results' and 'pagination' keys
@@ -745,6 +747,7 @@ async def search_impl(
             provider=provider_name,
             model=model_name,
             path_filter=path,
+            force_strategy=None if strategy == "auto" else strategy,
         )
     else:  # regex
         # Perform regex search; pass query so results are scored by cosine similarity

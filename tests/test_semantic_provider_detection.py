@@ -63,3 +63,26 @@ async def test_semantic_search_uses_configured_provider():
         "Semantic search should use configured model when not explicitly specified."
 
 
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_strategy_reaches_service_and_schema():
+    """`strategy` is exposed on the MCP schema and forwarded as force_strategy ("auto" -> None)."""
+    from chunkhound.mcp_server.tools import TOOL_REGISTRY
+
+    prop = TOOL_REGISTRY["search"].parameters["properties"]["strategy"]
+    assert prop["enum"] == ["auto", "single_hop", "multi_hop"]
+
+    provider = Mock()
+    provider.name, provider.model = "voyageai", "voyage-code-4"
+    manager = Mock(spec=EmbeddingManager)
+    manager.list_providers.return_value = ["voyageai"]
+    manager.get_provider.return_value = provider
+    services = Mock(spec=DatabaseServices)
+    services.search_service = Mock()
+    services.search_service.search_semantic = AsyncMock(return_value=([], {"total": 0, "page": 1, "page_size": 10}))
+
+    await search_impl(services=services, embedding_manager=manager, type="semantic", query="q", strategy="single_hop")
+    await search_impl(services=services, embedding_manager=manager, type="semantic", query="q")
+    calls = services.search_service.search_semantic.call_args_list
+    assert [c.kwargs["force_strategy"] for c in calls] == ["single_hop", None]
