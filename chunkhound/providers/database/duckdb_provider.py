@@ -1216,7 +1216,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _compact_copy_data(
         self, backup_path: Path, compacted_path: Path, state: dict[str, Any]
-    ) -> tuple[list[tuple[str]], bool]:
+    ) -> tuple[list[tuple[str]], list[dict[str, Any]]]:
         """Step 3: rebuild the compacted DB from ChunkHound-owned canonical tables.
 
         Compaction intentionally preserves only the canonical ChunkHound schema:
@@ -1225,10 +1225,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         not a generic DuckDB passthrough.
 
         HNSW indexes are NOT created during copy — they are rebuilt eagerly
-        after the atomic swap in ``_compact_finalize`` only if the original DB
-        had HNSW indexes before compaction began (``had_hnsw`` flag).
+        after the atomic swap in ``_compact_finalize`` using the source indexes
+        discovered here, so each per-table metric (not just cosine) survives
+        the rebuild.
 
-        Returns (embedding_table_names, had_hnsw).
+        Returns (embedding_table_names, source_hnsw_indexes).
         """
         tgt_conn = duckdb.connect(str(compacted_path))
         try:
@@ -1267,17 +1268,15 @@ class DuckDBProvider(SerialDatabaseProvider):
             tgt_conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
             tgt_conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
 
-            # Check whether the source catalog already had HNSW indexes.
-            # Compaction only restores HNSW when the pre-compaction source DB
-            # had one, so a false negative here would silently degrade search.
-            # Treat source-catalog discovery as fatal instead of best-effort.
-            had_hnsw = (
-                len(
-                    self._executor_get_existing_vector_indexes_from_catalog(
-                        tgt_conn, catalog="src", fail_on_error=True
-                    )
+            # Discover the source catalog's HNSW indexes, including each
+            # index's metric. Compaction only restores HNSW when the
+            # pre-compaction source DB had one, and it must reuse the original
+            # metric for each table; a false negative here would silently
+            # degrade search. Treat discovery as fatal instead of best-effort.
+            hnsw_indexes = (
+                self._executor_get_existing_vector_indexes_from_catalog(
+                    tgt_conn, catalog="src", fail_on_error=True
                 )
-                > 0
             )
 
             tgt_conn.execute(
@@ -1353,7 +1352,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     )
 
             tgt_conn.execute("CHECKPOINT")
-            return emb_tables, had_hnsw
+            return emb_tables, hnsw_indexes
         finally:
             tgt_conn.close()
 
@@ -1364,7 +1363,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         compacted_path: Path,
         backup_path: Path,
         original_size: int,
-        had_hnsw: bool,
+        hnsw_indexes: list[dict[str, Any]],
         _t0: float,
     ) -> int:
         """Steps 4-8: atomic swap, reconnect, restore indexes, cleanup.
@@ -1390,8 +1389,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Only recreate HNSW if the original DB had it before compaction.
         # During batch CLI indexing, HNSW is dropped at the start (bookends)
         # and intermediate compactions must not recreate it mid-pipeline.
-        if had_hnsw:
-            self._executor_ensure_all_hnsw_indexes(new_conn, state)
+        # Pass the discovered source indexes so each rebuild keeps its metric.
+        if hnsw_indexes:
+            self._executor_ensure_all_hnsw_indexes(
+                new_conn, state, source_indexes=hnsw_indexes
+            )
 
         backup_path.unlink(missing_ok=True)
 
@@ -1486,13 +1488,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
         compacted_path = db_path.with_suffix(db_path.suffix + ".compact_new")
         original_size = 0
-        had_hnsw = False
+        hnsw_indexes: list[dict[str, Any]] = []
 
         try:
             original_size = self._compact_prepare(
                 conn, state, db_path, backup_path, compacted_path
             )
-            _, had_hnsw = self._compact_copy_data(
+            _, hnsw_indexes = self._compact_copy_data(
                 backup_path, compacted_path, state
             )
             return self._compact_finalize(
@@ -1501,7 +1503,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 compacted_path,
                 backup_path,
                 original_size,
-                had_hnsw,
+                hnsw_indexes,
                 _t0,
             )
         except Exception as e:
@@ -1509,7 +1511,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             try:
                 self._compact_restore(
                     backup_path, compacted_path, db_path, state,
-                    had_hnsw=had_hnsw,
+                    had_hnsw=bool(hnsw_indexes),
                 )
             except Exception as restore_err:
                 log_if_not_mcp(
@@ -2115,12 +2117,20 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "SELECT metric FROM pragma_hnsw_index_info() WHERE index_name = ? LIMIT 1",
                 [index_name],
             ).fetchone()
-            if row:
-                return str(row[0])
-        except Exception:
-            logger.debug(
-                f"Could not query HNSW metric for {index_name}, defaulting to cosine"
+        except Exception as error:
+            logger.warning(
+                f"Could not query HNSW metric for index {index_name!r}: {error}. "
+                "Defaulting to cosine; rebuilding this index will lose a "
+                "non-cosine metric."
             )
+            return "cosine"
+        if row:
+            return str(row[0])
+        logger.warning(
+            f"pragma_hnsw_index_info() returned no metric for index {index_name!r}. "
+            "Defaulting to cosine; rebuilding this index will lose a non-cosine "
+            "metric."
+        )
         return "cosine"
 
     def _extract_custom_hnsw_identity(
@@ -2343,9 +2353,28 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.info(f"Dropped {dropped} HNSW index(es) before bulk indexing")
 
     def _executor_ensure_all_hnsw_indexes(
-        self, conn: Any, state: dict[str, Any]
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        *,
+        source_indexes: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Create canonical HNSW indexes on all embedding tables that have data."""
+        """Create canonical HNSW indexes on all embedding tables that have data.
+
+        ``source_indexes`` carries the HNSW indexes discovered before a
+        compaction rebuild. Their per-table metrics are reused so a non-cosine
+        index is never silently rewritten as cosine. Callers without source
+        index info (for example the end of batch indexing) keep the cosine
+        default.
+        """
+        source_metrics: dict[str, str] = {}
+        for index_info in source_indexes or ():
+            table_name = str(index_info.get("table_name", ""))
+            if table_name and table_name not in source_metrics:
+                source_metrics[table_name] = str(
+                    index_info.get("metric", "cosine")
+                )
+
         tables = conn.execute(
             "SELECT table_name FROM information_schema.tables "
             f"WHERE {_embedding_tables_where_clause()}"
@@ -2362,11 +2391,20 @@ class DuckDBProvider(SerialDatabaseProvider):
             dims = _embedding_dims_from_table_name(table_name)
             if dims is None:
                 continue
+            metric = source_metrics.get(table_name, "cosine")
+            try:
+                metric = self._normalize_hnsw_metric(metric)
+            except ValueError as error:
+                logger.warning(
+                    f"Ignoring invalid HNSW metric for {table_name}: {error}. "
+                    "Defaulting to cosine."
+                )
+                metric = "cosine"
             hnsw_name = _embedding_hnsw_index_name(dims)
             conn.execute(f"""
                 CREATE INDEX {hnsw_name} ON {self._quote_duckdb_identifier(table_name)}
                 USING HNSW (embedding)
-                WITH (metric = 'cosine')
+                WITH (metric = '{metric}')
             """)
             created += 1
         if created:

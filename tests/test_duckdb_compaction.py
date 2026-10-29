@@ -3243,10 +3243,19 @@ def test_compaction_preserves_all_canonical_tables_behaviorally(
 
 
 def test_non_cosine_hnsw_metric_survives_index_rebuild(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Non-cosine HNSW indexes survive guarded drop/recreate rebuilds."""
+    """Non-cosine HNSW indexes survive guarded and forced-compaction rebuilds.
+
+    The mutation guard rebuilds indexes once, then the sampled auto-compaction
+    (forced here via ``COMPACT_SAMPLE_INTERVAL = 1``) rebuilds them again. Both
+    paths must preserve the original metric. Regression for issue #456, where
+    compaction finalize hardcoded cosine.
+    """
+    from chunkhound.providers.database import serial_executor
+
     db = DuckDBProvider(tmp_path / "metric.duckdb", base_directory=tmp_path)
+    db.config = DatabaseConfig(fragmentation_threshold_pct=0.0)
     db.connect()
     try:
         _, original_chunk_id = _seed_embedding_dims_3(db)
@@ -3294,8 +3303,26 @@ def test_non_cosine_hnsw_metric_survives_index_rebuild(
         assert len(before) == 1
         assert before[0]["metric"] == "l2sq"
 
+        # Force the sampled auto-compaction deterministically: sample every
+        # write and make the fragmentation check independent of file-size
+        # heuristics.
+        monkeypatch.setattr(serial_executor, "COMPACT_SAMPLE_INTERVAL", 1)
+        monkeypatch.setattr(
+            db, "_executor_measure_fragmentation", lambda conn, state: 10.0
+        )
+
+        compaction_runs: list[int] = []
+        original_compact = db._executor_compact_database
+
+        def _tracked_compact(conn: Any, state: dict[str, Any]) -> int:
+            compaction_runs.append(1)
+            return original_compact(conn, state)
+
+        monkeypatch.setattr(db, "_executor_compact_database", _tracked_compact)
+
         db._execute_in_db_thread_sync("delete_chunks_batch", [original_chunk_id])
 
+        assert compaction_runs, "forced sampled auto-compaction did not run"
         after = [i for i in db.get_existing_vector_indexes() if i["index_name"] == "idx_hnsw_3"]
         assert len(after) == 1
         assert after[0]["metric"] == "l2sq"
