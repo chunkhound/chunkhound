@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 # Import and re-export exceptions for convenience
 from chunkhound.core.exceptions.embedding import (
@@ -39,7 +39,17 @@ class EmbeddingConfig:
     client_side_truncation: bool = False
 
 
-class EmbeddingProvider(Protocol):
+@runtime_checkable
+class EmbeddingSpaceIdentityProvider(Protocol):
+    """Provider contract for safe cross-request vector caching."""
+
+    @property
+    def embedding_space_identity(self) -> str:
+        """Opaque identity covering all settings that select an embedding space."""
+        ...
+
+
+class EmbeddingProvider(EmbeddingSpaceIdentityProvider, Protocol):
     """Abstract protocol for embedding providers.
 
     Defines the interface that all embedding implementations must follow.

@@ -22,6 +22,7 @@ def _embedding_manager():
             model="bounded-web-test",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)

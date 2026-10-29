@@ -108,6 +108,7 @@ async def test_web_embeddings_keep_full_batches_with_safe_text_and_pdf_chunks(
             model="text-embedding-3-small",
             provider="openai",
             dims=2,
+            embedding_space_identity="test-space",
         )
 
     def create(**kwargs):
@@ -157,6 +158,7 @@ async def test_research_factory_receives_transient_search_service() -> None:
             model="test",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
@@ -262,6 +264,7 @@ async def test_research_consumes_pages_incrementally_and_stores_full_text() -> N
             model="test",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
@@ -325,6 +328,7 @@ async def test_research_rejects_pages_without_usable_content() -> None:
             model="test",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
     )
     captured: dict = {}
@@ -377,6 +381,7 @@ async def test_research_propagates_error_after_partial_page_stream() -> None:
             model="test",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
     )
     captured: dict = {}
@@ -447,6 +452,7 @@ async def test_research_cancellation_finalizes_page_producer() -> None:
             model="test",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
     )
     captured: dict = {}

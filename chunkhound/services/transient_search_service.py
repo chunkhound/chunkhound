@@ -142,17 +142,29 @@ class TransientSearchService:
             return await self._embedding_manager.embed_texts(texts)
         return await self._embedding_manager.embed_texts(texts, provider_name=provider)
 
-    def _cache_namespace(self, result: Any) -> dict[str, Any]:
-        embedding_provider = self._embedding_manager.get_provider(result.provider)
-        endpoint = getattr(embedding_provider, "base_url", "")
-        deployment = getattr(embedding_provider, "_azure_deployment", "")
+    @staticmethod
+    def _cache_namespace(result: Any) -> dict[str, Any]:
+        identity = getattr(result, "embedding_space_identity", None)
+        if not isinstance(identity, str) or not identity:
+            raise RuntimeError(
+                "Embedding result is missing embedding_space_identity; providers "
+                "must stamp the identity used for each request"
+            )
         return {
             "provider": result.provider,
             "model": result.model,
             "dims": result.dims,
-            "endpoint": endpoint if isinstance(endpoint, str) else "",
-            "deployment": deployment if isinstance(deployment, str) else "",
+            "endpoint": identity,
+            "deployment": "",
         }
+
+    @staticmethod
+    def _validate_embedding_result(result: Any, expected: dict[str, Any]) -> None:
+        actual = TransientSearchService._cache_namespace(result)
+        if actual != expected:
+            raise RuntimeError(
+                "Embedding provider changed embedding space during transient search"
+            )
 
     async def _search_transient(
         self,
@@ -238,6 +250,7 @@ class TransientSearchService:
             if missing_indices:
                 texts = [filtered[index].code for index in missing_indices]
                 embedded = await self._embed_texts(texts, provider)
+                self._validate_embedding_result(embedded, cache_ns)
                 for index, vector in zip(missing_indices, embedded.embeddings):
                     vectors[index] = vector
                     self._vector_cache.put(filtered[index].code, vector, **cache_ns)
@@ -361,6 +374,7 @@ class TransientSearchService:
             if missing_indices:
                 texts = [filtered[index].code for index in missing_indices]
                 embedded = await self._embed_texts(texts, provider)
+                self._validate_embedding_result(embedded, cache_ns)
                 for index, vector in zip(missing_indices, embedded.embeddings):
                     vectors[index] = vector
                     self._vector_cache.put(filtered[index].code, vector, **cache_ns)

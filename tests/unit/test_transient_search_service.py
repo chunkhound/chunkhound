@@ -9,8 +9,10 @@ import pytest
 
 from chunkhound.embeddings import LocalEmbeddingResult
 from chunkhound.interfaces.embedding_provider import RerankResult
+from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 from chunkhound.services.transient_search_service import TransientSearchService
 from chunkhound.services.vector_cache import VectorCache
+from chunkhound.utils.hashing import compute_embedding_space_identity
 from tests.unit.test_diff_aware_search_service import make_chunk, make_original
 
 
@@ -24,7 +26,11 @@ def stream_chunks(chunks, batch_size: int = 100) -> object:
 
 
 def embedding_manager() -> MagicMock:
+    class Provider:
+        embedding_space_identity = compute_embedding_space_identity("test-provider")
+
     manager = MagicMock()
+    manager.get_provider.return_value = Provider()
 
     async def embed(texts: list[str]) -> LocalEmbeddingResult:
         vectors = []
@@ -38,6 +44,7 @@ def embedding_manager() -> MagicMock:
             model="test-model",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
@@ -125,12 +132,16 @@ async def test_shared_cache_isolates_embedding_provider_instances(
     cache = VectorCache(max_entries=10)
     chunks = [make_chunk("one", code="one")]
 
+    class Provider:
+        def __init__(self, endpoint: str, deployment: str) -> None:
+            self.embedding_space_identity = compute_embedding_space_identity(
+                "test-v1", endpoint, deployment
+            )
+
     def manager(
         endpoint: str, deployment: str, chunk_vector: list[float]
     ) -> MagicMock:
-        embedding_provider = MagicMock()
-        embedding_provider.base_url = endpoint
-        embedding_provider._azure_deployment = deployment
+        embedding_provider = Provider(endpoint, deployment)
         embedding_manager = MagicMock()
         embedding_manager.get_provider.return_value = embedding_provider
 
@@ -143,6 +154,7 @@ async def test_shared_cache_isolates_embedding_provider_instances(
                 model="shared-model",
                 provider="shared-provider",
                 dims=2,
+                embedding_space_identity=embedding_provider.embedding_space_identity,
             )
 
         embedding_manager.embed_texts = AsyncMock(side_effect=embed)
@@ -169,7 +181,82 @@ async def test_shared_cache_isolates_embedding_provider_instances(
         ["query"],
         ["one"],
     ]
-    second_manager.get_provider.assert_called_once_with("shared-provider")
+
+
+@pytest.mark.asyncio
+async def test_embedding_space_change_between_query_and_chunks_fails() -> None:
+    chunks = [make_chunk("one", code="one")]
+    manager = MagicMock()
+    identities = iter(["space-a", "space-b"])
+
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        return LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0] for _ in texts],
+            model="shared-model",
+            provider="test-provider",
+            dims=2,
+            embedding_space_identity=next(identities),
+        )
+
+    manager.embed_texts = AsyncMock(side_effect=embed)
+    service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", manager, VectorCache(10)
+    )
+
+    with pytest.raises(RuntimeError, match="changed embedding space"):
+        await service.search_semantic("query")
+    assert len(service._vector_cache) == 0
+
+
+@pytest.mark.asyncio
+async def test_shared_cache_isolates_real_azure_provider_endpoints() -> None:
+    cache = VectorCache(max_entries=10)
+    chunks = [make_chunk("one", code="one")]
+
+    def manager(endpoint: str, chunk_vector: list[float]) -> MagicMock:
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+            azure_endpoint=endpoint,
+            azure_deployment="shared-deployment",
+            api_version="2024-02-01",
+        )
+        embedding_manager = MagicMock()
+        embedding_manager.get_provider.return_value = provider
+
+        async def embed(texts: list[str]) -> LocalEmbeddingResult:
+            vectors = [
+                [1.0, 0.0] if text == "query" else chunk_vector for text in texts
+            ]
+            return LocalEmbeddingResult(
+                embeddings=vectors,
+                model="text-embedding-3-small",
+                provider="azure_openai",
+                dims=2,
+                embedding_space_identity=provider.embedding_space_identity,
+            )
+
+        embedding_manager.embed_texts = AsyncMock(side_effect=embed)
+        return embedding_manager
+
+    first_manager = manager("https://one.openai.azure.com", [1.0, 0.0])
+    second_manager = manager("https://two.openai.azure.com", [0.0, 1.0])
+    first_service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", first_manager, cache
+    )
+    second_service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", second_manager, cache
+    )
+
+    first_results, _ = await first_service.search_semantic("query")
+    second_results, _ = await second_service.search_semantic("query")
+
+    assert first_results[0]["similarity"] == pytest.approx(1.0)
+    assert second_results[0]["similarity"] == pytest.approx(0.0)
+    assert [call.args[0] for call in second_manager.embed_texts.await_args_list] == [
+        ["query"],
+        ["one"],
+    ]
 
 
 @pytest.mark.asyncio
@@ -210,7 +297,8 @@ async def test_bulk_search_scans_source_once_and_matches_scalar_ranking() -> Non
             for text in texts
         ]
         return LocalEmbeddingResult(
-            embeddings=vectors, model="test", provider="test", dims=2
+            embeddings=vectors, model="test", provider="test", dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
@@ -235,7 +323,8 @@ async def test_bulk_search_empty_query_embeddings_match_scalar_empty_results() -
     manager = MagicMock()
     manager.embed_texts = AsyncMock(
         return_value=LocalEmbeddingResult(
-            embeddings=[], model="test", provider="test", dims=0
+            embeddings=[], model="test", provider="test", dims=0,
+            embedding_space_identity="test-space",
         )
     )
     service = TransientSearchService(
@@ -323,7 +412,8 @@ async def test_concurrent_searches_do_not_cross_results() -> None:
             angle = 0.0 if text in {"left", "left query"} else math.pi / 2
             vectors.append([math.cos(angle), math.sin(angle)])
         return LocalEmbeddingResult(
-            embeddings=vectors, model="test", provider="test", dims=2
+            embeddings=vectors, model="test", provider="test", dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
@@ -462,6 +552,7 @@ async def test_equal_scores_prefer_earlier_ordinal() -> None:
             model="test-model",
             provider="test",
             dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
@@ -510,6 +601,7 @@ async def test_cache_does_not_reuse_vectors_across_embedding_spaces() -> None:
                 model="model",
                 provider=provider,
                 dims=dims,
+                embedding_space_identity="test-space",
             )
 
         manager.embed_texts = AsyncMock(side_effect=embed)
@@ -687,7 +779,8 @@ async def test_lower_scoring_diff_wins_same_file_line() -> None:
         for text in texts:
             vectors.append([1.0, 0.0] if text == "query" else [0.0, 1.0])
         return LocalEmbeddingResult(
-            embeddings=vectors, model="test", provider="test", dims=2
+            embeddings=vectors, model="test", provider="test", dims=2,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)

@@ -51,6 +51,7 @@ def make_embedding_manager(embeddings: list[list[float]]) -> MagicMock:
             model="test-model",
             provider="test",
             dims=len(embeddings[0]) if embeddings else 0,
+            embedding_space_identity="test-space",
         )
 
     manager.embed_texts = _embed

@@ -55,6 +55,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
     provider.dims = dim
     provider.distance = "cosine"
     provider.batch_size = 256
+    provider.embedding_space_identity = "test-space"
 
     # supports_reranking required by deep_research_impl validation
     provider.supports_reranking = MagicMock(return_value=True)
@@ -68,6 +69,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
             model="test-model",
             provider="test",
             dims=dim,
+            embedding_space_identity="test-space",
         )
 
     provider.embed = _embed
@@ -85,6 +87,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
             model="test-model",
             provider="test",
             dims=dim,
+            embedding_space_identity="test-space",
         )
 
     em.embed_texts = _embed_texts  # type: ignore[method-assign]
