@@ -298,6 +298,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_OBSCURIFY_API_KEY>",
     },
     {
+        id: "runcrate",
+        name: "Runcrate",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73zM12 22V12M3.3 7l7.7 4.73a2 2 0 0 0 2 0L20.7 7M7.5 4.27l9 5.15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "runcrate",
+            model: "deepseek-ai/DeepSeek-V4.1-Flash",
+        },
+        apiKeyPlaceholder: "<YOUR_RUNCRATE_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,

@@ -145,6 +145,7 @@ LLMProviderLiteral = Literal[
     "api-route",
     "opper",
     "obscurify-ai",
+    "runcrate",
     "opencode-cli",
 ]
 
@@ -188,6 +189,7 @@ CLI_PROVIDER_CHOICES = (
     "api-route",
     "opper",
     "obscurify-ai",
+    "runcrate",
     "opencode-cli",
 )
 

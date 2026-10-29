@@ -246,6 +246,14 @@ def test_obscurify_ai_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_runcrate_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "runcrate")
+
+    assert config["provider"] == "runcrate"
+    assert config["model"] == "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 
