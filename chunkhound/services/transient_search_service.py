@@ -2,12 +2,15 @@
 
 import asyncio
 import heapq
+import math
 import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from numbers import Real
 from typing import Any
 
 import numpy as np
+from loguru import logger
 
 from chunkhound.services.search_service_protocol import SearchServiceProtocol
 from chunkhound.services.vector_cache import VectorCache
@@ -425,7 +428,11 @@ class TransientSearchService:
         time_limit: float | None = None,
         result_limit: int | None = None,
     ) -> list[tuple[list[dict[str, Any]], dict[str, Any]] | BaseException]:
-        """Search compatible queries while scanning transient content once."""
+        """Search compatible queries while scanning transient content once.
+
+        ``time_limit`` only bounds DB multi-hop exploration. It does not bound
+        transient streaming or the combined final rerank.
+        """
         if not queries:
             return []
         if self._vector_source == "db":
@@ -504,12 +511,26 @@ class TransientSearchService:
         outputs: list[
             tuple[list[dict[str, Any]], dict[str, Any]] | BaseException
         ] = []
-        for transient_result, db_result in zip(transient_results, db_results):
+        for query, transient_result, db_result in zip(
+            queries, transient_results, db_results
+        ):
             if isinstance(db_result, BaseException):
                 outputs.append(db_result)
                 continue
-            merged = self._merge(transient_result[0], db_result[0], threshold)
-            available = min(len(merged), snapshot_size)
+            try:
+                merged = await self._finalize_both_results(
+                    query=query,
+                    transient_results=transient_result[0],
+                    db_results=db_result[0],
+                    snapshot_size=snapshot_size,
+                    threshold=threshold,
+                    provider=provider,
+                    force_strategy=force_strategy,
+                )
+            except Exception as error:
+                outputs.append(error)
+                continue
+            available = len(merged)
             outputs.append(
                 (
                     merged[offset : offset + page_size],
@@ -531,6 +552,11 @@ class TransientSearchService:
         time_limit: float | None = None,
         result_limit: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Search semantically across the selected vector sources.
+
+        ``time_limit`` only bounds DB multi-hop exploration. It does not bound
+        transient streaming or the combined final rerank.
+        """
         if self._vector_source == "db":
             return await self._original.search_semantic(
                 query=query,
@@ -570,9 +596,9 @@ class TransientSearchService:
             time_limit=time_limit,
             result_limit=result_limit,
         )
-        available = min(len(merged), snapshot_size)
+        available = len(merged)
         page = self._pagination(page_size, offset, available)
-        return merged[offset : min(offset + page_size, available)], page
+        return merged[offset : offset + page_size], page
 
     async def _search_both_snapshot(
         self,
@@ -586,8 +612,9 @@ class TransientSearchService:
         force_strategy: str | None = None,
         time_limit: float | None = None,
         result_limit: int | None = None,
+        final_rerank: bool = True,
     ) -> list[dict[str, Any]]:
-        """Fetch and merge equal bounded snapshots from transient and DB sources."""
+        """Fetch and combine equal bounded snapshots from both sources."""
         transient_task = asyncio.create_task(
             self._search_transient(
                 query,
@@ -616,7 +643,95 @@ class TransientSearchService:
         (transient_results, _), (db_results, _) = await _await_pair(
             transient_task, db_task
         )
-        return self._merge(transient_results, db_results, threshold)
+        if not final_rerank:
+            # Hybrid position fusion intentionally retains its existing source
+            # scoring behavior and larger fixed snapshot.
+            return self._merge(transient_results, db_results, threshold)
+        return await self._finalize_both_results(
+            query=query,
+            transient_results=transient_results,
+            db_results=db_results,
+            snapshot_size=snapshot_size,
+            threshold=threshold,
+            provider=provider,
+            force_strategy=force_strategy,
+        )
+
+    def _uses_final_rerank(
+        self, provider: str | None, force_strategy: str | None
+    ) -> tuple[bool, Any]:
+        embedding_provider = self._embedding_manager.get_provider(provider)
+        supports_reranking = getattr(embedding_provider, "supports_reranking", None)
+        supported = callable(supports_reranking) and supports_reranking() is True
+        return force_strategy != "single_hop" and supported, embedding_provider
+
+    async def _finalize_both_results(
+        self,
+        *,
+        query: str,
+        transient_results: list[dict[str, Any]],
+        db_results: list[dict[str, Any]],
+        snapshot_size: int,
+        threshold: float | None,
+        provider: str | None,
+        force_strategy: str | None,
+    ) -> list[dict[str, Any]]:
+        """Put retained both-mode candidates onto one validated score scale."""
+        candidates = self._merge(transient_results, db_results, None)
+        use_rerank, embedding_provider = self._uses_final_rerank(
+            provider, force_strategy
+        )
+        if not use_rerank:
+            if threshold is not None:
+                candidates = [
+                    result
+                    for result in candidates
+                    if float(result.get("score", 0.0)) >= threshold
+                ]
+            return candidates[:snapshot_size]
+        if not candidates:
+            return []
+
+        documents = [str(result.get("content", "")) for result in candidates]
+        rerank_results = await embedding_provider.rerank(
+            query=query, documents=documents, top_k=len(documents)
+        )
+        scores: dict[int, float] = {}
+        for rerank_result in rerank_results:
+            index = rerank_result.index
+            score = rerank_result.score
+            if type(index) is not int or not 0 <= index < len(candidates):
+                raise RuntimeError(
+                    "Combined final rerank returned an invalid candidate index"
+                )
+            if index in scores:
+                raise RuntimeError(
+                    "Combined final rerank returned a duplicate candidate index"
+                )
+            if isinstance(score, bool) or not isinstance(score, Real):
+                raise RuntimeError("Combined final rerank returned a non-numeric score")
+            numeric_score = float(score)
+            if not math.isfinite(numeric_score):
+                raise RuntimeError("Combined final rerank returned a non-finite score")
+            scores[index] = numeric_score
+        if set(scores) != set(range(len(candidates))):
+            raise RuntimeError(
+                "Combined final rerank did not score every candidate exactly once"
+            )
+
+        # Build new dictionaries only after complete validation so callers can
+        # never observe a mixture of cosine and reranker scores.
+        ranked = [
+            {**result, "score": scores[index]}
+            for index, result in enumerate(candidates)
+        ]
+        ranked.sort(key=lambda item: float(item["score"]), reverse=True)
+        ranked = ranked[:snapshot_size]
+        if threshold is not None:
+            ranked = [
+                result for result in ranked if float(result["score"]) >= threshold
+            ]
+        return ranked
 
     @staticmethod
     def _merge(
@@ -793,6 +908,14 @@ class TransientSearchService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
+        if self._vector_source == "both":
+            logger.warning(
+                "Hybrid search with vector_source='both' may process up to {} "
+                "semantic candidates from each source. This can be slow or fail "
+                "if the configured reranker cannot handle the combined workload.",
+                _HYBRID_BOTH_SNAPSHOT_SIZE,
+            )
+
         hybrid_window = (
             _HYBRID_BOTH_SNAPSHOT_SIZE
             if self._vector_source == "both"
@@ -853,6 +976,7 @@ class TransientSearchService:
                     snapshot_size=_HYBRID_BOTH_SNAPSHOT_SIZE,
                     threshold=threshold,
                     path_filter=None,
+                    final_rerank=False,
                 )
                 available = min(len(merged), _HYBRID_BOTH_SNAPSHOT_SIZE)
                 return merged, self._pagination(fetch_size, 0, available)

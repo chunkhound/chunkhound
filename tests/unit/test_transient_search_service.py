@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from chunkhound.embeddings import LocalEmbeddingResult
+from chunkhound.interfaces.embedding_provider import RerankResult
 from chunkhound.services.transient_search_service import TransientSearchService
 from chunkhound.services.vector_cache import VectorCache
 from tests.unit.test_diff_aware_search_service import make_chunk, make_original
@@ -41,6 +42,20 @@ def embedding_manager() -> MagicMock:
 
     manager.embed_texts = AsyncMock(side_effect=embed)
     return manager
+
+
+def reranking_manager(
+    results: list[RerankResult] | BaseException,
+) -> tuple[MagicMock, MagicMock]:
+    manager = embedding_manager()
+    provider = MagicMock()
+    provider.supports_reranking.return_value = True
+    if isinstance(results, BaseException):
+        provider.rerank = AsyncMock(side_effect=results)
+    else:
+        provider.rerank = AsyncMock(return_value=results)
+    manager.get_provider.return_value = provider
+    return manager, provider
 
 
 @pytest.mark.asyncio
@@ -514,6 +529,144 @@ async def test_cache_does_not_reuse_vectors_across_embedding_spaces() -> None:
 
 
 @pytest.mark.asyncio
+async def test_both_mode_combined_rerank_promotes_low_cosine_diff() -> None:
+    chunks = [make_chunk("diff", file_path="diff.py", code="low cosine")]
+    original = make_original(
+        [
+            {
+                "chunk_id": "db-high",
+                "file_path": "db.py",
+                "start_line": 1,
+                "content": "high cosine",
+                "similarity": 0.9,
+                "score": 0.9,
+            }
+        ]
+    )
+    manager, provider = reranking_manager(
+        [RerankResult(index=1, score=0.95), RerankResult(index=0, score=0.1)]
+    )
+    service = TransientSearchService(
+        original, stream_chunks(chunks), "both", manager, VectorCache(max_entries=0)
+    )
+
+    results, _ = await service.search_semantic("query", threshold=0.5)
+
+    assert [result["content"] for result in results] == ["low cosine"]
+    assert results[0]["similarity"] == pytest.approx(0.0)
+    assert results[0]["score"] == pytest.approx(0.95)
+    provider.rerank.assert_awaited_once_with(
+        query="query", documents=["high cosine", "low cosine"], top_k=2
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rerank_results", "message"),
+    [
+        ([RerankResult(index=0, score=0.5)], "every candidate"),
+        (
+            [RerankResult(index=0, score=0.5), RerankResult(index=0, score=0.4)],
+            "duplicate",
+        ),
+        (
+            [RerankResult(index=0, score=0.5), RerankResult(index=2, score=0.4)],
+            "invalid candidate index",
+        ),
+        (
+            [RerankResult(index=0, score=0.5), RerankResult(index=1, score=math.nan)],
+            "non-finite",
+        ),
+    ],
+)
+async def test_both_mode_rejects_invalid_combined_rerank(
+    rerank_results: list[RerankResult], message: str
+) -> None:
+    manager, _ = reranking_manager(rerank_results)
+    service = TransientSearchService(
+        make_original(
+            [
+                {
+                    "chunk_id": "db",
+                    "file_path": "db.py",
+                    "start_line": 1,
+                    "content": "db",
+                    "score": 0.8,
+                }
+            ]
+        ),
+        stream_chunks([make_chunk("diff", code="diff")]),
+        "both",
+        manager,
+        VectorCache(max_entries=0),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        await service.search_semantic("query")
+
+
+@pytest.mark.asyncio
+async def test_both_mode_propagates_combined_rerank_failure() -> None:
+    manager, _ = reranking_manager(RuntimeError("reranker unavailable"))
+    service = TransientSearchService(
+        make_original(), stream_chunks([make_chunk("diff")]), "both", manager
+    )
+
+    with pytest.raises(RuntimeError, match="reranker unavailable"):
+        await service.search_semantic("query")
+
+
+@pytest.mark.asyncio
+async def test_both_mode_forced_single_hop_keeps_cosine_and_skips_rerank() -> None:
+    manager, provider = reranking_manager([RerankResult(index=0, score=0.1)])
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks([make_chunk("target", code="target")]),
+        "both",
+        manager,
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_semantic(
+        "query", threshold=0.5, force_strategy="single_hop"
+    )
+
+    assert results[0]["score"] == pytest.approx(1.0)
+    provider.rerank.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bulk_both_mode_final_rerank_preserves_per_query_failures() -> None:
+    manager = embedding_manager()
+    provider = MagicMock()
+    provider.supports_reranking.return_value = True
+
+    async def rerank(query: str, documents: list[str], top_k: int):
+        if query == "broken":
+            raise RuntimeError("query rerank failed")
+        return [
+            RerankResult(index=index, score=float(len(documents) - index))
+            for index in range(len(documents))
+        ]
+
+    provider.rerank = AsyncMock(side_effect=rerank)
+    manager.get_provider.return_value = provider
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks([make_chunk("diff", code="target")]),
+        "both",
+        manager,
+        VectorCache(max_entries=0),
+    )
+
+    results = await service.search_semantic_many(["query", "broken"])
+
+    assert not isinstance(results[0], BaseException)
+    assert isinstance(results[1], RuntimeError)
+    assert "query rerank failed" in str(results[1])
+
+
+@pytest.mark.asyncio
 async def test_lower_scoring_diff_wins_same_file_line() -> None:
     chunks = [make_chunk("fn", file_path="src/foo.py", start_line=10, code="diff-body")]
     original = make_original(
@@ -805,6 +958,35 @@ async def test_both_mode_pagination_fields_unaffected_by_fixed_fetch_size() -> N
     assert pagination["total"] == 2
     assert pagination["has_more"] is False
     assert pagination["next_offset"] is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_warns_about_large_reranker_workload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture_warning(message: str, *args: object) -> None:
+        warnings.append((message, args))
+
+    monkeypatch.setattr(
+        "chunkhound.services.transient_search_service.logger.warning",
+        capture_warning,
+    )
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks([]),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    await service.search_hybrid("query")
+
+    assert len(warnings) == 1
+    message, args = warnings[0]
+    assert "can be slow or fail" in message
+    assert args == (500,)
 
 
 @pytest.mark.asyncio
