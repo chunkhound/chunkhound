@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import re
 from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
@@ -99,10 +100,10 @@ async def _cleanup_git_diff_process(
         await asyncio.gather(stderr_task, return_exceptions=True)
 
 
-async def stream_git_diff_file_blocks(
+async def stream_git_diff_fragments(
     commit_range: str, cwd: Path | str
 ) -> AsyncIterator[str]:
-    """Yield one ``git diff`` file block at a time from subprocess stdout."""
+    """Yield bounded decoded fragments from ``git diff`` stdout."""
     _validate_commit_range(commit_range)
     ranges = [commit_range]
     single_commit = _SINGLE_COMMIT_RANGE_RE.match(commit_range)
@@ -124,7 +125,7 @@ async def stream_git_diff_file_blocks(
             raise RuntimeError("git diff subprocess pipes were not created")
 
         stderr_task = asyncio.create_task(_drain_stderr(proc.stderr))
-        block: list[str] = []
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         loop = asyncio.get_running_loop()
         # Budget of time spent *blocked on git*, not wall clock. This generator
         # pauses at every yield while the caller embeds that file block, which
@@ -144,31 +145,16 @@ async def stream_git_diff_file_blocks(
 
         stderr = b""
         try:
-            pending = b""
             while True:
                 data = await await_git(_read_stdout_chunk(proc.stdout))
                 if not data:
                     break
-                pending += data
-                lines = pending.splitlines(keepends=True)
-                if lines and not lines[-1].endswith((b"\n", b"\r")):
-                    pending = lines.pop()
-                else:
-                    pending = b""
-                for line in lines:
-                    decoded = line.decode("utf-8", errors="replace")
-                    if decoded.startswith("diff --git ") and block:
-                        yield "".join(block)
-                        block = []
-                    block.append(decoded)
-            if pending:
-                decoded = pending.decode("utf-8", errors="replace")
-                if decoded.startswith("diff --git ") and block:
-                    yield "".join(block)
-                    block = []
-                block.append(decoded)
-            if block:
-                yield "".join(block)
+                decoded = decoder.decode(data)
+                if decoded:
+                    yield decoded
+            decoded = decoder.decode(b"", final=True)
+            if decoded:
+                yield decoded
             await await_git(proc.wait())
             # git has exited, so stderr is at EOF and this returns immediately.
             # Floor the timeout so draining it still works on a spent budget --
@@ -198,3 +184,40 @@ async def stream_git_diff_file_blocks(
             ranges.append(f"{_EMPTY_TREE_SHA}..{single_commit.group(2)}")
             continue
         raise ValueError(f"git diff failed: {error}")
+
+
+async def stream_git_diff_file_blocks(
+    commit_range: str, cwd: Path | str
+) -> AsyncIterator[str]:
+    """Compatibility wrapper yielding complete file blocks.
+
+    Production search consumes :func:`stream_git_diff_fragments` directly so
+    its memory does not scale with the largest changed file.
+    """
+    block: list[str] = []
+    pending = ""
+    fragments = stream_git_diff_fragments(commit_range, cwd)
+    try:
+        async for fragment in fragments:
+            pending += fragment
+            lines = pending.splitlines(keepends=True)
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                pending = lines.pop()
+            else:
+                pending = ""
+            for line in lines:
+                if line.startswith("diff --git ") and block:
+                    yield "".join(block)
+                    block = []
+                block.append(line)
+        if pending:
+            if pending.startswith("diff --git ") and block:
+                yield "".join(block)
+                block = []
+            block.append(pending)
+        if block:
+            yield "".join(block)
+    finally:
+        close = getattr(fragments, "aclose", None)
+        if callable(close):
+            await close()

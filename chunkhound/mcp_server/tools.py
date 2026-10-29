@@ -615,22 +615,25 @@ async def _inject_diff_service(
 
     # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
     from chunkhound.core.git_diff import (
-        parse_diff_to_chunks,
-        stream_git_diff_file_blocks,
+        stream_diff_to_chunks,
+        stream_git_diff_fragments,
     )
     from chunkhound.services.transient_search_service import TransientSearchService
 
     _cwd = await _git_cwd_from_services(services)
 
     async def chunk_stream() -> AsyncIterator[list[Any]]:
-        async for file_block in stream_git_diff_file_blocks(
-            effective_commit_range, cwd=_cwd
+        fragments = stream_git_diff_fragments(effective_commit_range, cwd=_cwd)
+        batch: list[Any] = []
+        async for chunk in stream_diff_to_chunks(
+            fragments, max_chunk_chars=MAX_DIFF_CHUNK_CHARS
         ):
-            chunks = parse_diff_to_chunks(
-                file_block, max_chunk_chars=MAX_DIFF_CHUNK_CHARS
-            )
-            for start in range(0, len(chunks), _TRANSIENT_BATCH_SIZE):
-                yield chunks[start : start + _TRANSIENT_BATCH_SIZE]
+            batch.append(chunk)
+            if len(batch) == _TRANSIENT_BATCH_SIZE:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     diff_service = TransientSearchService(
         original=services.search_service,

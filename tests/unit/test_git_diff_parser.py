@@ -1,9 +1,16 @@
 """Unit tests for chunkhound.core.git_diff.parser."""
+
+import asyncio
+from collections.abc import AsyncIterator
+
 import pytest
 
-from chunkhound.core.git_diff.parser import parse_diff_to_chunks
+from chunkhound.core.git_diff.parser import (
+    StreamingDiffParser,
+    parse_diff_to_chunks,
+    stream_diff_to_chunks,
+)
 from chunkhound.core.types.common import ChunkType, Language
-
 
 SINGLE_HUNK_DIFF = """\
 diff --git a/foo/bar.py b/foo/bar.py
@@ -148,8 +155,7 @@ def test_oversized_hunk_splits_into_parts() -> None:
         "index abc..def 100644\n"
         "--- a/big.json\n"
         "+++ b/big.json\n"
-        f"@@ -0,0 +1,1000 @@ root\n"
-        + big_body
+        "@@ -0,0 +1,1000 @@ root\n" + big_body
     )
     chunks = parse_diff_to_chunks(diff)
     assert len(chunks) > 1, "oversized hunk must produce multiple chunks"
@@ -165,13 +171,14 @@ def test_oversized_hunk_fragments_have_unique_start_lines() -> None:
         "index abc..def 100644\n"
         "--- a/big.json\n"
         "+++ b/big.json\n"
-        "@@ -0,0 +1,1000 @@ root\n"
-        + "".join(big_lines)
+        "@@ -0,0 +1,1000 @@ root\n" + "".join(big_lines)
     )
     chunks = parse_diff_to_chunks(diff)
     assert len(chunks) > 1
     start_lines = [c.start_line for c in chunks]
-    assert len(start_lines) == len(set(start_lines)), "split fragments must have unique start_lines"
+    assert len(start_lines) == len(set(start_lines)), (
+        "split fragments must have unique start_lines"
+    )
 
 
 def test_split_fragment_start_lines_reflect_actual_diff_lines() -> None:
@@ -189,8 +196,7 @@ def test_split_fragment_start_lines_reflect_actual_diff_lines() -> None:
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        f"@@ -98,60 +{hunk_start},60 @@ fn\n"
-        + "".join(lines)
+        f"@@ -98,60 +{hunk_start},60 @@ fn\n" + "".join(lines)
     )
     # max_chunk_chars=40: the @@ header (~24 chars) + first addition fills 1 part;
     # use a small value to make splits predictable.
@@ -202,27 +208,25 @@ def test_split_fragment_start_lines_reflect_actual_diff_lines() -> None:
     # At minimum, part 2 must start at line >= hunk_start + 1 (not hunk_start + 1
     # from ordinal, but the actual count of additions in part 1).
     for i in range(1, len(chunks)):
-        prev_end = chunks[i - 1].end_line
         curr_start = chunks[i].start_line
         # Each fragment must start strictly after the previous one ends.
         assert curr_start > chunks[i - 1].start_line, (
-            f"part {i+1} start_line ({curr_start}) must be > part {i} start_line "
-            f"({chunks[i-1].start_line}); got ordinal instead of real line number"
+            f"part {i + 1} start_line ({curr_start}) must be > part {i} start_line "
+            f"({chunks[i - 1].start_line}); got ordinal instead of real line number"
         )
         # start_line must be within the hunk range
         assert hunk_start <= curr_start <= hunk_start + 59, (
-            f"part {i+1} start_line {curr_start} outside hunk range [{hunk_start}, {hunk_start+59}]"
+            f"part {i + 1} start_line {curr_start} outside hunk range [{hunk_start}, {hunk_start + 59}]"
         )
 
 
 def test_oversized_hunk_custom_max() -> None:
-    lines = [f"+x\n"] * 50  # 50 × 3 chars = 150 chars
+    lines = ["+x\n"] * 50  # 50 × 3 chars = 150 chars
     diff = (
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        "@@ -1,0 +1,50 @@ fn\n"
-        + "".join(lines)
+        "@@ -1,0 +1,50 @@ fn\n" + "".join(lines)
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=40)
     assert len(chunks) > 1
@@ -243,8 +247,7 @@ def test_single_overlong_line_split() -> None:
         "diff --git a/icon.svg b/icon.svg\n"
         "--- a/icon.svg\n"
         "+++ b/icon.svg\n"
-        "@@ -0,0 +1,1 @@\n"
-        + long_line
+        "@@ -0,0 +1,1 @@\n" + long_line
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
     assert len(chunks) > 1
@@ -259,8 +262,7 @@ def test_single_overlong_line_fragments_report_hunk_start_as_start_line() -> Non
         "diff --git a/icon.svg b/icon.svg\n"
         "--- a/icon.svg\n"
         "+++ b/icon.svg\n"
-        "@@ -0,0 +42,1 @@\n"
-        + long_line
+        "@@ -0,0 +42,1 @@\n" + long_line
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
     assert len(chunks) > 1
@@ -277,8 +279,7 @@ def test_single_overlong_line_fragments_end_line_equals_start_line() -> None:
         "diff --git a/icon.svg b/icon.svg\n"
         "--- a/icon.svg\n"
         "+++ b/icon.svg\n"
-        "@@ -0,0 +42,1 @@\n"
-        + long_line
+        "@@ -0,0 +42,1 @@\n" + long_line
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
     assert len(chunks) > 1
@@ -306,8 +307,7 @@ def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> No
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        "@@ -98,10 +100,10 @@ fn\n"
-        + "".join(lines)
+        "@@ -98,10 +100,10 @@ fn\n" + "".join(lines)
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=30)
     assert len(chunks) >= 2, "expected at least 2 split fragments"
@@ -321,7 +321,7 @@ def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> No
     # Every intermediate fragment must end strictly before hunk_end.
     for i, c in enumerate(chunks[:-1]):
         assert c.end_line < hunk_end, (
-            f"part {i+1} end_line={c.end_line} equals hunk_end={hunk_end}; "
+            f"part {i + 1} end_line={c.end_line} equals hunk_end={hunk_end}; "
             "intermediate fragments must not claim the full hunk's tail"
         )
     # Last fragment must end exactly at hunk_end.
@@ -331,9 +331,138 @@ def test_multi_line_split_intermediate_fragments_have_per_part_end_lines() -> No
     # Adjacent fragments must be strictly contiguous: prev.end_line + 1 == next.start_line
     for i in range(len(chunks) - 1):
         assert chunks[i].end_line + 1 == chunks[i + 1].start_line, (
-            f"gap/overlap between part {i+1} (end={chunks[i].end_line}) "
-            f"and part {i+2} (start={chunks[i+1].start_line})"
+            f"gap/overlap between part {i + 1} (end={chunks[i].end_line}) "
+            f"and part {i + 2} (start={chunks[i + 1].start_line})"
         )
+
+
+@pytest.mark.asyncio
+async def test_closing_chunk_stream_closes_upstream_fragments() -> None:
+    closed = False
+
+    async def fragments() -> AsyncIterator[str]:
+        nonlocal closed
+        try:
+            yield (
+                "diff --git a/a.py b/a.py\n"
+                "--- a/a.py\n"
+                "+++ b/a.py\n"
+                "@@ -1 +1 @@ fn\n"
+                "+" + "x" * 100 + "\n"
+            )
+            await asyncio.Event().wait()
+        finally:
+            closed = True
+
+    stream = stream_diff_to_chunks(fragments(), max_chunk_chars=20)
+    await anext(stream)
+    await stream.aclose()
+
+    assert closed
+
+
+@pytest.mark.asyncio
+async def test_streaming_fragments_match_in_memory_parser() -> None:
+    """Control lines, UTF-8, and bodies may cross arbitrary read boundaries."""
+    diff = (
+        "diff --git a/café.py b/café.py\n"
+        "--- a/café.py\n"
+        "+++ b/café.py\n"
+        "@@ -1,2 +1,3 @@ función\n"
+        " context\n"
+        "+added café\n"
+        " tail\n"
+    )
+    cuts = [1, 4, 9, 17, 31, 48, 63, 80, len(diff)]
+
+    async def fragments() -> AsyncIterator[str]:
+        start = 0
+        for end in cuts:
+            yield diff[start:end]
+            start = end
+
+    streamed = [
+        chunk async for chunk in stream_diff_to_chunks(fragments(), max_chunk_chars=40)
+    ]
+    expected = parse_diff_to_chunks(diff, max_chunk_chars=40)
+
+    assert [chunk.to_dict() for chunk in streamed] == [
+        chunk.to_dict() for chunk in expected
+    ]
+
+
+def test_unterminated_final_body_line_keeps_declared_line_range() -> None:
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,2 +10,2 @@ fn\n"
+        " context\n"
+        "+added without newline"
+    )
+
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
+
+    assert chunks[-1].start_line == 10
+    assert chunks[-1].end_line == 11
+
+
+def test_added_line_starting_with_file_header_marker_remains_hunk_content() -> None:
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1 @@ fn\n"
+        "+++ hello from source\n"
+    )
+
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=10_000)
+
+    assert len(chunks) == 1
+    assert chunks[0].file_path == "a.py"
+    assert "+++ hello from source" in chunks[0].code
+
+
+def test_first_body_line_never_exceeds_chunk_limit_with_hunk_header() -> None:
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1 @@ function context\n"
+        "+" + "x" * 30 + "\n"
+    )
+
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=40)
+
+    assert chunks
+    assert all(len(chunk.code) <= 40 for chunk in chunks)
+    assert "x" * 30 in "".join(chunk.code for chunk in chunks)
+
+
+def test_huge_unterminated_body_line_keeps_parser_state_bounded() -> None:
+    parser = StreamingDiffParser(max_chunk_chars=10_000)
+    prefix = (
+        "diff --git a/bundle.js b/bundle.js\n"
+        "--- a/bundle.js\n"
+        "+++ b/bundle.js\n"
+        "@@ -1 +1 @@ bundle\n"
+        "+"
+    )
+    chunks = parser.feed(prefix)
+    max_buffered = 0
+    for _ in range(100):
+        chunks.extend(parser.feed("x" * 64_000))
+        max_buffered = max(
+            max_buffered,
+            len(parser._line_buffer) + len(parser._draft_text),
+        )
+    chunks.extend(parser.feed("\n"))
+    chunks.extend(parser.finish())
+
+    assert chunks, "large lines must produce chunks before end-of-file"
+    assert max_buffered <= 10_000
+    assert all(len(chunk.code) <= 10_000 for chunk in chunks)
+    assert all(chunk.start_line == 1 and chunk.end_line == 1 for chunk in chunks)
 
 
 def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
@@ -350,8 +479,7 @@ def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
         "diff --git a/a.py b/a.py\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
-        "@@ -98,10 +100,10 @@ fn\n"
-        + "".join(lines)
+        "@@ -98,10 +100,10 @@ fn\n" + "".join(lines)
     )
     chunks = parse_diff_to_chunks(diff, max_chunk_chars=90)
     assert len(chunks) >= 2
@@ -368,6 +496,6 @@ def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
     # Adjacent fragments must be strictly contiguous: prev.end_line + 1 == next.start_line
     for i in range(len(chunks) - 1):
         assert chunks[i].end_line + 1 == chunks[i + 1].start_line, (
-            f"gap/overlap between part {i+1} (end={chunks[i].end_line}) "
-            f"and part {i+2} (start={chunks[i+1].start_line})"
+            f"gap/overlap between part {i + 1} (end={chunks[i].end_line}) "
+            f"and part {i + 2} (start={chunks[i + 1].start_line})"
         )

@@ -5,7 +5,7 @@ The key claim:  after the injection block runs, the ResearchServiceFactory
 receives a *swapped* DatabaseServices whose search_service is a
 TransientSearchService wrapping the original.  We verify this by:
 
-  1. Mocking stream_git_diff_file_blocks to yield a known diff block.
+  1. Mocking stream_git_diff_fragments to yield a known diff block.
   2. Providing a controlled EmbeddingManager that returns unit-length vectors.
   3. Spying on the original search_service.search_semantic — in "diff" mode it
      must NOT be called; in "both" mode it WILL be called.
@@ -160,7 +160,7 @@ async def test_deep_research_injects_diff_service_on_commit_range():
 
     with (
         patch(
-            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            "chunkhound.core.git_diff.stream_git_diff_fragments",
             _stream_fake_diff,
         ),
         patch(
@@ -215,7 +215,7 @@ async def test_deep_research_synthesizes_from_diff_when_file_is_not_on_disk():
 
     with (
         patch(
-            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            "chunkhound.core.git_diff.stream_git_diff_fragments",
             _stream_fake_diff,
         ),
         patch(
@@ -302,7 +302,7 @@ async def test_deep_research_both_reads_database_results_from_current_source(tmp
 
     with (
         patch(
-            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            "chunkhound.core.git_diff.stream_git_diff_fragments",
             _stream_fake_diff,
         ),
         patch(
@@ -350,7 +350,7 @@ async def test_deep_research_diff_mode_does_not_call_original_search_semantic():
 
     with (
         patch(
-            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            "chunkhound.core.git_diff.stream_git_diff_fragments",
             _stream_fake_diff,
         ),
         patch(
@@ -434,7 +434,7 @@ async def test_semantic_search_returns_changed_code_for_commit_inputs(
         yield FAKE_DIFF
 
     git_diff = MagicMock(side_effect=stream_diff)
-    with patch("chunkhound.core.git_diff.stream_git_diff_file_blocks", git_diff):
+    with patch("chunkhound.core.git_diff.stream_git_diff_fragments", git_diff):
         result = await search_impl(
             services=_make_services(_make_original_search_service()),
             embedding_manager=_make_embedding_manager(),
@@ -466,7 +466,7 @@ async def test_semantic_search_rejects_invalid_commit_inputs_before_git(
 
     git_diff = MagicMock()
     with (
-        patch("chunkhound.core.git_diff.stream_git_diff_file_blocks", git_diff),
+        patch("chunkhound.core.git_diff.stream_git_diff_fragments", git_diff),
         pytest.raises(ValueError, match=message),
     ):
         await search_impl(
@@ -507,7 +507,7 @@ async def test_deep_research_commit_hash_expands_to_range():
 
     with (
         patch(
-            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            "chunkhound.core.git_diff.stream_git_diff_fragments",
             _fake_stream_git_diff,
         ),
         patch(
@@ -559,7 +559,7 @@ async def test_deep_research_last_n_commits_expands_correctly():
 
     with (
         patch(
-            "chunkhound.core.git_diff.stream_git_diff_file_blocks",
+            "chunkhound.core.git_diff.stream_git_diff_fragments",
             _fake_stream_git_diff,
         ),
         patch(
