@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Transient search streams in-process** — Git-history and web-page search stream chunks through a bounded vector cache and top-K heap instead of loading everything into memory; `MAX_DIFF_CHUNKS` truncation and the `_quickresearch` subprocess are gone. Set `CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES=0` to disable the cache, `CHUNKHOUND_VECTOR_CACHE_TTL_SECONDS` to change expiry, and `CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR` to tune the candidate pool (default 5). With `--vector-source both`, each page merges overfetch-sized heaps from diff and DB (`total` is a lower bound on that merged top-K); `offset+page_size` cannot exceed 2000. `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` is the total budget: discovery (query expansion + DDG) is capped at 60s or a quarter of the total; fetch and research share the remainder.
+
 ## [6.1.0] - 2026-10-20
 
 ### Added

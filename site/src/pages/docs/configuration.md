@@ -325,8 +325,8 @@ The delta-only gate above relies on structured error codes returned by `Config.v
 | `embedding_not_configured` | No embedding provider, or the provider is missing required fields for the command. |
 | `mcp_non_loopback_no_auth` | `mcp.host` binds to a non-loopback interface without `mcp.auth_token`. |
 | `mcp_cors_no_auth` | `mcp.cors` is enabled without `mcp.auth_token`. |
-| `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp` / `_quickresearch`. |
-| `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp`/`_quickresearch` commands hit `db_readonly_wrong_command` first.) |
+| `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp`. |
+| `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp` commands hit `db_readonly_wrong_command` first.) |
 
 ## Embedding Providers
 
@@ -723,6 +723,9 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 
 | Variable | Description |
 |---|---|
+| `CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES` | Max cached chunk vectors for git-history/web search (default `10000`; `0` disables caching, results are identical) |
+| `CHUNKHOUND_VECTOR_CACHE_TTL_SECONDS` | Seconds since last access before a cached vector expires (default `300`) |
+| `CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR` | Candidate pool multiplier for git-history/web search (default `5`) |
 | `CHUNKHOUND_EMBEDDING__PROVIDER` | Embedding provider name |
 | `CHUNKHOUND_EMBEDDING__MODEL` | Embedding model name |
 | `CHUNKHOUND_EMBEDDING__API_KEY` | API key for embedding provider |
@@ -811,7 +814,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DB_EXECUTE_TIMEOUT` | Legacy alias for `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` |
 | `CHUNKHOUND_YAML_ENGINE` | YAML parser engine (`rapid` or `tree`) |
 | `CHUNKHOUND_CONFIG_FILE` | Path to config file (alternative to `--config`) |
-| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Web search subprocess timeout in seconds (default: 600) |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Total websearch budget in seconds (default: 600). Discovery (DDG) is capped at 60s or a quarter of this, whichever is smaller; fetch+research use the remainder. |
 | `CHUNKHOUND_DEBUG` | Enable debug logging |
 | `VOYAGE_API_KEY` | Fallback API key for VoyageAI provider |
 
@@ -1048,7 +1051,7 @@ If any of these are missing, the MCP `websearch` tool is not registered (capabil
 
 | Variable | Description |
 |---|---|
-| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Wall-clock timeout (seconds) for the research subprocess. Default: 600. Also returned for malformed values. |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Total wall-clock budget (seconds) for websearch. Default: 600. Discovery is capped at min(60, total/4); fetch and research share the remainder. Also returned for malformed values. |
 
 ### Fixed Constants
 

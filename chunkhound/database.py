@@ -32,11 +32,9 @@ from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.types.common import Language
 
 if TYPE_CHECKING:
-    from chunkhound.services.diff_aware_search_service import SearchServiceProtocol
     from chunkhound.services.embedding_service import EmbeddingService
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
-
-from chunkhound.services.indexing_coordinator import run_batch_compaction_boundary
+    from chunkhound.services.search_service_protocol import SearchServiceProtocol
 
 # Provider imports
 # Registry import for service layer
@@ -46,6 +44,7 @@ from chunkhound.registry import (
     create_search_service,
     get_registry,
 )
+from chunkhound.services.indexing_coordinator import run_batch_compaction_boundary
 
 # Legacy imports for backward compatibility
 from .embeddings import EmbeddingManager

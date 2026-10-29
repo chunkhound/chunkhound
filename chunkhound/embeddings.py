@@ -8,6 +8,7 @@ from loguru import logger
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider,
+    EmbeddingSpaceIdentityProvider,
 )
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ class LocalEmbeddingResult:
     model: str
     provider: str
     dims: int
+    embedding_space_identity: str
     total_tokens: int | None = None
 
 
@@ -108,14 +110,47 @@ class EmbeddingManager:
             Embedding result with vectors and metadata
         """
         provider = self.get_provider(provider_name)
+        if not isinstance(provider, EmbeddingSpaceIdentityProvider):
+            raise ValueError(
+                f"Embedding provider {provider.name!r} must expose a non-empty "
+                "embedding_space_identity"
+            )
+        identity_before = provider.embedding_space_identity
+        if not identity_before:
+            raise ValueError(
+                f"Embedding provider {provider.name!r} must expose a non-empty "
+                "embedding_space_identity"
+            )
+        metadata_before = (
+            provider.name,
+            provider.model,
+            identity_before,
+        )
 
         embeddings = await provider.embed(texts)
 
+        metadata_after = (
+            provider.name,
+            provider.model,
+            provider.embedding_space_identity,
+        )
+        if metadata_after != metadata_before:
+            raise RuntimeError(
+                f"Embedding provider {provider.name!r} changed embedding space "
+                "during a request"
+            )
+        name, model, identity = metadata_before
+        dims = len(embeddings[0]) if embeddings else provider.dims
+        if any(len(vector) != dims for vector in embeddings):
+            raise RuntimeError(
+                f"Embedding provider {name!r} returned inconsistent vector dimensions"
+            )
         return LocalEmbeddingResult(
             embeddings=embeddings,
-            model=provider.model,
-            provider=provider.name,
-            dims=provider.dims,
+            model=model,
+            provider=name,
+            dims=dims,
+            embedding_space_identity=identity,
         )
 
 

@@ -71,7 +71,6 @@ def install_default_log_sink(verbose: bool = False) -> int:
     )
 
 
-
 def _format_duration(seconds: float) -> str:
     """Format a duration in seconds as HH:MM:SS."""
     total_seconds = int(round(seconds))
@@ -83,32 +82,29 @@ def _format_duration(seconds: float) -> str:
 class RichOutputFormatter:
     """Modern terminal UI formatter using Rich library."""
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, output: TextIO | None = None):
         """Initialize Rich output formatter.
 
         Args:
             verbose: Whether to enable verbose output
+            output: Destination stream. Defaults to stdout, except for the
+                legacy quickresearch quiet mode which defaults to stderr.
         """
         self.verbose = verbose
-        self._terminal_compatible = self._check_terminal_compatibility()
         # Quiet mode redirects the shared Rich Console and all non-Rich
         # fallback prints (via _fallback_stream) to stderr, so a child
         # invoked with stdout=PIPE never sees formatter output bleed into
         # the captured payload.
         self._quiet_stdout = bool(os.environ.get("CHUNKHOUND_QUICKRESEARCH_QUIET"))
-        if self._terminal_compatible:
-            self.console = (
-                Console(file=sys.stderr) if self._quiet_stdout else Console()
-            )
-        else:
-            self.console = None
+        self._output = output or (sys.stderr if self._quiet_stdout else sys.stdout)
+        self._terminal_compatible = self._check_terminal_compatibility()
+        self.console = Console(file=self._output) if self._terminal_compatible else None
         self._progress: Progress | None = None
         self._live: Live | None = None
 
     def _check_terminal_compatibility(self) -> bool:
         """Check if terminal supports Rich formatting."""
         import os
-        import sys
 
         # Check for explicit Rich disable
         if os.environ.get("CHUNKHOUND_NO_RICH"):
@@ -116,8 +112,8 @@ class RichOutputFormatter:
 
         # Basic checks for terminal compatibility
         try:
-            # Check if stdout is a TTY
-            if not sys.stdout.isatty():
+            # Check whether the selected destination supports terminal output.
+            if not self._output.isatty():
                 return False
 
             # Check for common terminal variables
@@ -129,7 +125,7 @@ class RichOutputFormatter:
 
             # Test Rich console creation
             try:
-                test_console = Console()
+                Console(file=self._output)
                 # Simple test - try to create a text object
                 Text("test")
                 return True
@@ -140,7 +136,7 @@ class RichOutputFormatter:
             return False
 
     def _fallback_stream(self) -> TextIO:
-        return sys.stderr if self._quiet_stdout else sys.stdout
+        return self._output
 
     def _safe_print(self, message: str) -> None:
         """Safely print with Rich or fallback to plain text."""

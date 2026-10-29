@@ -27,6 +27,182 @@ from chunkhound.services.research.shared.models import (
 )
 
 
+def resolve_source_text(provider: Any, file_path: str) -> str | None:
+    """Return full source text from a transient store or the filesystem."""
+    getter = getattr(provider, "get_transient_file_content", None)
+    if callable(getter):
+        stored = getter(file_path)
+        if isinstance(stored, str) and stored:
+            return stored
+
+    base_dir = provider.get_base_directory()
+    path = Path(file_path) if Path(file_path).is_absolute() else base_dir / file_path
+    if path.exists():
+        return path.read_text(encoding="utf-8", errors="ignore")
+    return None
+
+
+async def resolve_source_text_async(provider: Any, file_path: str) -> str | None:
+    """Load transient sources asynchronously (evicted web pages may refetch)."""
+    getter = getattr(provider, "get_transient_file_content_async", None)
+    if callable(getter):
+        content = await getter(file_path)
+        return content if isinstance(content, str) else None
+    return resolve_source_text(provider, file_path)
+
+
+class BudgetedSourceExcerpt(str):
+    """Authoritative web evidence: synthesis must not rebuild it from chunks.
+
+    The marker lives on each value so aggregation and clustering can copy or
+    partition the source mapping without losing its budget semantics. Ordinary
+    code source strings retain their existing chunk/line-marker rendering.
+    """
+
+
+async def read_transient_sources_with_budget(
+    provider: Any,
+    chunks: list[dict[str, Any]],
+    llm_manager: Any,
+    max_tokens: int | None,
+) -> dict[str, str] | None:
+    """Retain bounded selected evidence, not the fetched corpus, for synthesis.
+
+    Only providers explicitly advertising a byte budget opt in. Large sources
+    contribute the actual matching chunk text rather than a prefix of the page
+    or an unbounded line (a whole page may be a single line). Source loading
+    verifies that refetched content still matches the searched revision.
+    """
+    byte_budget = getattr(provider, "transient_source_budget_bytes", None)
+    if not isinstance(byte_budget, int) or byte_budget <= 0:
+        return None
+    llm = llm_manager.get_utility_provider()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for chunk in chunks:
+        path = chunk.get("file_path") or chunk.get("path")
+        if path:
+            grouped.setdefault(path, []).append(chunk)
+    contents: dict[str, str] = {}
+    remaining_tokens = max_tokens
+    source_selector = getattr(provider, "transient_chunks_are_source", False)
+
+    def is_authoritative_source(chunk: dict[str, Any]) -> bool:
+        if callable(source_selector):
+            return bool(source_selector(chunk))
+        return bool(source_selector)
+
+    def selected_excerpt(matches: list[dict[str, Any]], max_chars: int) -> str:
+        pieces: list[str] = []
+        remaining_chars = max_chars
+        for match in matches:
+            text = match.get("content") or match.get("code") or ""
+            piece = text[:remaining_chars]
+            if piece:
+                pieces.append(piece)
+                remaining_chars -= len(piece) + 7
+            if remaining_chars <= 0:
+                break
+        return "\n\n...\n\n".join(pieces)[:max_chars]
+
+    def current_source_excerpt(
+        source: str,
+        matches: list[dict[str, Any]],
+        file_path: str,
+        max_chars: int,
+    ) -> str:
+        lines = source.split("\n")
+        pieces: list[str] = []
+        for match in matches:
+            start_line = match.get("start_line", 1)
+            end_line = match.get("end_line", start_line)
+            expanded_start, expanded_end = expand_to_natural_boundaries(
+                lines, start_line, end_line, match, file_path
+            )
+            if expanded_start == 0 and expanded_end == 0:
+                continue
+            pieces.append("\n".join(lines[max(0, expanded_start - 1) : expanded_end]))
+        return "\n\n...\n\n".join(pieces)[:max_chars]
+
+    for path, matches in grouped.items():
+        if byte_budget <= 0 or (remaining_tokens is not None and remaining_tokens <= 0):
+            break
+        per_file = min(byte_budget, 64_000)
+        max_chars = per_file // 4
+        authoritative_matches = [
+            match for match in matches if is_authoritative_source(match)
+        ]
+        current_matches = [
+            match for match in matches if not is_authoritative_source(match)
+        ]
+        has_authoritative_source = bool(authoritative_matches)
+        if has_authoritative_source:
+            # Git history results already contain the requested revision's diff
+            # hunks. They are authoritative evidence: consulting the working
+            # tree here could substitute newer code or lose deleted files.
+            if current_matches:
+                # A path can contain changed lines from the diff and unchanged
+                # DB matches elsewhere. Preserve both revisions explicitly:
+                # historical matches use their returned hunks, while DB matches
+                # get context from the current source rather than stale index
+                # snippets. Split the per-file budget so neither source crowds
+                # the other out.
+                historical_chars = max_chars // 2
+                historical = selected_excerpt(authoritative_matches, historical_chars)
+                source = await resolve_source_text_async(provider, path)
+                current = (
+                    current_source_excerpt(
+                        source,
+                        current_matches,
+                        path,
+                        max_chars - len(historical) - 7,
+                    )
+                    if source
+                    else ""
+                )
+                excerpt = "\n\n...\n\n".join(
+                    piece for piece in (historical, current) if piece
+                )[:max_chars]
+                del source
+            else:
+                excerpt = selected_excerpt(authoritative_matches, max_chars)
+        else:
+            # DB results in a mixed diff+DB search are ordinary current-source
+            # matches. Read their source normally instead of treating the small
+            # search snippets as historical diff hunks.
+            source = await resolve_source_text_async(provider, path)
+            if not source:
+                continue
+            # Four bytes per Unicode code point is a conservative UTF-8 bound.
+            excerpt = (
+                source
+                if len(source) * 4 <= per_file
+                else current_source_excerpt(source, matches, path, max_chars)
+            )
+            del source
+        if remaining_tokens is not None:
+            low, high = 0, len(excerpt)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if llm.estimate_tokens(excerpt[:middle]) <= remaining_tokens:
+                    low = middle
+                else:
+                    high = middle - 1
+            excerpt = excerpt[:low]
+        if excerpt:
+            # This helper has selected and budgeted the exact source revision.
+            # Preserve it through synthesis rather than rebuilding it from the
+            # original search snippets.
+            contents[path] = BudgetedSourceExcerpt(excerpt)
+            byte_budget -= len(excerpt.encode("utf-8"))
+            if remaining_tokens is not None:
+                remaining_tokens -= llm.estimate_tokens(excerpt)
+    if chunks and not contents:
+        raise RuntimeError(
+            "No readable transient source evidence within the synthesis budget"
+        )
+    return contents
+
+
 class FileReader:
     """Handles token-budget-aware file reading for deep research."""
 
@@ -57,6 +233,12 @@ class FileReader:
         Returns:
             Dictionary mapping file paths to contents
         """
+        transient = await read_transient_sources_with_budget(
+            self._db_services.provider, chunks, llm_manager, max_tokens
+        )
+        if transient is not None:
+            return transient
+
         # Group chunks by file
         files_to_chunks: dict[str, list[dict[str, Any]]] = {}
         for chunk in chunks:
@@ -73,9 +255,6 @@ class FileReader:
         total_tokens = 0
         llm = llm_manager.get_utility_provider()
 
-        # Get base directory for path resolution
-        base_dir = self._db_services.provider.get_base_directory()
-
         for file_path, file_chunks in files_to_chunks.items():
             # Check if we've hit the overall token limit (skip if unlimited)
             if budget_limit is not None and total_tokens >= budget_limit:
@@ -85,23 +264,17 @@ class FileReader:
                 break
 
             try:
-                # Resolve path relative to base directory
-                if Path(file_path).is_absolute():
-                    path = Path(file_path)
-                else:
-                    path = base_dir / file_path
-
-                if not path.exists():
-                    logger.warning(f"File not found (expected at {path}): {file_path}")
+                content = await resolve_source_text_async(
+                    self._db_services.provider, file_path
+                )
+                if content is None:
+                    logger.warning(f"File not found: {file_path}")
                     continue
 
                 # Calculate token budget for this file (capped to prevent bloat)
                 num_chunks = len(file_chunks)
                 raw_budget = TOKEN_BUDGET_PER_FILE * num_chunks
                 budget = min(raw_budget, FILE_CONTENT_TOKENS_MAX)
-
-                # Read file
-                content = path.read_text(encoding="utf-8", errors="ignore")
 
                 # Estimate tokens
                 estimated_tokens = llm.estimate_tokens(content)
@@ -132,10 +305,8 @@ class FileReader:
                         end_line = chunk.get("end_line", 1)
 
                         # Use smart boundary detection to expand to complete functions/classes
-                        expanded_start, expanded_end = (
-                            expand_to_natural_boundaries(
-                                lines, start_line, end_line, chunk, file_path
-                            )
+                        expanded_start, expanded_end = expand_to_natural_boundaries(
+                            lines, start_line, end_line, chunk, file_path
                         )
 
                         if expanded_start == 0 and expanded_end == 0:
@@ -193,7 +364,7 @@ class FileReader:
                 f"but failed to read ANY file contents. "
                 f"Possible causes: "
                 f"(1) Token budget exhausted ({budget_desc}), "
-                f"(2) Files not found at base_directory: {base_dir}, "
+                f"(2) Files not found on disk or in the transient store, "
                 f"(3) All file read operations failed. "
                 f"Check logs above for file-specific errors."
             )

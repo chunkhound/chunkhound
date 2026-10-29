@@ -44,6 +44,140 @@ async def test_custom_endpoint_validation() -> None:
     assert provider.api_key == "custom-key"
 
 
+@pytest.mark.asyncio
+async def test_embedding_manager_stamps_request_identity() -> None:
+    class Provider:
+        name = "test"
+        model = "model"
+        dims = 2
+        embedding_space_identity = "space-a"
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    manager = EmbeddingManager()
+    manager.register_provider(Provider(), set_default=True)
+
+    result = await manager.embed_texts(["text"])
+
+    assert result.embedding_space_identity == "space-a"
+
+
+@pytest.mark.asyncio
+async def test_embedding_manager_accepts_response_dimension_discovery() -> None:
+    class Provider:
+        name = "test"
+        model = "model"
+        dims = 1536
+        embedding_space_identity = "space-a"
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            self.dims = 3
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+    manager = EmbeddingManager()
+    manager.register_provider(Provider(), set_default=True)
+
+    result = await manager.embed_texts(["text"])
+
+    assert result.dims == 3
+    assert result.embedding_space_identity == "space-a"
+
+
+@pytest.mark.asyncio
+async def test_embedding_manager_rejects_identity_change_during_request() -> None:
+    class Provider:
+        name = "test"
+        model = "model"
+        dims = 2
+        embedding_space_identity = "space-a"
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            self.embedding_space_identity = "space-b"
+            return [[1.0, 0.0] for _ in texts]
+
+    manager = EmbeddingManager()
+    manager.register_provider(Provider(), set_default=True)
+
+    with pytest.raises(RuntimeError, match="changed embedding space"):
+        await manager.embed_texts(["text"])
+
+
+@pytest.mark.asyncio
+async def test_embedding_manager_rejects_aba_identity_change_during_request() -> None:
+    class Provider:
+        name = "test"
+        model = "model"
+        dims = 2
+        generation = 0
+
+        @property
+        def embedding_space_identity(self) -> str:
+            return f"space-a:{self.generation}"
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            self.generation += 1
+            self.generation += 1
+            return [[1.0, 0.0] for _ in texts]
+
+    manager = EmbeddingManager()
+    manager.register_provider(Provider(), set_default=True)
+
+    with pytest.raises(RuntimeError, match="changed embedding space"):
+        await manager.embed_texts(["text"])
+
+
+@pytest.mark.asyncio
+async def test_embedding_manager_rejects_provider_without_identity() -> None:
+    class Provider:
+        name = "legacy"
+        model = "model"
+        dims = 2
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    manager = EmbeddingManager()
+    manager.register_provider(Provider(), set_default=True)
+
+    with pytest.raises(ValueError, match="embedding_space_identity"):
+        await manager.embed_texts(["text"])
+
+
+def test_embedding_space_identity_generation_detects_aba_reconfiguration() -> None:
+    provider = OpenAIEmbeddingProvider(
+        api_key="key-a",
+        model="text-embedding-3-small",
+    )
+    original = provider.embedding_space_identity
+
+    provider.update_config(api_key="key-b")
+    provider.update_config(api_key="key-a")
+
+    assert provider.embedding_space_identity != original
+
+
+def test_embedding_space_identity_covers_azure_routing_without_leaking_secrets() -> None:
+    first = OpenAIEmbeddingProvider(
+        api_key="secret-one",
+        model="text-embedding-3-small",
+        azure_endpoint="https://one.openai.azure.com?token=endpoint-secret",
+        azure_deployment="shared-deployment",
+        api_version="2024-02-01",
+    )
+    second = OpenAIEmbeddingProvider(
+        api_key="secret-two",
+        model="text-embedding-3-small",
+        azure_endpoint="https://one.openai.azure.com?token=endpoint-secret",
+        azure_deployment="shared-deployment",
+        api_version="2024-02-01",
+    )
+
+    assert first.embedding_space_identity != second.embedding_space_identity
+    assert "secret-one" not in first.embedding_space_identity
+    assert "endpoint-secret" not in first.embedding_space_identity
+
+
 def test_url_detection_logic() -> None:
     """Only the canonical OpenAI host should be treated as official."""
     official_urls = [

@@ -1,6 +1,27 @@
+import hashlib
 from pathlib import Path
 
 import xxhash
+
+
+def compute_text_hash(text: str) -> str:
+    """Compute an XXH3-64 digest without retaining the source text."""
+    return xxhash.xxh3_64_hexdigest(text.encode("utf-8"))
+
+
+def compute_embedding_space_identity(*parts: str) -> str:
+    """Hash provider routing details into an opaque cache namespace.
+
+    Providers must include every stable setting that can select a distinct
+    embedding space. Hashing avoids retaining endpoint credentials or query
+    tokens in cache keys.
+    """
+    digest = hashlib.sha256()
+    for part in parts:
+        encoded = part.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def compute_file_hash(path: Path) -> str:
