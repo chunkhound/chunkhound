@@ -25,7 +25,11 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     # Empty-string → None coercion at the surface boundary, so every
     # downstream consumer sees the two-valued "real string or None" contract.
     previous_query = args.previous_query or None
-    formatter = RichOutputFormatter(verbose=getattr(args, "verbose", False))
+    # Keep every setup/progress/error diagnostic on stderr. Stdout is reserved
+    # for the final answer so redirects remain machine-readable on failures.
+    formatter = RichOutputFormatter(
+        verbose=getattr(args, "verbose", False), output=sys.stderr
+    )
     embedding_manager = setup_embedding_manager(formatter, config)
     llm_manager = setup_llm_manager(formatter, config)
 
@@ -75,4 +79,4 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(1)
     for warning in warnings:
         _warning_to_stderr(warning)
-    formatter.text_block(str(result.get("answer", "")))
+    sys.stdout.write(str(result.get("answer", "")).rstrip() + "\n")

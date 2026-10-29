@@ -38,7 +38,7 @@ def providers(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_websearch_command_runs_research_in_process(
-    monkeypatch, providers
+    monkeypatch, providers, capsys
 ) -> None:
     monkeypatch.setattr(
         websearch_core, "search_multi", AsyncMock(return_value=search_results())
@@ -57,19 +57,12 @@ async def test_websearch_command_runs_research_in_process(
 
     monkeypatch.setattr(websearch_core, "fetch_pages", pages)
     monkeypatch.setattr(web_research_service, "research_web_pages", research)
-    rendered: list[str] = []
-    monkeypatch.setattr(
-        ws_mod.RichOutputFormatter,
-        "text_block",
-        lambda self, text: rendered.append(text),
-    )
-
     await ws_mod.websearch_command(make_args(), MagicMock())
 
     assert seen["async"] is True
     assert seen["pages"] == [("https://example.invalid/page", ".md", "# In memory")]
     assert seen["progress"] is True
-    assert rendered == ["ANSWER"]
+    assert capsys.readouterr().out == "ANSWER\n"
     assert not hasattr(ws_mod, "tempfile")
     assert not hasattr(ws_mod, "subprocess")
 
@@ -96,13 +89,10 @@ async def test_websearch_command_keeps_progress_off_stdout(
 
     monkeypatch.setattr(websearch_core, "fetch_pages", pages)
     monkeypatch.setattr(web_research_service, "research_web_pages", research)
-    monkeypatch.setattr(
-        ws_mod.RichOutputFormatter, "text_block", lambda self, text: None
-    )
-
     await ws_mod.websearch_command(make_args(), MagicMock())
 
     captured = capsys.readouterr()
+    assert captured.out == "ANSWER\n"
     for message in (
         "Searching page 1",
         "Found 1 results",
@@ -150,7 +140,9 @@ async def test_websearch_research_timeout_exits_124(monkeypatch, providers) -> N
 
 
 @pytest.mark.asyncio
-async def test_websearch_command_urlerror_exits_1(monkeypatch, providers) -> None:
+async def test_websearch_command_urlerror_exits_1(
+    monkeypatch, providers, capsys
+) -> None:
     monkeypatch.setattr(
         websearch_core,
         "search_multi",
@@ -161,6 +153,9 @@ async def test_websearch_command_urlerror_exits_1(monkeypatch, providers) -> Non
         await ws_mod.websearch_command(make_args(), MagicMock())
 
     assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Web search failed: boom" in captured.err
 
 
 @pytest.mark.asyncio
