@@ -88,6 +88,26 @@ def test_single_hunk_file_path_strips_b_prefix() -> None:
     assert chunk.chunk_type == ChunkType.BLOCK
 
 
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("+++ b/space name.py\t", "space name.py"),
+        ('+++ "b/tab\\tname.py"', "tab\tname.py"),
+        ('+++ "b/quote\\"name.py"', 'quote"name.py'),
+        ('+++ "b/back\\\\slash.py"', "back\\slash.py"),
+        ('+++ "b/caf\\303\\251.py"', "café.py"),
+        ('+++ "b/café\\t\\"\\\\.py"', 'café\t"\\.py'),
+    ],
+)
+def test_git_patch_paths_are_decoded(header: str, expected: str) -> None:
+    diff = f"diff --git a/file b/file\n--- a/file\n{header}\n@@ -1 +1 @@\n-old\n+new\n"
+
+    chunks = parse_diff_to_chunks(diff)
+
+    assert len(chunks) == 1
+    assert chunks[0].file_path == expected
+
+
 def test_multi_hunk_same_file_produces_two_chunks() -> None:
     chunks = parse_diff_to_chunks(MULTI_HUNK_SAME_FILE)
     assert len(chunks) == 2

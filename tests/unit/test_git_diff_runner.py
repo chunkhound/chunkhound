@@ -6,9 +6,11 @@ from unittest.mock import patch
 
 import pytest
 
+from chunkhound.core.git_diff.parser import stream_diff_to_chunks
 from chunkhound.core.git_diff.runner import (
     _MAX_STDERR_BYTES,
     stream_git_diff_file_blocks,
+    stream_git_diff_fragments,
 )
 
 
@@ -130,6 +132,51 @@ async def test_streams_complete_file_blocks_from_real_git(
     assert all(block.startswith("diff --git ") for block in blocks)
     assert "one.py" in blocks[0]
     assert "two.py" in blocks[1]
+
+
+@pytest.mark.asyncio
+async def test_real_git_preserves_exact_paths_despite_noprefix_config(
+    tmp_path: Path,
+) -> None:
+    async def git(*args: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(tmp_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        assert proc.returncode == 0, stderr.decode("utf-8", errors="replace")
+
+    await git("init")
+    await git("config", "diff.noprefix", "true")
+    paths = ("space name.py", "café.py", "b/nested.py")
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("value = 1\n", encoding="utf-8")
+    await git("add", ".")
+    await git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "initial",
+    )
+    for path in paths:
+        (tmp_path / path).write_text("value = 2\n", encoding="utf-8")
+
+    chunks = [
+        chunk
+        async for chunk in stream_diff_to_chunks(
+            stream_git_diff_fragments("HEAD", cwd=tmp_path)
+        )
+    ]
+
+    assert {str(chunk.file_path) for chunk in chunks} == set(paths)
 
 
 @pytest.mark.asyncio

@@ -154,7 +154,11 @@ async def stream_git_diff_fragments(
         current_range = ranges.pop(0)
         proc = await asyncio.create_subprocess_exec(
             "git",
+            "-c",
+            "core.quotePath=false",
             "diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             current_range,
             "--",
             cwd=str(cwd),

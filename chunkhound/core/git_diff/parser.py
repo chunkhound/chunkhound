@@ -15,6 +15,61 @@ from chunkhound.core.types.common import (
 
 _HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@(.*)")
 _MAX_METADATA_LINE_CHARS = 1024 * 1024
+_GIT_PATH_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "t": 0x09,
+    "n": 0x0A,
+    "v": 0x0B,
+    "f": 0x0C,
+    "r": 0x0D,
+    '"': 0x22,
+    "\\": 0x5C,
+}
+
+
+def _decode_git_patch_path(raw_path: str) -> str:
+    """Decode one path from a unified-diff file header.
+
+    Git leaves spaces unquoted and separates optional header metadata with a
+    tab. Paths containing tabs, quotes, backslashes, or non-ASCII bytes use
+    Git's C-style quoting, where octal escapes represent bytes rather than
+    Unicode code points.
+    """
+    if not raw_path.startswith('"'):
+        return raw_path.partition("\t")[0]
+
+    decoded = bytearray()
+    index = 1
+    while index < len(raw_path):
+        char = raw_path[index]
+        if char == '"':
+            return decoded.decode("utf-8", errors="replace")
+        if char != "\\":
+            decoded.extend(char.encode("utf-8"))
+            index += 1
+            continue
+
+        index += 1
+        if index >= len(raw_path):
+            break
+        escaped = raw_path[index]
+        if escaped in "01234567":
+            end = index + 1
+            while end < min(index + 3, len(raw_path)) and raw_path[end] in "01234567":
+                end += 1
+            decoded.append(int(raw_path[index:end], 8))
+            index = end
+            continue
+        value = _GIT_PATH_ESCAPES.get(escaped)
+        if value is None:
+            decoded.extend(escaped.encode("utf-8"))
+        else:
+            decoded.append(value)
+        index += 1
+
+    # Malformed quoted metadata should not abort the entire diff stream.
+    return raw_path
 
 
 class StreamingDiffParser:
@@ -128,7 +183,7 @@ class StreamingDiffParser:
             return
 
         if not self._in_hunk and stripped.startswith("+++ "):
-            raw_path = stripped[4:]
+            raw_path = _decode_git_patch_path(stripped[4:])
             if raw_path == "/dev/null":
                 self._current_file = None
             elif raw_path.startswith("b/"):
