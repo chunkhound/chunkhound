@@ -144,6 +144,7 @@ LLMProviderLiteral = Literal[
     "requesty",
     "api-route",
     "opper",
+    "obscurify-ai",
     "opencode-cli",
 ]
 
@@ -186,6 +187,7 @@ CLI_PROVIDER_CHOICES = (
     "requesty",
     "api-route",
     "opper",
+    "obscurify-ai",
     "opencode-cli",
 )
 

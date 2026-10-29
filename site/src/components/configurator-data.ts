@@ -288,6 +288,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_OPPER_API_KEY>",
     },
     {
+        id: "obscurify-ai",
+        name: "Obscurify.ai",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5zM12 15v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "obscurify-ai",
+            model: "deepseek/deepseek-v4-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_OBSCURIFY_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,
