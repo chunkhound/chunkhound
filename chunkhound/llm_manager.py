@@ -157,7 +157,7 @@ class LLMManager:
                 if thinking_display := config.get("thinking_display"):
                     provider_kwargs["thinking_display"] = thinking_display
 
-                # Effort parameter (Opus 4.5/4.6/4.7, Sonnet 4.6, Mythos)
+                # Effort parameter (Fable 5, Mythos, Opus 4.5-4.8, Sonnet 4.6)
                 if effort := config.get("effort"):
                     provider_kwargs["effort"] = effort
 
@@ -167,7 +167,7 @@ class LLMManager:
                 if cache_ttl := config.get("cache_ttl"):
                     provider_kwargs["cache_ttl"] = cache_ttl
 
-                # Task budgets (beta, Opus 4.7 only)
+                # Task budgets (beta: Fable 5, Mythos 5, Opus 4.7/4.8)
                 if (budget := config.get("task_budget_tokens")) is not None:
                     provider_kwargs["task_budget_tokens"] = budget
 
