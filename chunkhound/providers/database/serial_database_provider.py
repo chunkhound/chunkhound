@@ -1,6 +1,7 @@
 """Base class for database providers requiring single-threaded execution."""
 
 import asyncio
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -11,8 +12,15 @@ from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, File
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
-from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
+from chunkhound.providers.database.ownership import DatabaseOwnership
+from chunkhound.providers.database.serial_executor import (
+    DatabaseOperationTimeoutError,
+    DatabaseRustPipelineInProgressError,
+    SerialDatabaseExecutor,
+)
+from chunkhound.utils.async_worker import await_worker_completion
 from chunkhound.utils.logging_guard import log_if_not_mcp
+from chunkhound_native import acquire_database_lease
 
 # Type hinting only
 if TYPE_CHECKING:
@@ -53,7 +61,15 @@ class SerialDatabaseProvider(ABC):
         self._services_initialized = False
         self.embedding_manager = embedding_manager
         self.config = config
-        self._db_path = db_path
+        self._db_path = (
+            db_path if str(db_path) == ":memory:" else Path(db_path).absolute()
+        )
+        self._ownership_lock = threading.RLock()
+        self._close_lock = threading.RLock()
+        self._database_ownership: DatabaseOwnership | None = None
+        self._closed = False
+        self._closing = False
+        self._rust_pipeline_cleanup: object | None = None
 
         # Create serial executor for all database operations.
         # Timeout comes from DatabaseConfig (JSON/env/CLI); None keeps the
@@ -75,6 +91,25 @@ class SerialDatabaseProvider(ABC):
 
         # Base directory for path normalization (immutable after initialization)
         self._base_directory: Path = base_directory
+
+    def _ensure_database_ownership(self) -> DatabaseOwnership | None:
+        with self._ownership_lock:
+            if self._closed:
+                raise RuntimeError("Database provider is closed")
+            if str(self._db_path) == ":memory:":
+                return None
+            if self._database_ownership is None:
+                self._database_ownership = DatabaseOwnership(
+                    acquire_database_lease(str(self._db_path))
+                )
+            self._database_ownership.assert_covers(self._db_path)
+            return self._database_ownership
+
+    def _close_additional_connections(self) -> None:
+        """Subclass-owned handles not held in the executor thread."""
+
+    def _additional_connections_closed(self) -> bool:
+        return True
 
     @abstractmethod
     def _create_connection(self) -> Any:
@@ -113,7 +148,7 @@ class SerialDatabaseProvider(ABC):
     def is_connected(self) -> bool:
         """Check if database connection is active."""
         # For serial providers, we consider it connected if executor exists
-        return self._executor is not None
+        return not self._closed and self._executor is not None
 
     @property
     def last_activity_time(self) -> float | None:
@@ -137,8 +172,17 @@ class SerialDatabaseProvider(ABC):
 
             logger.info(f"{self.__class__.__name__} initialization complete")
 
+        except DatabaseOperationTimeoutError:
+            # The worker is still owned. Only explicit final close may drain it
+            # and release the lease after a caller-side deadline.
+            raise
         except Exception as e:
             logger.error(f"{self.__class__.__name__} connection failed: {e}")
+            if self._executor._is_rust_reconnect_owner():
+                # Retain partial handles/lease under unavailable guard;
+                # do not finalize executor.
+                raise
+            self.disconnect(skip_checkpoint=True)
             raise
 
     def close(self) -> None:
@@ -149,15 +193,39 @@ class SerialDatabaseProvider(ABC):
         self.disconnect(skip_checkpoint=False)
 
     def disconnect(self, skip_checkpoint: bool = False) -> None:
-        """Close database connection with optional checkpointing."""
-        try:
-            # Perform final operations in DB thread
-            self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
-        finally:
-            # Clear thread-local storage
-            self._executor.clear_thread_local()
-            # Shutdown executor with Windows-specific handling
-            self._executor.shutdown(wait=True)
+        """Drain admitted work and release ownership only after all handles close."""
+        # Serialize the entire close, including additional handles and lease
+        # release. This is separate from ownership: admitted workers need that
+        # mutex while the close caller drains them.
+        with self._close_lock:
+            with self._ownership_lock:
+                if self._closed:
+                    return
+                if self.is_rust_pipeline_in_progress():
+                    raise DatabaseRustPipelineInProgressError(
+                        "Wait for the Rust indexing operation to finish before closing"
+                    )
+                self._closing = True
+            try:
+                self._executor.disconnect_provider(self, skip_checkpoint)
+            finally:
+                try:
+                    # Never close the manager alongside a still-running DB worker.
+                    if self._executor.finalization_complete:
+                        self._close_additional_connections()
+                finally:
+                    with self._ownership_lock:
+                        if (
+                            self._executor.finalization_complete
+                            and self._executor.handles_closed
+                            and self._additional_connections_closed()
+                        ):
+                            if self._database_ownership is not None:
+                                self._database_ownership.close()
+                                self._database_ownership = None
+                            # A finalized executor is not complete provider
+                            # shutdown: retained readers/native close may fail.
+                            self._closed = True
 
     def release_for_rust_pipeline(self) -> None:
         """Close the DuckDB connection without shutting down the executor.
@@ -172,6 +240,7 @@ class SerialDatabaseProvider(ABC):
                 in that case — Python's DuckDB connection would still be open
                 on the same file Rust is about to write to.
         """
+        self._ensure_database_ownership()
         try:
             self._execute_in_db_thread_sync(
                 "disconnect", False, _bypass_rust_pipeline_guard=True
@@ -184,12 +253,21 @@ class SerialDatabaseProvider(ABC):
                     f"handing write ownership to the Rust pipeline: {e}"
                 ),
             ) from e
-        finally:
-            self._executor.clear_thread_local()
 
     def set_rust_pipeline_in_progress(self, active: bool) -> None:
-        """Publish whether the Rust pipeline currently owns the database file."""
-        self._executor.set_rust_pipeline_in_progress(active)
+        """Publish exclusive scope ownership; duplicate owners may not clear it."""
+        if active and self._executor.is_rust_pipeline_in_progress():
+            raise DatabaseRustPipelineInProgressError(
+                "Rust indexing operation already owns this provider"
+            )
+        with self._ownership_lock:
+            if active and (self._closing or self._closed):
+                raise RuntimeError("Database provider is closing or closed")
+            if active and self._executor.is_rust_pipeline_in_progress():
+                raise DatabaseRustPipelineInProgressError(
+                    "Rust indexing operation already owns this provider"
+                )
+            self._executor.set_rust_pipeline_in_progress(active)
 
     def is_rust_pipeline_in_progress(self) -> bool:
         """Return True when the Rust pipeline currently owns the database file."""
@@ -763,9 +841,8 @@ class SerialDatabaseProvider(ABC):
 
     async def compact_database_async(self) -> int:
         """Async variant of compact_database."""
-        return await asyncio.get_running_loop().run_in_executor(
-            None, self.compact_database
-        )
+        future = asyncio.get_running_loop().run_in_executor(None, self.compact_database)
+        return await await_worker_completion(future)
 
     def measure_fragmentation(self) -> float:
         """Return fragmentation ratio. Stateless by default.

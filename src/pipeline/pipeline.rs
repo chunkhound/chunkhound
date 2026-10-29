@@ -9,10 +9,14 @@ use super::config::PipelineConfig;
 use super::differ::DiffResult;
 use super::report::PipelineReport;
 
-use crate::db::{check_disk_usage_limit, create_backend, DbBackend, DbConfig};
+use crate::cancellation::{receive, send, PipelineCancellationToken, StopToken};
+use crate::db::{
+    check_disk_usage_limit, create_backend, database_path_string, DbBackend, DbConfig,
+};
 use crate::embed::{create_embed_fn, EmbedBatchFn};
-use crate::error::DbError;
+use crate::error::{DbError, PipelineError};
 use crate::types::{ChunkRecord, DbFileEntry, DbWriterBatch, FileRecord};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// The main PyO3 class — Python calls `.run()` from `asyncio.to_thread`.
@@ -112,8 +116,8 @@ impl IndexingPipeline {
     /// run. ``"write-index"`` arrives as ``(0, 1)`` when the indexes are
     /// about to be rebuilt and as ``(1, 1)`` when the run changed no rows
     /// and they were left in place.
-    #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false, analytics_recorder=None, analytics_handle=0))]
-    #[allow(clippy::too_many_arguments)] // Mirrors run()'s existing shape; analytics is two more optional, orthogonal params.
+    #[pyo3(signature = (files, parse_batch_callback, embed_batch_callback=None, progress_callback=None, incremental=false, analytics_recorder=None, analytics_handle=0, cancellation_token=None))]
+    #[allow(clippy::too_many_arguments)] // Existing Python API plus optional independent cancellation capability.
     fn run(
         &mut self,
         py: Python<'_>,
@@ -131,171 +135,205 @@ impl IndexingPipeline {
         incremental: bool,
         analytics_recorder: Option<Py<crate::analytics::AnalyticsRecorder>>,
         analytics_handle: u64,
+        cancellation_token: Option<Py<PipelineCancellationToken>>,
     ) -> PyResult<PipelineReport> {
-        let started = Instant::now();
-        // Extracted once here, while the GIL is still held (this whole
-        // method releases it via py.allow_threads() below) -- the resulting
-        // Arc is Send+Sync and needs no further GIL access to record calls
-        // from the embed rayon threads.
-        let analytics: Option<(Arc<crate::analytics::Inner>, u64)> = analytics_recorder
+        let stop = cancellation_token
             .as_ref()
-            .and_then(|r| r.borrow(py).inner_arc())
-            .map(|inner| (inner, analytics_handle));
-
-        if files.is_empty() {
-            // Only short-circuit when there's no DB yet to clean up (first-ever
-            // run on an empty directory). Otherwise an empty file list must
-            // still flow through the incremental diff + streaming pipeline
-            // below — files removed from disk since the last run (down to
-            // zero) need their orphaned DB rows deleted. The store thread
-            // applies `delete_paths` once at start, before the insert loop.
-            let no_db_yet = (self.config.db_path.as_os_str().is_empty()
-                || self.config.db_path.as_os_str() == ":memory:")
-                || !self.config.db_path.join("chunks.db").exists();
-            if no_db_yet {
-                return Ok(PipelineReport::empty());
-            }
+            .map(|token| token.borrow(py).stop.clone())
+            .unwrap_or_default();
+        stop.begin()?;
+        if stop.is_cancelled() {
+            stop.finish(true);
+            return Err(crate::cancellation::PipelineCancelledError::new_err(
+                "indexing cancelled",
+            ));
         }
-
-        let mut file_count = files.len() as u64;
-        let mut batch_paths: Vec<PathBuf> = files.iter().map(|(p, _)| PathBuf::from(p)).collect();
-        // Applies to every file for the whole run, independent of the diff's
-        // own verdict — built once here rather than routed through
-        // `DiffResult`, since `build_db_batch` needs it for files the diff
-        // never touches too (e.g. the "no DB yet" early-return path above
-        // doesn't apply, but a fresh DB with no prior rows still needs every
-        // file's relative key to write its first row).
-        let rel_keys: std::collections::HashMap<PathBuf, String> = files
-            .into_iter()
-            .map(|(p, rel)| (PathBuf::from(p), rel))
-            .collect();
-
-        // ── Incremental diff (Phase 3) ─────────────────────────
-        let delete_paths: Vec<String>;
-        // Content hash for every scanned file the diff already had a DB row
-        // for (see `differ::compute_diff`) — freshly computed for files that
-        // must be reprocessed, or the DB's existing hash carried forward
-        // unchanged otherwise. Covers files that never reach `batch_paths`
-        // too (mtime-unchanged, or hash-confirmed unchanged despite a
-        // differing mtime) so a force-reindex caller — which reprocesses
-        // every file regardless — still writes back the correct hash for
-        // one it didn't need to change, instead of nulling it out.
-        let new_hashes: std::collections::HashMap<PathBuf, String>;
-        let existing_ids: std::collections::HashMap<PathBuf, i64>;
-        // (size_bytes, mtime) per scanned file — produced once by the diff
-        // phase and reused by parse_one_batch to avoid a third stat pass.
-        let disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>;
-        let mut files_skipped_by_hash = 0u64;
-        if incremental {
-            let diff =
-                self.compute_diff_blocking(py, &progress_callback, &batch_paths, &rel_keys)?;
-            // Only process changed files
-            batch_paths = diff.changed;
-            // Respect do_cleanup flag: skip orphan deletion when cleanup is disabled.
-            delete_paths = if self.config.do_cleanup {
-                diff.removed
-            } else {
-                Vec::new()
-            };
-            new_hashes = diff.new_hashes;
-            existing_ids = diff.existing_ids;
-            disk_stats = diff.disk_stats;
-            files_skipped_by_hash = diff.skipped_by_hash;
-            // Update file_count to reflect what will actually be processed
-            file_count = batch_paths.len() as u64;
-        } else {
-            // force_reindex re-indexes every scanned file. Still run the diff
-            // so new_hashes/existing_ids/disk_stats are populated — otherwise
-            // parse writes content_hash as NULL (empty map → unwrap_or_default).
-            // do_cleanup only gates orphan deletion, not the hash maps.
-            let diff =
-                self.compute_diff_blocking(py, &progress_callback, &batch_paths, &rel_keys)?;
-            delete_paths = if self.config.do_cleanup {
-                diff.removed
-            } else {
-                Vec::new()
-            };
-            new_hashes = diff.new_hashes;
-            existing_ids = diff.existing_ids;
-            disk_stats = diff.disk_stats;
-        }
-
-        // ── Resolve directory→db file path (shared by both write paths) ──
-        let db_file: PathBuf = if self.config.db_path.as_os_str().is_empty()
+        let requested_db_file = if self.config.db_path.as_os_str().is_empty()
             || self.config.db_path.as_os_str() == ":memory:"
         {
             PathBuf::from(":memory:")
         } else {
             self.config.db_path.join("chunks.db")
         };
-
-        let db_config = DbConfig {
-            db_path: db_file.to_string_lossy().into_owned(),
-            compaction_threshold: self.config.compaction_threshold,
-            compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
-            insert_batch_size: self.config.db_batch_size.max(1),
-        };
-
-        // Ensure parent directory exists (DuckDB doesn't auto-create it).
-        if let Some(parent) = db_file.parent() {
-            if !parent.as_os_str().is_empty() && parent != PathBuf::from(":memory:").as_path() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to create db directory {}: {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
+        let run_lease = match py.allow_threads(move || {
+            crate::database_coordination::lease::acquire_shared(&requested_db_file)
+        }) {
+            Ok(lease) => lease,
+            Err(error) => {
+                stop.finish(true);
+                return Err(error.into());
             }
-        }
+        };
+        let cleanup_ok = AtomicBool::new(true);
+        let db_file = run_lease.target().to_path_buf();
+        let result = (|| -> PyResult<PipelineReport> {
+            stop.check().map_err(|_| DbError::Cancelled)?;
+            // Validate before even the empty-run shortcut; diff and writer must
+            // use exactly the canonical target covered by run_lease.
+            let db_path = database_path_string(&db_file)?;
+            let started = Instant::now();
+            // Extracted once here, while the GIL is still held (this whole
+            // method releases it via py.allow_threads() below) -- the resulting
+            // Arc is Send+Sync and needs no further GIL access to record calls
+            // from the embed rayon threads.
+            let analytics: Option<(Arc<crate::analytics::Inner>, u64)> = analytics_recorder
+                .as_ref()
+                .and_then(|r| r.borrow(py).inner_arc())
+                .map(|inner| (inner, analytics_handle));
 
-        // ── Parse ∥ Embed ∥ Store: 3-stage streaming pipeline ──
-        let provider = self.config.embedding_provider.clone();
-        let model = self.config.embedding_model.clone();
-        let total_files = batch_paths.len() as u64;
+            if files.is_empty() {
+                // Only short-circuit when there's no DB yet to clean up (first-ever
+                // run on an empty directory). Otherwise an empty file list must
+                // still flow through the incremental diff + streaming pipeline
+                // below — files removed from disk since the last run (down to
+                // zero) need their orphaned DB rows deleted. The store thread
+                // applies `delete_paths` once at start, before the insert loop.
+                let probe = db_file.clone();
+                let no_db_yet =
+                    py.allow_threads(move || probe == Path::new(":memory:") || !probe.exists());
+                if no_db_yet {
+                    stop.check().map_err(|_| DbError::Cancelled)?;
+                    return Ok(PipelineReport::empty());
+                }
+            }
 
-        emit_progress(py, &progress_callback, "parse", 0, total_files);
+            let mut file_count = files.len() as u64;
+            let mut batch_paths: Vec<PathBuf> =
+                files.iter().map(|(p, _)| PathBuf::from(p)).collect();
+            // Applies to every file for the whole run, independent of the diff's
+            // own verdict — built once here rather than routed through
+            // `DiffResult`, since `build_db_batch` needs it for files the diff
+            // never touches too (e.g. the "no DB yet" early-return path above
+            // doesn't apply, but a fresh DB with no prior rows still needs every
+            // file's relative key to write its first row).
+            let rel_keys: std::collections::HashMap<PathBuf, String> = files
+                .into_iter()
+                .map(|(p, rel)| (PathBuf::from(p), rel))
+                .collect();
 
-        // Built once per run (invariant across every batch) and handed to
-        // every parse_batch_callback() call — see ParseCallConfig's doc
-        // comment for why this is a single typed object rather than a
-        // growing list of positional arguments.
-        let parse_config: Py<super::parse_call_config::ParseCallConfig> = Py::new(
-            py,
-            super::parse_call_config::ParseCallConfig {
-                detect_embedded_sql: self.config.detect_embedded_sql,
-                per_file_timeout_secs: self.config.per_file_timeout_secs,
-                per_file_timeout_min_size_kb: self.config.per_file_timeout_min_size_kb,
-                config_file_size_threshold_kb: self.config.config_file_size_threshold_kb,
-                parse_thread_pool_size: self.config.parse_thread_pool_size,
-            },
-        )?;
+            // ── Incremental diff (Phase 3) ─────────────────────────
+            let delete_paths: Vec<String>;
+            // Content hash for every scanned file the diff already had a DB row
+            // for (see `differ::compute_diff`) — freshly computed for files that
+            // must be reprocessed, or the DB's existing hash carried forward
+            // unchanged otherwise. Covers files that never reach `batch_paths`
+            // too (mtime-unchanged, or hash-confirmed unchanged despite a
+            // differing mtime) so a force-reindex caller — which reprocesses
+            // every file regardless — still writes back the correct hash for
+            // one it didn't need to change, instead of nulling it out.
+            let new_hashes: std::collections::HashMap<PathBuf, String>;
+            let existing_ids: std::collections::HashMap<PathBuf, i64>;
+            // (size_bytes, mtime) per scanned file — produced once by the diff
+            // phase and reused by parse_one_batch to avoid a third stat pass.
+            let disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>;
+            let mut files_skipped_by_hash = 0u64;
+            if incremental {
+                let diff = self.compute_diff_blocking(
+                    py,
+                    &progress_callback,
+                    &batch_paths,
+                    &rel_keys,
+                    db_path.clone(),
+                    &stop,
+                    &cleanup_ok,
+                )?;
+                stop.check().map_err(|_| DbError::Cancelled)?;
+                // Only process changed files
+                batch_paths = diff.changed;
+                // Respect do_cleanup flag: skip orphan deletion when cleanup is disabled.
+                delete_paths = if self.config.do_cleanup {
+                    diff.removed
+                } else {
+                    Vec::new()
+                };
+                new_hashes = diff.new_hashes;
+                existing_ids = diff.existing_ids;
+                disk_stats = diff.disk_stats;
+                files_skipped_by_hash = diff.skipped_by_hash;
+                // Update file_count to reflect what will actually be processed
+                file_count = batch_paths.len() as u64;
+            } else {
+                // force_reindex re-indexes every scanned file. Still run the diff
+                // so new_hashes/existing_ids/disk_stats are populated — otherwise
+                // parse writes content_hash as NULL (empty map → unwrap_or_default).
+                // do_cleanup only gates orphan deletion, not the hash maps.
+                let diff = self.compute_diff_blocking(
+                    py,
+                    &progress_callback,
+                    &batch_paths,
+                    &rel_keys,
+                    db_path.clone(),
+                    &stop,
+                    &cleanup_ok,
+                )?;
+                stop.check().map_err(|_| DbError::Cancelled)?;
+                delete_paths = if self.config.do_cleanup {
+                    diff.removed
+                } else {
+                    Vec::new()
+                };
+                new_hashes = diff.new_hashes;
+                existing_ids = diff.existing_ids;
+                disk_stats = diff.disk_stats;
+            }
 
-        // Clone Python references before releasing the GIL — Py<T>::clone()
-        // panics without the GIL held, and this whole call runs inside
-        // py.allow_threads() below.
-        let parse_cb = parse_batch_callback.clone_ref(py);
-        let embed_fn = if self.config.skip_embeddings {
-            None
-        } else {
+            let db_config = DbConfig {
+                db_path,
+                compaction_threshold: self.config.compaction_threshold,
+                compaction_min_size_bytes: self.config.compaction_min_size_mb * 1024 * 1024,
+                insert_batch_size: self.config.db_batch_size.max(1),
+            };
+
+            // ── Parse ∥ Embed ∥ Store: 3-stage streaming pipeline ──
+            let provider = self.config.embedding_provider.clone();
+            let model = self.config.embedding_model.clone();
+            let total_files = batch_paths.len() as u64;
+
+            stop.check().map_err(|_| DbError::Cancelled)?;
+            emit_progress(py, &progress_callback, "parse", 0, total_files);
+            stop.check().map_err(|_| DbError::Cancelled)?;
+
+            // Built once per run (invariant across every batch) and handed to
+            // every parse_batch_callback() call — see ParseCallConfig's doc
+            // comment for why this is a single typed object rather than a
+            // growing list of positional arguments.
+            let parse_config: Py<super::parse_call_config::ParseCallConfig> = Py::new(
+                py,
+                super::parse_call_config::ParseCallConfig {
+                    detect_embedded_sql: self.config.detect_embedded_sql,
+                    per_file_timeout_secs: self.config.per_file_timeout_secs,
+                    per_file_timeout_min_size_kb: self.config.per_file_timeout_min_size_kb,
+                    config_file_size_threshold_kb: self.config.config_file_size_threshold_kb,
+                    parse_thread_pool_size: self.config.parse_thread_pool_size,
+                },
+            )?;
+
+            // Clone Python references before releasing the GIL — Py<T>::clone()
+            // panics without the GIL held, and this whole call runs inside
+            // py.allow_threads() below.
+            let parse_cb = parse_batch_callback.clone_ref(py);
+            stop.check().map_err(|_| DbError::Cancelled)?;
             let callback = embed_batch_callback.as_ref().map(|cb| cb.clone_ref(py));
             let mut embed_cfg = self.config.embed_config();
             embed_cfg.analytics = analytics.clone();
-            Some(Arc::from(
-                create_embed_fn(&embed_cfg, callback)
-                    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
-            ))
-        };
-        let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
-        let store_progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
-        let t_run = Instant::now();
-        let outcome = py
-            .allow_threads(|| {
+            let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
+            let store_progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
+            let t_run = Instant::now();
+            let outcome = py.allow_threads(|| {
+                stop.check().map_err(|_| DbError::Cancelled)?;
+                let embed_fn = if self.config.skip_embeddings {
+                    None
+                } else {
+                    Some(Arc::from(
+                        create_embed_fn(&embed_cfg, callback)
+                            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?,
+                    ))
+                };
                 self.pipeline_parse_embed_store(
                     &batch_paths,
                     parse_cb,
                     parse_config,
-                    embed_fn.clone(),
+                    embed_fn,
                     &provider,
                     &model,
                     progress_cb,
@@ -306,33 +344,42 @@ impl IndexingPipeline {
                     existing_ids,
                     disk_stats,
                     rel_keys,
+                    &stop,
+                    &cleanup_ok,
                 )
+                .map_err(PyErr::from)
+            })?;
+            stop.check().map_err(|_| DbError::Cancelled)?;
+            log::info!(
+                "pipeline parse+embed+store: {:.2}s",
+                t_run.elapsed().as_secs_f64()
+            );
+
+            let total_secs = started.elapsed().as_secs_f64();
+            emit_progress(py, &progress_callback, "done", file_count, file_count);
+            stop.check().map_err(|_| DbError::Cancelled)?;
+            log::info!(
+                "pipeline total: {total_secs:.2}s (files={file_count}, chunks={}, embeds={})",
+                outcome.chunks_written,
+                outcome.embeddings_written
+            );
+
+            Ok(PipelineReport {
+                files_processed: file_count,
+                files_skipped: files_skipped_by_hash,
+                chunks_written: outcome.chunks_written,
+                embeddings_generated: outcome.embeddings_written,
+                elapsed_secs: total_secs,
+                errors: outcome.errors,
+                skipped_paths: outcome.skipped_paths,
+                peak_rss_mb: None,
+                disk_limit: outcome.disk_limit_exceeded,
             })
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        log::info!(
-            "pipeline parse+embed+store: {:.2}s",
-            t_run.elapsed().as_secs_f64()
-        );
-
-        let total_secs = started.elapsed().as_secs_f64();
-        emit_progress(py, &progress_callback, "done", file_count, file_count);
-        log::info!(
-            "pipeline total: {total_secs:.2}s (files={file_count}, chunks={}, embeds={})",
-            outcome.chunks_written,
-            outcome.embeddings_written
-        );
-
-        Ok(PipelineReport {
-            files_processed: file_count,
-            files_skipped: files_skipped_by_hash,
-            chunks_written: outcome.chunks_written,
-            embeddings_generated: outcome.embeddings_written,
-            elapsed_secs: total_secs,
-            errors: outcome.errors,
-            skipped_paths: outcome.skipped_paths,
-            peak_rss_mb: None,
-            disk_limit: outcome.disk_limit_exceeded,
-        })
+        })();
+        // Also release on early/error returns, after all worker joins.
+        py.allow_threads(move || drop(run_lease));
+        stop.finish(cleanup_ok.load(Ordering::Acquire));
+        result
     }
 }
 
@@ -344,28 +391,31 @@ impl IndexingPipeline {
     /// DuckDB snapshot, `stat`, and xxh3 hashing run under `py.allow_threads`
     /// so the GIL is not held across that IO/CPU. Progress ticks re-acquire
     /// it via `emit_progress_gil`, same as parse/embed/store workers.
+    #[allow(clippy::too_many_arguments)] // Diff borrows run control and cleanup state in addition to its existing snapshot inputs.
     fn compute_diff_blocking(
         &self,
         py: Python<'_>,
         progress_callback: &Option<Py<PyAny>>,
         files: &[PathBuf],
         rel_keys: &std::collections::HashMap<PathBuf, String>,
+        db_path: String,
+        stop: &StopToken,
+        cleanup_ok: &AtomicBool,
     ) -> PyResult<DiffResult> {
+        stop.check().map_err(|_| DbError::Cancelled)?;
         let total_files = files.len() as u64;
         emit_progress(py, progress_callback, "diff", 0, total_files);
+        stop.check().map_err(|_| DbError::Cancelled)?;
 
-        let db_file = if self.config.db_path.as_os_str().is_empty()
-            || self.config.db_path.as_os_str() == ":memory:"
-        {
+        if db_path == ":memory:" {
             emit_progress(py, progress_callback, "diff", total_files, total_files);
+            stop.check().map_err(|_| DbError::Cancelled)?;
             return Ok(DiffResult {
                 changed: files.to_vec(),
                 removed: Vec::new(),
                 ..Default::default()
             });
-        } else {
-            self.config.db_path.join("chunks.db")
-        };
+        }
 
         // Deliberately NOT short-circuited on `!db_file.exists()` here: a
         // crashed compaction swap (compaction.rs's 3-phase protocol) renames
@@ -383,7 +433,6 @@ impl IndexingPipeline {
         let progress_cb = progress_callback.as_ref().map(|cb| cb.clone_ref(py));
         let files_owned: Vec<PathBuf> = files.to_vec();
         let rel_keys_owned = rel_keys.clone();
-        let db_path = db_file.to_string_lossy().into_owned();
         let compaction_threshold = self.config.compaction_threshold;
         let compaction_min_size_bytes = self.config.compaction_min_size_mb * 1024 * 1024;
         let insert_batch_size = self.config.db_batch_size.max(1);
@@ -397,7 +446,18 @@ impl IndexingPipeline {
                 insert_batch_size,
             };
             let backend: Box<dyn DbBackend> = create_backend(db_config);
-            let db_entries: Vec<DbFileEntry> = backend.read_file_states()?;
+            stop.check().map_err(|_| DbError::Cancelled)?;
+            let db_entries: Vec<DbFileEntry> = match backend.read_file_states() {
+                Ok(entries) => entries,
+                Err(error) => {
+                    // The read owns its own connection. Any failed read/close is
+                    // conservatively unavailable; do not infer safety from this unopened
+                    // backend's close(), or from a stringified exception.
+                    cleanup_ok.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            };
+            stop.check().map_err(|_| DbError::Cancelled)?;
 
             // Read mtime AND size in a single pass so that compute_diff (which
             // needs mtime for change detection) and parse_one_batch (which needs
@@ -408,21 +468,20 @@ impl IndexingPipeline {
             // cast (see `FILE_STATE_SELECT` in duckdb_backend/read.rs), so it's
             // directly comparable to these on-disk values with no further
             // normalization needed.
-            let precomputed_stats: std::collections::HashMap<PathBuf, (u64, f64)> = files_owned
-                .iter()
-                .filter_map(|p| {
-                    let meta = std::fs::metadata(p).ok()?;
+            let mut precomputed_stats = std::collections::HashMap::new();
+            for p in &files_owned {
+                stop.check().map_err(|_| DbError::Cancelled)?;
+                if let Ok(meta) = std::fs::metadata(p) {
                     let mtime = meta
                         .modified()
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs_f64())
                         .unwrap_or(0.0);
-                    Some((p.clone(), (meta.len(), mtime)))
-                })
-                .collect();
-
-            Ok(super::differ::compute_diff(
+                    precomputed_stats.insert(p.clone(), (meta.len(), mtime));
+                }
+            }
+            super::differ::compute_diff_cancellable(
                 &db_entries,
                 &files_owned,
                 &rel_keys_owned,
@@ -431,13 +490,15 @@ impl IndexingPipeline {
                 Some(&mut |current, total| {
                     emit_progress_gil(&progress_cb, "diff", current as u64, total as u64);
                 }),
-            ))
+                stop,
+            )
         })?;
 
         // Unconditional final tick: small diffs (< DIFF_TICK_INTERVAL files)
         // may never hit the in-loop modulo, so the bar wouldn't otherwise
         // reach 100%.
         emit_progress(py, progress_callback, "diff", total_files, total_files);
+        stop.check().map_err(|_| DbError::Cancelled)?;
 
         Ok(result)
     }
@@ -494,663 +555,437 @@ impl IndexingPipeline {
         existing_ids: std::collections::HashMap<PathBuf, i64>,
         disk_stats: std::collections::HashMap<PathBuf, (u64, f64)>,
         rel_keys: std::collections::HashMap<PathBuf, String>,
-    ) -> Result<StoreOutcome, String> {
-        use std::sync::mpsc;
-        use std::sync::{Arc, Mutex};
+        stop: &StopToken,
+        cleanup_ok: &AtomicBool,
+    ) -> Result<StoreOutcome, DbError> {
+        std::thread::scope(|scope| {
+            use std::sync::mpsc;
+            use std::sync::{Arc, Mutex};
 
-        let batch_size = self.config.parse_batch_size.max(1);
-        let embed_thread_pool_size = self.config.embed_thread_pool_size;
-        let embed_batch_size = self.config.embed_batch_size.max(1);
-        let skip_embeddings = self.config.skip_embeddings;
-        let disk_usage_limit_mb = self.config.disk_usage_limit_mb;
-        let provider = provider.to_string();
-        let model = model.to_string();
+            let batch_size = self.config.parse_batch_size.max(1);
+            let embed_thread_pool_size = self.config.embed_thread_pool_size;
+            let embed_batch_size = self.config.embed_batch_size.max(1);
+            let skip_embeddings = self.config.skip_embeddings;
+            let disk_usage_limit_mb = self.config.disk_usage_limit_mb;
+            let provider = provider.to_string();
+            let model = model.to_string();
 
-        // Separate clones of the progress callback for the parse and embed
-        // threads — the original `progress_cb` is kept in this function's
-        // own scope to emit the final landing progress after both threads
-        // join.
-        let progress_cb_parse = progress_cb
-            .as_ref()
-            .map(|cb| Python::with_gil(|py| cb.clone_ref(py)));
-        let progress_cb_embed = progress_cb
-            .as_ref()
-            .map(|cb| Python::with_gil(|py| cb.clone_ref(py)));
+            // Separate clones of the progress callback for the parse and embed
+            // threads — the original `progress_cb` is kept in this function's
+            // own scope to emit the final landing progress after both threads
+            // join.
+            let progress_cb_parse = progress_cb
+                .as_ref()
+                .map(|cb| Python::with_gil(|py| cb.clone_ref(py)));
+            let progress_cb_embed = progress_cb
+                .as_ref()
+                .map(|cb| Python::with_gil(|py| cb.clone_ref(py)));
 
-        // Build file batches (indices into `files` slice).
-        let batches: Vec<(usize, Vec<PathBuf>)> = files
-            .chunks(batch_size)
-            .enumerate()
-            .map(|(i, chunk)| (i, chunk.to_vec()))
-            .collect();
-        let batch_count = batches.len();
-        let batch_count_u64 = batch_count as u64;
-        let total_files = files.len() as u64;
+            // Build file batches (indices into `files` slice).
+            let batches: Vec<(usize, Vec<PathBuf>)> = files
+                .chunks(batch_size)
+                .enumerate()
+                .map(|(i, chunk)| (i, chunk.to_vec()))
+                .collect();
+            let batch_count = batches.len();
+            let total_files = files.len() as u64;
 
-        // Bounded backpressure keeps any one stage from running arbitrarily
-        // far ahead of the next — parsed batches hold source text, embedded
-        // batches additionally hold float vectors, and both are memory-heavy.
-        // The embed->store hop is deeper (8): instrumentation showed embed and
-        // store were mutually starving (~600-800s each) through a 2-slot buffer,
-        // so a deeper buffer lets embed run ahead during store's write bursts
-        // and absorbs embed's large per-batch time variance (2s-28s).
-        let (parse_tx, parse_rx) = mpsc::sync_channel::<(usize, Vec<super::types::ParsedFile>)>(2);
-        let (store_tx, store_rx) = mpsc::sync_channel::<DbWriterBatch>(8);
-        let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        // Per-file parse errors (e.g. one file's parse callback raised) —
-        // these don't abort the run, unlike `error` above, which is for
-        // whole-batch-callback failures.
-        let parse_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let parse_skips: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
-        // Per-file embed errors (e.g. an embed API call for one sub-batch
-        // failed) — same non-fatal treatment as `parse_errors`: those chunks
-        // are written without an embedding rather than aborting the run.
-        let embed_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            // Bounded backpressure keeps any one stage from running arbitrarily
+            // far ahead of the next — parsed batches hold source text, embedded
+            // batches additionally hold float vectors, and both are memory-heavy.
+            // The embed->store hop is deeper (8): instrumentation showed embed and
+            // store were mutually starving (~600-800s each) through a 2-slot buffer,
+            // so a deeper buffer lets embed run ahead during store's write bursts
+            // and absorbs embed's large per-batch time variance (2s-28s).
+            let (parse_tx, parse_rx) =
+                mpsc::sync_channel::<(usize, Vec<super::types::ParsedFile>)>(2);
+            let (store_tx, store_rx) = mpsc::sync_channel::<DbWriterBatch>(8);
+            let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            // Per-file parse errors (e.g. one file's parse callback raised) —
+            // these don't abort the run, unlike `error` above, which is for
+            // whole-batch-callback failures.
+            let parse_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let parse_skips: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            // Per-file embed errors (e.g. an embed API call for one sub-batch
+            // failed) — same non-fatal treatment as `parse_errors`: those chunks
+            // are written without an embedding rather than aborting the run.
+            let embed_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // ── Parse thread ──────────────────────────────────────
-        let parse_handle = {
-            let error = Arc::clone(&error);
-            let parse_errors = Arc::clone(&parse_errors);
-            let parse_skips = Arc::clone(&parse_skips);
-            std::thread::spawn(move || {
-                let mut parsed_files_count: u64 = 0;
-                for (batch_idx, batch) in batches {
-                    if error.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-                        break;
-                    }
-
-                    let t_batch = Instant::now();
-                    let paths: Vec<String> = batch
-                        .iter()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .collect();
-
-                    let parsed = match Python::with_gil(|gil_py| {
-                        Self::parse_one_batch(
-                            gil_py,
-                            &parse_cb,
-                            &parse_config,
-                            &paths,
-                            &batch,
-                            &new_hashes,
-                            &disk_stats,
-                            &rel_keys,
-                        )
-                    }) {
-                        Ok(parsed) => parsed,
-                        Err(e) => {
-                            let mut err = error.lock().unwrap_or_else(|e| e.into_inner());
-                            if err.is_none() {
-                                *err = Some(e);
-                            }
+            // ── Parse thread ──────────────────────────────────────
+            let parse_handle = {
+                let error = Arc::clone(&error);
+                let parse_errors = Arc::clone(&parse_errors);
+                let parse_skips = Arc::clone(&parse_skips);
+                scope.spawn(move || {
+                    let mut parsed_files_count: u64 = 0;
+                    for (batch_idx, batch) in batches {
+                        if stop.is_cancelled() {
                             break;
                         }
-                    };
-
-                    {
-                        let mut errs = parse_errors.lock().unwrap_or_else(|e| e.into_inner());
-                        let mut skips = parse_skips.lock().unwrap_or_else(|e| e.into_inner());
-                        for pf in &parsed {
-                            if let Some(e) = &pf.error {
-                                errs.push(format!("{}: {}", pf.path.display(), e));
-                            } else if let Some(reason) = &pf.skip_reason {
-                                let skip_path = if pf.rel_path.is_empty() {
-                                    pf.path.display().to_string()
-                                } else {
-                                    pf.rel_path.clone()
-                                };
-                                skips.push((skip_path, reason.clone()));
-                            }
+                        if error.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                            break;
                         }
-                    }
 
-                    log::debug!(
-                        "[parse] batch {batch_idx} done in {:.3}s",
-                        t_batch.elapsed().as_secs_f64()
-                    );
+                        let t_batch = Instant::now();
+                        let paths: Vec<String> = batch
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect();
 
-                    // Report real parse throughput as soon as this batch is
-                    // parsed — not gated on the embed thread consuming it —
-                    // so the "parse" progress bar reflects actual parse
-                    // completion instead of tracking embed's consumption
-                    // rate (see the removed piggyback emit in the embed
-                    // thread's loop below).
-                    parsed_files_count += batch.len() as u64;
-                    emit_progress_gil(&progress_cb_parse, "parse", parsed_files_count, total_files);
+                        let parsed = match Python::with_gil(|gil_py| {
+                            Self::parse_one_batch(
+                                gil_py,
+                                &parse_cb,
+                                &parse_config,
+                                &paths,
+                                &batch,
+                                &new_hashes,
+                                &disk_stats,
+                                &rel_keys,
+                            )
+                        }) {
+                            Ok(parsed) => parsed,
+                            Err(e) => {
+                                let mut err = error.lock().unwrap_or_else(|e| e.into_inner());
+                                if err.is_none() {
+                                    *err = Some(e);
+                                }
+                                break;
+                            }
+                        };
+                        if stop.is_cancelled() {
+                            break;
+                        }
 
-                    if parse_tx.send((batch_idx, parsed)).is_err() {
-                        // Receiver dropped (main thread error) — stop.
-                        break;
-                    }
-                }
-                parsed_files_count
-            })
-        };
-
-        // ── Store thread ───────────────────────────────────────
-        // Owns the single DB connection for the whole run. Uses the same
-        // HNSW bulk-mode bracket the Python path already relies on for bulk
-        // indexing: drop all HNSW indexes once, write each streamed batch
-        // incrementally (prepare_write's own HNSW-drop step is a no-op
-        // while bulk mode is on), then either compact (which rebuilds
-        // indexes as part of its own rewrite) or rebuild indexes directly
-        // once at the very end — never both, see the comment below.
-        //
-        // A run with nothing to write, nothing to delete and no compaction
-        // due skips the bracket altogether: dropping the indexes only to
-        // rebuild them over the same rows costs a full HNSW build (plus the
-        // checkpoint behind it) for no change. `backend.open()` has already
-        // recreated any index a crashed earlier run left missing, so there
-        // is nothing for the end of this run to restore either.
-        let nothing_to_write = batch_count == 0 && delete_paths.is_empty();
-        let store_handle: std::thread::JoinHandle<Result<StoreOutcome, String>> = {
-            std::thread::spawn(move || {
-                // Captured before `db_config` is moved into the backend —
-                // used only to stat the DB and WAL files for per-batch size
-                // tracing below.
-                let db_path = db_config.db_path.clone();
-                let mut backend: Box<dyn DbBackend> = create_backend(db_config);
-                let open_result = backend.open();
-                Self::close_backend_on_err(backend.as_mut(), open_result)?;
-                // Dropping HNSW indexes is a catalog-only DDL operation (no
-                // data scan), so it's always sub-10ms in practice — not
-                // worth a dedicated progress bar (it would flash past
-                // unnoticed). Log it instead for the rare case it's slow.
-                // Compaction must keep the bracket even on an otherwise
-                // empty run: it rebuilds the indexes through `reopen()`, with
-                // the metrics `drop_all_hnsw_indexes()` captures. So whether
-                // to compact is decided here, with the skip: the post-write
-                // step does not ask again on a run that skipped the bracket.
-                let skip_decision = Self::can_skip_hnsw_bracket(backend.as_ref(), nothing_to_write);
-                let skip_hnsw_bracket =
-                    Self::close_backend_on_err(backend.as_mut(), skip_decision)?;
-                if skip_hnsw_bracket {
-                    log::info!("[hnsw-drop] skipped: nothing to write, delete or compact");
-                } else {
-                    let t_hnsw_drop = Instant::now();
-                    let drop_hnsw_result = backend.drop_all_hnsw_indexes();
-                    Self::close_backend_on_err(backend.as_mut(), drop_hnsw_result)?;
-                    log::info!(
-                        "[hnsw-drop] done in {:.3}s",
-                        t_hnsw_drop.elapsed().as_secs_f64()
-                    );
-                }
-                // Orphan deletes free space and must run even when the DB is
-                // already over disk_usage_limit_mb — that guard exists to
-                // stop inserts (growth), not cleanup. Applied here, before
-                // the insert loop, so a pre-recv disk-limit trip +
-                // drop(store_rx) cannot discard them.
-                if !delete_paths.is_empty() {
-                    let orphan_batch = DbWriterBatch {
-                        files: Vec::new(),
-                        delete_paths,
-                    };
-                    let delete_result = backend.prepare_write(&orphan_batch);
-                    Self::close_backend_on_err(backend.as_mut(), delete_result)?;
-                }
-                emit_progress_gil(&store_progress_cb, "write-prepare", 0, batch_count_u64);
-
-                // Write each batch as soon as it arrives (no window). The
-                // 10-batch window was left over from a reverted multi-batch
-                // transaction; it now only serves to make the store thread
-                // block collecting a full window before writing, which
-                // instrumentation showed cost ~793s of store idle time and
-                // ping-ponged with the embed stage. Per-batch commits (the
-                // default write path) are unchanged. checkpoint_threshold —
-                // not commit frequency — now governs WAL checkpoint cost.
-                const STORE_COMMIT_INTERVAL: usize = 1;
-
-                let mut chunks_written = 0u64;
-                let mut embeddings_written = 0u64;
-                let mut batch_no = 0usize;
-                // Pipeline diagnostic: cumulative time the store thread spends
-                // BLOCKED in recv() waiting for the embed stage to produce.
-                let mut store_wait_s = 0f64;
-                // Set when a mid-run disk-usage check trips (see below).
-                let mut disk_limit_hit: Option<(f64, f64)> = None;
-
-                let write_result: Result<(), String> = (|| {
-                    let mut window: Vec<crate::types::DbWriterBatch> =
-                        Vec::with_capacity(STORE_COMMIT_INTERVAL);
-
-                    // Labeled so the disk-usage check below can break out of
-                    // the whole store loop, not just the inner per-window
-                    // `for`.
-                    'store_loop: loop {
-                        // Pre-write guard, mirroring Python's
-                        // _check_disk_usage_limit: is the DB already over the
-                        // limit from prior commits, before this window writes
-                        // anything? Never inspects whether this window's own
-                        // writes would push it over. Checked once per window
-                        // — BEFORE any batch in it is received — rather than
-                        // once per received batch, so this is safe regardless
-                        // of STORE_COMMIT_INTERVAL: either the whole window is
-                        // left completely untouched, or it's fully processed
-                        // (prepare_write's deletes AND the matching inserts).
-                        // Checking mid-fill instead would let a tripped check
-                        // land after some batches in the window already had
-                        // prepare_write's un-rollback-able deletes applied but
-                        // before write_batches_in_one_txn ever inserted their
-                        // replacements — silent data loss the moment this
-                        // constant is ever raised above 1.
-                        if let Some(hit) =
-                            check_disk_usage_limit(Path::new(&db_path), disk_usage_limit_mb)
                         {
-                            log::warn!(
-                                "[store] disk usage limit exceeded: \
-                                 {:.1} MB >= {:.1} MB — stopping further writes",
-                                hit.0,
-                                hit.1
-                            );
-                            disk_limit_hit = Some(hit);
-                            break 'store_loop;
-                        }
-
-                        // Fill window: prepare_write per batch (auto-commit),
-                        // block on recv until window full or channel closes.
-                        window.clear();
-                        for _ in 0..STORE_COMMIT_INTERVAL {
-                            let t_recv = Instant::now();
-                            let recv = store_rx.recv();
-                            store_wait_s += t_recv.elapsed().as_secs_f64();
-                            match recv {
-                                Ok(batch) => {
-                                    let t_prep = Instant::now();
-                                    backend.prepare_write(&batch).map_err(|e| e.to_string())?;
-                                    let prep_ms = t_prep.elapsed().as_secs_f64() * 1e3;
-                                    log::debug!(
-                                        "[store] prep batch {} in {prep_ms:.1}ms",
-                                        window.len() + 1,
-                                    );
-                                    window.push(batch);
-                                    // Emit progress after each prepare_write so the
-                                    // chunks/s rate stays live during accumulation.
-                                    // chunks_written is the cumulative total through
-                                    // the previous window (this batch not yet written).
-                                    emit_progress_gil_chunks(
-                                        &store_progress_cb,
-                                        "write-data",
-                                        (batch_no + window.len()) as u64,
-                                        batch_count_u64,
-                                        chunks_written,
-                                    );
+                            let mut errs = parse_errors.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut skips = parse_skips.lock().unwrap_or_else(|e| e.into_inner());
+                            for pf in &parsed {
+                                if let Some(e) = &pf.error {
+                                    errs.push(format!("{}: {}", pf.path.display(), e));
+                                } else if let Some(reason) = &pf.skip_reason {
+                                    let skip_path = if pf.rel_path.is_empty() {
+                                        pf.path.display().to_string()
+                                    } else {
+                                        pf.rel_path.clone()
+                                    };
+                                    skips.push((skip_path, reason.clone()));
                                 }
-                                Err(_) => break, // channel closed
                             }
                         }
-                        if window.is_empty() {
+
+                        log::debug!(
+                            "[parse] batch {batch_idx} done in {:.3}s",
+                            t_batch.elapsed().as_secs_f64()
+                        );
+
+                        // Report real parse throughput as soon as this batch is
+                        // parsed — not gated on the embed thread consuming it —
+                        // so the "parse" progress bar reflects actual parse
+                        // completion instead of tracking embed's consumption
+                        // rate (see the removed piggyback emit in the embed
+                        // thread's loop below).
+                        parsed_files_count += batch.len() as u64;
+                        emit_progress_gil(
+                            &progress_cb_parse,
+                            "parse",
+                            parsed_files_count,
+                            total_files,
+                        );
+
+                        if !send(&parse_tx, (batch_idx, parsed), stop) {
+                            // Receiver dropped (main thread error) — stop.
+                            break;
+                        }
+                    }
+                    parsed_files_count
+                })
+            };
+
+            // ── Store thread ───────────────────────────────────────
+            // Owns the single DB connection for the whole run. Uses the same
+            // HNSW bulk-mode bracket the Python path already relies on for bulk
+            // indexing: drop all HNSW indexes once, write each streamed batch
+            // incrementally (prepare_write's own HNSW-drop step is a no-op
+            // while bulk mode is on), then either compact (which rebuilds
+            // indexes as part of its own rewrite) or rebuild indexes directly
+            // once at the very end — never both, see the comment below.
+            // An empty diff must leave existing indexes in place unless
+            // compaction is due. open() still restores any index a crash lost.
+            let store_handle: std::thread::ScopedJoinHandle<'_, Result<StoreOutcome, DbError>> = {
+                scope.spawn(move || {
+                    // Captured before `db_config` is moved into the backend —
+                    // used only to stat the DB and WAL files for per-batch size
+                    // tracing below.
+                    let db_path = db_config.db_path.clone();
+                    Self::store_batches(
+                        create_backend(db_config),
+                        db_path,
+                        batch_count,
+                        delete_paths,
+                        store_rx,
+                        disk_usage_limit_mb,
+                        |phase, current, total, chunks| match chunks {
+                            Some(chunks) => emit_progress_gil_chunks(
+                                &store_progress_cb,
+                                phase,
+                                current,
+                                total,
+                                chunks,
+                            ),
+                            None => emit_progress_gil(&store_progress_cb, phase, current, total),
+                        },
+                        stop,
+                        cleanup_ok,
+                    )
+                })
+            };
+
+            // ── Embed thread ───────────────────────────────────────
+            // Owns one rayon pool for the life of the run (built once, not
+            // rebuilt per batch), so worker OS threads — and the Python-side
+            // per-thread embedding-provider/HTTP-client cache keyed on them
+            // (see chunkhound/pipeline_bridge.py's `threading.local()` usage)
+            // — are reused across every streamed batch instead of being torn
+            // down and rebuilt on each one.
+            let embed_handle: std::thread::ScopedJoinHandle<'_, Result<u64, String>> = {
+                let error = Arc::clone(&error);
+                let embed_errors = Arc::clone(&embed_errors);
+                scope.spawn(move || {
+                    let pool = Self::build_embed_pool(embed_thread_pool_size)?;
+                    let mut received_files: u64 = 0;
+                    let mut seen_chunks: u64 = 0;
+                    let mut embedded_chunks: u64 = 0;
+
+                    // Anchor the embed-rate clock before any batch is processed
+                    // — the Python side starts its speed-tracking timer on the
+                    // first "embed" call it receives, so an early (0, 0) call
+                    // here (mirroring the "parse" phase's own early call in
+                    // `run()`) ensures that timer starts before batch 0's
+                    // embedding work, not after it. Without this, the first
+                    // real per-batch call already carries batch 0's full chunk
+                    // count with ~0 elapsed time behind it, producing a
+                    // nonsensical "chunks/s" figure.
+                    if !skip_embeddings {
+                        emit_progress_gil(&progress_cb_embed, "embed", 0, 0);
+                    }
+
+                    // Pipeline diagnostic: cumulative time the embed thread spends
+                    // BLOCKED on its channels — recv (upstream parse empty) and send
+                    // (downstream store full). Together with the store thread's
+                    // recv-wait this reveals which stage actually gates the pipeline.
+                    let mut embed_wait_parse = 0f64;
+                    let mut embed_wait_store = 0f64;
+                    loop {
+                        let t_recv = Instant::now();
+                        let recv = receive(&parse_rx, stop);
+                        embed_wait_parse += t_recv.elapsed().as_secs_f64();
+                        let Some((batch_idx, mut parsed_files)) = recv else {
+                            break;
+                        };
+                        if error.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
                             break;
                         }
 
-                        // Write the whole window in one transaction.
-                        let t_write = Instant::now();
-                        let results = backend
-                            .write_batches_in_one_txn(&window)
-                            .map_err(|e| e.to_string())?;
-                        let write_s = t_write.elapsed().as_secs_f64();
+                        let t_batch = Instant::now();
+                        received_files += parsed_files.len() as u64;
 
-                        let db_mib =
-                            std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0) / (1 << 20);
-                        let wal_mib = std::fs::metadata(format!("{db_path}.wal"))
-                            .map(|m| m.len())
-                            .unwrap_or(0)
-                            / (1 << 20);
-
-                        let window_start = batch_no + 1;
-                        for result in &results {
-                            chunks_written += result.chunks_written;
-                            embeddings_written += result.embeddings_written;
-                            batch_no += 1;
-                        }
-                        // Emit final progress for this window now that batch_no and
-                        // chunks_written are accurate.
-                        emit_progress_gil_chunks(
-                            &store_progress_cb,
-                            "write-data",
-                            batch_no as u64,
-                            batch_count_u64,
-                            chunks_written,
-                        );
-                        log::debug!(
-                            "[store] window {window_start}-{batch_no} done in {write_s:.3}s \
-                             (chunks={chunks_written} embeds={embeddings_written} \
-                             db={db_mib}MiB wal={wal_mib}MiB)",
-                        );
-                    }
-                    Ok(())
-                })();
-                log::debug!("[pipe] store blocked: embed-recv {store_wait_s:.1}s");
-
-                // Force the parse/embed threads' existing cooperative-shutdown
-                // cascade (the same mechanism a real store error already
-                // triggers): dropping store_rx makes embed's store_tx.send()
-                // fail fast, which drops parse_rx, making parse's
-                // parse_tx.send() fail — no new shutdown machinery needed.
-                // Deliberately stops promptly here rather than mirroring
-                // Python's own behavior of continuing to parse/embed the rest
-                // of the file list after the trip (a known Python-side
-                // inefficiency, not a contract worth reproducing).
-                if disk_limit_hit.is_some() {
-                    drop(store_rx);
-                }
-
-                // Check compaction need BEFORE building the HNSW index, not
-                // after. `run_compaction()`'s EXPORT/IMPORT rewrite copies
-                // `files`/`chunks`/`embeddings_*` into a fresh database with
-                // no indexes, then rebuilds them via `reopen()` — on both
-                // its success path (`run_attach_copy_compaction`) and its
-                // failure-fallback path (`reopen_after_compaction_failure`).
-                // So `run_compaction()` *always* leaves the database with a
-                // rebuilt HNSW index. Calling `ensure_all_hnsw_indexes()`
-                // beforehand would just mean building the (CPU-intensive,
-                // see `SET threads = 8` there) index once, throwing it away
-                // during compaction, then building it again from scratch —
-                // do not restore that call here without also removing the
-                // `run_compaction()` branch's reliance on `reopen()`.
-                //
-                // Never compact after a disk-limit trip: the EXPORT/IMPORT
-                // rewrite needs a full second copy of the database on disk
-                // (old + new coexist until the swap), transiently roughly
-                // doubling disk usage — the exact thing this run just
-                // determined it can't afford. Falls back to the cheaper
-                // ensure_all_hnsw_indexes() over whatever was already
-                // written; actual compaction is deferred to a future run,
-                // where indexing_coordinator.py's pre-run check will catch
-                // the still-over-limit condition before any writes start.
-                //
-                // Chained onto `write_result` (rather than a separate `?`
-                // per step) so that a failure at any point — the write loop
-                // itself, or compaction/index-rebuild after it — funnels
-                // through the single best-effort `backend.close()` below
-                // instead of returning early with the connection left open
-                // and HNSW indexes un-restored (Invariant 14).
-                let post_write_result: Result<(), String> = write_result.and_then(|()| {
-                    let needs_compaction = !skip_hnsw_bracket
-                        && disk_limit_hit.is_none()
-                        && backend.needs_compaction().map_err(|e| e.to_string())?;
-                    if needs_compaction {
-                        emit_progress_gil(&store_progress_cb, "write-compact", 0, 1);
-                        backend.run_compaction().map_err(|e| e.to_string())?;
-                    } else {
-                        if disk_limit_hit.is_some() {
-                            if skip_hnsw_bracket {
-                                log::info!(
-                                    "[store] skipping compaction after disk-limit trip; \
-                                     existing HNSW indexes left in place"
-                                );
-                            } else {
-                                log::info!(
-                                    "[store] skipping compaction after disk-limit trip; \
-                                     rebuilding HNSW indexes only"
-                                );
+                        if !skip_embeddings && !parsed_files.is_empty() {
+                            // Embed this batch's chunks.
+                            let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
+                            for (fi, pf) in parsed_files.iter().enumerate() {
+                                if pf.error.is_some() {
+                                    continue;
+                                }
+                                for (ci, ch) in pf.chunks.iter().enumerate() {
+                                    let text =
+                                        ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
+                                    embed_targets.push((fi, ci, text));
+                                }
                             }
-                        }
-                        // Still emitted when there is nothing to rebuild:
-                        // the progress consumer resolves its index and
-                        // compact bars on whichever of these two phases
-                        // fires. A skipped build reports itself complete.
-                        let index_done = u64::from(skip_hnsw_bracket);
-                        emit_progress_gil(&store_progress_cb, "write-index", index_done, 1);
-                        if !skip_hnsw_bracket {
-                            backend
-                                .ensure_all_hnsw_indexes()
-                                .map_err(|e| e.to_string())?;
-                        }
-                    }
-                    Ok(())
-                });
+                            seen_chunks += embed_targets.len() as u64;
 
-                if let Err(e) = post_write_result {
-                    // Best-effort: restore HNSW indexes over whatever was
-                    // already committed before surfacing the error
-                    // (mirrors the single-shot path's Invariant 14 restore).
-                    let _ = backend.close();
-                    return Err(e);
-                }
-
-                backend.close().map_err(|e| e.to_string())?;
-                emit_progress_gil(&store_progress_cb, "write-done", 1, 1);
-
-                Ok(StoreOutcome {
-                    chunks_written,
-                    embeddings_written,
-                    // Filled in by the caller after all three threads join —
-                    // the store thread has no access to the parse/embed
-                    // threads' shared error accumulators.
-                    errors: Vec::new(),
-                    skipped_paths: Vec::new(),
-                    disk_limit_exceeded: disk_limit_hit,
-                })
-            })
-        };
-
-        // ── Embed thread ───────────────────────────────────────
-        // Owns one rayon pool for the life of the run (built once, not
-        // rebuilt per batch), so worker OS threads — and the Python-side
-        // per-thread embedding-provider/HTTP-client cache keyed on them
-        // (see chunkhound/pipeline_bridge.py's `threading.local()` usage)
-        // — are reused across every streamed batch instead of being torn
-        // down and rebuilt on each one.
-        let embed_handle: std::thread::JoinHandle<Result<u64, String>> = {
-            let error = Arc::clone(&error);
-            let embed_errors = Arc::clone(&embed_errors);
-            std::thread::spawn(move || {
-                let pool = Self::build_embed_pool(embed_thread_pool_size)?;
-                let mut received_files: u64 = 0;
-                let mut seen_chunks: u64 = 0;
-                let mut embedded_chunks: u64 = 0;
-
-                // Anchor the embed-rate clock before any batch is processed
-                // — the Python side starts its speed-tracking timer on the
-                // first "embed" call it receives, so an early (0, 0) call
-                // here (mirroring the "parse" phase's own early call in
-                // `run()`) ensures that timer starts before batch 0's
-                // embedding work, not after it. Without this, the first
-                // real per-batch call already carries batch 0's full chunk
-                // count with ~0 elapsed time behind it, producing a
-                // nonsensical "chunks/s" figure.
-                if !skip_embeddings {
-                    emit_progress_gil(&progress_cb_embed, "embed", 0, 0);
-                }
-
-                // Pipeline diagnostic: cumulative time the embed thread spends
-                // BLOCKED on its channels — recv (upstream parse empty) and send
-                // (downstream store full). Together with the store thread's
-                // recv-wait this reveals which stage actually gates the pipeline.
-                let mut embed_wait_parse = 0f64;
-                let mut embed_wait_store = 0f64;
-                loop {
-                    let t_recv = Instant::now();
-                    let recv = parse_rx.recv();
-                    embed_wait_parse += t_recv.elapsed().as_secs_f64();
-                    let (batch_idx, mut parsed_files) = match recv {
-                        Ok(v) => v,
-                        Err(_) => break,
-                    };
-                    if error.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-                        break;
-                    }
-
-                    let t_batch = Instant::now();
-                    received_files += parsed_files.len() as u64;
-
-                    if !skip_embeddings && !parsed_files.is_empty() {
-                        // Embed this batch's chunks.
-                        let mut embed_targets: Vec<(usize, usize, String)> = Vec::new();
-                        for (fi, pf) in parsed_files.iter().enumerate() {
-                            if pf.error.is_some() {
-                                continue;
-                            }
-                            for (ci, ch) in pf.chunks.iter().enumerate() {
-                                let text = ch.embed_text.as_deref().unwrap_or(&ch.code).to_string();
-                                embed_targets.push((fi, ci, text));
-                            }
-                        }
-                        seen_chunks += embed_targets.len() as u64;
-
-                        if !embed_targets.is_empty() {
-                            if let Some(ref batch_fn) = embed_fn {
-                                // `None` progress arg is deliberate:
-                                // embed_batch_parallel's internal progress
-                                // callback reports a total scoped to just
-                                // this batch's chunk count, which isn't
-                                // useful for a cross-batch running estimate
-                                // — progress is instead computed and
-                                // emitted once per batch below, using
-                                // running totals.
-                                match Self::embed_batch_parallel(
-                                    &pool,
-                                    embed_batch_size,
-                                    &mut parsed_files,
-                                    &embed_targets,
-                                    batch_fn.as_ref(),
-                                    &provider,
-                                    &model,
-                                    None,
-                                ) {
-                                    Ok(outcome) => {
-                                        if !outcome.errors.is_empty() {
-                                            embed_errors
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner())
-                                                .extend(outcome.errors);
+                            if !embed_targets.is_empty() {
+                                if let Some(ref batch_fn) = embed_fn {
+                                    // `None` progress arg is deliberate:
+                                    // embed_batch_parallel's internal progress
+                                    // callback reports a total scoped to just
+                                    // this batch's chunk count, which isn't
+                                    // useful for a cross-batch running estimate
+                                    // — progress is instead computed and
+                                    // emitted once per batch below, using
+                                    // running totals.
+                                    match Self::embed_batch_parallel(
+                                        &pool,
+                                        embed_batch_size,
+                                        &mut parsed_files,
+                                        &embed_targets,
+                                        batch_fn.as_ref(),
+                                        &provider,
+                                        &model,
+                                        None,
+                                        stop,
+                                    ) {
+                                        Ok(outcome) => {
+                                            if !outcome.errors.is_empty() {
+                                                embed_errors
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner())
+                                                    .extend(outcome.errors);
+                                            }
+                                            embedded_chunks += outcome.embedded;
                                         }
-                                        embedded_chunks += outcome.embedded;
-                                    }
-                                    Err(e) => {
-                                        let mut err =
-                                            error.lock().unwrap_or_else(|e| e.into_inner());
-                                        if err.is_none() {
-                                            *err = Some(e);
+                                        Err(PipelineError::Cancelled) => break,
+                                        Err(e) => {
+                                            let mut err =
+                                                error.lock().unwrap_or_else(|e| e.into_inner());
+                                            if err.is_none() {
+                                                *err = Some(e.to_string());
+                                            }
+                                            break;
                                         }
-                                        break;
                                     }
                                 }
                             }
                         }
-                    }
 
-                    if !skip_embeddings {
-                        // Exact chunk total isn't known upfront in a
-                        // pipelined/streaming design — estimate it from the
-                        // chunk density observed so far, refined every batch.
-                        // Converges to the exact count as received_files
-                        // approaches total_files (exact on the final batch).
-                        let estimated_total = if received_files > 0 {
-                            ((seen_chunks as f64 / received_files as f64) * total_files as f64)
-                                .round() as u64
-                        } else {
-                            seen_chunks
+                        if !skip_embeddings {
+                            // Exact chunk total isn't known upfront in a
+                            // pipelined/streaming design — estimate it from the
+                            // chunk density observed so far, refined every batch.
+                            // Converges to the exact count as received_files
+                            // approaches total_files (exact on the final batch).
+                            let estimated_total = if received_files > 0 {
+                                ((seen_chunks as f64 / received_files as f64) * total_files as f64)
+                                    .round() as u64
+                            } else {
+                                seen_chunks
+                            }
+                            .max(embedded_chunks);
+                            emit_progress_gil(
+                                &progress_cb_embed,
+                                "embed",
+                                embedded_chunks,
+                                estimated_total,
+                            );
                         }
-                        .max(embedded_chunks);
-                        emit_progress_gil(
-                            &progress_cb_embed,
-                            "embed",
-                            embedded_chunks,
-                            estimated_total,
-                        );
-                    }
 
+                        log::debug!(
+                            "[embed] batch {batch_idx} done in {:.3}s",
+                            t_batch.elapsed().as_secs_f64()
+                        );
+
+                        // Orphan deletes are applied once by the store thread at
+                        // start — batches here are inserts only.
+                        if stop.is_cancelled() {
+                            break;
+                        }
+                        let db_batch =
+                            Self::build_db_batch(&parsed_files, Vec::new(), &existing_ids);
+                        let t_send = Instant::now();
+                        let sent = send(&store_tx, db_batch, stop);
+                        embed_wait_store += t_send.elapsed().as_secs_f64();
+                        if !sent {
+                            // Store thread exited early (DB error) — stop feeding
+                            // it; the real error surfaces via store_handle.join().
+                            break;
+                        }
+                    }
                     log::debug!(
-                        "[embed] batch {batch_idx} done in {:.3}s",
-                        t_batch.elapsed().as_secs_f64()
+                        "[pipe] embed blocked: parse-recv {embed_wait_parse:.1}s  \
+                     store-send {embed_wait_store:.1}s"
                     );
 
-                    // Orphan deletes are applied once by the store thread at
-                    // start — batches here are inserts only.
-                    let db_batch = Self::build_db_batch(&parsed_files, Vec::new(), &existing_ids);
-                    let t_send = Instant::now();
-                    let sent = store_tx.send(db_batch);
-                    embed_wait_store += t_send.elapsed().as_secs_f64();
-                    if sent.is_err() {
-                        // Store thread exited early (DB error) — stop feeding
-                        // it; the real error surfaces via store_handle.join().
-                        break;
-                    }
-                }
-                log::debug!(
-                    "[pipe] embed blocked: parse-recv {embed_wait_parse:.1}s  \
-                     store-send {embed_wait_store:.1}s"
-                );
+                    Ok(embedded_chunks)
+                })
+            };
 
-                Ok(embedded_chunks)
-            })
-        };
+            // Join every stage before inspecting results, so the store thread's
+            // DB connection is always closed (it closes the backend in both its
+            // success and error paths) regardless of where an upstream error
+            // occurred — never leak the connection.
+            let parse_join = parse_handle.join();
+            let embed_join = embed_handle.join();
+            let store_join = store_handle.join();
+            if store_join.is_err() {
+                cleanup_ok.store(false, Ordering::Release);
+            }
 
-        // Join every stage before inspecting results, so the store thread's
-        // DB connection is always closed (it closes the backend in both its
-        // success and error paths) regardless of where an upstream error
-        // occurred — never leak the connection.
-        let parse_join = parse_handle.join();
-        let embed_join = embed_handle.join();
-        let store_join = store_handle.join();
-
-        // A parse-thread error takes priority — it explains the incomplete
-        // run even though later stages may have run to partial completion
-        // (or hit their own errors) on whatever batches were already sent.
-        // A panic (as opposed to a returned Err stashed in `error`) never
-        // sets `error`, so it must be checked explicitly here — otherwise
-        // the run falls through and reports success on an incomplete parse.
-        let parsed_files_count = match parse_join {
-            Ok(n) => n,
-            Err(_) => return Err("pipeline parse thread panicked".to_string()),
-        };
-        if let Some(e) = Arc::try_unwrap(error)
+            // A parse-thread error takes priority — it explains the incomplete
+            // run even though later stages may have run to partial completion
+            // (or hit their own errors) on whatever batches were already sent.
+            // A panic (as opposed to a returned Err stashed in `error`) never
+            // sets `error`, so it must be checked explicitly here — otherwise
+            // the run falls through and reports success on an incomplete parse.
+            let parsed_files_count = match parse_join {
+                Ok(n) => n,
+                Err(_) => return Err(DbError::Other("pipeline parse thread panicked".to_string())),
+            };
+            if let Some(e) = Arc::try_unwrap(error)
             .expect("parse/embed threads already joined above and drop their clone on exit, so this is the sole remaining owner")
             .into_inner()
             .unwrap_or_else(|e| e.into_inner())
         {
-            return Err(e);
+            return Err(DbError::Other(e));
         }
-        // Per-file parse errors don't abort the run (unlike `error` above) —
-        // collected here so they can be merged into the final report below.
-        let file_parse_errors = Arc::try_unwrap(parse_errors)
+            // Per-file parse errors don't abort the run (unlike `error` above) —
+            // collected here so they can be merged into the final report below.
+            let file_parse_errors = Arc::try_unwrap(parse_errors)
             .expect("parse thread already joined above and drops its clone on exit, so this is the sole remaining owner")
             .into_inner()
             .unwrap_or_else(|e| e.into_inner());
-        let file_parse_skips = Arc::try_unwrap(parse_skips)
+            let file_parse_skips = Arc::try_unwrap(parse_skips)
             .expect("parse thread already joined above and drops its clone on exit, so this is the sole remaining owner")
             .into_inner()
             .unwrap_or_else(|e| e.into_inner());
 
-        let embedded_chunks = match embed_join {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err("pipeline embed thread panicked".to_string()),
-        };
-        // Per-batch embed errors don't abort the run (unlike `error` above) —
-        // collected here so they can be merged into the final report below,
-        // instead of only reaching a log::warn! line as before.
-        let file_embed_errors = Arc::try_unwrap(embed_errors)
+            let embedded_chunks = match embed_join {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => return Err(DbError::Other(e)),
+                Err(_) => return Err(DbError::Other("pipeline embed thread panicked".to_string())),
+            };
+            // Per-batch embed errors don't abort the run (unlike `error` above) —
+            // collected here so they can be merged into the final report below,
+            // instead of only reaching a log::warn! line as before.
+            let file_embed_errors = Arc::try_unwrap(embed_errors)
             .expect("embed thread already joined above and drops its clone on exit, so this is the sole remaining owner")
             .into_inner()
             .unwrap_or_else(|e| e.into_inner());
 
-        // Emit final parse/embed progress — both stages are fully done by
-        // the time every batch has been received and embedded here, even
-        // though the store thread may still be writing the last batch(es).
-        // These land the bars on their exact final counts (the per-batch
-        // embed estimate above should already match, but this is a cheap,
-        // guaranteed-exact landing rather than relying on that convergence).
-        // Uses the parse thread's own tally, not `total_files`, so a run cut
-        // short by the disk-limit shutdown cascade (which stops the parse
-        // thread before it reaches the last batch) reports how much was
-        // actually parsed instead of falsely claiming full completion.
-        emit_progress_gil(&progress_cb, "parse", parsed_files_count, total_files);
-        if !skip_embeddings {
-            emit_progress_gil(&progress_cb, "embed", embedded_chunks, embedded_chunks);
-        }
-
-        match store_join {
-            Ok(Ok(mut result)) => {
-                result.errors = file_parse_errors;
-                result.errors.extend(file_embed_errors);
-                result.skipped_paths = file_parse_skips;
-                Ok(result)
+            if stop.is_cancelled() {
+                return match store_join {
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err(DbError::Other("pipeline store thread panicked".into())),
+                    Ok(Ok(_)) => Err(DbError::Cancelled),
+                };
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err("pipeline store thread panicked".to_string()),
-        }
+
+            // Emit final parse/embed progress — both stages are fully done by
+            // the time every batch has been received and embedded here, even
+            // though the store thread may still be writing the last batch(es).
+            // These land the bars on their exact final counts (the per-batch
+            // embed estimate above should already match, but this is a cheap,
+            // guaranteed-exact landing rather than relying on that convergence).
+            // Uses the parse thread's own tally, not `total_files`, so a run cut
+            // short by the disk-limit shutdown cascade (which stops the parse
+            // thread before it reaches the last batch) reports how much was
+            // actually parsed instead of falsely claiming full completion.
+            emit_progress_gil(&progress_cb, "parse", parsed_files_count, total_files);
+            if !skip_embeddings {
+                emit_progress_gil(&progress_cb, "embed", embedded_chunks, embedded_chunks);
+            }
+
+            match store_join {
+                Ok(Ok(mut result)) => {
+                    result.errors = file_parse_errors;
+                    result.errors.extend(file_embed_errors);
+                    result.skipped_paths = file_parse_skips;
+                    Ok(result)
+                }
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(DbError::Other("pipeline store thread panicked".to_string())),
+            }
+        })
     }
 
     /// Whether the store thread can leave the HNSW indexes exactly as
@@ -1167,19 +1002,221 @@ impl IndexingPipeline {
         Ok(nothing_to_write && !backend.needs_compaction()?)
     }
 
-    /// Run a fallible backend setup step (`open`/`drop_all_hnsw_indexes`),
-    /// closing the backend on failure so this step doesn't skip Invariant 14
-    /// — no failure path may leave the connection open or HNSW indexes
-    /// un-restored — mirroring the pattern the write/compact steps below
-    /// already use via `post_write_result`'s best-effort `backend.close()`.
-    fn close_backend_on_err<T>(
-        backend: &mut dyn DbBackend,
-        result: Result<T, DbError>,
-    ) -> Result<T, String> {
-        result.map_err(|e| {
-            let _ = backend.close();
-            e.to_string()
-        })
+    /// Own the store stage's backend through setup, prepared writes, index
+    /// restoration and close. Called by the production store thread; accepting
+    /// the database boundary here also lets contracts inject storage failures.
+    #[allow(clippy::too_many_arguments)] // Extracted store stage retains its channel, progress, limits and run-control inputs.
+    fn store_batches(
+        mut backend: Box<dyn DbBackend>,
+        db_path: String,
+        batch_count: usize,
+        delete_paths: Vec<String>,
+        store_rx: std::sync::mpsc::Receiver<DbWriterBatch>,
+        disk_usage_limit_mb: Option<f64>,
+        progress: impl Fn(&str, u64, u64, Option<u64>),
+        stop: &StopToken,
+        cleanup_ok: &AtomicBool,
+    ) -> Result<StoreOutcome, DbError> {
+        let batch_count_u64 = batch_count as u64;
+        let mut store_wait_s = 0f64;
+        let store_work = (|| -> Result<StoreOutcome, DbError> {
+            if stop.is_cancelled() {
+                return Ok(StoreOutcome {
+                    chunks_written: 0,
+                    embeddings_written: 0,
+                    errors: Vec::new(),
+                    skipped_paths: Vec::new(),
+                    disk_limit_exceeded: None,
+                });
+            }
+            backend.open()?;
+            let nothing_to_write = batch_count == 0 && delete_paths.is_empty();
+            let skip_hnsw_bracket = stop.is_cancelled()
+                || Self::can_skip_hnsw_bracket(backend.as_ref(), nothing_to_write)?;
+            if skip_hnsw_bracket {
+                log::info!("[hnsw-drop] skipped: nothing to write, delete or compact");
+            } else {
+                let t_hnsw_drop = Instant::now();
+                backend.drop_all_hnsw_indexes()?;
+                log::info!(
+                    "[hnsw-drop] done in {:.3}s",
+                    t_hnsw_drop.elapsed().as_secs_f64()
+                );
+            }
+            // Orphan deletes free space and must run even when the DB is
+            // already over disk_usage_limit_mb — that guard exists to
+            // stop inserts (growth), not cleanup. Applied here, before
+            // the insert loop, so a pre-recv disk-limit trip +
+            // drop(store_rx) cannot discard them.
+            for paths in delete_paths.chunks(100) {
+                if stop.is_cancelled() {
+                    break;
+                }
+                backend.prepare_write(&DbWriterBatch {
+                    files: Vec::new(),
+                    delete_paths: paths.to_vec(),
+                })?;
+            }
+            progress("write-prepare", 0, batch_count_u64, None);
+
+            // Write each batch as soon as it arrives (no window). The
+            // 10-batch window was left over from a reverted multi-batch
+            // transaction; it now only serves to make the store thread
+            // block collecting a full window before writing, which
+            // instrumentation showed cost ~793s of store idle time and
+            // ping-ponged with the embed stage. Per-batch commits (the
+            // default write path) are unchanged. checkpoint_threshold —
+            // not commit frequency — now governs WAL checkpoint cost.
+            const STORE_COMMIT_INTERVAL: usize = 1;
+
+            let mut chunks_written = 0u64;
+            let mut embeddings_written = 0u64;
+            let mut batch_no = 0usize;
+            // Set when a mid-run disk-usage check trips (see below).
+            let mut disk_limit_hit: Option<(f64, f64)> = None;
+
+            loop {
+                if stop.is_cancelled() {
+                    break;
+                }
+                // Pre-write guard, mirroring Python's
+                // _check_disk_usage_limit: is the DB already over the
+                // limit from prior commits, before this window writes
+                // anything? Never inspects whether this window's own
+                // writes would push it over. Checked once per window
+                // — BEFORE any batch in it is received — rather than
+                // once per received batch, so this is safe regardless
+                // of STORE_COMMIT_INTERVAL: either the whole window is
+                // left completely untouched, or it's fully processed
+                // (prepare_write's deletes AND the matching inserts).
+                // Checking mid-fill instead would let a tripped check
+                // land after some batches in the window already had
+                // prepare_write's un-rollback-able deletes applied but
+                // before write_batches_in_one_txn ever inserted their
+                // replacements — silent data loss the moment this
+                // constant is ever raised above 1.
+                if let Some(hit) = check_disk_usage_limit(Path::new(&db_path), disk_usage_limit_mb)
+                {
+                    log::warn!(
+                        "[store] disk usage limit exceeded: \
+                                 {:.1} MB >= {:.1} MB — stopping further writes",
+                        hit.0,
+                        hit.1
+                    );
+                    disk_limit_hit = Some(hit);
+                    break;
+                }
+
+                let mut window = Vec::with_capacity(STORE_COMMIT_INTERVAL);
+                for _ in 0..STORE_COMMIT_INTERVAL {
+                    let t_recv = Instant::now();
+                    let received = receive(&store_rx, stop);
+                    store_wait_s += t_recv.elapsed().as_secs_f64();
+                    let Some(batch) = received else {
+                        break;
+                    };
+                    if stop.is_cancelled() {
+                        break;
+                    }
+                    let t_prep = Instant::now();
+                    backend.prepare_write(&batch)?;
+                    let prep_ms = t_prep.elapsed().as_secs_f64() * 1e3;
+                    log::debug!("[store] prep batch {} in {prep_ms:.1}ms", window.len() + 1);
+                    window.push(batch);
+                    progress(
+                        "write-data",
+                        (batch_no + window.len()) as u64,
+                        batch_count_u64,
+                        Some(chunks_written),
+                    );
+                }
+                if window.is_empty() {
+                    break;
+                }
+
+                // Always commit prepared replacements, even after stop. A partial window
+                // commits without waiting for additional upstream batches.
+                let t_write = Instant::now();
+                let results = backend.write_batches_in_one_txn(&window)?;
+                let write_s = t_write.elapsed().as_secs_f64();
+
+                let db_mib = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0) / (1 << 20);
+                let wal_mib = std::fs::metadata(format!("{db_path}.wal"))
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    / (1 << 20);
+
+                let window_start = batch_no + 1;
+                for result in &results {
+                    chunks_written += result.chunks_written;
+                    embeddings_written += result.embeddings_written;
+                    batch_no += 1;
+                }
+                // Emit final progress for this window now that batch_no and
+                // chunks_written are accurate.
+                progress(
+                    "write-data",
+                    batch_no as u64,
+                    batch_count_u64,
+                    Some(chunks_written),
+                );
+                log::debug!(
+                    "[store] window {window_start}-{batch_no} done in {write_s:.3}s \
+                             (chunks={chunks_written} embeds={embeddings_written} \
+                             db={db_mib}MiB wal={wal_mib}MiB)",
+                );
+            }
+            drop(store_rx);
+            if disk_limit_hit.is_some() {
+                if skip_hnsw_bracket {
+                    log::info!("[store] skipping compaction after disk-limit trip; existing HNSW indexes left in place");
+                } else {
+                    log::info!("[store] skipping compaction after disk-limit trip; rebuilding HNSW indexes only");
+                }
+            }
+            let compact = !skip_hnsw_bracket
+                && disk_limit_hit.is_none()
+                && !stop.is_cancelled()
+                && backend.needs_compaction()?;
+            let mut compacted = false;
+            if compact {
+                progress("write-compact", 0, 1, None);
+                if !stop.is_cancelled() {
+                    backend.run_compaction()?;
+                    compacted = true;
+                }
+            }
+            if !skip_hnsw_bracket && !compacted {
+                progress("write-index", 0, 1, None);
+                backend.ensure_all_hnsw_indexes()?;
+            } else if skip_hnsw_bracket {
+                progress("write-index", 1, 1, None);
+            }
+            Ok(StoreOutcome {
+                chunks_written,
+                embeddings_written,
+                errors: Vec::new(),
+                skipped_paths: Vec::new(),
+                disk_limit_exceeded: disk_limit_hit,
+            })
+        })();
+        log::debug!("[pipe] store blocked: embed-recv {store_wait_s:.1}s");
+        let closed = backend.close();
+        if closed.is_err() || store_work.is_err() {
+            cleanup_ok.store(false, Ordering::Release);
+        }
+        drop(backend);
+        match (store_work, closed) {
+            (Err(error), Err(_)) => {
+                log::error!("native store operation and cleanup both failed");
+                Err(error)
+            }
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Ok(outcome), Ok(())) => {
+                progress("write-done", 1, 1, None);
+                Ok(outcome)
+            }
+        }
     }
 
     /// Convert parsed files into a `DbWriterBatch`. Each file's relative
@@ -1464,11 +1501,13 @@ impl IndexingPipeline {
         provider: &str,
         model: &str,
         progress_callback: Option<Py<PyAny>>,
-    ) -> Result<EmbedBatchOutcome, String> {
+        stop: &StopToken,
+    ) -> Result<EmbedBatchOutcome, PipelineError> {
         use rayon::prelude::*;
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Mutex;
 
+        stop.check()?;
         let batch_size = embed_batch_size.max(1);
         let total = targets.len() as u64;
         let completed = AtomicU64::new(0);
@@ -1487,12 +1526,15 @@ impl IndexingPipeline {
 
         pool.install(|| {
             targets.par_chunks(batch_size).for_each(|batch| {
+                if stop.is_cancelled() {
+                    return;
+                }
                 let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
                 let indices: Vec<(usize, usize)> =
                     batch.iter().map(|(fi, ci, _)| (*fi, *ci)).collect();
                 let batch_len = batch.len() as u64;
 
-                match embed_fn.embed_batch(&texts) {
+                match embed_fn.embed_batch_cancellable(&texts, stop) {
                     Ok(embed_result) => {
                         log::trace!(
                             "embedding batch requests={} retries={}",
@@ -1539,6 +1581,10 @@ impl IndexingPipeline {
                                 .extend(Self::format_batch_errors(&missing, &file_paths, &reason));
                         }
                     }
+                    Err(PipelineError::Cancelled) => {
+                        stop.cancel();
+                        return;
+                    }
                     Err(e) => {
                         log::warn!("embed batch failed ({} chunks), continuing: {e}", batch_len);
                         batch_errors
@@ -1564,6 +1610,8 @@ impl IndexingPipeline {
             });
         });
 
+        stop.check()?;
+
         // Apply embeddings to parsed chunks (single-threaded, after all batches).
         // Mutating pure-Rust Vec<f32> fields — no GIL required.
         let results = all_results.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -1575,6 +1623,7 @@ impl IndexingPipeline {
             chunk.model = Some(model.to_string());
         }
 
+        stop.check()?;
         Ok(EmbedBatchOutcome {
             embedded,
             errors: batch_errors.into_inner().unwrap_or_else(|e| e.into_inner()),
@@ -1668,115 +1717,187 @@ impl IndexingPipeline {
 mod tests {
     use super::*;
     use crate::types::BatchResult;
-    use std::cell::Cell;
+    use std::sync::Mutex;
 
-    /// Minimal `DbBackend` double for testing `close_backend_on_err` in
-    /// isolation — no PyO3/GIL/pipeline machinery needed, since the function
-    /// under test only touches `&mut dyn DbBackend` and a `Result`.
+    /// Faults are injected only at the database boundary. The real store stage
+    /// owns this backend and must close/drop it before returning its result.
     struct FakeBackend {
-        fail_open: bool,
-        fail_drop_hnsw: bool,
-        close_called: Cell<bool>,
+        fail_at: Option<&'static str>,
+        fail_close: bool,
+        events: Arc<Mutex<Vec<&'static str>>>,
         /// `None` makes `needs_compaction()` fail.
         compaction_due: Option<bool>,
     }
 
-    impl DbBackend for FakeBackend {
-        fn open(&mut self) -> Result<(), DbError> {
-            if self.fail_open {
-                Err(DbError::Other("simulated open failure".into()))
+    impl FakeBackend {
+        fn record(&self, operation: &'static str) -> Result<(), DbError> {
+            self.events.lock().unwrap().push(operation);
+            if self.fail_at == Some(operation) || (operation == "close" && self.fail_close) {
+                Err(DbError::Other(format!("simulated {operation} failure")))
             } else {
                 Ok(())
             }
         }
+    }
+
+    impl Drop for FakeBackend {
+        fn drop(&mut self) {
+            self.events.lock().unwrap().push("drop-backend");
+        }
+    }
+
+    impl DbBackend for FakeBackend {
+        fn open(&mut self) -> Result<(), DbError> {
+            self.record("open")
+        }
 
         fn close(&mut self) -> Result<(), DbError> {
-            self.close_called.set(true);
-            Ok(())
+            self.record("close")
+        }
+
+        fn prepare_write(&mut self, _batch: &DbWriterBatch) -> Result<(), DbError> {
+            self.record("prepare")
         }
 
         fn write_batch(&mut self, _batch: &DbWriterBatch) -> Result<BatchResult, DbError> {
-            unreachable!("not exercised by these tests")
+            self.record("write")?;
+            Ok(BatchResult {
+                file_ids: vec![1],
+                chunks_written: 1,
+                embeddings_written: 1,
+            })
         }
 
         fn needs_compaction(&self) -> Result<bool, DbError> {
+            self.record("needs_compaction")?;
             self.compaction_due
                 .ok_or_else(|| DbError::Other("simulated needs_compaction failure".into()))
         }
 
         fn run_compaction(&mut self) -> Result<(), DbError> {
-            Ok(())
+            self.record("compact")
         }
 
         fn drop_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
-            if self.fail_drop_hnsw {
-                Err(DbError::Other(
-                    "simulated drop_all_hnsw_indexes failure".into(),
-                ))
-            } else {
-                Ok(())
-            }
+            self.record("drop-hnsw")
+        }
+
+        fn ensure_all_hnsw_indexes(&mut self) -> Result<(), DbError> {
+            self.record("restore-hnsw")
         }
     }
 
-    #[test]
-    fn test_open_failure_still_closes_backend() {
-        let mut backend = FakeBackend {
-            fail_open: true,
-            fail_drop_hnsw: false,
-            close_called: Cell::new(false),
-            compaction_due: Some(false),
-        };
-        let open_result = backend.open();
-        let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
-        assert!(result.is_err());
-        assert!(
-            backend.close_called.get(),
-            "close() must run even when open() fails (Invariant 14)"
-        );
+    fn run_store(
+        backend: FakeBackend,
+        writing: bool,
+        cleanup_ok: &AtomicBool,
+    ) -> Result<StoreOutcome, DbError> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        if writing {
+            tx.send(DbWriterBatch {
+                files: Vec::new(),
+                delete_paths: Vec::new(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        IndexingPipeline::store_batches(
+            Box::new(backend),
+            String::new(),
+            usize::from(writing),
+            Vec::new(),
+            rx,
+            None,
+            |_, _, _, _| {},
+            &StopToken::default(),
+            cleanup_ok,
+        )
     }
 
     #[test]
-    fn test_drop_hnsw_failure_still_closes_backend() {
-        let mut backend = FakeBackend {
-            fail_open: false,
-            fail_drop_hnsw: true,
-            close_called: Cell::new(false),
-            compaction_due: Some(false),
-        };
-        let drop_result = backend.drop_all_hnsw_indexes();
-        let result = IndexingPipeline::close_backend_on_err(&mut backend, drop_result);
-        assert!(result.is_err());
+    fn test_store_open_failure_still_closes_backend() {
+        let mut backend = backend_with_compaction(Some(false));
+        backend.fail_at = Some("open");
+        let events = Arc::clone(&backend.events);
+        let cleanup_ok = AtomicBool::new(true);
+        let result = run_store(backend, true, &cleanup_ok);
         assert!(
-            backend.close_called.get(),
-            "close() must run even when drop_all_hnsw_indexes() fails (Invariant 14)"
+            matches!(result, Err(DbError::Other(message)) if message == "simulated open failure")
         );
+        assert_eq!(*events.lock().unwrap(), ["open", "close", "drop-backend"]);
+        assert!(!cleanup_ok.load(Ordering::Acquire));
     }
 
     #[test]
-    fn test_success_path_does_not_close_early() {
-        let mut backend = FakeBackend {
-            fail_open: false,
-            fail_drop_hnsw: false,
-            close_called: Cell::new(false),
-            compaction_due: Some(false),
-        };
-        let open_result = backend.open();
-        let result = IndexingPipeline::close_backend_on_err(&mut backend, open_result);
-        assert!(result.is_ok());
+    fn test_store_drop_hnsw_failure_still_closes_backend() {
+        let mut backend = backend_with_compaction(Some(false));
+        backend.fail_at = Some("drop-hnsw");
+        let events = Arc::clone(&backend.events);
+        let cleanup_ok = AtomicBool::new(true);
+        let result = run_store(backend, true, &cleanup_ok);
         assert!(
-            !backend.close_called.get(),
-            "close() must not run on the success path — the store thread closes \
-             explicitly later, and closing here would wrongly trigger a premature \
-             ensure_all_hnsw_indexes() before any batches are written"
+            matches!(result, Err(DbError::Other(message)) if message == "simulated drop-hnsw failure")
         );
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["open", "drop-hnsw", "close", "drop-backend"]
+        );
+        assert!(!cleanup_ok.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_store_success_restores_indexes_before_close() {
+        let backend = backend_with_compaction(Some(false));
+        let events = Arc::clone(&backend.events);
+        let cleanup_ok = AtomicBool::new(true);
+        let outcome = run_store(backend, true, &cleanup_ok).unwrap();
+        assert_eq!((outcome.chunks_written, outcome.embeddings_written), (1, 1));
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "open",
+                "drop-hnsw",
+                "prepare",
+                "write",
+                "needs_compaction",
+                "restore-hnsw",
+                "close",
+                "drop-backend"
+            ]
+        );
+        assert!(cleanup_ok.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_store_close_failure_is_unavailable_and_preserves_primary_error() {
+        for fail_open in [false, true] {
+            let mut backend = backend_with_compaction(Some(false));
+            backend.fail_at = fail_open.then_some("open");
+            backend.fail_close = true;
+            let events = Arc::clone(&backend.events);
+            let cleanup_ok = AtomicBool::new(true);
+            let result = run_store(backend, false, &cleanup_ok);
+            let expected = if fail_open {
+                "simulated open failure"
+            } else {
+                "simulated close failure"
+            };
+            assert!(matches!(result, Err(DbError::Other(message)) if message == expected));
+            let expected_events = if fail_open {
+                vec!["open", "close", "drop-backend"]
+            } else {
+                vec!["open", "needs_compaction", "close", "drop-backend"]
+            };
+            assert_eq!(*events.lock().unwrap(), expected_events);
+            assert!(!cleanup_ok.load(Ordering::Acquire));
+        }
     }
 
     fn backend_with_compaction(compaction_due: Option<bool>) -> FakeBackend {
         FakeBackend {
-            fail_open: false,
-            fail_drop_hnsw: false,
-            close_called: Cell::new(false),
+            fail_at: None,
+            fail_close: false,
+            events: Arc::new(Mutex::new(Vec::new())),
             compaction_due,
         }
     }
@@ -1804,15 +1925,19 @@ mod tests {
     }
 
     #[test]
-    fn test_hnsw_bracket_decision_failure_still_closes_backend() {
-        let mut backend = backend_with_compaction(None);
-        let decision = IndexingPipeline::can_skip_hnsw_bracket(&backend, true);
-        let result = IndexingPipeline::close_backend_on_err(&mut backend, decision);
-        assert!(result.is_err());
+    fn test_store_hnsw_bracket_decision_failure_still_closes_backend() {
+        let backend = backend_with_compaction(None);
+        let events = Arc::clone(&backend.events);
+        let cleanup_ok = AtomicBool::new(true);
+        let result = run_store(backend, false, &cleanup_ok);
         assert!(
-            backend.close_called.get(),
-            "close() must run even when the compaction check fails (Invariant 14)"
+            matches!(result, Err(DbError::Other(message)) if message == "simulated needs_compaction failure")
         );
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["open", "needs_compaction", "close", "drop-backend"]
+        );
+        assert!(!cleanup_ok.load(Ordering::Acquire));
     }
 
     #[test]

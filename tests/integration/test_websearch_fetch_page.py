@@ -33,8 +33,8 @@ import pytest_asyncio
 from chunkhound.utils.websearch_core import (
     _CHROME_PATHS,
     _fetch_page,
-    _resolve_chrome_path,
 )
+from tests.utils.chrome_diagnostics import diagnosed_chrome, resolve_chrome_for_test
 
 if TYPE_CHECKING:
     import zendriver as zd
@@ -87,28 +87,13 @@ async def chrome_browser() -> AsyncIterator[zd.Browser]:
     and skips the test instead of letting it hit the silent-event-drop
     loop in zendriver's listener.
     """
-    import zendriver as zd
-
-    chrome_path = _resolve_chrome_path()
+    pytest.importorskip("zendriver")
+    chrome_path, version = resolve_chrome_for_test()
     if chrome_path is None:
         pytest.skip("No Chrome resolvable via _resolve_chrome_path")
 
-    browser = await zd.start(
-        headless=True,
-        browser_args=[
-            "--headless=new",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-        ],
-        browser_executable_path=chrome_path,
-    )
-    try:
+    async with diagnosed_chrome(chrome_path, version=version) as browser:
         yield browser
-    finally:
-        try:
-            await asyncio.wait_for(browser.stop(), timeout=10)
-        except asyncio.TimeoutError:
-            pass
 
 
 async def test_fetch_page_html_branch(

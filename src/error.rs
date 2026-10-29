@@ -67,6 +67,10 @@ impl PipelineError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    #[error("indexing cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Coordination(#[from] crate::database_coordination::error::LeaseError),
     #[error("duckdb: {0}")]
     DuckDb(#[from] duckdb::Error),
     #[error("io: {0}")]
@@ -78,8 +82,14 @@ pub enum DbError {
 }
 
 impl From<DbError> for PyErr {
-    fn from(e: DbError) -> PyErr {
-        PyRuntimeError::new_err(e.to_string())
+    fn from(error: DbError) -> PyErr {
+        match error {
+            DbError::Coordination(error) => error.into(),
+            DbError::Cancelled => {
+                crate::cancellation::PipelineCancelledError::new_err("indexing cancelled")
+            }
+            other => PyRuntimeError::new_err(other.to_string()),
+        }
     }
 }
 

@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChunkHound — Embedding Provider Integration Design</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fafbfc;
+    --card-bg: #ffffff;
+    --text: #24292e;
+    --text-secondary: #586069;
+    --border: #e1e4e8;
+    --accent: #0366d6;
+    --accent-bg: #f1f8ff;
+    --critical: #d73a49;
+    --warning: #e36209;
+    --success: #28a745;
+    --code-bg: #f6f8fa;
+    --mermaid-bg: #ffffff;
+    --table-stripe: #f6f8fa;
+    --heading: #1b1f23;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+
+  /* ── Navigation ── */
+  nav {
+    position: fixed;
+    top: 0; left: 0;
+    width: 280px;
+    height: 100vh;
+    background: var(--card-bg);
+    border-right: 1px solid var(--border);
+    padding: 20px 16px;
+    overflow-y: auto;
+    z-index: 100;
+  }
+  nav h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--accent);
+  }
+  nav a {
+    display: block;
+    padding: 5px 0;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    transition: color 0.15s;
+  }
+  nav a:hover, nav a.active { color: var(--accent); }
+  nav a.h2 { padding-left: 12px; font-size: 12px; }
+
+  /* ── Main Content ── */
+  main {
+    margin-left: 280px;
+    max-width: 900px;
+    padding: 40px 48px 80px;
+  }
+  h1 { font-size: 2em; margin-bottom: 8px; color: var(--heading); border-bottom: 3px solid var(--accent); padding-bottom: 12px; }
+  h2 { font-size: 1.5em; margin-top: 40px; margin-bottom: 16px; color: var(--heading); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  h3 { font-size: 1.2em; margin-top: 28px; margin-bottom: 12px; color: var(--heading); }
+  h4 { font-size: 1.05em; margin-top: 20px; margin-bottom: 8px; color: var(--heading); }
+
+  p { margin-bottom: 14px; }
+  strong { color: var(--heading); }
+
+  /* ── Metadata bar ── */
+  .meta {
+    display: flex; gap: 20px; flex-wrap: wrap;
+    padding: 12px 16px;
+    background: var(--accent-bg);
+    border-radius: 6px;
+    margin-bottom: 28px;
+    font-size: 13px;
+  }
+  .meta span { color: var(--text-secondary); }
+  .meta strong { color: var(--heading); }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin-bottom: 24px;
+  }
+  .card h3 { margin-top: 0; }
+
+  /* ── Tables ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+    font-size: 13px;
+  }
+  th, td {
+    padding: 8px 12px;
+    text-align: left;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--code-bg); font-weight: 600; }
+  tr:nth-child(even) { background: var(--table-stripe); }
+
+  /* ── Code ── */
+  code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, monospace;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    overflow-x: auto;
+    margin-bottom: 20px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+
+  /* ── Mermaid diagrams ── */
+  .mermaid {
+    background: var(--mermaid-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    margin-bottom: 24px;
+    text-align: center;
+    overflow-x: auto;
+  }
+
+  /* ── Badges ── */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-crit { background: #ffeef0; color: var(--critical); }
+  .badge-warn { background: #fff5e6; color: var(--warning); }
+  .badge-ok { background: #e6ffed; color: var(--success); }
+  .badge-info { background: var(--accent-bg); color: var(--accent); }
+
+  /* ── Blockquotes ── */
+  blockquote {
+    border-left: 4px solid var(--accent);
+    padding: 8px 16px;
+    margin: 16px 0;
+    background: var(--accent-bg);
+    border-radius: 0 6px 6px 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    nav { display: none; }
+    main { margin-left: 0; padding: 16px; }
+  }
+
+  /* ── Print ── */
+  @media print {
+    nav { display: none; }
+    main { margin-left: 0; }
+    .mermaid { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <h2>Contents</h2>
+  <a href="#architecture">Architecture Overview</a>
+  <a href="#decisions" class="h2">Design Decisions</a>
+  <a href="#matryoshka">Matryoshka Truncation</a>
+  <a href="#main-loop">Embed Stage Main Loop</a>
+  <a href="#trait">Provider Trait &amp; UML</a>
+  <a href="#batch-flow">Batch &amp; Flush Sequence</a>
+  <a href="#retry-flow">Retry &amp; Error Flow</a>
+  <a href="#bloom">Bloom Filter Integration</a>
+  <a href="#shutdown">Error Propagation</a>
+  <a href="#types">Type Relationships</a>
+  <a href="#details">Detailed Design</a>
+  <a href="#details" class="h2">Pipeline Position</a>
+  <a href="#details" class="h2">File Keys</a>
+  <a href="#details" class="h2">Lifecycle</a>
+  <a href="#provider-trait">EmbeddingProvider Trait</a>
+  <a href="#provider-trait" class="h2">EmbedError Table</a>
+  <a href="#provider-trait" class="h2">HTTP→Error Mapping</a>
+  <a href="#provider-trait" class="h2">EmbedConfig</a>
+  <a href="#openai">OpenAI Provider</a>
+  <a href="#voyageai">VoyageAI Provider</a>
+  <a href="#bloom-detail">Bloom Filter Details</a>
+  <a href="#batch-detail">Batch Accumulation</a>
+  <a href="#retry-detail">Retry &amp; Error Handling</a>
+  <a href="#extensibility">Extensibility</a>
+  <a href="#types-detail">Types Reference</a>
+  <a href="#modules">Module Layout</a>
+  <a href="#deps">Cargo.toml</a>
+  <a href="#tests">Test Strategy</a>
+  <a href="#python">Python Call Site</a>
+  <a href="#logging">Logging (pyo3-log bridge)</a>
+  <a href="#future">Future Work</a>
+</nav>
+
+<main>
+
+<h1>Embedding Provider Integration — Detailed Design</h1>
+
+<div class="meta">
+  <span><strong>Date:</strong> 2026-07-19 · Revision 3</span>
+  <span><strong>Scope:</strong> Embed stage only (Phase 1)</span>
+  <span><strong>Depends on:</strong> PR #375 (RustDbWriter)</span>
+  <span class="badge badge-info">Rust + PyO3</span>
+</div>
+
+<!-- ═══════════════════════════════════════════ ARCHITECTURE ═══════════════════════════════════════════ -->
+
+<h2 id="architecture">Architecture Overview</h2>
+
+<div class="mermaid">
+graph TB
+    subgraph Pipeline["4-Stage Rust Pipeline"]
+        Scanner["📂 FileScanner  |  1 thread  |  walkdir + ignore"]
+        Parser["🌳 Parser  |  rayon pool (N=cpus)  |  tree-sitter"]
+        Embed["⚡ Embed Stage  |  1 thread  |  reqwest::blocking"]
+        DB["💾 DB Writer  |  1 thread  |  duckdb / lancedb"]
+    end
+    subgraph Cache["CacheSnapshot (Arc-shared)"]
+        Bloom["🔮 AtomicBloomFilter  |  lock-free  |  1% FPR"]
+        Files["📋 RwLock HashMap  |  path → FileEntry"]
+    end
+    Scanner -->|"bounded(500)"| Parser
+    Parser -->|"bounded(N×16)"| Embed
+    Embed -->|"bounded(100)"| DB
+    Embed -.->|read| Bloom
+    DB -.->|write post-commit| Bloom
+    Scanner -.->|read| Files
+    DB -.->|write post-commit| Files
+    style Embed fill:#bbdefb,stroke:#1565c0,stroke-width:3px
+</div>
+
+<div class="card">
+  <p>The embed stage is a single <code>std::thread</code> between Parser and DB Writer. It holds no DB connection and no Python references. It owns a <code>Box&lt;dyn EmbeddingProvider&gt;</code> wrapping a <code>reqwest::blocking::Client</code>. The GIL is released during the entire pipeline — never re-acquired by the embed stage.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════ DECISIONS ═══════════════════════════════════════════ -->
+
+<h2 id="decisions">Design Decisions</h2>
+
+<table>
+<tr><th>Decision</th><th>Choice</th><th>Rationale</th></tr>
+<tr><td>Concurrency</td><td>Single thread, sequential</td><td>Simplicity; DB Writer backpressure throttles naturally</td></tr>
+<tr><td>Providers</td><td>OpenAI + Azure + VoyageAI</td><td>Matches Python; trait designed for extensibility</td></tr>
+<tr><td>Rate limiting</td><td>Retry-only (reactive)</td><td>Honor Retry-After; no token bucket overhead</td></tr>
+<tr><td>429 semantics</td><td>No compounding on 429</td><td>429 = provider ceiling, not transient error</td></tr>
+<tr><td>Batch boundary</td><td>Provider max, cap 300</td><td>Matches Python MAX_CHUNKS_PER_BATCH</td></tr>
+<tr><td>Bloom key</td><td>(hash, provider, model, dims)</td><td>Distinguishes matryoshka dimensions</td></tr>
+<tr><td>Dimension truncation</td><td>Provider-internal</td><td>Preserves existing matryoshka flow</td></tr>
+<tr><td>Error isolation</td><td>Batch-level → cancel pipeline</td><td>Embed APIs are reliable; retries handle transients</td></tr>
+<tr><td>Retry attempts</td><td>Default 3</td><td>Matches Python retry_attempts=3</td></tr>
+<tr><td>Token estimation</td><td>3 chars/token</td><td>EMBEDDING_CHARS_PER_TOKEN measured empirically</td></tr>
+<tr><td>File keys</td><td>FileKey(u64) + HashMap</td><td>Immune to HashMap removal index shift</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════ MAIN LOOP ═══════════════════════════════════════════ -->
+
+<h2 id="matryoshka">Matryoshka Dimension Truncation</h2>
+
+<div class="mermaid">
+flowchart TD
+    subgraph SS["Server-Side Truncation"]
+        S1["embed_batch() called"] --> S2["POST /v1/embeddings<br/>body: {dimensions: 256}"]
+        S2 --> S3["API returns 256-dim vectors<br/>(already truncated)"]
+        S3 --> S4["Return vectors as-is<br/>provider.dimensions() = 256"]
+    end
+
+    subgraph CS["Client-Side Truncation"]
+        C1["embed_batch() called"] --> C2["POST /v1/embeddings<br/>body: NO dimensions param"]
+        C2 --> C3["API returns native 1536-dim vectors"]
+        C3 --> C4["v[..256].to_vec()"] 
+        C4 --> C5["L2-normalize truncated slice"]
+        C5 --> C6["Return 256-dim vectors<br/>provider.dimensions() = 256"]
+    end
+
+    subgraph NO["No Truncation (output_dims=None)"]
+        N1["embed_batch() called"] --> N2["POST /v1/embeddings<br/>body: NO dimensions param"]
+        N2 --> N3["API returns native-dim vectors"]
+        N3 --> N4["Return vectors as-is<br/>provider.dimensions() = native_dims"]
+    end
+
+    style SS fill:#e8f5e9,stroke:#388e3c
+    style CS fill:#fff3e0,stroke:#e65100
+    style NO fill:#e3f2fd,stroke:#1565c0
+</div>
+
+<div class="card">
+  <p>Dimension truncation is <strong>provider-internal</strong>. The embed stage never sees native dimensions — it only calls <code>provider.embed_batch()</code> and receives vectors at <code>provider.dimensions()</code>. The bloom filter key includes the output dimension to correctly distinguish same-model-different-dims embeddings.</p>
+  <p>Config fields: <code>output_dims</code> (target dimension) and <code>client_side_truncation</code> (where truncation happens).</p>
+</div>
+
+
+<h2 id="main-loop">Embed Stage Main Loop</h2>
+
+<div class="mermaid">
+flowchart TD
+    A["📥 rx.iter() — next ParsedFile"] --> B{"🔍 kind?"}
+    B -->|"Deleted | Error"| C["📤 from_parsed() → tx.send()"]
+    B -->|"Added | Modified"| D["📝 Create EmbeddedFile (all vectors=None)"]
+    D --> E["🔑 FileKey = buffer.next_key++"]
+    E --> F{"For each chunk:"}
+    F --> G{"text empty?"}
+    G -->|yes| H["✏️ '[EMPTY]' placeholder"]
+    G -->|no| I{"🔮 bloom hit?"}
+    H --> I
+    I -->|yes| J["⏭️ chunks_skipped++"]
+    I -->|no| K{"📏 tokens > max?"}
+    K -->|yes| L["⚠️ skip + warn"]
+    K -->|no| M["➕ push to batch"]
+    J --> N{"any new_chunks?"}
+    L --> N
+    M --> O["new_chunks++"]
+    O --> N
+    N -->|no| P["📤 tx.send(file) immediately"]
+    N -->|yes| Q["📋 PendingFile{file, remaining}"]
+    M --> R{"batch.len() ≥ cap?"}
+    R -->|yes| S["🔥 flush_batch()"]
+    R -->|no| N
+    S --> T{"🛑 cancelled?"}
+    T -->|yes| U["🧹 drain + exit"]
+    T -->|no| A
+    C --> A
+    P --> A
+    style S fill:#fff3e0,stroke:#e65100
+    style U fill:#ffcdd2,stroke:#c62828
+</div>
+
+<!-- ═══════════════════════════════════════════ TRAIT UML ═══════════════════════════════════════════ -->
+
+<h2 id="trait">EmbeddingProvider Trait &amp; Implementations</h2>
+
+<div class="mermaid">
+classDiagram
+    class EmbeddingProvider {
+        &lt;&lt;interface&gt;&gt;
+        +embed_batch(texts) Result
+        +max_batch_size() usize
+        +name() &str
+        +model() &str
+        +dimensions() usize
+        +max_tokens_per_chunk() usize
+        +recommended_concurrency() usize
+    }
+    class OpenAiProvider {
+        -client: blocking::Client
+        -api_key: String
+        -is_azure: bool
+        -model_info: OpenAiModelInfo
+        +new(cfg) Result
+        +name() "openai" | "azure_openai"
+    }
+    class VoyageAiProvider {
+        -client: blocking::Client
+        -api_key: String
+        -model_info: VoyageModelInfo
+        +new(cfg) Result
+        +name() "voyageai"
+    }
+    EmbeddingProvider <|.. OpenAiProvider
+    EmbeddingProvider <|.. VoyageAiProvider
+    note for EmbeddingProvider "Object-safe · Send only · Sync-free"
+</div>
+
+<div class="card">
+  <h4>Trait Requirements</h4>
+  <table>
+  <tr><th>Method</th><th>Contract</th></tr>
+  <tr><td><code>embed_batch</code></td><td>Return exactly texts.len() vectors in input order. Sort by API response index. Never panic.</td></tr>
+  <tr><td><code>max_batch_size</code></td><td>API's documented maximum texts per call</td></tr>
+  <tr><td><code>name</code></td><td>Stable identifier; changing it invalidates bloom cache</td></tr>
+  <tr><td><code>model</code></td><td>The API model identifier string</td></tr>
+  <tr><td><code>dimensions</code></td><td>Output dimension AFTER any truncation</td></tr>
+  <tr><td><code>max_tokens_per_chunk</code></td><td>Maximum tokens a single chunk can contain</td></tr>
+  <tr><td><code>recommended_concurrency</code></td><td>Default 1; available for future parallel HTTP</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════ BATCH FLOW ═══════════════════════════════════════════ -->
+
+<h2 id="batch-flow">Batch Accumulation &amp; Flush Sequence</h2>
+
+<div class="mermaid">
+sequenceDiagram
+    participant P as Parser (rayon)
+    participant E as Embed Buffer
+    participant API as Provider API
+    participant D as DB Writer
+
+    P->>E: ParsedFile A (3 chunks)
+    E->>E: bloom → 2 new, 1 skip
+    E->>E: batch += 2
+
+    P->>E: ParsedFile B (5 chunks)
+    E->>E: bloom → 5 new
+    E->>E: batch += 5 (now 7)
+
+    P->>E: ParsedFile C (8 chunks)
+    E->>E: bloom → 8 new
+    E->>E: batch += 8 (now 15 ≥ cap)
+
+    E->>API: embed_batch(15 texts)
+    activate API
+    API->>API: POST /v1/embeddings
+    Note over API: Matryoshka dimension truncation:<br/>Server-side: API receives "dimensions"<br/>→ returns already-truncated vectors<br/><br/>Client-side: API returns native-dim<br/>→ provider slices to output_dims<br/>→ L2-normalizes
+    API-->>E: 15 vectors (output_dims length) ✓
+    deactivate API
+
+    E->>E: scatter vectors to pending_files
+    E->>E: remaining -= 1 per chunk
+
+    E->>D: emit files where remaining == 0
+    Note over E,D: Manual drain loop with ? propagation
+
+    P->>E: ParsedFile D (1 chunk)
+    Note over P: Parser done, drops Sender
+
+    E->>API: flush remaining batch (1 text)
+    activate API
+    API-->>API: same truncation logic
+    API-->>E: 1 vector (output_dims length) ✓
+    deactivate API
+
+    E->>D: final safety-net drain
+    E->>D: drop tx → DB Writer exit signal
+</div>
+
+<!-- ═══════════════════════════════════════════ RETRY FLOW ═══════════════════════════════════════════ -->
+
+<h2 id="retry-flow">Retry &amp; Error Handling Flow</h2>
+
+<div class="mermaid">
+flowchart TD
+    A["🔥 flush_batch()"] --> B["📞 embed_with_retry()"]
+    B --> C{"API response?"}
+    C -->|"✅ 200"| D["Sort by index, return vectors"]
+    C -->|"❌ error"| E{"retryable type?"}
+
+    E -->|"🔄 Http / 5xx"| F{"attempt < max_attempts?"}
+    F -->|yes| G["⏱️ sleep(exp. backoff)<br/>stats.retries++"]
+    G --> B
+
+    F -->|no| H["❌ chunks_failed += N<br/>Return Err → cancel pipeline"]
+
+    E -->|"🚦 429 RateLimited"| J["⏱️ sleep(Retry-After)<br/>No compounding"]
+    J --> B
+
+    E -->|"📏 ContextLengthExceeded"| K["✂️ flush_split_batch()"]
+    K --> L{"batch size > 1?"}
+    L -->|yes| M["📤 flush first half<br/>📥 requeue second half"]
+    M --> A
+    L -->|no| N["⏭️ single chunk → skip<br/>decrement remaining<br/>emit file if done"]
+
+    E -->|"💀 Auth / BadRequest / ResponseFormat"| O["🛑 Set cancelled=true<br/>Mark vectors=None<br/>Drain + drop tx + exit"]
+
+    H --> O
+
+    style D fill:#c8e6c9
+    style O fill:#ffcdd2
+    style K fill:#fff9c4
+</div>
+
+<div class="card">
+  <h4>Error Propagation Summary</h4>
+  <table>
+  <tr><th>Failure</th><th>Response</th></tr>
+  <tr><td>Retry succeeds</td><td>Log warning, continue. <code>stats.retries</code> incremented</td></tr>
+  <tr><td>Retries exhausted</td><td><code>cancelled=true</code>, mark batch <code>vector=None</code>, drain, drop tx</td></tr>
+  <tr><td>Fatal (Auth, BadRequest)</td><td>Same drain-and-exit</td></tr>
+  <tr><td>ContextLengthExceeded</td><td>Split batch in half; single chunk → skip + emit file</td></tr>
+  <tr><td>Cancellation mid-run</td><td>Safety-net drain → drop tx → exit</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════ BLOOM ═══════════════════════════════════════════ -->
+
+<h2 id="bloom">Bloom Filter Integration</h2>
+
+<div class="mermaid">
+flowchart LR
+    subgraph Setup["Startup Phase"]
+        S1["SELECT COUNT(*)"] --> S2["new AtomicBloomFilter(1.5×)"]
+        S2 --> S3["populate from DB"]
+        S3 --> S4["💾 persist .bloom"]
+    end
+    subgraph Index["During Indexing"]
+        I1["chunk.content_hash"] --> I2{"bloom.contains?"}
+        I2 -->|"❌ miss"| I3["send to API"]
+        I2 -->|"✅ hit"| I4["skip"]
+        I3 --> I5["DB Writer commit"]
+        I5 --> I6["bloom.insert(key)"]
+    end
+    subgraph Restart["Next Startup"]
+        R1["load .bloom"] --> R2{"provider/model match?"}
+        R2 -->|"yes"| R3["reuse"]
+        R2 -->|"no"| R4["rebuild from DB"]
+    end
+    style I2 fill:#e1f5fe
+    style I6 fill:#c8e6c9
+</div>
+
+<div class="card">
+  <h4>Bloom Key Format</h4>
+  <pre><code>fn bloom_key(hash, provider, model, dims) → "{hash}:{provider}:{model}:{dims}"
+// Example: "a1b2c3:openai:text-embedding-3-small:1536"</code></pre>
+  <p>False positive rate: <strong>1%</strong>. False negatives: <strong>never</strong>.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════ SHUTDOWN ═══════════════════════════════════════════ -->
+
+<h2 id="shutdown">Error Propagation &amp; Pipeline Shutdown</h2>
+
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> Running: start
+
+    state Running {
+        Receiving --> Accumulating: chunk passes bloom
+        Accumulating --> Flushing: batch full / drain
+        Flushing --> Receiving: success
+        Flushing --> ErrorState: retries exhausted
+        Receiving --> Draining: Parser done / cancelled
+        Draining --> [*]: all files emitted
+    }
+
+    state ErrorState {
+        MarkCancelled: set cancelled=true
+        MarkVectorsNone: un-flushed batch → None
+        EmitPendingFiles: partial results out
+        DropSender: signal DB Writer
+        PropagateError: return Err
+
+        [*] --> MarkCancelled
+        MarkCancelled --> MarkVectorsNone
+        MarkVectorsNone --> EmitPendingFiles
+        EmitPendingFiles --> DropSender
+        DropSender --> PropagateError
+        PropagateError --> [*]
+    }
+
+    Running --> ErrorState: unrecoverable error
+</div>
+
+<blockquote>
+  <strong>Key invariant:</strong> The safety-net drain ALWAYS runs before error propagation. This ensures the DB Writer receives the drop signal and doesn't hang, even when the embed stage fails catastrophically.
+</blockquote>
+
+<!-- ═══════════════════════════════════════════ TYPES ═══════════════════════════════════════════ -->
+
+<h2 id="types">Type Relationships (UML)</h2>
+
+<div class="mermaid">
+classDiagram
+    class ParsedFile {
+        +path: PathBuf
+        +file_id: Option~u64~
+        +kind: FileEventKind
+        +chunks: Vec~ParsedChunk~
+    }
+    class ParsedChunk {
+        +text: String
+        +content_hash: String
+        +chunk_type: String
+        +start_line: u32
+        +end_line: u32
+    }
+    class EmbeddedFile {
+        +path: PathBuf
+        +file_id: Option~u64~
+        +kind: FileEventKind
+        +chunks: Vec~EmbeddedChunk~
+    }
+    class EmbeddedChunk {
+        +text: String
+        +content_hash: String
+        +vector: Option~Vec~f32~~
+        +provider: String
+        +model: String
+    }
+    class PendingFile {
+        +file: EmbeddedFile
+        +remaining: usize
+    }
+    class BatchChunk {
+        +file_key: FileKey
+        +chunk_idx: usize
+        +text: String
+    }
+    class EmbedBuffer {
+        +pending_files: HashMap
+        +batch: Vec~BatchChunk~
+        +stats: EmbedStats
+    }
+    ParsedFile "1" --> "*" ParsedChunk
+    EmbeddedFile "1" --> "*" EmbeddedChunk
+    EmbeddedChunk ..|> ParsedChunk
+    PendingFile "1" --> "1" EmbeddedFile
+    EmbedBuffer "1" --> "*" PendingFile
+    EmbedBuffer "1" --> "*" BatchChunk
+    BatchChunk ..> PendingFile: FileKey ref
+</div>
+
+<!-- ═══════════════════════════════════════════ DETAILED SECTIONS ═══════════════════════════════════════════ -->
+
+<h2 id="details">Detailed Design Sections</h2>
+
+<h3 id="provider-trait">EmbeddingProvider Trait</h3>
+
+<div class="card">
+<pre><code>pub trait EmbeddingProvider: Send {
+    fn embed_batch(&self, texts: &[String]) -> Result&lt;Vec&lt;Vec&lt;f32&gt;&gt;, EmbedError&gt;;
+    fn max_batch_size(&self) -> usize;
+    fn name(&self) -> &str;
+    fn model(&self) -> &str;
+    fn dimensions(&self) -> usize;
+    fn max_tokens_per_chunk(&self) -> usize;
+    fn recommended_concurrency(&self) -> usize { 1 }
+}</code></pre>
+</div>
+
+<h4>EmbedError Variants</h4>
+<table>
+<tr><th>Variant</th><th>HTTP</th><th>Retryable</th><th>Action</th></tr>
+<tr><td><code>Http(String)</code></td><td>network/DNS</td><td class="badge badge-ok">✅ yes</td><td>Exponential backoff</td></tr>
+<tr><td><code>RateLimited { retry_after }</code></td><td>429</td><td class="badge badge-ok">✅ yes</td><td>Honor Retry-After header</td></tr>
+<tr><td><code>Provider(String)</code></td><td>5xx</td><td class="badge badge-ok">✅ yes</td><td>Exponential backoff</td></tr>
+<tr><td><code>ContextLengthExceeded(String)</code></td><td>400 "context length"</td><td class="badge badge-ok">✅ yes</td><td>Split batch + retry</td></tr>
+<tr><td><code>Auth(String)</code></td><td>401/403</td><td class="badge badge-crit">❌ fatal</td><td>Cancel pipeline</td></tr>
+<tr><td><code>BadRequest(String)</code></td><td>4xx</td><td class="badge badge-crit">❌ fatal</td><td>Cancel pipeline</td></tr>
+<tr><td><code>ResponseFormat(String)</code></td><td>—</td><td class="badge badge-crit">❌ fatal</td><td>Cancel pipeline</td></tr>
+<tr><td><code>Cancelled</code></td><td>—</td><td>—</td><td>Pipeline exit</td></tr>
+</table>
+
+<h4>HTTP Status → Error Classification</h4>
+<pre><code>fn classify_response(response: Response) -> Result&lt;Response, EmbedError&gt; {
+    match response.status().as_u16() {
+        200..=299 => Ok(response),                                    // success
+        401 | 403 => Err(EmbedError::Auth(body)),                     // auth failure
+        429 => {
+            let retry_after = parse_header(&response, "retry-after");
+            Err(EmbedError::RateLimited { retry_after })               // rate limit
+        }
+        400..=499 => {
+            if body.contains("context length") {
+                Err(EmbedError::ContextLengthExceeded(body))           // splittable
+            } else {
+                Err(EmbedError::BadRequest(body))                      // fatal
+            }
+        }
+        500..=599 => Err(EmbedError::Provider(body)),                 // server error
+        _ => Err(EmbedError::Http(format!("HTTP {}", status))),       // unknown
+    }
+}</code></pre>
+
+<h4>EmbedConfig (PyO3 Boundary)</h4>
+<pre><code>pub struct EmbedConfig {
+    pub provider:               String,           // "openai" | "voyageai"
+    pub api_key:                String,
+    pub model:                  String,           // "text-embedding-3-small"
+    pub base_url:               Option&lt;String&gt;,   // proxy / Azure override
+    pub output_dims:            Option&lt;usize&gt;,    // matryoshka target
+    pub client_side_truncation: bool,
+    pub batch_size:             Option&lt;usize&gt;,    // user cap
+    pub timeout_seconds:        u64,
+    pub retry_max_attempts:     u32,              // default 3
+    pub ssl_verify:             bool,
+    pub api_version:            Option&lt;String&gt;,   // Azure
+    pub azure_endpoint:         Option&lt;String&gt;,   // Azure
+}</code></pre>
+<p>Effective batch: <code>min(config.batch_size?, provider.max_batch_size(), 300)</code></p>
+
+<!-- ═══════════════════════════════════════════ OPENAI ═══════════════════════════════════════════ -->
+
+<h3 id="openai">OpenAI Provider (incl. Azure)</h3>
+
+<table>
+<tr><th>Model</th><th>Native Dims</th><th>Max Tokens</th><th>Matryoshka</th></tr>
+<tr><td><code>text-embedding-3-small</code></td><td>1536</td><td>8191</td><td>✅</td></tr>
+<tr><td><code>text-embedding-3-large</code></td><td>3072</td><td>8191</td><td>✅</td></tr>
+<tr><td><code>text-embedding-ada-002</code></td><td>1536</td><td>8191</td><td>❌</td></tr>
+</table>
+
+<ul>
+<li><strong>Max batch:</strong> 2048</li>
+<li><strong>Auth:</strong> <code>Authorization: Bearer {key}</code> (standard) or <code>api-key: {key}</code> (Azure)</li>
+<li><strong>Azure detection:</strong> <code>azure_endpoint</code> field or <code>base_url</code> containing <code>openai.azure.com</code></li>
+<li><strong><code>name()</code>:</strong> <code>"openai"</code> or <code>"azure_openai"</code></li>
+<li><strong>Validation:</strong> <code>client_side_truncation</code> requires <code>output_dims</code>; <code>output_dims</code> ≤ <code>native_dims</code></li>
+</ul>
+
+<!-- ═══════════════════════════════════════════ VOYAGEAI ═══════════════════════════════════════════ -->
+
+<h3 id="voyageai">VoyageAI Provider</h3>
+
+<table>
+<tr><th>Model</th><th>Native Dims</th><th>Max Tokens/Chunk</th><th>Max Tokens/Batch</th><th>Supported Dims</th></tr>
+<tr><td><code>voyage-3-large</code></td><td>1024</td><td>32000</td><td>120000</td><td>256,512,1024,2048</td></tr>
+<tr><td><code>voyage-3.5</code></td><td>1024</td><td>32000</td><td>320000</td><td>256,512,1024,2048</td></tr>
+<tr><td><code>voyage-3.5-lite</code></td><td>1024</td><td>32000</td><td>1000000</td><td>256,512,1024,2048</td></tr>
+<tr><td><code>voyage-code-3</code></td><td>1024</td><td>32000</td><td>120000</td><td>256,512,1024,2048</td></tr>
+<tr><td><code>voyage-finance-2</code></td><td>1024</td><td>32000</td><td>120000</td><td>1024</td></tr>
+<tr><td><code>voyage-law-2</code></td><td>1024</td><td>16000</td><td>120000</td><td>1024</td></tr>
+<tr><td><code>voyage-multilingual-2</code></td><td>1024</td><td>32000</td><td>120000</td><td>1024</td></tr>
+<tr><td><code>voyage-large-2-instruct</code></td><td>1024</td><td>16000</td><td>120000</td><td>1024</td></tr>
+<tr><td><code>voyage-2</code></td><td>1024</td><td>4000</td><td>320000</td><td>1024</td></tr>
+</table>
+
+<ul>
+<li><strong>Max batch:</strong> 1000</li>
+<li><strong>Auth:</strong> <code>Authorization: Bearer {key}</code></li>
+<li><strong><code>truncation: true</code></strong> always passed in request body</li>
+<li><strong>Dimension param:</strong> <code>"output_dimension"</code></li>
+</ul>
+
+<!-- ═══════════════════════════════════════════ BLOOM DETAIL ═══════════════════════════════════════════ -->
+
+<h3 id="bloom-detail">Bloom Filter Details</h3>
+
+<table>
+<tr><th>Aspect</th><th>Detail</th></tr>
+<tr><td>Crate</td><td><code>fastbloom</code> — lock-free AtomicBloomFilter, serde persistence</td></tr>
+<tr><td>Initial capacity</td><td><code>SELECT COUNT(*) × 1.5</code>, min 1,000,000</td></tr>
+<tr><td>FPR</td><td>1% (<code>with_false_pos(0.01, capacity)</code>)</td></tr>
+<tr><td>Persistence</td><td><code>.chunkhound/db/embeddings.bloom</code></td></tr>
+<tr><td>Overflow</td><td>Deferred: rebuild scheduled by compaction cycle</td></tr>
+<tr><td>Model change</td><td>Discard stale bloom, rebuild from DB on mismatch</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════ BATCH DETAIL ═══════════════════════════════════════════ -->
+
+<h3 id="batch-detail">Batch Accumulation &amp; Flush Implementation</h3>
+
+<pre><code>const MAX_CHUNKS_PER_BATCH: usize = 300;
+
+struct EmbedBuffer {
+    pending_files: HashMap&lt;FileKey, PendingFile&gt;,
+    batch:         Vec&lt;BatchChunk&gt;,
+    stats:         EmbedStats,
+    next_key:      u64,
+}
+
+struct PendingFile { file: EmbeddedFile, remaining: usize }
+struct BatchChunk  { file_key: FileKey, chunk_idx: usize, text: String }</code></pre>
+
+<h4>Flush Triggers</h4>
+<table>
+<tr><th>Trigger</th><th>Condition</th></tr>
+<tr><td>Capacity</td><td><code>batch.len() >= effective_batch_size</code></td></tr>
+<tr><td>Channel drain</td><td>Parser drops Sender</td></tr>
+<tr><td>Cancellation</td><td><code>cancelled.load(Relaxed)</code></td></tr>
+<tr><td>ContextLengthExceeded</td><td>API returns "context length" error</td></tr>
+</table>
+
+<h4>Error-Safe Drain Pattern</h4>
+<pre><code>let result = flush_batch(...);  // may error
+
+// ALWAYS runs — ensures DB Writer receives drop signal
+for (_, pf) in buffer.pending_files.drain() {
+    let _ = tx.send(pf.file);   // ignore channel errors
+}
+drop(tx);
+
+result?;  // propagate error AFTER drain</code></pre>
+
+<!-- ═══════════════════════════════════════════ RETRY DETAIL ═══════════════════════════════════════════ -->
+
+<h3 id="retry-detail">Retry &amp; Error Handling Implementation</h3>
+
+<pre><code>struct RetryPolicy {
+    max_attempts: u32,       // default: 3
+    base_delay:   Duration,  // 1 second
+    max_delay:    Duration,  // 60 seconds
+    jitter:       bool,      // true
+}</code></pre>
+
+<pre><code>fn embed_with_retry(
+    provider: &dyn EmbeddingProvider,
+    texts: &[String],
+    policy: &RetryPolicy,
+    cancelled: &AtomicBool,
+    stats: &mut EmbedStats,
+) -> Result&lt;Vec&lt;Vec&lt;f32&gt;&gt;, EmbedError&gt; {
+    let mut attempt = 0;
+    let mut delay = policy.base_delay;
+    loop {
+        if cancelled.load(Relaxed) { return Err(EmbedError::Cancelled); }
+        attempt += 1;
+        match provider.embed_batch(texts) {
+            Ok(v) => { /* validate len, return */ }
+            Err(e) => {
+                stats.retries += 1;
+                if matches!(e, ContextLengthExceeded(_)) { return Err(e); }
+                if !is_retryable(&e) || attempt >= policy.max_attempts {
+                    stats.chunks_failed += texts.len() as u64;
+                    return Err(e);
+                }
+                let wait = parse_retry_after_or_backoff(&e, delay);
+                sleep_with_jitter(wait, policy.jitter);
+                if !matches!(e, RateLimited { .. }) {
+                    delay = (delay * 2).min(policy.max_delay);
+                }
+            }
+        }
+    }
+}</code></pre>
+
+<h4>Token Estimation</h4>
+<pre><code>const EMBEDDING_CHARS_PER_TOKEN: usize = 3;  // matches Python
+
+fn estimate_tokens(text: &str) -> usize {
+    text.len() / EMBEDDING_CHARS_PER_TOKEN
+}</code></pre>
+<p>Chunks where <code>estimate_tokens() > provider.max_tokens_per_chunk()</code> are skipped with a warning.</p>
+
+<!-- ═══════════════════════════════════════════ EXTENSIBILITY ═══════════════════════════════════════════ -->
+
+<h3 id="extensibility">Extensibility — Adding a New Provider</h3>
+
+<div class="card">
+<h4>Required Methods</h4>
+<pre><code>impl EmbeddingProvider for MyProvider {
+    fn embed_batch(&self, texts: &[String]) -> Result&lt;Vec&lt;Vec&lt;f32&gt;&gt;, EmbedError&gt; { ... }
+    fn max_batch_size(&self) -> usize { ... }
+    fn name(&self) -> &str { ... }
+    fn model(&self) -> &str { ... }
+    fn dimensions(&self) -> usize { ... }
+    fn max_tokens_per_chunk(&self) -> usize { ... }
+}</code></pre>
+
+<h4>Step-by-Step</h4>
+<ol>
+<li>Create struct in <code>src/embed/myprovider.rs</code> with <code>reqwest::blocking::Client</code></li>
+<li>Implement <code>new(cfg: &EmbedConfig)</code> — configure client, resolve dims</li>
+<li>Implement <code>EmbeddingProvider</code> — build request, parse response, handle truncation</li>
+<li>Register in <code>create_provider()</code> factory — one match arm</li>
+<li>Add <code>pub mod myprovider;</code> to <code>src/embed/mod.rs</code></li>
+</ol>
+
+<h4>Don't</h4>
+<ul>
+<li>Add provider-specific fields to <code>EmbedConfig</code></li>
+<li>Change the trait for one provider</li>
+<li>Branch on <code>provider.name()</code> in the embed stage</li>
+</ul>
+</div>
+
+<!-- ═══════════════════════════════════════════ TYPES REF ═══════════════════════════════════════════ -->
+
+<h3 id="types-detail">Types Reference</h3>
+
+<table>
+<tr><th>Type</th><th>Purpose</th><th>Key Fields</th></tr>
+<tr><td><code>ParsedFile</code></td><td>Input from Parser</td><td>path, file_id, kind, chunks</td></tr>
+<tr><td><code>ParsedChunk</code></td><td>Chunk before embedding</td><td>text, content_hash, chunk_type</td></tr>
+<tr><td><code>EmbeddedFile</code></td><td>Output to DB Writer</td><td>path, file_id, kind, chunks (with vectors)</td></tr>
+<tr><td><code>EmbeddedChunk</code></td><td>Chunk with vector</td><td>+ vector, provider, model</td></tr>
+<tr><td><code>PendingFile</code></td><td>File waiting in buffer</td><td>EmbeddedFile + remaining counter</td></tr>
+<tr><td><code>BatchChunk</code></td><td>Chunk in API queue</td><td>FileKey, chunk_idx, text</td></tr>
+<tr><td><code>EmbedBuffer</code></td><td>Stage state</td><td>pending_files, batch, stats</td></tr>
+<tr><td><code>EmbedStats</code></td><td>Returned counters</td><td>chunks_checked, skipped, sent, failed, retries</td></tr>
+<tr><td><code>FileKey(u64)</code></td><td>Stable file ref</td><td>Monotonically incrementing</td></tr>
+<tr><td><code>RetryPolicy</code></td><td>Backoff config</td><td>max_attempts, base/max delays, jitter</td></tr>
+<tr><td><code>EmbedConfig</code></td><td>PyO3 boundary</td><td>provider, api_key, model, batch_size, dims</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════ MODULES ═══════════════════════════════════════════ -->
+
+<h3 id="modules">Module Layout</h3>
+
+<pre><code>src/embed/
+├── mod.rs          # embed_stage(), EmbedBuffer, flush_batch()
+├── provider.rs     # EmbeddingProvider trait, create_provider(), EmbedConfig
+├── openai.rs       # OpenAiProvider (incl. Azure)
+├── voyageai.rs     # VoyageAiProvider
+├── retry.rs        # RetryPolicy, embed_with_retry(), sleep_with_jitter()
+├── types.rs        # EmbeddedFile, EmbeddedChunk, EmbedStats, FileKey, BatchChunk
+└── utils.rs        # l2_normalize(), bloom_key(), estimate_tokens()</code></pre>
+
+<!-- ═══════════════════════════════════════════ DEPS ═══════════════════════════════════════════ -->
+
+<h3 id="deps">Cargo.toml Dependencies</h3>
+
+<pre><code>[dependencies]
+reqwest      = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+thiserror    = "1"
+crossbeam    = "0.8"
+fastbloom    = { version = "0.7", features = ["serde"] }
+phf          = { version = "0.11", features = ["macros"] }
+rand         = "0.8"
+
+[dev-dependencies]
+mockito      = "1"</code></pre>
+
+<!-- ═══════════════════════════════════════════ TESTS ═══════════════════════════════════════════ -->
+
+<h3 id="tests">Test Strategy</h3>
+
+<div class="card">
+<h4>Rust Unit Tests</h4>
+<ul>
+<li>Bloom key construction, token estimation, L2 normalization</li>
+<li>HTTP status code classification (<code>classify_response</code>)</li>
+<li>Retry policy defaults match Python</li>
+<li>Azure endpoint detection</li>
+<li>VoyageAI truncation in request body</li>
+<li>Batch split behavior on context-length errors</li>
+</ul>
+
+<h4>Python Integration Tests</h4>
+<ul>
+<li>Provider parity: Rust output matches Python on same input (mock server)</li>
+<li>Channel integration: Embed stage with mock Parser + DB Writer</li>
+<li>Retry behavior: 429 with Retry-After, 5xx with exponential backoff</li>
+<li>Token limit: oversized chunk skip, batch split</li>
+</ul>
+
+<h4>Mandatory Commands</h4>
+<pre><code>cargo test embed::                           # Rust unit tests
+cargo clippy -- -D warnings                  # Rust lint
+uv run pytest tests/test_smoke.py -v -n auto # existing smoke
+uv run pytest tests/test_embed_*.py -v       # embed-specific</code></pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ PYTHON ═══════════════════════════════════════════ -->
+
+<h3 id="python">Python Call Site</h3>
+
+<pre><code># chunkhound/services/pipeline_bridge.py (Phase 1)
+import chunkhound_native
+
+stats = chunkhound_native.run_pipeline(
+    root="/path/to/repo",
+    crash_recovery_done=True,
+    embed_config={
+        "provider": "openai",
+        "api_key": "...",
+        "model": "text-embedding-3-small",
+        "output_dims": None,
+        "batch_size": None,
+        "timeout": 60,
+        "retry_attempts": 3,
+        "ssl_verify": True,
+    },
+    db_config=db.config_dict(),
+    pipeline_config=cfg.to_dict(),
+)</code></pre>
+
+<p>Python validation (Pydantic) owns config correctness. Rust trusts the dict structure. The GIL is released on <code>run_pipeline</code> entry and re-acquired only to build the return dict.</p>
+
+<!-- ═══════════════════════════════════════════ FUTURE ═══════════════════════════════════════════ -->
+
+<h2 id="logging">Logging — pyo3-log Bridge</h2>
+
+<div class="card">
+  <p>The embed stage (and all Rust pipeline stages) use the <code>log</code> crate macros. The <code>pyo3-log</code> crate routes every Rust <code>log::*!()</code> call to Python's <code>logging</code> module — a single bridge, no separate Rust log file, no format syncing.</p>
+</div>
+
+<pre><code># Cargo.toml
+[dependencies]
+pyo3-log = "0.10"
+log      = "0.4"
+
+// src/lib.rs
+#[pymodule_init]
+fn init_module(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    pyo3_log::init();                     // routes all log::*! → Python logging
+    pyo3::prepare_freethreaded_python();  // required for embed thread callbacks
+    Ok(())
+}</code></pre>
+
+<h4>All Python Log Config Is Inherited</h4>
+<table>
+<tr><th>Python config</th><th>Effect on Rust logs</th></tr>
+<tr><td><code>CHUNKHOUND_DEBUG=1</code></td><td><code>log::debug!()</code> becomes visible</td></tr>
+<tr><td><code>CHUNKHOUND_DEBUG_FILE=/tmp/ch.log</code></td><td>Rust logs appear in debug file alongside Python logs</td></tr>
+<tr><td><code>--debug</code> / <code>--verbose</code></td><td>Standard Python log level controls apply</td></tr>
+<tr><td><code>CHUNKHOUND_NO_RICH</code></td><td>Plain-text output</td></tr>
+<tr><td><code>CHUNKHOUND_MCP_MODE</code></td><td>Logging goes through MCP protocol</td></tr>
+</table>
+
+<p><strong>Thread safety:</strong> <code>pyo3-log</code> acquires the GIL per log call. The embed stage runs in <code>py.allow_threads()</code> — a log call briefly re-acquires the GIL, negligible since logging is not on the hot path (~1-2 lines per batch).</p>
+
+<h4>Embed Stage Log Messages</h4>
+<table>
+<tr><th>Location</th><th>Level</th><th>Example</th></tr>
+<tr><td>Batch flush</td><td><code>DEBUG</code></td><td><code>"Flushing batch: 204 texts, attempt 1"</code></td></tr>
+<tr><td>Retry</td><td><code>WARN</code></td><td><code>"Embed API retry: attempt 2/3 after 1.5s (HTTP 429)"</code></td></tr>
+<tr><td>API failure (exhausted)</td><td><code>ERROR</code></td><td><code>"Embed API failed after 3 attempts: timeout, 204 chunks lost"</code></td></tr>
+<tr><td>Token skip</td><td><code>WARN</code></td><td><code>"Skipping oversized chunk in src/large.py:412 (est. 12000 > 8191 max)"</code></td></tr>
+<tr><td>Bloom skip count</td><td><code>DEBUG</code></td><td><code>"Bloom filter: 1823 chunks skipped, 517 new"</code></td></tr>
+<tr><td>Completion</td><td><code>INFO</code></td><td><code>"Embed stage complete: 517 embeddings in 3 batches, 1 retry, 0 failed"</code></td></tr>
+</table>
+
+<h4>What NOT to Do</h4>
+<ul>
+<li><strong>Don't use <code>env_logger</code>:</strong> writes to stderr independently, bypassing Python's log routing and <code>CHUNKHOUND_DEBUG_FILE</code>.</li>
+<li><strong>Don't use <code>print!()</code> / <code>eprintln!()</code>:</strong> no log level control, no file routing, no MCP protocol support.</li>
+<li><strong>Don't route debug messages through progress callback:</strong> too chatty — use <code>log::debug!()</code> instead.</li>
+<li><strong>Don't use <code>log::error!()</code> for parse failures:</strong> errors go in <code>PipelineReport.errors</code>; <code>log::warn!()</code> is for operational warnings.</li>
+</ul>
+
+
+<h3 id="future">Future Work</h3>
+
+<table>
+<tr><th>Item</th><th>When</th></tr>
+<tr><td>Time-window flush</td><td>If sparse repos become a problem</td></tr>
+<tr><td>Concurrent HTTP via thread pool</td><td>If single-thread throughput bottlenecks</td></tr>
+<tr><td>Bloom overflow auto-rebuild</td><td>When fastbloom adds load factor tracking</td></tr>
+<tr><td>Qwen/Cohere/Ollama native providers</td><td>When user demand justifies dedicated structs</td></tr>
+<tr><td>tiktoken integration for precise token counting</td><td>If estimate_tokens produces too many false skips</td></tr>
+<tr><td>VoyageAI per-batch token budget enforcement</td><td>Add sum(estimate_tokens) > max_tokens_per_batch check</td></tr>
+<tr><td>Bloom sidecar metadata for model-change detection</td><td>.embeddings.bloom.meta JSON sidecar</td></tr>
+</table>
+
+</main>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      fontSize: '13px',
+      primaryColor: '#bbdefb',
+      primaryTextColor: '#24292e',
+      primaryBorderColor: '#1565c0',
+      lineColor: '#586069',
+      secondaryColor: '#f6f8fa',
+      tertiaryColor: '#ffffff'
+    },
+    flowchart: { useMaxWidth: true, htmlLabels: true },
+    sequence: { useMaxWidth: true },
+    class: { useMaxWidth: true },
+    state: { useMaxWidth: true }
+  });
+</script>
+
+</body>
+</html>

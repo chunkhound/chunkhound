@@ -1078,8 +1078,8 @@ async def test_parent_set_with_unknown_nested_key_is_schema_error(
 async def test_deep_path_with_dict_value_defers_to_sub_model_validation(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Locks in the ``len(segments) == 1`` guard on the payload-key pre-check
-    # in ``rules.py`` (see comment at the guard site for the full rationale).
+    # A dict value for a scalar target must reach sub-model validation,
+    # not be treated as model fields by the payload-key pre-check.
     from loguru import logger
 
     envelope = {
@@ -1708,3 +1708,108 @@ async def test_pipeline_skips_fetch_for_internal_subprocess_commands(
         assert len(fake.calls) == prior, (
             f"{command!r} must skip fetch; got calls={fake.calls}"
         )
+
+
+@pytest.mark.parametrize(
+    "path,op,value,expected",
+    [
+        ("hub.archive_limits.max_members", "set", 7,
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits.max_members", "merge", 7,
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits", "merge", {"max_members": 7},
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits", "set", {"max_members": 7},
+         {"max_members": 7}),
+        ("hub", "merge", {"archive_limits": {"max_members": 7}},
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits.max_members", "remove", None,
+         {"max_path_depth": 12}),
+    ],
+)
+async def test_nested_archive_rules_persist_valid_updates(
+    _isolate, monkeypatch, path, op, value, expected
+):
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({
+        "hub": {"archive_limits": {"max_members": 10, "max_path_depth": 12}}
+    }))
+    rule = {"id": path, "op": op}
+    if op != "remove":
+        rule["value"] = value
+    _install_fetch(monkeypatch, {"version": 1, "rules": [rule]})
+    await run_remote_config_fetch(_args(), "search")
+    assert _read_target(target)["hub"]["archive_limits"] == expected
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"id": "hub.archive_limits.max_membrs", "op": "set", "value": 7},
+        {"id": "hub.archive_limits.max_membrs", "op": "merge", "value": 7},
+        {"id": "hub.archive_limits.max_membrs", "op": "remove"},
+        {"id": "hub.archive_limits", "op": "set",
+         "value": {"max_members": 7, "max_membrs": 7}},
+        {"id": "hub.archive_limits", "op": "merge",
+         "value": {"max_members": 7, "max_membrs": 7}},
+        {"id": "hub", "op": "set",
+         "value": {"archive_limits": {"max_members": 7, "max_membrs": 7}}},
+        {"id": "hub", "op": "merge",
+         "value": {"archive_limits": {"max_members": 7, "max_membrs": 7}}},
+    ],
+)
+async def test_nested_archive_typos_are_schema_errors_and_next_rule_applies(
+    _isolate, monkeypatch, rule
+):
+    target = _target_path(_isolate)
+    original_hub = {
+        "url": "https://publisher.test/catalogue",
+        "archive_limits": {"max_members": 10, "max_path_depth": 12},
+    }
+    target.write_text(json.dumps({"hub": original_hub}))
+    _install_fetch(monkeypatch, {"version": 1, "rules": [
+        rule, {"id": "mcp.host", "op": "set", "value": "127.0.0.1"}
+    ]})
+    messages = []
+    handler = logger.add(lambda m: messages.append(str(m)), level="INFO")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+    data = _read_target(target)
+    assert data["hub"] == original_hub
+    assert data["mcp"]["host"] == "127.0.0.1"
+    first = [m for m in messages if "rule 1 on" in m]
+    assert any(
+        "schema_error" in m and "unknown path" in m
+        and "hub.archive_limits.max_membrs" in m for m in first
+    ), messages
+    assert not any("no-op" in m or "applied:" in m for m in first), messages
+
+
+@pytest.mark.parametrize("invalid", [True, 1.5, 0, -1, "7", None])
+@pytest.mark.parametrize("op", ["set", "merge"])
+async def test_nested_archive_invalid_quota_rolls_back_before_next_rule(
+    _isolate, monkeypatch, invalid, op
+):
+    target = _target_path(_isolate)
+    original_hub = {"archive_limits": {"max_members": 10, "max_path_depth": 12}}
+    target.write_text(json.dumps({"hub": original_hub}))
+    _install_fetch(monkeypatch, {"version": 1, "rules": [
+        {"id": "hub.archive_limits", "op": op,
+         "value": {"max_members": invalid, "max_path_depth": 9}},
+        {"id": "mcp.host", "op": "set", "value": "127.0.0.1"},
+    ]})
+    messages = []
+    handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+    data = _read_target(target)
+    assert data["hub"] == original_hub
+    assert data["mcp"]["host"] == "127.0.0.1"
+    assert any(
+        "rule 1 on" in m and "schema_error" in m
+        and "sub-model validation failed" in m for m in messages
+    ), messages

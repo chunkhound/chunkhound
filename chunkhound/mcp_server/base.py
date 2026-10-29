@@ -39,6 +39,7 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
     DatabaseRustPipelineInProgressError,
 )
+from chunkhound.registry import ProviderRegistry
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
 from chunkhound.services.realtime.service import RealtimeIndexingService
@@ -101,6 +102,9 @@ class MCPServerBase(ABC):
 
         # Service components - initialized lazily or eagerly based on subclass
         self.services: DatabaseServices | None = None
+        self._service_registry = ProviderRegistry()
+        self._database_services_ready = False
+        self._database_provider_connected_once = False
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
@@ -470,10 +474,14 @@ class MCPServerBase(ABC):
                     self.debug_log(msg)
 
                 # Create services using unified factory (lazy connect for fast init)
+                self._database_services_ready = False
+                self._database_provider_connected_once = False
                 self.services = create_services(
                     db_path=db_path,
                     config=self.config,
                     embedding_manager=self.embedding_manager,
+                    connect_database=False,
+                    registry=self._service_registry,
                 )
 
                 # Determine target path for scanning and watching
@@ -1099,9 +1107,15 @@ class MCPServerBase(ABC):
                 raise
 
     def _close_provider_in_background(self) -> asyncio.Future[None]:
-        """Start or reuse the provider close attempt on a daemon thread."""
-        if self._provider_close_future is not None:
-            return self._provider_close_future
+        """Start/reuse one in-flight close; retry a completed failed attempt."""
+        previous = self._provider_close_future
+        if previous is not None:
+            if not previous.done() or previous.cancelled():
+                # Cancellation is not proof the daemon thread has stopped.
+                return previous
+            if previous.exception() is None:
+                return previous
+            # A completed failure must permit the provider's public close retry.
 
         if self.services is None:
             raise RuntimeError("Services not initialized")
@@ -1158,12 +1172,11 @@ class MCPServerBase(ABC):
         return future
 
     async def cleanup(self) -> None:
-        """Clean up resources and start at most one provider close attempt.
+        """Clean resources with at most one in-flight provider close attempt.
 
-        The timeout only bounds how long each cleanup call waits. A blocking
-        synchronous provider close keeps running on its daemon thread, and later
-        cleanup calls reuse that same in-flight attempt instead of starting a
-        second one.
+        Each caller waits only up to the cleanup deadline. A blocking close keeps
+        running on its daemon thread and is reused by later calls. Successful
+        closure is reused; a completed failed attempt may be retried.
         """
         if (
             self._deferred_start_task is not None
@@ -1201,10 +1214,7 @@ class MCPServerBase(ABC):
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
 
-        if self.services and (
-            self.services.provider.is_connected
-            or self._provider_close_future is not None
-        ):
+        if self.services is not None:
             self.debug_log("Closing database connection")
             # Run sync provider cleanup on a dedicated daemon thread so cleanup()
             # never depends on asyncio's default executor shutdown behavior.
@@ -1253,6 +1263,20 @@ class MCPServerBase(ABC):
             await self._connect_provider()
         return self.services
 
+    def _connect_and_initialize_provider(self) -> None:
+        if self.services is None:
+            raise RuntimeError("Services not initialized. Call initialize() first.")
+        # Some backends report executor availability before their first
+        # connect has initialized tables. Remember actual connect success
+        # separately so a completion-only retry does not reconnect.
+        if (
+            not self._database_provider_connected_once
+            or not self.services.provider.is_connected
+        ):
+            self.services.provider.connect()
+            self._database_provider_connected_once = True
+        self._service_registry.complete_database_initialization()
+
     async def _connect_provider(self) -> None:
         """Connect the database provider if not already connected.
 
@@ -1274,13 +1298,19 @@ class MCPServerBase(ABC):
         run_rust_indexing_phase() restore the connection when the
         respective owner finishes.
         """
-        if self.services.provider.is_connected:
+        if self.services.provider.is_connected and self._database_services_ready:
             return
         async with self._connect_lock:
-            if not self.services.provider.is_connected:
+            if (
+                not self.services.provider.is_connected
+                or not self._database_services_ready
+            ):
                 loop = asyncio.get_running_loop()
                 try:
-                    await loop.run_in_executor(None, self.services.provider.connect)
+                    await loop.run_in_executor(
+                        None, self._connect_and_initialize_provider
+                    )
+                    self._database_services_ready = True
                 except DatabaseCompactionInProgressError:
                     log_if_not_mcp(
                         "info",

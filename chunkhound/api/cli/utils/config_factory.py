@@ -9,6 +9,7 @@ from pathlib import Path
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.config.hub_config import HubConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.config.mcp_config import MCPConfig
 from chunkhound.core.config.remote import run_remote_config_fetch
@@ -32,6 +33,7 @@ def _fallback_config(args: argparse.Namespace) -> Config:
         mcp=MCPConfig(),
         indexing=IndexingConfig(),
         research=ResearchConfig(),
+        hub=HubConfig(),
         debug=False,
         target_dir=resolved_target,
         embeddings_disabled=bool(getattr(args, "no_embeddings", False)),

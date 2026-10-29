@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chunkhound.core.config.hub_config import HubConfig
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .analytics_config import AnalyticsConfig
@@ -138,6 +139,7 @@ class Config(BaseModel):
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     fetchurl: FetchUrlConfig = Field(default_factory=FetchUrlConfig)
     remote_config: RemoteConfig | None = Field(default=None)
+    hub: HubConfig = Field(default_factory=HubConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     debug: bool = Field(default=False)
 
@@ -519,6 +521,8 @@ class Config(BaseModel):
             config["remote_config"] = remote_config
         if analytics_config := AnalyticsConfig.load_from_env():
             config["analytics"] = analytics_config
+        if hub_config := HubConfig.load_from_env():
+            config["hub"] = hub_config
 
         return config
 
@@ -618,7 +622,7 @@ class Config(BaseModel):
             self.database.path = project_root / ".chunkhound" / "db"
 
         # Ensure database path is resolved to canonical form (handles symlinks)
-        if self.database.path:
+        if self.database.path and str(self.database.path) != ":memory:":
             self.database.path = self.database.path.resolve()
 
         return self

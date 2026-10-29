@@ -12,7 +12,6 @@ from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.mcp_server.tools import search_impl
-from chunkhound.registry import configure_registry
 
 from ..utils.rich_output import RichOutputFormatter
 
@@ -41,13 +40,6 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(str(e))
         sys.exit(1)
 
-    # Configure registry with the Config object (like index command does)
-    try:
-        configure_registry(config)
-    except Exception as e:
-        formatter.error(f"Failed to configure registry: {e}")
-        sys.exit(1)
-
     # Initialize embedding manager (exactly like MCP server)
     embedding_manager = EmbeddingManager()
 
@@ -63,7 +55,8 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         # Unexpected error - log but continue
         logger.debug(f"Unexpected error setting up embedding provider: {e}")
 
-    # Create services using unified factory (exactly like MCP)
+    # The unified factory owns registry configuration, including DB preflight.
+    # Configuring here too would create a second provider for the same file.
     try:
         services = create_services(
             db_path=db_path, config=config, embedding_manager=embedding_manager

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+import chunkhound_native as native
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.embedding_config import EmbeddingConfig
@@ -36,6 +37,7 @@ from chunkhound.core.embedding_model_drift import (
 )
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.mcp_server.base import MCPServerBase
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 from chunkhound.registry import ModelDriftDecision, ProviderRegistry
@@ -330,6 +332,35 @@ class TestConfigureKeepsTheIndexUsable:
 
         assert (rebuilt.model, rebuilt.dims) == ("voyage-code-3", 1024)
 
+    def test_known_default_dimensions_report_drift_before_pinning_to_index(
+        self, index: _Index
+    ):
+        index.seed([("voyageai", "voyage-code-3", 512)])
+        consulted: list[ModelDrift] = []
+
+        registry, _ = index.configure(
+            model="voyage-code-3", on_model_drift=_recorder(consulted)
+        )
+
+        assert len(consulted) == 1
+        assert consulted[0].configured_dims == 1024
+        assert registry.get_provider("embedding").dims == 512
+
+    def test_unknown_dimensions_do_not_guess_drift_against_matching_model(
+        self, index: _Index
+    ):
+        index.seed([("voyageai", "acme-custom", 777)])
+        consulted: list[ModelDrift] = []
+
+        registry, config = index.configure(
+            model="acme-custom", on_model_drift=_recorder(consulted)
+        )
+
+        assert consulted == []
+        assert config.embedding is not None
+        assert config.embedding.output_dims is None
+        assert registry.get_provider("embedding").output_dims is None
+
     def test_unknown_configured_model_decline_restores_indexed_dims(
         self, index: _Index
     ):
@@ -595,3 +626,83 @@ class TestUpgradeSuggestions:
         for superseded, successor in EMBEDDING_MODEL_UPGRADES["voyageai"].items():
             assert superseded in VOYAGE_MODEL_CONFIG
             assert successor in VOYAGE_MODEL_CONFIG
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_point", ["factory", "mcp"])
+async def test_deferred_factory_keeps_embedding_pinning_after_install_contention(
+    tmp_path: Path, clean_environment: None, entry_point: str
+):
+    config = Config(target_dir=tmp_path, analytics={"enabled": False})
+    config.database = _seed_index(tmp_path, _CODE_3_INDEX)
+    config.database.read_only = True
+    config.embedding = EmbeddingConfig(
+        provider="voyageai", model="voyage-code-4",
+        api_key="test-key", output_dims=2048,
+    )
+    class Server(MCPServerBase):
+        def _register_tools(self) -> None:
+            pass
+
+        async def run(self) -> None:
+            pass
+
+    registry = ProviderRegistry()
+    target = config.database.get_db_path()
+    lease = native.acquire_install_lease(str(target), "duckdb")
+    services = None
+    server = None
+    other = None
+    try:
+        if entry_point == "mcp":
+            server = Server(config)
+            await server.initialize()
+            services = server.services
+            assert services is not None
+            assert server._deferred_start_task is not None
+            await server._deferred_start_task
+            manager = server.embedding_manager
+            assert manager is not None
+            early = manager.get_default_provider()
+            assert early is not None
+        else:
+            early = EmbeddingProviderFactory.create_provider(config.embedding)
+            manager = EmbeddingManager()
+            manager.register_provider(early, set_default=True)
+            services = create_services(
+                target, config, manager, connect_database=False, registry=registry
+            )
+        assert not services.provider.is_connected
+        assert (early.model, early.dims) == ("voyage-code-4", 2048)
+        with pytest.raises(native.DatabaseBusyError):
+            services.provider.connect()
+        # Reconfigure the GLOBAL factory while the first bundle is pending.
+        other_root = tmp_path / "other"
+        other_root.mkdir()
+        other_config = Config(
+            target_dir=other_root,
+            database={"path": other_root / "database"},
+            skip_layers={"global", "env", "local_config", "config_file", "cli"},
+        )
+        other = create_services(other_config.database.get_db_path(), other_config)
+        lease.close()
+        if server is not None:
+            assert await server.ensure_tool_services("search") is services
+        else:
+            services.provider.connect()
+            registry.complete_database_initialization()
+        assert (early.model, early.dims) == ("voyage-code-3", 1024)
+        assert (config.embedding.model, config.embedding.output_dims) == (
+            "voyage-code-3", 1024
+        )
+        assert manager.get_default_provider() is early
+        assert services.provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+    finally:
+        lease.close()
+        if server is not None:
+            await server.cleanup()
+        elif services is not None:
+            services.provider.close()
+        if other is not None:
+            other.provider.close()
+    native.acquire_install_lease(str(target), "duckdb").close()
