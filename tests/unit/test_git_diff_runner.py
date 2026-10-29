@@ -221,11 +221,24 @@ async def test_stream_reassembles_line_longer_than_reader_limit(
 
 
 @pytest.mark.asyncio
-async def test_stream_root_commit_uses_empty_tree(tmp_path: Path) -> None:
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+async def test_stream_root_commit_uses_repository_empty_tree(
+    tmp_path: Path, object_format: str
+) -> None:
     proc = await asyncio.create_subprocess_exec(
-        "git", "init", cwd=str(tmp_path), stdout=asyncio.subprocess.PIPE
+        "git",
+        "init",
+        f"--object-format={object_format}",
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 and object_format == "sha256":
+        message = stderr.decode("utf-8", errors="replace")
+        if "unknown option" in message or "unknown hash algorithm" in message:
+            pytest.skip("installed Git does not support SHA-256 repositories")
+    assert proc.returncode == 0, stderr.decode("utf-8", errors="replace")
     (tmp_path / "root.py").write_text("root = True\n", encoding="utf-8")
     proc = await asyncio.create_subprocess_exec("git", "add", ".", cwd=str(tmp_path))
     await proc.communicate()
@@ -251,6 +264,7 @@ async def test_stream_root_commit_uses_empty_tree(tmp_path: Path) -> None:
     )
     stdout, _ = await proc.communicate()
     root_hash = stdout.decode().strip()
+    assert len(root_hash) == (40 if object_format == "sha1" else 64)
 
     blocks = [
         block
@@ -296,7 +310,13 @@ async def test_root_commit_retry_also_fails(tmp_path: Path) -> None:
         call_count += 1
         return procs.pop(0)
 
-    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        patch(
+            "chunkhound.core.git_diff.runner._empty_tree_oid",
+            return_value="4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        ),
+    ):
         with pytest.raises(ValueError, match="not a git repository"):
             async for _ in stream_git_diff_file_blocks(
                 f"{commit_hash}^..{commit_hash}", cwd=tmp_path
@@ -378,8 +398,7 @@ async def test_stream_buffered_reads_avoid_per_line_timeout(
     )
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         blocks = [
-            block
-            async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
+            block async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
         ]
 
     assert len(blocks) == 1

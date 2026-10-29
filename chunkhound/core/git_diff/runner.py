@@ -23,9 +23,6 @@ _GIT_STDERR_READ_TIMEOUT_SECONDS = 5
 # balloon memory just because stdout is streamed without a size cap.
 _MAX_STDERR_BYTES = 64 * 1024
 
-# SHA1 of git's empty tree — used as the "no parent" base for root commits.
-_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
 # Pattern matching <hash>^..<hash> produced by _resolve_commit_range for a
 # single commit_hash.  Both capture groups must be identical.
 # Accepts uppercase hex (git emits lowercase but accepts both) and up to 64
@@ -68,6 +65,51 @@ async def _drain_stderr(stream: asyncio.StreamReader) -> bytes:
 async def _read_stdout_chunk(stream: asyncio.StreamReader) -> bytes:
     """Read a bounded stdout block without imposing a line-length limit."""
     return await stream.read(_GIT_STDOUT_READ_BYTES)
+
+
+async def _empty_tree_oid(cwd: Path | str) -> str:
+    """Ask Git for the empty-tree ID in this repository's object format."""
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "hash-object",
+        "-t",
+        "tree",
+        "--stdin",
+        cwd=str(cwd),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    communication = asyncio.create_task(proc.communicate())
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communication), timeout=_GIT_DIFF_TIMEOUT_SECONDS
+        )
+    except BaseException:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(communication), _GIT_CLEANUP_TIMEOUT_SECONDS
+            )
+        except (asyncio.TimeoutError, OSError):
+            communication.cancel()
+        finally:
+            await asyncio.gather(communication, return_exceptions=True)
+        raise
+
+    if proc.returncode != 0:
+        error = stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"git empty-tree lookup failed: {error}")
+    oid = stdout.decode("ascii", errors="replace").strip()
+    if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", oid) is None:
+        raise ValueError(
+            f"git empty-tree lookup returned an invalid object ID: {oid!r}"
+        )
+    return oid
 
 
 async def _cleanup_git_diff_process(
@@ -181,7 +223,8 @@ async def stream_git_diff_fragments(
             and single_commit.group(1) == single_commit.group(2)
             and _is_missing_parent_error(error)
         ):
-            ranges.append(f"{_EMPTY_TREE_SHA}..{single_commit.group(2)}")
+            empty_tree = await _empty_tree_oid(cwd)
+            ranges.append(f"{empty_tree}..{single_commit.group(2)}")
             continue
         raise ValueError(f"git diff failed: {error}")
 
