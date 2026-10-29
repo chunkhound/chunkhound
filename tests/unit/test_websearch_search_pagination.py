@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -240,7 +241,7 @@ def _install_search_stub(
     """
     calls: list[tuple[str, int]] = []
 
-    def fake_search(query, limit=30, progress_callback=None):
+    def fake_search(query, limit=30, progress_callback=None, *, cancel_event=None):
         calls.append((query, limit))
         val = responses[query]
         if isinstance(val, Exception):
@@ -462,6 +463,52 @@ def test_search_multi_empty_queries_returns_empty(monkeypatch) -> None:
     out = asyncio.run(ws_mod.search_multi([], limit=10))
 
     assert out == []
+
+
+def test_search_multi_cancellation_stops_pagination_and_later_queries(
+    monkeypatch,
+) -> None:
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    search_finished = threading.Event()
+    calls: list[dict[str, str]] = []
+    page = _page_html(
+        [("A", "https://a.example/", "d")],
+        next_params={"q": "q1", "s": "20"},
+    )
+
+    def blocking_fetch(params: dict[str, str]) -> str:
+        calls.append(dict(params))
+        fetch_started.set()
+        if not release_fetch.wait(timeout=2):
+            raise AssertionError("test did not release blocked DDG fetch")
+        return page
+
+    real_search = ws_mod.search
+
+    def tracked_search(*args, **kwargs):
+        try:
+            return real_search(*args, **kwargs)
+        finally:
+            search_finished.set()
+
+    monkeypatch.setattr(ws_mod, "_fetch", blocking_fetch)
+    monkeypatch.setattr(ws_mod, "search", tracked_search)
+
+    async def cancel_during_fetch() -> None:
+        task = asyncio.create_task(ws_mod.search_multi(["q1", "q2"], limit=10))
+        try:
+            assert await asyncio.to_thread(fetch_started.wait, 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_fetch.set()
+        assert await asyncio.to_thread(search_finished.wait, 1)
+
+    asyncio.run(cancel_during_fetch())
+
+    assert calls == [{"q": "q1", "b": ""}]
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import itertools
 import os
 import re
 import subprocess
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -932,15 +933,19 @@ def search(
     query: str,
     limit: int = 30,
     progress_callback: Callable[[str], None] | None = None,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> list[tuple[str, str, str]]:
     results: list[tuple[str, str, str]] = []
     params: dict[str, str] = {"q": query, "b": ""}  # b = submit button name
     page_num = 0
-    while True:
+    while cancel_event is None or not cancel_event.is_set():
         page_num += 1
         if progress_callback:
             progress_callback(f"Fetching page {page_num}...")
         page = _fetch(params)
+        if cancel_event is not None and cancel_event.is_set():
+            break
         rp = _ResultParser()
         rp.feed(page)
         if not rp.results:
@@ -1006,27 +1011,40 @@ async def search_multi(
     batches: list[list[tuple[str, str, str]]] = []
     first_error: urllib.error.URLError | None = None
     successes = 0
-    for i, q in enumerate(queries, start=1):
-        per_query_progress: Callable[[str], None] | None = (
-            (lambda msg, p=f"[{i}/{n}] ": progress_callback(f"{p}{msg}"))
-            if progress_callback is not None
-            else None
-        )
-        try:
-            batch = await asyncio.to_thread(search, q, limit, per_query_progress)
-        except urllib.error.URLError as e:
-            if failure_callback is not None:
-                failure_callback(q, e)
+    cancel_event = threading.Event()
+    try:
+        for i, q in enumerate(queries, start=1):
+            if progress_callback is None:
+                per_query_progress = None
             else:
-                logger.warning(
-                    f"DDG query failed ({q!r}): {e.reason}; "
-                    "continuing with remaining queries"
+                prefix = f"[{i}/{n}] "
+
+                def per_query_progress(msg: str) -> None:
+                    progress_callback(f"{prefix}{msg}")
+
+            try:
+                batch = await asyncio.to_thread(
+                    search,
+                    q,
+                    limit,
+                    per_query_progress,
+                    cancel_event=cancel_event,
                 )
-            if first_error is None:
-                first_error = e
-            continue
-        successes += 1
-        batches.append(batch)
+            except urllib.error.URLError as e:
+                if failure_callback is not None:
+                    failure_callback(q, e)
+                else:
+                    logger.warning(
+                        f"DDG query failed ({q!r}): {e.reason}; "
+                        "continuing with remaining queries"
+                    )
+                if first_error is None:
+                    first_error = e
+                continue
+            successes += 1
+            batches.append(batch)
+    finally:
+        cancel_event.set()
     if successes == 0 and first_error is not None:
         raise first_error
     seen: dict[str, tuple[str, str, str]] = {}
