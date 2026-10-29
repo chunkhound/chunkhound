@@ -36,6 +36,7 @@ class StreamingDiffParser:
 
         self._draft_text = ""
         self._draft_start = 0
+        self._draft_has_body = False
         self._pending: tuple[str, int] | None = None
         self._draft_count = 0
         self._part_number = 0
@@ -52,13 +53,13 @@ class StreamingDiffParser:
                 newline = self._line_buffer.find("\n")
                 if newline < 0:
                     self._append_hunk_text(
-                        self._line_buffer, self._running_line, output
+                        self._line_buffer, self._running_line, output, is_body=True
                     )
                     self._line_buffer = ""
                     break
                 piece = self._line_buffer[: newline + 1]
                 self._line_buffer = self._line_buffer[newline + 1 :]
-                self._append_hunk_text(piece, self._running_line, output)
+                self._append_hunk_text(piece, self._running_line, output, is_body=True)
                 if self._streaming_line_advances:
                     self._running_line += 1
                 self._streaming_line_advances = None
@@ -73,7 +74,9 @@ class StreamingDiffParser:
 
             if self._can_stream_partial_body(self._line_buffer):
                 advances = self._line_buffer[0] in ("+", " ")
-                self._append_hunk_text(self._line_buffer, self._running_line, output)
+                self._append_hunk_text(
+                    self._line_buffer, self._running_line, output, is_body=True
+                )
                 self._line_buffer = ""
                 self._streaming_line_advances = advances
                 break
@@ -91,7 +94,9 @@ class StreamingDiffParser:
         output: list[Chunk] = []
         if self._streaming_line_advances is not None:
             if self._line_buffer:
-                self._append_hunk_text(self._line_buffer, self._running_line, output)
+                self._append_hunk_text(
+                    self._line_buffer, self._running_line, output, is_body=True
+                )
             if self._streaming_line_advances:
                 self._running_line += 1
             self._streaming_line_advances = None
@@ -161,15 +166,14 @@ class StreamingDiffParser:
     def _append_complete_hunk_line(self, line: str, output: list[Chunk]) -> None:
         advances = bool(line) and line[0] in ("+", " ")
         if len(line) > self._max_chunk_chars:
-            self._append_hunk_text(line, self._running_line, output)
+            self._append_hunk_text(line, self._running_line, output, is_body=True)
         else:
             would_overflow = (
                 self._draft_text
                 and len(self._draft_text) + len(line) > self._max_chunk_chars
             )
-            draft_has_new_line = self._running_line > self._draft_start
             if would_overflow:
-                if draft_has_new_line:
+                if self._draft_has_body:
                     self._rotate_draft(output)
                 else:
                     # A hunk header is useful context, but never let it push the
@@ -179,17 +183,25 @@ class StreamingDiffParser:
             if not self._draft_text:
                 self._draft_start = self._running_line
             self._draft_text += line
+            self._draft_has_body = True
         if advances:
             self._running_line += 1
 
     def _append_hunk_text(
-        self, text: str, line_offset: int, output: list[Chunk]
+        self,
+        text: str,
+        line_offset: int,
+        output: list[Chunk],
+        *,
+        is_body: bool = False,
     ) -> None:
         while text:
             if not self._draft_text:
                 self._draft_start = line_offset
             available = self._max_chunk_chars - len(self._draft_text)
             self._draft_text += text[:available]
+            if is_body:
+                self._draft_has_body = True
             text = text[available:]
             if len(self._draft_text) == self._max_chunk_chars:
                 self._rotate_draft(output)
@@ -203,6 +215,7 @@ class StreamingDiffParser:
             self._emit_pending(current[1], output)
         self._pending = current
         self._draft_text = ""
+        self._draft_has_body = False
 
     def _emit_pending(self, next_offset: int, output: list[Chunk]) -> None:
         if self._pending is None or self._current_file is None:
@@ -252,6 +265,7 @@ class StreamingDiffParser:
         self._running_line = 0
         self._draft_text = ""
         self._draft_start = 0
+        self._draft_has_body = False
         self._pending = None
         self._draft_count = 0
         self._part_number = 0

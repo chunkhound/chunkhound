@@ -234,6 +234,26 @@ def test_oversized_hunk_custom_max() -> None:
         assert len(c.code) <= 40
 
 
+def test_oversized_deletion_heavy_hunk_preserves_all_body_text() -> None:
+    deleted = [f"-old{i:04d} {'x' * 20}\n" for i in range(500)]
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,500 +1 @@ fn\n" + "".join(deleted) + "+replacement\n"
+    )
+
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=1_000)
+    combined = "".join(chunk.code for chunk in chunks)
+
+    assert len(chunks) > 1
+    assert all(len(chunk.code) <= 1_000 for chunk in chunks)
+    assert deleted[0] in combined
+    assert deleted[len(deleted) // 2] in combined
+    assert deleted[-1] in combined
+    assert "+replacement\n" in combined
+
+
 def test_small_hunk_not_split() -> None:
     chunks = parse_diff_to_chunks(SINGLE_HUNK_DIFF)
     assert len(chunks) == 1
