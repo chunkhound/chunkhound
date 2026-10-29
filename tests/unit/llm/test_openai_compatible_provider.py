@@ -159,6 +159,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "runcrate",
+            "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "expected_name": "runcrate",
+            "expected_base_url": "https://api.runcrate.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'runcrate'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="runcrate",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -314,6 +329,7 @@ class TestFactoryPipeline:
             "api-route": 10,
             "opper": 10,
             "obscurify-ai": 10,
+            "runcrate": 10,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected
