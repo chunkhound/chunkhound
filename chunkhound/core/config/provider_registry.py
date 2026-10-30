@@ -138,4 +138,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://obscurify.ai/api-docs",
         auth_url="https://obscurify.ai/account",
     ),
+    "atlascloud": OpenAICompatibleSpec(
+        name="atlascloud",
+        default_base_url="https://api.atlascloud.ai/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        docs_url="https://www.atlascloud.ai/docs",
+        auth_url="https://console.atlascloud.ai/api-keys",
+    ),
 }
