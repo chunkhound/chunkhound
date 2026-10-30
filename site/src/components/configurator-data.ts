@@ -298,6 +298,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_OBSCURIFY_API_KEY>",
     },
     {
+        id: "atlascloud",
+        name: "Atlas Cloud",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 18a4 4 0 0 1-.5-7.97A5.5 5.5 0 0 1 17 8.5a4.75 4.75 0 0 1 0 9.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "atlascloud",
+            model: "deepseek-ai/deepseek-v4-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_ATLASCLOUD_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,
