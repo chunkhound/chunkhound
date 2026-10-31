@@ -1435,6 +1435,55 @@ class RealtimePipelineMixin:
             self._set_error(f"Error indexing new directory {dir_path}: {e}")
         finally:
             self._record_processing_finished(dir_path, completed=completed)
+    def _overdue_embed_mutations(self) -> list[RealtimeMutation]:
+        """Pending embeds, if the oldest has waited past _EMBED_MAX_WAIT_SECONDS."""
+        now = time.monotonic()
+        last = self._last_promoted_embed_attempt
+        if last is not None and now - last < self._EMBED_MAX_WAIT_SECONDS:
+            return []
+        pending = [
+            m for (op, _), m in self._pending_mutations.items() if op == "embed"
+        ]
+        if not pending:
+            return []
+        oldest: float | None = None
+        for m in pending:
+            queued = self._parse_status_timestamp(m.first_queued_at)
+            if queued is not None:
+                ts = queued.timestamp()
+                oldest = ts if oldest is None else min(oldest, ts)
+        if oldest is None or time.time() - oldest < self._EMBED_MAX_WAIT_SECONDS:
+            return []
+        return pending
+
+    async def _run_promoted_embed_pass(self, overdue: list[RealtimeMutation]) -> None:
+        """Run one embed pass ahead of queued changes; settle the embeds it covers."""
+        self._last_promoted_embed_attempt = time.monotonic()
+        self._record_processing_started(overdue[0].path)
+        completed = False
+        try:
+            await self.services.indexing_coordinator.generate_missing_embeddings()
+            completed = True
+        except DatabaseTemporarilyUnavailableError:
+            # Compaction owns the DB; the embeds stay pending and are retried after the
+            # wait interval, or reached in normal queue order.
+            pass
+        except Exception as error:
+            logger.warning(
+                f"Embedding generation failed in realtime (promoted pass): {error}"
+            )
+            self._record_processing_error()
+            self._set_warning(
+                f"Embedding generation failed in realtime promoted embed pass: {error}"
+            )
+        finally:
+            self._record_processing_finished(overdue[0].path, completed=completed)
+        if completed:
+            # Their heap entries remain and are skipped as unowned when dequeued.
+            for m in overdue:
+                self._release_pending_mutation(m)
+            self._emit_status_update()
+
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
@@ -1459,8 +1508,16 @@ class RealtimePipelineMixin:
                         mutation.source_generation
                     )
 
+                if mutation.operation != "embed":
+                    overdue = self._overdue_embed_mutations()
+                    if overdue:
+                        await self._run_promoted_embed_pass(overdue)
+
                 # Fast path for embedding generation without re-parsing the file.
                 if mutation.operation == "embed":
+                    if not owned_when_dequeued:
+                        # Already covered by a promoted embed pass.
+                        continue
                     completed = False
                     try:
                         self._record_processing_started(mutation.path)

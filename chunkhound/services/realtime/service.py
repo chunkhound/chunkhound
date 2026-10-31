@@ -98,6 +98,13 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         "dir_index": 1,
         "embed": 2,
     }
+    # Embeds rank last, so a steady stream of edits starves them: every change
+    # outranks every waiting embed, and re-parsed files stay unsearchable by meaning
+    # for as long as editing continues (observed: 918 files unembedded for over two
+    # hours). Once an embed has waited this long, the loop runs one embed pass ahead
+    # of the next change; that pass embeds every chunk still missing a vector, so it
+    # settles all waiting embeds.
+    _EMBED_MAX_WAIT_SECONDS = 60.0
 
     def __init__(
         self,
@@ -149,6 +156,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         )
         self.pending_files: set[Path] = set()
         self._pending_mutations: dict[tuple[str, str], RealtimeMutation] = {}
+        self._last_promoted_embed_attempt: float | None = None
         self._pending_path_counts: dict[str, int] = {}
         self.failed_files: set[str] = set()
         self._last_warning: str | None = None
