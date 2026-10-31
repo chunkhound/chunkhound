@@ -1484,6 +1484,41 @@ class RealtimePipelineMixin:
                 self._release_pending_mutation(m)
             self._emit_status_update()
 
+    async def _refresh_embedding_coverage(self) -> None:
+        """Measure chunks missing a vector; queue an embed pass if any are missing.
+
+        Nothing else repairs them: a chunk whose embedding was never written (starved,
+        failed, or the server stopped first) stays invisible to semantic search, and a
+        CLI index skips unchanged files. Leaves _coverage_dirty set when the database is
+        temporarily unavailable so the idle loop retries.
+        """
+        # Must never raise: the loop calls this before blocking on the queue, so an
+        # escaping error with the flag still set would spin the loop without yielding.
+        try:
+            coordinator = getattr(self.services, "indexing_coordinator", None)
+            counter = getattr(coordinator, "count_chunks_missing_embeddings", None)
+            if counter is None:
+                self._coverage_dirty = False
+                return
+            missing = await counter()
+        except DatabaseTemporarilyUnavailableError:
+            return
+        except Exception as error:
+            logger.debug(f"Embedding coverage check failed: {error}")
+            self._coverage_dirty = False
+            return
+        self._coverage_dirty = False
+        self._embedding_coverage = {
+            "missing_chunks": missing,
+            "checked_at": self._utc_now(),
+        }
+        if missing and not any(
+            op == "embed" for op, _ in self._pending_mutations
+        ):
+            path = self.watch_path or Path(".")
+            await self._enqueue_mutation(self._build_mutation("embed", path))
+        self._emit_status_update()
+
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
@@ -1493,7 +1528,20 @@ class RealtimePipelineMixin:
         while True:
             try:
                 if buffered_mutation is None:
-                    _, _, queued_mutation = await self.file_queue.get()
+                    if self._coverage_dirty and self.file_queue.empty():
+                        await self._refresh_embedding_coverage()
+                    try:
+                        _, _, queued_mutation = await asyncio.wait_for(
+                            self.file_queue.get(),
+                            timeout=(
+                                self._COVERAGE_RETRY_SECONDS
+                                if self._coverage_dirty
+                                else None
+                            ),
+                        )
+                    except TimeoutError:
+                        continue
+                    self._coverage_dirty = True
                     mutation, owned_when_dequeued = self._prepare_dequeued_mutation(
                         queued_mutation
                     )

@@ -164,3 +164,30 @@ async def test_rust_errors_with_empty_backfill_skip_both_compacts():
 
     assert coordinator.compact_calls == [True, True]
     assert stats.db_compactions == 0
+
+
+@pytest.mark.asyncio
+async def test_clean_rust_run_still_repairs_chunks_missing_vectors():
+    """A clean Rust run that skips every unchanged file must still fill chunks
+    that never got a vector (a starved or interrupted realtime embed). Before,
+    the pass ran only after Rust errors, so `chunkhound index` left them missing."""
+    process_result = {
+        "status": "success",
+        "pipeline": "rust",
+        "files_processed": 0,
+        "total_chunks": 0,
+        "embeddings_generated": 0,
+        "errors": 0,
+        "skipped": 0,
+        "skipped_due_to_timeout": [],
+        "skipped_unchanged": 962,
+        "skipped_filtered": 0,
+    }
+    backfill_result = {"status": "success", "generated": 531}
+    coordinator = _FakeCoordinator(process_result, backfill_result)
+    service = DirectoryIndexingService(coordinator, _FakeConfig())
+
+    stats = await service.process_directory(Path("/does/not/matter"))
+
+    coordinator.generate_missing_embeddings.assert_awaited_once()
+    assert stats.embeddings_generated == 531

@@ -105,6 +105,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     # of the next change; that pass embeds every chunk still missing a vector, so it
     # settles all waiting embeds.
     _EMBED_MAX_WAIT_SECONDS = 60.0
+    # Idle retry for a coverage check the database could not answer yet (the Rust
+    # pipeline or compaction owns it during start-up).
+    _COVERAGE_RETRY_SECONDS = 30.0
 
     def __init__(
         self,
@@ -157,6 +160,12 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self.pending_files: set[Path] = set()
         self._pending_mutations: dict[tuple[str, str], RealtimeMutation] = {}
         self._last_promoted_embed_attempt: float | None = None
+        self._embedding_coverage: dict[str, Any] = {
+            "missing_chunks": None,
+            "checked_at": None,
+        }
+        # True until coverage is measured once, and again after any work.
+        self._coverage_dirty = True
         self._pending_path_counts: dict[str, int] = {}
         self.failed_files: set[str] = set()
         self._last_warning: str | None = None
@@ -408,6 +417,10 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             "pending_files": 0,
             "pending_mutations": cls._default_pending_mutation_snapshot(),
             "failed_files": 0,
+            # Chunks with no vector for the current model, measured after start-up and
+            # after every embed pass. Such chunks are invisible to semantic search while
+            # regex search still finds them, so a non-zero count is the only signal.
+            "embedding_coverage": {"missing_chunks": None, "checked_at": None},
             "last_warning": None,
             "last_warning_at": None,
             "last_error": None,
@@ -527,6 +540,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "queue_size": self.file_queue.qsize(),
                 "pending_files": len(self.pending_files),
                 "failed_files": len(self.failed_files),
+                "embedding_coverage": dict(self._embedding_coverage),
                 "last_warning": self._last_warning,
                 "last_warning_at": self._last_warning_at,
                 "last_error": self._last_error,
