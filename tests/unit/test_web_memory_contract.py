@@ -6,6 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from chunkhound.core.models.chunk import Chunk
+from chunkhound.core.types.common import (
+    ChunkType,
+    FileId,
+    FilePath,
+    Language,
+    LineNumber,
+)
 from chunkhound.embeddings import LocalEmbeddingResult
 from chunkhound.services import web_research_service as web
 from chunkhound.services.research.shared.file_reader import FileReader
@@ -125,6 +133,136 @@ async def test_evicted_pages_support_concurrent_late_search_and_async_source(
         assert await web.research_web_pages(
             "query", pages(), MagicMock(), _embedding_manager(), MagicMock()
         ) == {"answer": "done"}
+
+
+@pytest.mark.asyncio
+async def test_pdf_cache_avoids_reparse_until_bounded_cache_eviction(
+    monkeypatch,
+) -> None:
+    captured = {}
+    parse_calls = 0
+    refetch_calls = 0
+    body = b"%PDF cached body"
+    url = "https://example.invalid/cached.pdf"
+
+    async def parse_pdf(content: bytes, source_url: str) -> list[Chunk]:
+        nonlocal parse_calls
+        parse_calls += 1
+        assert content == body
+        return [
+            Chunk(
+                symbol="pdf",
+                start_line=LineNumber(1),
+                end_line=LineNumber(1),
+                code="bounded PDF text",
+                chunk_type=ChunkType.PARAGRAPH,
+                file_id=FileId(0),
+                language=Language.PDF,
+                file_path=FilePath(source_url),
+            )
+        ]
+
+    async def refetch(urls, **kwargs):
+        nonlocal refetch_calls
+        refetch_calls += 1
+        yield urls[0], ".pdf", body
+
+    async def deep_research(query, previous_query=None):
+        services = captured["db_services"]
+        first, second = await asyncio.gather(
+            services.search_service.search_semantic("first"),
+            services.search_service.search_semantic("second"),
+        )
+        third = await services.search_service.search_semantic("third")
+        assert first[0] and second[0] and third[0]
+        services.provider._sources.clear()
+        services.provider._source_bytes = 0
+        assert await services.provider.get_transient_file_content_async(url) == (
+            "bounded PDF text"
+        )
+        return {"answer": "done"}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return MagicMock(deep_research=deep_research)
+
+    monkeypatch.setattr(web, "_parse_pdf_isolated", parse_pdf)
+    monkeypatch.setattr(web, "fetch_pages", refetch)
+    monkeypatch.setattr(web.ResearchServiceFactory, "create", create)
+
+    assert await web.research_web_pages(
+        "query",
+        [(url, ".pdf", body)],
+        MagicMock(),
+        _embedding_manager(),
+        MagicMock(),
+    ) == {"answer": "done"}
+    assert parse_calls == 2
+    assert refetch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pdf_refetch_parse_failure_is_sticky(monkeypatch) -> None:
+    captured = {}
+    body = b"%PDF stable body"
+    url = "https://example.invalid/stable.pdf"
+    calls = 0
+
+    async def parse_pdf(content: bytes, source_url: str) -> list[Chunk]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise TimeoutError("worker timed out")
+        return [
+            Chunk(
+                symbol="pdf",
+                start_line=LineNumber(1),
+                end_line=LineNumber(1),
+                code="stable evidence",
+                chunk_type=ChunkType.PARAGRAPH,
+                file_id=FileId(0),
+                language=Language.PDF,
+                file_path=FilePath(source_url),
+            )
+        ]
+
+    async def refetch(urls, **kwargs):
+        yield urls[0], ".pdf", body
+
+    async def deep_research(query, previous_query=None):
+        services = captured["db_services"]
+        assert (await services.search_service.search_semantic("first"))[0]
+        services.provider._sources.clear()
+        services.provider._source_bytes = 0
+        with pytest.raises(
+            RuntimeError, match="Unable to replay previously usable web source"
+        ):
+            await services.search_service.search_semantic("second")
+        with pytest.raises(
+            RuntimeError, match="Unable to replay previously usable web source"
+        ):
+            await services.search_service.search_semantic("third")
+        raise RuntimeError("Unable to replay previously usable web source")
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return MagicMock(deep_research=deep_research)
+
+    monkeypatch.setattr(web, "_parse_pdf_isolated", parse_pdf)
+    monkeypatch.setattr(web, "fetch_pages", refetch)
+    monkeypatch.setattr(web.ResearchServiceFactory, "create", create)
+
+    with pytest.raises(
+        RuntimeError, match="Unable to replay previously usable web source"
+    ):
+        await web.research_web_pages(
+            "query",
+            [(url, ".pdf", body)],
+            MagicMock(),
+            _embedding_manager(),
+            MagicMock(),
+        )
+    assert calls == 2
 
 
 @pytest.mark.asyncio

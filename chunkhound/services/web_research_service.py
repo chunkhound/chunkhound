@@ -3,10 +3,15 @@
 import asyncio
 import copy
 import hashlib
+import json
+import multiprocessing
 import sys
+import threading
+import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, cast
 
@@ -32,9 +37,17 @@ _PAGE_CHUNK_CHARS = 1_200
 _BATCH_SIZE = 100
 _SOURCE_CACHE_BYTES = 32 * 1024 * 1024
 _MAX_CONCURRENT_SCANS = 4
+_PDF_PARSE_TIMEOUT_SECONDS = 30.0
+_PDF_MAX_EXTRACTED_CHARS = 1_000_000
+_PDF_MAX_CHUNKS = 1_000
+_PDF_MAX_SYMBOL_CHARS = 512
+_PDF_MAX_HEADER_CHARS = 4_096
+_PDF_MAX_IPC_BYTES = 8 * 1024 * 1024
+_PDF_PROCESS_JOIN_SECONDS = 0.5
 _WEB_VECTOR_CACHE = VectorCache.from_env()
 
 Page = tuple[str, str, str | bytes]
+_PDFChunkWire = tuple[str, int, int, str, str, str | None]
 
 
 class _EmptySearchService:
@@ -74,36 +87,60 @@ class _TransientProvider:
     def __init__(self) -> None:
         # An explicit synthesis contract, not a claim that sources fit this size.
         self.transient_source_budget_bytes = 1_000_000
-        self._sources: OrderedDict[str, tuple[Page, str, int]] = OrderedDict()
+        self._sources: OrderedDict[
+            str, tuple[Page, str, tuple[Chunk, ...] | None, int]
+        ] = OrderedDict()
         self._source_bytes = 0
         self._load_source: Callable[[str], Awaitable[str | None]] | None = None
 
-    def _cached(self, source_url: str) -> tuple[Page, str, int] | None:
+    def _cached(
+        self, source_url: str
+    ) -> tuple[Page, str, tuple[Chunk, ...] | None, int] | None:
         entry = self._sources.get(source_url)
         if entry is not None:
             self._sources.move_to_end(source_url)
         return entry
 
-    def _store(self, page: Page, text: str) -> None:
+    def _store(
+        self,
+        page: Page,
+        text: str,
+        chunks: Sequence[Chunk] | None = None,
+    ) -> None:
         source_url, extension, content = page
         previous = self._sources.pop(source_url, None)
         if previous is not None:
-            self._source_bytes -= previous[2]
+            self._source_bytes -= previous[3]
+        cached_chunks = tuple(chunks) if chunks is not None else None
+        cached_page = (
+            (source_url, extension, b"")
+            if extension == ".pdf" and cached_chunks is not None
+            else page
+        )
+        # Do not retain raw PDF bytes after bounded normalization. The source
+        # fingerprint remains in the descriptor for live-refetch validation.
+        content = cached_page[2]
         # Count raw and normalized text separately even when they share storage.
-        # Include generous per-entry overhead for the mapping and tuple nodes.
+        # Include chunk text again because it may not share string storage with
+        # the normalized synthesis text, plus generous container overhead.
+        chunk_size = sum(
+            sys.getsizeof(chunk) + sys.getsizeof(chunk.code)
+            for chunk in cached_chunks or ()
+        )
         size = (
             sum(
                 sys.getsizeof(item)
-                for item in (page, source_url, extension, content, text)
+                for item in (cached_page, source_url, extension, content, text)
             )
+            + chunk_size
             + 512
         )
         if size > _SOURCE_CACHE_BYTES:
             return
         while self._sources and self._source_bytes + size > _SOURCE_CACHE_BYTES:
             _, evicted = self._sources.popitem(last=False)
-            self._source_bytes -= evicted[2]
-        self._sources[source_url] = (page, text, size)
+            self._source_bytes -= evicted[3]
+        self._sources[source_url] = (cached_page, text, cached_chunks, size)
         self._source_bytes += size
 
     def get_transient_file_content(self, file_path: str) -> str | None:
@@ -183,45 +220,238 @@ def _text_chunks(source_url: str, content: str) -> list[Chunk]:
     return chunks
 
 
+def _bounded_pdf_chunks(parsed: Sequence[Chunk]) -> tuple[list[Chunk], bool]:
+    """Split and bound PDF output before it crosses a process boundary."""
+    chunks: list[Chunk] = []
+    extracted_chars = 0
+    truncated = False
+    for source in parsed:
+        if _is_unusable_pdf_chunk(source):
+            continue
+        for part, start in enumerate(
+            range(0, len(source.code), _PAGE_CHUNK_CHARS), start=1
+        ):
+            if len(chunks) >= _PDF_MAX_CHUNKS:
+                return chunks, True
+            remaining = _PDF_MAX_EXTRACTED_CHARS - extracted_chars
+            if remaining <= 0:
+                return chunks, True
+            code = source.code[start : start + min(_PAGE_CHUNK_CHARS, remaining)]
+            if not code:
+                return chunks, True
+            symbol = (
+                source.symbol
+                if len(source.code) <= _PAGE_CHUNK_CHARS
+                else f"{source.symbol}:part:{part}"
+            )
+            chunks.append(
+                replace(
+                    source,
+                    symbol=str(symbol)[:_PDF_MAX_SYMBOL_CHARS],
+                    code=code,
+                    parent_header=(
+                        source.parent_header[:_PDF_MAX_HEADER_CHARS]
+                        if source.parent_header is not None
+                        else None
+                    ),
+                )
+            )
+            extracted_chars += len(code)
+            if len(code) < min(_PAGE_CHUNK_CHARS, len(source.code) - start):
+                truncated = True
+                return chunks, truncated
+    return chunks, truncated
+
+
 def pages_to_chunks(pages: Sequence[Page]) -> list[Chunk]:
-    """Convert fetched page bodies to embedding-safe chunks."""
+    """Synchronously convert pages; production PDF research uses isolation."""
     chunks: list[Chunk] = []
     for source_url, extension, content in pages:
-        chunks.extend(_page_to_chunks(source_url, extension, content))
+        if extension == ".pdf" and isinstance(content, bytes):
+            parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
+            bounded, _ = _bounded_pdf_chunks(parsed)
+            chunks.extend(
+                replace(chunk, file_path=FilePath(source_url)) for chunk in bounded
+            )
+        elif isinstance(content, str):
+            chunks.extend(_text_chunks(source_url, content))
     return chunks
 
 
-def _page_to_chunks(
-    source_url: str, extension: str, content: str | bytes
-) -> list[Chunk]:
-    if extension == ".pdf" and isinstance(content, bytes):
+def _pdf_parse_worker(content: bytes, connection: Connection) -> None:
+    """Parse one PDF in a disposable process and send bounded JSON bytes."""
+    try:
         parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
-        chunks: list[Chunk] = []
-        for chunk in parsed:
-            if _is_unusable_pdf_chunk(chunk):
-                continue
-            chunk = replace(chunk, file_path=FilePath(source_url))
-            if len(chunk.code) <= _PAGE_CHUNK_CHARS:
-                chunks.append(chunk)
-                continue
-            # Enforce the same hard bound even if the PDF parser's semantic
-            # splitter admits oversized text (e.g. whitespace-heavy chunks).
-            # Keep the original source span/metadata: extracted PDF text does
-            # not map directly to byte offsets in the PDF document.
-            for part, start in enumerate(
-                range(0, len(chunk.code), _PAGE_CHUNK_CHARS), start=1
-            ):
-                chunks.append(
-                    replace(
-                        chunk,
-                        symbol=f"{chunk.symbol}:part:{part}",
-                        code=chunk.code[start : start + _PAGE_CHUNK_CHARS],
-                    )
+        bounded, truncated = _bounded_pdf_chunks(parsed)
+        wire: list[_PDFChunkWire] = [
+            (
+                str(chunk.symbol),
+                int(chunk.start_line),
+                int(chunk.end_line),
+                chunk.code,
+                chunk.chunk_type.value,
+                chunk.parent_header,
+            )
+            for chunk in bounded
+        ]
+        payload = json.dumps(
+            ["ok", wire, truncated], ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(payload) > _PDF_MAX_IPC_BYTES:
+            raise ValueError("PDF parser result exceeds the IPC safety limit")
+        connection.send_bytes(payload)
+    except Exception as error:
+        try:
+            payload = json.dumps(
+                ["error", str(error)[:500], False], separators=(",", ":")
+            ).encode("utf-8")
+            connection.send_bytes(payload)
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        connection.close()
+
+
+def _stop_pdf_process(process: Any) -> None:
+    if process.is_alive():
+        process.terminate()
+        process.join(_PDF_PROCESS_JOIN_SECONDS)
+    if process.is_alive():
+        process.kill()
+        process.join(_PDF_PROCESS_JOIN_SECONDS)
+    else:
+        process.join(0)
+    process.close()
+
+
+def _run_pdf_parser_process(
+    content: bytes,
+    stop: threading.Event,
+) -> bytes:
+    """Own the blocking spawn/IPC lifecycle outside the asyncio event loop."""
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(target=_pdf_parse_worker, args=(content, child))
+    started = False
+    try:
+        try:
+            process.start()
+            started = True
+        except Exception as error:
+            raise RuntimeError(f"Unable to start PDF parser: {error}") from error
+        finally:
+            child.close()
+        expires = time.monotonic() + _PDF_PARSE_TIMEOUT_SECONDS
+        while not stop.is_set() and time.monotonic() < expires:
+            if parent.poll(0.01):
+                try:
+                    return parent.recv_bytes(_PDF_MAX_IPC_BYTES)
+                except OSError as error:
+                    raise RuntimeError(
+                        "PDF parser result exceeds the IPC safety limit"
+                    ) from error
+            if not process.is_alive():
+                if parent.poll():
+                    try:
+                        return parent.recv_bytes(_PDF_MAX_IPC_BYTES)
+                    except OSError as error:
+                        raise RuntimeError(
+                            "PDF parser result exceeds the IPC safety limit"
+                        ) from error
+                raise RuntimeError(
+                    f"PDF parser exited without a result (exit {process.exitcode})"
                 )
-        return chunks
-    if isinstance(content, str):
-        return _text_chunks(source_url, content)
-    return []
+        if stop.is_set():
+            raise RuntimeError("PDF parsing cancelled")
+        raise TimeoutError(
+            f"PDF parsing timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+        )
+    finally:
+        parent.close()
+        if started:
+            _stop_pdf_process(process)
+        else:
+            process.close()
+
+
+def _decode_pdf_payload(payload_bytes: bytes, source_url: str) -> list[Chunk]:
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("PDF parser returned an invalid result") from error
+    if not (
+        isinstance(payload, list)
+        and len(payload) == 3
+        and isinstance(payload[0], str)
+        and isinstance(payload[2], bool)
+    ):
+        raise RuntimeError("PDF parser returned an invalid result")
+    status, result, truncated = payload
+    if status != "ok" or not isinstance(result, list):
+        raise RuntimeError(f"PDF parsing failed: {str(result)[:500]}")
+    if len(result) > _PDF_MAX_CHUNKS:
+        raise RuntimeError("PDF parser returned too many chunks")
+    chunks: list[Chunk] = []
+    total_chars = 0
+    for item in result:
+        if not (isinstance(item, list) and len(item) == 6):
+            raise RuntimeError("PDF parser returned an invalid chunk")
+        symbol, start_line, end_line, code, chunk_type, parent_header = item
+        if not (
+            isinstance(symbol, str)
+            and isinstance(start_line, int)
+            and not isinstance(start_line, bool)
+            and isinstance(end_line, int)
+            and not isinstance(end_line, bool)
+            and isinstance(code, str)
+            and isinstance(chunk_type, str)
+            and chunk_type in {member.value for member in ChunkType}
+            and (parent_header is None or isinstance(parent_header, str))
+            and 1 <= start_line <= end_line
+            and len(symbol) <= _PDF_MAX_SYMBOL_CHARS
+            and len(code) <= _PAGE_CHUNK_CHARS
+            and (parent_header is None or len(parent_header) <= _PDF_MAX_HEADER_CHARS)
+        ):
+            raise RuntimeError("PDF parser returned an invalid chunk")
+        total_chars += len(code)
+        if total_chars > _PDF_MAX_EXTRACTED_CHARS:
+            raise RuntimeError("PDF parser returned too much extracted text")
+        chunks.append(
+            Chunk(
+                symbol=symbol,
+                start_line=LineNumber(start_line),
+                end_line=LineNumber(end_line),
+                code=code,
+                chunk_type=ChunkType.from_string(chunk_type),
+                file_id=FileId(0),
+                language=Language.PDF,
+                file_path=FilePath(source_url),
+                parent_header=parent_header,
+            )
+        )
+    if truncated:
+        raise ValueError("PDF extracted content exceeds the websearch safety limit")
+    return chunks
+
+
+async def _parse_pdf_isolated(content: bytes, source_url: str) -> list[Chunk]:
+    """Parse PDF bytes with a hard timeout and cancellation-safe cleanup."""
+    stop = threading.Event()
+    task = asyncio.create_task(
+        asyncio.to_thread(_run_pdf_parser_process, content, stop)
+    )
+    try:
+        payload = await asyncio.wait_for(
+            asyncio.shield(task), timeout=_PDF_PARSE_TIMEOUT_SECONDS + 1.5
+        )
+    except BaseException:
+        stop.set()
+        try:
+            await asyncio.shield(task)
+        except BaseException:
+            pass
+        raise
+    return _decode_pdf_payload(payload, source_url)
 
 
 @dataclass(frozen=True)
@@ -229,12 +459,26 @@ class _PageDescriptor:
     url: str
     fingerprint: bytes
     usable: bool
+    is_pdf: bool = False
 
 
-def _normalized_page(page: Page) -> tuple[str, list[Chunk]]:
-    chunks = _page_to_chunks(*page)
-    text = page[2] if isinstance(page[2], str) else "".join(c.code for c in chunks)
-    return text, chunks
+async def _normalized_page(
+    page: Page,
+    warning_callback: Callable[[str], None] | None,
+) -> tuple[str, list[Chunk], bytes, bool]:
+    source_url, extension, content = page
+    if extension == ".pdf" and isinstance(content, bytes):
+        fingerprint = hashlib.sha256(content).digest()
+        try:
+            chunks = await _parse_pdf_isolated(content, source_url)
+        except (TimeoutError, RuntimeError, ValueError) as error:
+            if warning_callback is not None:
+                warning_callback(f"Failed to parse {source_url}: {error}")
+            return "", [], fingerprint, True
+        return "".join(chunk.code for chunk in chunks), chunks, fingerprint, False
+    if isinstance(content, str):
+        return content, _text_chunks(source_url, content), _fingerprint(content), False
+    return "", [], hashlib.sha256(b"").digest(), False
 
 
 def _fingerprint(text: str) -> bytes:
@@ -295,7 +539,10 @@ class _BoundedPageStream:
     ) -> tuple[str, list[Chunk]]:
         entry = self._provider._cached(descriptor.url)
         if entry is not None:
-            return entry[1], _page_to_chunks(*entry[0])
+            cached_chunks = entry[2]
+            if cached_chunks is not None:
+                return entry[1], list(cached_chunks)
+            return entry[1], _text_chunks(descriptor.url, entry[1])
         # Each refetch owns and closes its fetch iterator/browser. The shared
         # lock bounds refetches to one, including asynchronous source readers.
         fetched = fetch_pages([descriptor.url], warning_callback=self._warning_callback)
@@ -303,12 +550,30 @@ class _BoundedPageStream:
             page = await anext(fetched, None)
             if page is None:
                 raise RuntimeError(f"Unable to refetch web source: {descriptor.url}")
-            text, chunks = _normalized_page(page)
-            if _fingerprint(text) != descriptor.fingerprint:
+            if descriptor.is_pdf:
+                content = page[2]
+                fingerprint = (
+                    hashlib.sha256(content).digest()
+                    if isinstance(content, bytes)
+                    else _fingerprint(content)
+                )
+                if fingerprint != descriptor.fingerprint:
+                    raise RuntimeError(
+                        f"Web source changed since first read: {descriptor.url}"
+                    )
+            text, chunks, fingerprint, warned = await _normalized_page(
+                page, self._warning_callback
+            )
+            if fingerprint != descriptor.fingerprint:
                 raise RuntimeError(
                     f"Web source changed since first read: {descriptor.url}"
                 )
-            self._provider._store(page, text)
+            if warned or (descriptor.usable and not chunks):
+                raise RuntimeError(
+                    f"Unable to replay previously usable web source: "
+                    f"{descriptor.url}"
+                )
+            self._provider._store(page, text, chunks)
             return text, chunks
         finally:
             await fetched.aclose()
@@ -344,8 +609,13 @@ class _BoundedPageStream:
                 if page is None:
                     self._complete = True
                     return None
-                text, chunks = _normalized_page(page)
-                descriptor = _PageDescriptor(page[0], _fingerprint(text), bool(chunks))
+                text, chunks, fingerprint, warned = await _normalized_page(
+                    page, self._warning_callback
+                )
+                is_pdf = page[1] == ".pdf" and isinstance(page[2], bytes)
+                descriptor = _PageDescriptor(
+                    page[0], fingerprint, bool(chunks), is_pdf
+                )
                 previous = self._by_url.get(page[0])
                 if (
                     previous is not None
@@ -358,8 +628,8 @@ class _BoundedPageStream:
                 self._by_url[page[0]] = descriptor
                 if chunks:
                     self.usable_page_count += 1
-                    self._provider._store(page, text)
-                elif self._warning_callback is not None:
+                    self._provider._store(page, text, chunks)
+                elif self._warning_callback is not None and not warned:
                     self._warning_callback(f"No usable content parsed from {page[0]}")
                 return chunks
             except BaseException as exc:

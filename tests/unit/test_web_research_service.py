@@ -1,6 +1,7 @@
 """Contracts for composing in-process research over fetched pages."""
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,8 +19,14 @@ from chunkhound.services.research.shared.file_reader import resolve_source_text
 from chunkhound.services.transient_search_service import TransientSearchService
 from chunkhound.services.vector_cache import VectorCache
 from chunkhound.services.web_research_service import (
+    _parse_pdf_isolated,
     pages_to_chunks,
     research_web_pages,
+)
+from tests.helpers.pdf_worker_fixture import (
+    blocking_pdf_worker,
+    invalid_chunk_type_worker,
+    malformed_pdf_worker,
 )
 
 
@@ -92,7 +99,14 @@ async def test_web_embeddings_keep_full_batches_with_safe_text_and_pdf_chunks(
         language=Language.PDF,
     )
     monkeypatch.setattr(web, "_WEB_VECTOR_CACHE", VectorCache(max_entries=0))
-    monkeypatch.setattr(web.PDFMapping, "parse_pdf_content", lambda *args: [parsed])
+
+    async def parse_pdf(content: bytes, source_url: str) -> list[Chunk]:
+        bounded, _ = web._bounded_pdf_chunks([parsed])
+        return [
+            web.replace(chunk, file_path=source_url) for chunk in bounded
+        ]
+
+    monkeypatch.setattr(web, "_parse_pdf_isolated", parse_pdf)
     batches: list[list[str]] = []
     query = "embedding safety"
 
@@ -136,6 +150,81 @@ async def test_web_embeddings_keep_full_batches_with_safe_text_and_pdf_chunks(
     assert all(len(batch) == 100 for batch in batches[:-1])
     assert 1 <= len(batches[-1]) <= 100
     assert "".join(text for batch in batches for text in batch) == content * 2
+
+
+@pytest.mark.asyncio
+async def test_isolated_pdf_parser_enforces_hard_timeout(monkeypatch) -> None:
+    from chunkhound.services import web_research_service as web
+
+    monkeypatch.setattr(web, "_PDF_PARSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(web, "_pdf_parse_worker", blocking_pdf_worker)
+
+    with pytest.raises(TimeoutError, match="PDF parsing timed out"):
+        await web._parse_pdf_isolated(b"%PDF", "https://example.invalid/slow.pdf")
+
+
+@pytest.mark.asyncio
+async def test_isolated_pdf_parser_rejects_malformed_payload(monkeypatch) -> None:
+    from chunkhound.services import web_research_service as web
+
+    monkeypatch.setattr(web, "_pdf_parse_worker", malformed_pdf_worker)
+
+    with pytest.raises(RuntimeError, match="invalid chunk"):
+        await web._parse_pdf_isolated(
+            b"%PDF", "https://example.invalid/malformed.pdf"
+        )
+
+
+@pytest.mark.asyncio
+async def test_isolated_pdf_parser_rejects_invalid_chunk_type(monkeypatch) -> None:
+    from chunkhound.services import web_research_service as web
+
+    monkeypatch.setattr(web, "_pdf_parse_worker", invalid_chunk_type_worker)
+
+    with pytest.raises(RuntimeError, match="invalid chunk"):
+        await web._parse_pdf_isolated(
+            b"%PDF", "https://example.invalid/invalid-type.pdf"
+        )
+
+
+@pytest.mark.asyncio
+async def test_isolated_pdf_parser_cancellation_reaps_worker(monkeypatch) -> None:
+    from chunkhound.services import web_research_service as web
+
+    stopped = asyncio.Event()
+    real_stop = web._stop_pdf_process
+
+    def observed_stop(process) -> None:
+        real_stop(process)
+        stopped.set()
+
+    monkeypatch.setattr(web, "_pdf_parse_worker", blocking_pdf_worker)
+    monkeypatch.setattr(web, "_stop_pdf_process", observed_stop)
+    task = asyncio.create_task(
+        web._parse_pdf_isolated(b"%PDF", "https://example.invalid/slow.pdf")
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_isolated_pdf_parser_extracts_fixture_without_disk_writes() -> None:
+    content = Path("tests/fixtures/test_simple.pdf").read_bytes()
+
+    chunks = await _parse_pdf_isolated(
+        content, "https://example.invalid/test_simple.pdf"
+    )
+
+    assert chunks
+    assert all(
+        chunk.file_path == "https://example.invalid/test_simple.pdf"
+        for chunk in chunks
+    )
+    assert all(len(chunk.code) <= 1_200 for chunk in chunks)
 
 
 def test_pages_to_chunks_keeps_source_url_without_writing_files() -> None:
@@ -311,15 +400,6 @@ async def test_research_consumes_pages_incrementally_and_stores_full_text() -> N
 
 @pytest.mark.asyncio
 async def test_research_rejects_pages_without_usable_content() -> None:
-    error = Chunk(
-        symbol="pdf_parse_error",
-        start_line=LineNumber(1),
-        end_line=LineNumber(1),
-        code="Error parsing PDF: malformed file",
-        chunk_type=ChunkType.UNKNOWN,
-        file_id=FileId(0),
-        language=Language.PDF,
-    )
     warnings: list[str] = []
     manager = MagicMock()
     manager.embed_texts = AsyncMock(
@@ -350,8 +430,8 @@ async def test_research_rejects_pages_without_usable_content() -> None:
             side_effect=create,
         ),
         patch(
-            "chunkhound.services.web_research_service.PDFMapping.parse_pdf_content",
-            return_value=[error],
+            "chunkhound.services.web_research_service._parse_pdf_isolated",
+            new=AsyncMock(return_value=[]),
         ),
         pytest.raises(ValueError, match="No usable page content"),
     ):
