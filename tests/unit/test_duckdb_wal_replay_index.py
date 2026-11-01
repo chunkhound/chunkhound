@@ -34,9 +34,7 @@ def test_wal_validation_keeps_replayed_rows_in_secondary_indexes(
     con.execute("CREATE INDEX idx_t_k ON t(k)")
     con.close()
 
-    subprocess.run(
-        [sys.executable, "-c", _WRITE_AND_DIE, str(db_path)], check=True
-    )
+    subprocess.run([sys.executable, "-c", _WRITE_AND_DIE, str(db_path)], check=True)
     assert db_path.with_suffix(".db.wal").exists()
 
     DuckDBConnectionManager(db_path, None)._preemptive_wal_cleanup()
