@@ -140,6 +140,11 @@ class EmbeddingManager:
                 "during a request"
             )
         name, model, identity = metadata_before
+        if len(embeddings) != len(texts):
+            raise RuntimeError(
+                f"Embedding provider {name!r} returned {len(embeddings)} vectors "
+                f"for {len(texts)} texts"
+            )
         dims = len(embeddings[0]) if embeddings else provider.dims
         if any(len(vector) != dims for vector in embeddings):
             raise RuntimeError(

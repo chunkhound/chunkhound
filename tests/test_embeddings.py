@@ -85,6 +85,30 @@ async def test_embedding_manager_accepts_response_dimension_discovery() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returned_count", [1, 3])
+async def test_embedding_manager_rejects_wrong_vector_count(
+    returned_count: int,
+) -> None:
+    class Provider:
+        name = "test"
+        model = "model"
+        dims = 2
+        embedding_space_identity = "space-a"
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in range(returned_count)]
+
+    manager = EmbeddingManager()
+    manager.register_provider(Provider(), set_default=True)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"returned {returned_count} vectors for 2 texts",
+    ):
+        await manager.embed_texts(["first", "second"])
+
+
+@pytest.mark.asyncio
 async def test_embedding_manager_rejects_identity_change_during_request() -> None:
     class Provider:
         name = "test"
@@ -157,7 +181,8 @@ def test_embedding_space_identity_generation_detects_aba_reconfiguration() -> No
     assert provider.embedding_space_identity != original
 
 
-def test_embedding_space_identity_covers_azure_routing_without_leaking_secrets() -> None:
+def test_embedding_space_identity_covers_azure_routing_without_leaking_secrets(
+) -> None:
     first = OpenAIEmbeddingProvider(
         api_key="secret-one",
         model="text-embedding-3-small",
