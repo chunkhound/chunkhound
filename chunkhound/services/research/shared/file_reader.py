@@ -135,6 +135,7 @@ async def read_transient_sources_with_budget(
             match for match in matches if not is_authoritative_source(match)
         ]
         has_authoritative_source = bool(authoritative_matches)
+        mixed_evidence: tuple[str, str, str, str] | None = None
         if has_authoritative_source:
             # Git history results already contain the requested revision's diff
             # hunks. They are authoritative evidence: consulting the working
@@ -146,22 +147,44 @@ async def read_transient_sources_with_budget(
                 # get context from the current source rather than stale index
                 # snippets. Split the per-file budget so neither source crowds
                 # the other out.
-                historical_chars = max_chars // 2
-                historical = selected_excerpt(authoritative_matches, historical_chars)
+                historical_label = "[Historical diff evidence]\n"
+                current_label = "[Current working-tree evidence]\n"
+                section_separator = "\n\n"
+                label_chars = (
+                    len(historical_label)
+                    + len(current_label)
+                    + len(section_separator)
+                )
+                evidence_chars = max(0, max_chars - label_chars)
+                historical = selected_excerpt(
+                    authoritative_matches, evidence_chars // 2
+                )
                 source = await resolve_source_text_async(provider, path)
                 current = (
                     current_source_excerpt(
                         source,
                         current_matches,
                         path,
-                        max_chars - len(historical) - 7,
+                        evidence_chars - len(historical),
                     )
                     if source
                     else ""
                 )
-                excerpt = "\n\n...\n\n".join(
-                    piece for piece in (historical, current) if piece
-                )[:max_chars]
+                if historical and current:
+                    mixed_evidence = (
+                        historical_label,
+                        historical,
+                        current_label,
+                        current,
+                    )
+                    excerpt = (
+                        f"{historical_label}{historical}"
+                        f"{section_separator}{current_label}{current}"
+                    )[:max_chars]
+                elif historical:
+                    excerpt = selected_excerpt(authoritative_matches, max_chars)
+                else:
+                    excerpt = current[:max_chars]
                 del source
             else:
                 excerpt = selected_excerpt(authoritative_matches, max_chars)
@@ -180,14 +203,34 @@ async def read_transient_sources_with_budget(
             )
             del source
         if remaining_tokens is not None:
-            low, high = 0, len(excerpt)
-            while low < high:
-                middle = (low + high + 1) // 2
-                if llm.estimate_tokens(excerpt[:middle]) <= remaining_tokens:
-                    low = middle
+            def truncate_to_tokens(text: str, token_limit: int) -> str:
+                low, high = 0, len(text)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if llm.estimate_tokens(text[:middle]) <= token_limit:
+                        low = middle
+                    else:
+                        high = middle - 1
+                return text[:low]
+
+            if mixed_evidence is not None:
+                historical_label, historical, current_label, current = mixed_evidence
+                labels = historical_label + current_label + section_separator
+                label_tokens = llm.estimate_tokens(labels)
+                if label_tokens > remaining_tokens:
+                    excerpt = ""
                 else:
-                    high = middle - 1
-            excerpt = excerpt[:low]
+                    evidence_tokens = remaining_tokens - label_tokens
+                    historical_tokens = evidence_tokens // 2
+                    current_tokens = evidence_tokens - historical_tokens
+                    historical = truncate_to_tokens(historical, historical_tokens)
+                    current = truncate_to_tokens(current, current_tokens)
+                    excerpt = (
+                        f"{historical_label}{historical}"
+                        f"{section_separator}{current_label}{current}"
+                    )
+            else:
+                excerpt = truncate_to_tokens(excerpt, remaining_tokens)
         if excerpt:
             # This helper has selected and budgeted the exact source revision.
             # Preserve it through synthesis rather than rebuilding it from the

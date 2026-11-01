@@ -323,12 +323,88 @@ async def test_deep_research_both_reads_database_results_from_current_source(tmp
         )
 
     evidence = result["answer"]
+    assert "[Historical diff evidence]" in evidence["src/auth.py"]
     assert "def logout(user):" in evidence["src/auth.py"]
+    assert "[Current working-tree evidence]" in evidence["src/auth.py"]
     assert "SAME_PATH_CURRENT_MARKER" in evidence["src/auth.py"]
     assert "STALE_SAME_PATH_SNIPPET" not in evidence["src/auth.py"]
     assert "CURRENT_SOURCE_MARKER" in evidence["src/current.py"]
     assert "current_dependency" in evidence["src/current.py"]
     assert "STALE_DB_SNIPPET" not in evidence["src/current.py"]
+
+
+@pytest.mark.asyncio
+async def test_mixed_revision_labels_survive_constrained_synthesis_budget(
+    tmp_path,
+) -> None:
+    """A small budget reserves labeled evidence from both source revisions."""
+    from chunkhound.mcp_server.tools import deep_research_impl
+
+    auth_file = tmp_path / "src" / "auth.py"
+    auth_file.parent.mkdir()
+    auth_file.write_text(
+        "def current_helper():\n    return 'CURRENT_MARKER'\n",
+        encoding="utf-8",
+    )
+    original_search = _make_original_search_service()
+    original_search.search_semantic.return_value = (
+        [
+            {
+                "chunk_id": 43,
+                "file_path": "src/auth.py",
+                "content": "STALE",
+                "start_line": 1,
+                "end_line": 2,
+                "similarity": 0.8,
+                "score": 0.8,
+            }
+        ],
+        {"offset": 0, "page_size": 50, "has_more": False, "total": 1},
+    )
+    services = _make_services(original_search)
+    services.provider.get_transient_file_content_async = None
+    services.provider.get_transient_file_content = None
+    services.provider.get_base_directory.return_value = tmp_path
+    llm_manager = MagicMock()
+    llm_manager.get_utility_provider.return_value.estimate_tokens.side_effect = len
+
+    def create(**kwargs):
+        db_services = kwargs["db_services"]
+
+        async def research(query, previous_query=None):
+            chunks, _ = await db_services.search_service.search_semantic(
+                query, force_strategy="single_hop"
+            )
+            evidence = await FileReader(db_services).read_files_with_budget(
+                chunks, llm_manager, max_tokens=180
+            )
+            return {"answer": evidence["src/auth.py"]}
+
+        return MagicMock(deep_research=research)
+
+    with (
+        patch(
+            "chunkhound.core.git_diff.stream_git_diff_fragments",
+            _stream_fake_diff,
+        ),
+        patch(
+            "chunkhound.services.research.factory.ResearchServiceFactory.create",
+            side_effect=create,
+        ),
+    ):
+        result = await deep_research_impl(
+            services=services,
+            embedding_manager=_make_embedding_manager(),
+            llm_manager=llm_manager,
+            query="compare revisions",
+            commit_range="HEAD~2..HEAD",
+            vector_source="both",
+        )
+
+    assert "[Historical diff evidence]" in result["answer"]
+    assert "def logout" in result["answer"]
+    assert "[Current working-tree evidence]" in result["answer"]
+    assert "CURRENT_MARKER" in result["answer"]
 
 
 @pytest.mark.asyncio
