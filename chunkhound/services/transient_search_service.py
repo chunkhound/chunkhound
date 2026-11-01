@@ -479,7 +479,13 @@ class TransientSearchService:
             )
         if self._vector_source == "diff":
             transient_results = await self._search_transient_many(
-                queries, page_size, offset, threshold, path_filter, provider
+                queries,
+                page_size,
+                offset,
+                threshold,
+                path_filter,
+                provider,
+                limit=result_limit,
             )
             return list(transient_results)
 
@@ -597,7 +603,13 @@ class TransientSearchService:
             )
         if self._vector_source == "diff":
             return await self._search_transient(
-                query, page_size, offset, threshold, path_filter, provider
+                query,
+                page_size,
+                offset,
+                threshold,
+                path_filter,
+                provider,
+                limit=result_limit,
             )
 
         # Overfetch-sized heaps from both sources, independent of offset. Reject

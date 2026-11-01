@@ -100,6 +100,28 @@ async def test_streams_5000_chunks_into_bounded_top_page() -> None:
 
 
 @pytest.mark.asyncio
+async def test_result_limit_controls_transient_pagination_window() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(100)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, pagination = await service.search_semantic(
+        "query", page_size=10, offset=60, result_limit=100
+    )
+
+    assert len(results) == 10
+    assert pagination["total"] == 100
+
+
+@pytest.mark.asyncio
 async def test_second_search_reuses_cached_chunk_embeddings() -> None:
     chunks = [make_chunk("one", code="one"), make_chunk("two", code="two")]
     manager = embedding_manager()
