@@ -21,6 +21,7 @@ from loguru import logger
 from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.interfaces.embedding_provider import embed_queries
 from chunkhound.services.research.shared.chunk_context_builder import get_chunk_text
 from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.models import (
@@ -593,7 +594,7 @@ class UnifiedSearch:
         if query:
             try:
                 embedding_provider = self._embedding_manager.get_provider()
-                query_vec = (await embedding_provider.embed([query]))[0]
+                query_vec = (await embed_queries(embedding_provider, [query]))[0]
             except Exception as e:
                 logger.warning(f"Failed to embed query for regex scoring: {e}")
 

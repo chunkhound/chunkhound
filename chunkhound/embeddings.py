@@ -8,6 +8,7 @@ from loguru import logger
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider,
+    embed_queries,
 )
 
 if TYPE_CHECKING:
@@ -110,6 +111,26 @@ class EmbeddingManager:
         provider = self.get_provider(provider_name)
 
         embeddings = await provider.embed(texts)
+
+        return LocalEmbeddingResult(
+            embeddings=embeddings,
+            model=provider.model,
+            provider=provider.name,
+            dims=provider.dims,
+        )
+
+    async def embed_query_texts(
+        self,
+        texts: list[str],
+        provider_name: str | None = None,
+    ) -> LocalEmbeddingResult:
+        """Like ``embed_texts``, for search queries compared against indexed chunks.
+
+        Uses the provider's query path when it has one (see ``embed_queries``).
+        """
+        provider = self.get_provider(provider_name)
+
+        embeddings = await embed_queries(provider, texts)
 
         return LocalEmbeddingResult(
             embeddings=embeddings,

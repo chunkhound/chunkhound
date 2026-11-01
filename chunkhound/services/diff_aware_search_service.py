@@ -155,7 +155,7 @@ class DiffAwareSearchService:
             return [], {"total": 0, "page_size": page_size, "offset": offset}
 
         # 1. Embed the query
-        embed_result = await self._embedding_manager.embed_texts([query])
+        embed_result = await self._embedding_manager.embed_query_texts([query])
         q_vec = np.array(embed_result.embeddings[0], dtype=np.float32)
 
         # B1 — normalize query vector
