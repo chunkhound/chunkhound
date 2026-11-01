@@ -493,21 +493,17 @@ async def test_deep_offset_within_window_keeps_heap_bounded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_both_mode_deep_offset_rejected_beyond_max_result_window() -> None:
-    chunks = [
-        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
-        for i in range(5_000)
-    ]
+async def test_both_mode_rejects_offset_outside_candidate_window() -> None:
     service = TransientSearchService(
         make_original(),
-        stream_chunks(chunks, batch_size=100),
+        stream_chunks([]),
         "both",
         embedding_manager(),
         VectorCache(max_entries=0),
     )
 
-    with pytest.raises(ValueError, match="offset\\+page_size"):
-        await service.search_semantic("query", page_size=10, offset=1_995)
+    with pytest.raises(ValueError, match=r"both-mode candidate window \(50\)"):
+        await service.search_semantic("query", page_size=10, offset=50)
 
 
 @pytest.mark.asyncio
@@ -868,21 +864,13 @@ async def test_both_mode_pagination_stops_at_overfetch_pool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_both_mode_does_not_return_results_beyond_reported_total() -> None:
-    chunks = [
-        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
-        for i in range(2100)
-    ]
+async def test_both_mode_rejects_partial_page_outside_candidate_window() -> None:
     service = TransientSearchService(
-        make_original(), stream_chunks(chunks), "both", embedding_manager()
+        make_original(), stream_chunks([]), "both", embedding_manager()
     )
 
-    results, page = await service.search_semantic("query", page_size=10, offset=45)
-
-    assert len(results) == 5
-    assert page["total"] == 50
-    assert page["has_more"] is False
-    assert page["next_offset"] is None
+    with pytest.raises(ValueError, match=r"offset\+page_size \(55\).+window \(50\)"):
+        await service.search_semantic("query", page_size=10, offset=45)
 
 
 @pytest.mark.asyncio

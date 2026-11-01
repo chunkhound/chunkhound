@@ -3,7 +3,7 @@
 ## Summary
 
 - Replace bulk git-diff embedding and the `_quickresearch` subprocess with one in-process pipeline: streamed chunk batches → bounded `VectorCache` (XXH3 keys, float32, LRU + last-access TTL) → top-K heap → optional both-mode merge with DB HNSW. Git history and fetched pages search without temp files; cache and overfetch are tunable via `CHUNKHOUND_VECTOR_CACHE_*` and `CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR`.
-- `TransientSearchService` overlays streaming semantic search on the existing DB service. Hybrid (`vector_source=both`) freezes complete source snapshots, ranks consistently across pages, fuses full snapshots (not partial heaps), and keeps `total` numeric: a lower bound while a source has more, exact once both are exhausted. Stream failures cancel sibling work and propagate.
+- `TransientSearchService` overlays streaming semantic search on the existing DB service. Hybrid (`vector_source=both`) freezes and fuses equal overfetch-sized source snapshots, ranks consistently within that candidate window, and keeps `total` numeric. Offsets that cannot fit a complete page inside the candidate window fail explicitly. Stream failures cancel sibling work and propagate.
 - Git liveness timeout now counts only time blocked on git, not embedding consumer latency. Stderr drain is bounded. Argument-injection guards and empty-tree retry stay on the streaming runner. Websearch no longer writes fetched pages to disk; research uses an in-memory page stream and a progress-event interface.
 
 ## Why

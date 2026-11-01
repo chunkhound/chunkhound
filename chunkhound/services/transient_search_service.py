@@ -600,9 +600,18 @@ class TransientSearchService:
                 query, page_size, offset, threshold, path_filter, provider
             )
 
-        # Overfetch-sized heaps from both sources, independent of offset.
-        # Not the 2000-hit paging ceiling — that only rejects deep offsets.
+        # Overfetch-sized heaps from both sources, independent of offset. Reject
+        # pages outside that fixed pool rather than returning a misleading empty
+        # page for an offset that can never be represented by this snapshot.
         snapshot_size = _candidate_pool_size(page_size)
+        if offset + page_size > snapshot_size:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the both-mode "
+                f"candidate window ({snapshot_size}) for page_size={page_size}; "
+                "keep page_size stable and use an offset within that window, "
+                "increase page_size, narrow the query, or use "
+                "vector_source='db' or vector_source='diff'."
+            )
         merged = await self._search_both_snapshot(
             query=query,
             snapshot_size=snapshot_size,
