@@ -367,6 +367,8 @@ def test_duckdb_candidate_wal_entry_is_refused_without_install_mutation(
             pytest.skip("directory symlink creation is unavailable")
         spelling = alias / "chunks.db"
 
+    lock_path = Path(str(target) + ".chunkhound.lock")
+
     def tree_state():
         state = {}
         for root, directories, files in os.walk(tmp_path, followlinks=False):
@@ -377,6 +379,10 @@ def test_duckdb_candidate_wal_entry_is_refused_without_install_mutation(
                     payload = ("symlink", os.readlink(path))
                 elif path.is_dir():
                     payload = ("directory",)
+                elif path == lock_path:
+                    # Windows forbids reading the held coordination lock through
+                    # another handle. Keep its metadata in the no-mutation check.
+                    payload = ("coordination-lock", info.st_size)
                 else:
                     payload = ("file", path.read_bytes())
                 state[str(path.relative_to(tmp_path))] = (
