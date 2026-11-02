@@ -886,6 +886,34 @@ async def test_both_mode_pagination_stops_at_overfetch_pool() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("page_size", [3, 7, 10])
+async def test_both_mode_next_offset_is_always_accepted(page_size) -> None:
+    """Following ``next_offset`` must never lead to a rejected request."""
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(60)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    offset: int | None = 0
+    while offset is not None:
+        _, page = await service.search_semantic(
+            "query", page_size=page_size, offset=offset
+        )
+        [(_, many_page)] = await service.search_semantic_many(
+            ["query"], page_size=page_size, offset=offset
+        )
+        assert many_page["next_offset"] == page["next_offset"]
+        offset = page["next_offset"]
+
+
+@pytest.mark.asyncio
 async def test_both_mode_rejects_partial_page_outside_candidate_window() -> None:
     service = TransientSearchService(
         make_original(), stream_chunks([]), "both", embedding_manager()

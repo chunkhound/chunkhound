@@ -421,10 +421,15 @@ class TransientSearchService:
         return outputs
 
     @staticmethod
-    def _pagination(page_size: int, offset: int, total: int) -> dict[str, Any]:
-        has_more = (
-            offset + page_size < total and offset + 2 * page_size <= _MAX_RESULT_WINDOW
-        )
+    def _pagination(
+        page_size: int,
+        offset: int,
+        total: int,
+        window: int = _MAX_RESULT_WINDOW,
+    ) -> dict[str, Any]:
+        # Only advertise a next page the same call would accept: the next
+        # request must keep offset + page_size inside the supported window.
+        has_more = offset + page_size < total and offset + 2 * page_size <= window
         return {
             "offset": offset,
             "page_size": page_size,
@@ -432,6 +437,20 @@ class TransientSearchService:
             "next_offset": offset + page_size if has_more else None,
             "total": total,
         }
+
+    @staticmethod
+    def _both_mode_window(page_size: int, offset: int) -> int:
+        """Return the both-mode candidate window, rejecting pages outside it."""
+        snapshot_size = _candidate_pool_size(page_size)
+        if offset + page_size > snapshot_size:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the both-mode "
+                f"candidate window ({snapshot_size}) for page_size={page_size}; "
+                "keep page_size stable and use an offset within that window, "
+                "increase page_size, narrow the query, or use "
+                "vector_source='db' or vector_source='diff'."
+            )
+        return snapshot_size
 
     async def search_semantic_many(
         self,
@@ -489,7 +508,7 @@ class TransientSearchService:
             )
             return list(transient_results)
 
-        snapshot_size = _candidate_pool_size(page_size)
+        snapshot_size = self._both_mode_window(page_size, offset)
         transient_task = asyncio.create_task(
             self._search_transient_many(
                 queries,
@@ -558,7 +577,7 @@ class TransientSearchService:
             outputs.append(
                 (
                     merged[offset : offset + page_size],
-                    self._pagination(page_size, offset, available),
+                    self._pagination(page_size, offset, available, snapshot_size),
                 )
             )
         return outputs
@@ -615,15 +634,7 @@ class TransientSearchService:
         # Overfetch-sized heaps from both sources, independent of offset. Reject
         # pages outside that fixed pool rather than returning a misleading empty
         # page for an offset that can never be represented by this snapshot.
-        snapshot_size = _candidate_pool_size(page_size)
-        if offset + page_size > snapshot_size:
-            raise ValueError(
-                f"offset+page_size ({offset + page_size}) exceeds the both-mode "
-                f"candidate window ({snapshot_size}) for page_size={page_size}; "
-                "keep page_size stable and use an offset within that window, "
-                "increase page_size, narrow the query, or use "
-                "vector_source='db' or vector_source='diff'."
-            )
+        snapshot_size = self._both_mode_window(page_size, offset)
         merged = await self._search_both_snapshot(
             query=query,
             snapshot_size=snapshot_size,
@@ -636,7 +647,7 @@ class TransientSearchService:
             result_limit=result_limit,
         )
         available = len(merged)
-        page = self._pagination(page_size, offset, available)
+        page = self._pagination(page_size, offset, available, snapshot_size)
         return merged[offset : offset + page_size], page
 
     async def _search_both_snapshot(
