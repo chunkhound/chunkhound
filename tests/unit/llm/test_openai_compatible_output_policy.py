@@ -48,6 +48,7 @@ def _manager_provider(
         ("api-route", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("obscurify-ai", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("atlascloud", "max_tokens", OutputLimitCapability.UNKNOWN),
+        ("runcrate", "max_tokens", OutputLimitCapability.UNKNOWN),
     ],
 )
 async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
@@ -100,6 +101,7 @@ async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
         ("opper", "max_tokens"),
         ("obscurify-ai", "max_tokens"),
         ("atlascloud", "max_tokens"),
+        ("runcrate", "max_tokens"),
     ],
 )
 async def test_custom_builtin_endpoint_uses_fallback_cap(
