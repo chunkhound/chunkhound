@@ -3245,22 +3245,15 @@ def test_compaction_preserves_all_canonical_tables_behaviorally(
         db.disconnect()
 
 
-def test_non_cosine_hnsw_metric_survives_index_rebuild(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A forced sampled auto-compaction preserves a non-cosine HNSW metric.
+def test_non_cosine_hnsw_metric_survives_index_rebuild(tmp_path: Path) -> None:
+    """Forced compaction preserves a non-cosine HNSW metric.
 
-    A zero fragmentation threshold makes the freshly built HNSW index count as
-    compaction overhead, and ``COMPACT_SAMPLE_INTERVAL = 1`` forces the sampled
-    auto-compaction path, so no probability is involved. The compaction log and
-    the on-disk file size prove it ran. Regression for issue #456, where
+    Calls ``compact_database`` directly so no sampling probability or
+    fragmentation heuristic is involved. The returned compacted size and the
+    on-disk size prove compaction ran. Regression for issue #456, where
     finalize rebuilt the index with a hardcoded cosine metric.
     """
-    from chunkhound.providers.database import serial_executor
-
-    monkeypatch.setattr(serial_executor, "COMPACT_SAMPLE_INTERVAL", 0)
     db = DuckDBProvider(tmp_path / "metric.duckdb", base_directory=tmp_path)
-    db.config = DatabaseConfig(fragmentation_threshold_pct=0.0)
     db.connect()
     try:
         _seed_embedding_dims_3(db)
@@ -3314,23 +3307,15 @@ def test_non_cosine_hnsw_metric_survives_index_rebuild(
         log_buffer = io.StringIO()
         sink_id = logger.add(log_buffer, level="INFO")
         try:
-            monkeypatch.setattr(serial_executor, "COMPACT_SAMPLE_INTERVAL", 1)
-            db._execute_in_db_thread_sync(
-                "insert_file",
-                File(
-                    path="metric_compaction_trigger.py",
-                    mtime=3.0,
-                    size_bytes=24,
-                    language=Language.PYTHON,
-                ),
-            )
+            compacted_size = db.compact_database()
         finally:
             logger.remove(sink_id)
 
-        assert "Compaction complete" in log_buffer.getvalue(), (
-            "forced sampled auto-compaction did not run"
-        )
-        assert os.path.getsize(db.db_path) <= size_before * 1.05
+        assert compacted_size > 0, "forced compaction did not run"
+        assert "Compaction complete" in log_buffer.getvalue()
+        # Same contract as test_compacted_file_is_not_larger: allow small
+        # DuckDB header overhead but no growth from the rebuild.
+        assert compacted_size <= size_before + 2048
 
         after = [
             i
