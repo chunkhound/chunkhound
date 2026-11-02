@@ -14,6 +14,7 @@ from loguru import logger
 
 from chunkhound.services.search_service_protocol import SearchServiceProtocol
 from chunkhound.services.vector_cache import VectorCache
+from chunkhound.utils.path_filter import normalize_path_filter, path_matches_filter
 
 OVERFETCH_FACTOR_ENV = "CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR"
 _DEFAULT_OVERFETCH_FACTOR = 5
@@ -128,15 +129,6 @@ class TransientSearchService:
             result = result / norm
         return result
 
-    @staticmethod
-    def _validate_path_filter(path_filter: str | None) -> str | None:
-        if not path_filter:
-            return None
-        for danger in ("..", "~", "*", "?", "[", "]", "\0", "\n", "\r"):
-            if danger in path_filter:
-                raise ValueError(f"Path filter contains forbidden pattern: {danger!r}")
-        return path_filter.replace("\\", "/").lstrip("/").rstrip("/") + "/"
-
     async def _embed_texts(self, texts: list[str], provider: str | None) -> Any:
         if provider is None:
             return await self._embedding_manager.embed_texts(texts)
@@ -215,7 +207,7 @@ class TransientSearchService:
             return [], self._pagination(page_size, offset, 0)
         query_vector = self._normalise(query_result.embeddings[0])
         cache_ns = self._cache_namespace(query_result)
-        path_prefix = self._validate_path_filter(path_filter)
+        path_prefix = normalize_path_filter(path_filter)
         effective_limit = (
             limit
             if limit is not None
@@ -235,7 +227,7 @@ class TransientSearchService:
                 if not path_prefix
                 or (
                     chunk.file_path
-                    and str(chunk.file_path).replace("\\", "/").startswith(path_prefix)
+                    and path_matches_filter(str(chunk.file_path), path_prefix)
                 )
             ]
             if not filtered:
@@ -340,7 +332,7 @@ class TransientSearchService:
             [self._normalise(vector) for vector in query_result.embeddings]
         )
         cache_ns = self._cache_namespace(query_result)
-        path_prefix = self._validate_path_filter(path_filter)
+        path_prefix = normalize_path_filter(path_filter)
         effective_limit = (
             limit
             if limit is not None
@@ -360,7 +352,7 @@ class TransientSearchService:
                 if not path_prefix
                 or (
                     chunk.file_path
-                    and str(chunk.file_path).replace("\\", "/").startswith(path_prefix)
+                    and path_matches_filter(str(chunk.file_path), path_prefix)
                 )
             ]
             if not filtered:
@@ -849,7 +841,7 @@ class TransientSearchService:
                 f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
             )
         expression = re.compile(pattern)
-        path_prefix = self._validate_path_filter(path_filter)
+        path_prefix = normalize_path_filter(path_filter)
         effective_limit = limit if limit is not None else offset + page_size
         matches: list[dict[str, Any]] = []
         total = 0
@@ -859,7 +851,7 @@ class TransientSearchService:
             async for chunks in self._chunk_stream():
                 for chunk in chunks:
                     path = str(chunk.file_path).replace("\\", "/")
-                    if path_prefix and not path.startswith(path_prefix):
+                    if path_prefix and not path_matches_filter(path, path_prefix):
                         continue
                     if expression.search(chunk.code) is None:
                         continue
