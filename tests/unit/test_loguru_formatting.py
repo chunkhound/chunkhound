@@ -11,7 +11,17 @@ from pathlib import Path
 
 
 _PRINTF_PLACEHOLDER = re.compile(r"%(?:\d+(?:\.\d+)?)?[sdrf]\b")
-_LOG_METHODS = {"trace", "debug", "info", "success", "warning", "error", "critical", "exception", "log"}
+_LOG_METHODS = {
+    "trace",
+    "debug",
+    "info",
+    "success",
+    "warning",
+    "error",
+    "critical",
+    "exception",
+    "log",
+}
 
 
 def test_loguru_messages_do_not_use_printf_placeholders() -> None:
@@ -37,7 +47,10 @@ def test_loguru_messages_do_not_use_printf_placeholders() -> None:
             method = node.func
             if not isinstance(method, ast.Attribute) or method.attr not in _LOG_METHODS:
                 continue
-            if not isinstance(method.value, ast.Name) or method.value.id not in logger_names:
+            if (
+                not isinstance(method.value, ast.Name)
+                or method.value.id not in logger_names
+            ):
                 continue
             template = node.args[0]
             if not isinstance(template, ast.Constant) or not isinstance(template.value, str):
@@ -45,4 +58,6 @@ def test_loguru_messages_do_not_use_printf_placeholders() -> None:
             if _PRINTF_PLACEHOLDER.search(template.value):
                 offenders.append(f"{path.relative_to(root.parent)}:{node.lineno}")
 
-    assert not offenders, "Loguru calls use printf-style placeholders: " + ", ".join(offenders)
+    assert not offenders, (
+        "Loguru calls use printf-style placeholders: " + ", ".join(offenders)
+    )
