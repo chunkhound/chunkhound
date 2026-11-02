@@ -16,7 +16,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.interfaces.database_provider import DatabaseProvider
-from chunkhound.interfaces.embedding_provider import EmbeddingProvider, embed_queries
+from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
 
 class SingleHopStrategy:
@@ -61,7 +61,7 @@ class SingleHopStrategy:
             Tuple of (results, pagination_metadata)
         """
         # Generate query embedding
-        query_results = await embed_queries(self._embedding_provider, [query])
+        query_results = await self._embedding_provider.embed_query([query])
         if not query_results:
             return [], {}
 

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **VoyageAI semantic search ranks better** — Search queries are now embedded with Voyage `input_type="query"` instead of `"document"`. Voyage models embed queries and documents differently, and a query embedded as a document was matched as one document against another, which pushed relevant code far down the results. Indexed chunks were always embedded as documents and still are, so no re-index is needed. Other providers are unchanged.
+
 ## [6.1.0] - 2026-10-20
 
 ### Added

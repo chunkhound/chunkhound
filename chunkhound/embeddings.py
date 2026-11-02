@@ -8,7 +8,6 @@ from loguru import logger
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider,
-    embed_queries,
 )
 
 if TYPE_CHECKING:
@@ -109,15 +108,7 @@ class EmbeddingManager:
             Embedding result with vectors and metadata
         """
         provider = self.get_provider(provider_name)
-
-        embeddings = await provider.embed(texts)
-
-        return LocalEmbeddingResult(
-            embeddings=embeddings,
-            model=provider.model,
-            provider=provider.name,
-            dims=provider.dims,
-        )
+        return _embedding_result(provider, await provider.embed(texts))
 
     async def embed_query_texts(
         self,
@@ -126,18 +117,21 @@ class EmbeddingManager:
     ) -> LocalEmbeddingResult:
         """Like ``embed_texts``, for search queries compared against indexed chunks.
 
-        Uses the provider's query path when it has one (see ``embed_queries``).
+        Uses the provider's ``embed_query``.
         """
         provider = self.get_provider(provider_name)
+        return _embedding_result(provider, await provider.embed_query(texts))
 
-        embeddings = await embed_queries(provider, texts)
 
-        return LocalEmbeddingResult(
-            embeddings=embeddings,
-            model=provider.model,
-            provider=provider.name,
-            dims=provider.dims,
-        )
+def _embedding_result(
+    provider: EmbeddingProvider, embeddings: list[list[float]]
+) -> LocalEmbeddingResult:
+    return LocalEmbeddingResult(
+        embeddings=embeddings,
+        model=provider.model,
+        provider=provider.name,
+        dims=provider.dims,
+    )
 
 
 def create_openai_provider(

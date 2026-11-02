@@ -3,7 +3,7 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import httpx
 from loguru import logger
@@ -67,6 +67,10 @@ class VoyageModelConfig(TypedDict):
 # from this map are not Cohere-style: TEI sends no limit at all, and "auto"
 # probes Cohere-style only when a rerank_model is configured.
 _RERANK_LIMIT_PARAM = {"voyage": "top_k", "cohere": "top_n"}
+
+# Voyage's embed `input_type`. Indexed chunks are embedded as "document" and
+# search queries as "query"; the two are embedded asymmetrically.
+VoyageInputType = Literal["query", "document"]
 
 
 # Official VoyageAI model configuration based on API documentation
@@ -526,11 +530,13 @@ class VoyageAIEmbeddingProvider:
         Voyage models embed queries and documents asymmetrically; a query
         embedded as a document ranks as a document-vs-document match against
         the indexed chunks. Callers reach this through
-        ``chunkhound.interfaces.embedding_provider.embed_queries``.
+        ``EmbeddingProvider.embed_query``.
         """
         return await self._embed_as(texts, "query")
 
-    async def _embed_as(self, texts: list[str], input_type: str) -> list[list[float]]:
+    async def _embed_as(
+        self, texts: list[str], input_type: VoyageInputType
+    ) -> list[list[float]]:
         if not texts:
             return []
 
@@ -551,7 +557,7 @@ class VoyageAIEmbeddingProvider:
         return await self._embed_single_batch(validated_texts, input_type)
 
     async def _embed_single_batch(
-        self, texts: list[str], input_type: str = "document"
+        self, texts: list[str], input_type: VoyageInputType
     ) -> list[list[float]]:
         """Send one batch to the API with retry logic."""
         async with self._embed_semaphore:
@@ -629,7 +635,7 @@ class VoyageAIEmbeddingProvider:
             )
 
     async def _embed_single_batch_locked(
-        self, texts: list[str], input_type: str = "document"
+        self, texts: list[str], input_type: VoyageInputType
     ) -> list[list[float]]:
         """Inner embed implementation, called while holding the semaphore."""
         # Retry loop for transient network errors

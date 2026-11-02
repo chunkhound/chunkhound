@@ -858,7 +858,7 @@ class TestEmbedSubBatching:
         p = _make_provider(api_key="test-key", batch_size=2)
         call_sizes: list[int] = []
 
-        async def fake_single_batch(texts, input_type="document"):
+        async def fake_single_batch(texts, input_type):
             call_sizes.append(len(texts))
             return [[float(i)] for i in range(len(texts))]
 
@@ -873,7 +873,7 @@ class TestEmbedSubBatching:
     async def test_sub_batching_preserves_order(self):
         p = _make_provider(api_key="test-key", batch_size=2)
 
-        async def fake_single_batch(texts, input_type="document"):
+        async def fake_single_batch(texts, input_type):
             return [[float(ord(t[0]))] for t in texts]
 
         p._embed_single_batch = fake_single_batch
@@ -965,7 +965,7 @@ class TestUpstreamTimeoutRetry:
                 new_callable=AsyncMock,
             ) as mock_sleep:
                 with pytest.raises(RuntimeError):
-                    await p._embed_single_batch_locked(["text"])
+                    await p._embed_single_batch_locked(["text"], "document")
 
         assert call_count == 2
         # Upstream timeout backoff: base_delay=10.0, attempt=0 → 10.0 * 2^0 = 10.0
@@ -990,7 +990,7 @@ class TestUpstreamTimeoutRetry:
                 new_callable=AsyncMock,
             ):
                 with pytest.raises(RuntimeError):
-                    await p._embed_single_batch_locked(["text"])
+                    await p._embed_single_batch_locked(["text"], "document")
 
         assert call_count == 2
 
@@ -1009,7 +1009,7 @@ class TestUpstreamTimeoutRetry:
             side_effect=fake_to_thread,
         ):
             with pytest.raises(RuntimeError, match="Embedding generation failed"):
-                await p._embed_single_batch_locked(["text"])
+                await p._embed_single_batch_locked(["text"], "document")
 
         assert call_count == 1
 

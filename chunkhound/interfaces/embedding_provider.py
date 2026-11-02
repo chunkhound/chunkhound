@@ -120,6 +120,28 @@ class EmbeddingProvider(Protocol):
         """
         ...
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for search queries.
+
+        Every place that embeds a search query to compare against indexed chunk
+        vectors calls this, never ``embed``. Some models embed queries and
+        documents asymmetrically (Voyage's ``input_type``): chunks are indexed
+        as documents, and a query embedded as a document ranks as a
+        document-vs-document match, which can push the right chunk far down
+        the list. A provider whose model makes no such distinction delegates
+        to ``embed``.
+
+        Args:
+            texts: List of query strings to embed
+
+        Returns:
+            List of embedding vectors (one per input query)
+
+        Raises:
+            EmbeddingError: If embedding generation fails
+        """
+        ...
+
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text.
 
@@ -398,26 +420,3 @@ class APIEmbeddingProvider(EmbeddingProvider, Protocol):
             NotImplementedError: If provider doesn't support reranking
         """
         raise NotImplementedError("Reranking not supported by this provider")
-
-
-async def embed_queries(
-    provider: EmbeddingProvider, queries: list[str]
-) -> list[list[float]]:
-    """Embed search queries that will be compared against indexed chunk vectors.
-
-    Some embedding models embed queries and documents asymmetrically (Voyage's
-    ``input_type``): chunks are indexed as documents, and a query embedded as a
-    document ranks as a document-vs-document match, which can push the right
-    chunk far down the list. A provider that distinguishes the two defines
-    ``embed_query``; every other provider embeds queries with ``embed``, as
-    before.
-
-    The method is looked up on the provider's class, not the instance, so a
-    ``MagicMock`` provider (which answers every attribute) keeps using its
-    ``embed``.
-    """
-    if callable(getattr(type(provider), "embed_query", None)):
-        embed_query = getattr(provider, "embed_query")
-        result: list[list[float]] = await embed_query(queries)
-        return result
-    return await provider.embed(queries)

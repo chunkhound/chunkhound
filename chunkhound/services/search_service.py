@@ -7,7 +7,7 @@ from loguru import logger
 
 from chunkhound.core.types.common import ChunkId
 from chunkhound.interfaces.database_provider import DatabaseProvider
-from chunkhound.interfaces.embedding_provider import EmbeddingProvider, embed_queries
+from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
 from .base_service import BaseService
 from .search.context_retriever import ContextRetriever
@@ -255,9 +255,7 @@ class SearchService(BaseService):
             # is populated by the result enhancer.
             if query and self._embedding_provider and results:
                 try:
-                    query_vec = (
-                        await embed_queries(self._embedding_provider, [query])
-                    )[0]
+                    query_vec = (await self._embedding_provider.embed_query([query]))[0]
                     chunk_ids = [
                         c["chunk_id"]
                         for c in results
