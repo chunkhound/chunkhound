@@ -17,6 +17,13 @@ class UniversalConcept(Enum):
     STRUCTURE = "structure"  # Hierarchical organization (headers, sections)
 
 
+# Metadata key a mapping sets on a BLOCK chunk that is one top-level statement,
+# such as a JS `describe(...)` call or an IIFE. The parser cuts the definitions
+# nested in such a statement out of it, since they are chunked on their own, and
+# merges it only with chunks directly next to it (see UniversalParser).
+TOP_LEVEL_STATEMENT = "top_level_statement"
+
+
 @dataclass(frozen=True)
 class UniversalChunk:
     """Language-agnostic representation of semantic code unit."""

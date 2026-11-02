@@ -169,6 +169,8 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         elif concept == UniversalConcept.IMPORT:
             return TOP_LEVEL_IMPORTS
         elif concept == UniversalConcept.BLOCK:
+            # BLOCK here means a top-level call statement only (describe/it,
+            # an IIFE, main(), app.listen(...)); never a nested block.
             return TOP_LEVEL_CALL_STATEMENTS
         return None
 
