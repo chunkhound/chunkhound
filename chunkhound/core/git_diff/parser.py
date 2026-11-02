@@ -141,7 +141,12 @@ class StreamingDiffParser:
                 self._consume_line(line, output)
                 continue
 
-            if self._can_stream_partial_body(self._line_buffer):
+            if len(self._line_buffer) > self._max_chunk_chars and (
+                self._can_stream_partial_body(self._line_buffer)
+            ):
+                # Only stream a partial line once it cannot fit in one chunk
+                # anyway. Shorter partial lines wait for their newline so chunk
+                # boundaries do not depend on where pipe reads happen to split.
                 advances = self._line_buffer[0] in ("+", " ")
                 self._append_hunk_text(
                     self._line_buffer, self._running_line, output, is_body=True

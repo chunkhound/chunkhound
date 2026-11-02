@@ -1,6 +1,7 @@
 """Unit tests for chunkhound.core.git_diff.parser."""
 
 import asyncio
+import random
 from collections.abc import AsyncIterator
 
 import pytest
@@ -530,6 +531,35 @@ def test_huge_unterminated_body_line_keeps_parser_state_bounded() -> None:
     assert max_buffered <= 10_000
     assert all(len(chunk.code) <= 10_000 for chunk in chunks)
     assert all(chunk.start_line == 1 and chunk.end_line == 1 for chunk in chunks)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_chunks_do_not_depend_on_read_boundaries(seed: int) -> None:
+    """The same diff must yield identical chunks however git output is split."""
+    rng = random.Random(seed)
+    lines = []
+    for i in range(3_000):
+        width = rng.choice([5, 40, 120, 900, 2_500])
+        lines.append(f"{rng.choice('+- ')}line{i} {'x' * width}\n")
+    diff = (
+        "diff --git a/big.py b/big.py\n"
+        "--- a/big.py\n"
+        "+++ b/big.py\n"
+        "@@ -1,3000 +1,3000 @@ fn\n" + "".join(lines)
+    )
+    parser = StreamingDiffParser(max_chunk_chars=2_000)
+    streamed = []
+    start = 0
+    while start < len(diff):
+        end = start + rng.randint(1, 8_000)
+        streamed.extend(parser.feed(diff[start:end]))
+        start = end
+    streamed.extend(parser.finish())
+
+    expected = parse_diff_to_chunks(diff, max_chunk_chars=2_000)
+    assert [chunk.to_dict() for chunk in streamed] == [
+        chunk.to_dict() for chunk in expected
+    ]
 
 
 def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
