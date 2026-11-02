@@ -81,6 +81,11 @@ class StreamingDiffParser:
         self._max_chunk_chars = max_chunk_chars
         self._line_buffer = ""
         self._streaming_line_advances: bool | None = None
+        # Pure-deletion hunks (``+N,0``) have no new-side lines to index. Their
+        # body is discarded without buffering so a huge deleted line (e.g. a
+        # minified bundle) cannot trip the metadata-line safety limit.
+        self._skipping_hunk = False
+        self._discarding_line = False
 
         self._current_file: str | None = None
         self._hunk_start = 0
@@ -104,6 +109,15 @@ class StreamingDiffParser:
         self._line_buffer += text
 
         while self._line_buffer:
+            if self._discarding_line:
+                newline = self._line_buffer.find("\n")
+                if newline < 0:
+                    self._line_buffer = ""
+                    break
+                self._line_buffer = self._line_buffer[newline + 1 :]
+                self._discarding_line = False
+                continue
+
             if self._streaming_line_advances is not None:
                 newline = self._line_buffer.find("\n")
                 if newline < 0:
@@ -136,6 +150,11 @@ class StreamingDiffParser:
                 self._streaming_line_advances = advances
                 break
 
+            if self._skipping_hunk and not self._could_be_boundary(self._line_buffer):
+                self._line_buffer = ""
+                self._discarding_line = True
+                break
+
             if len(self._line_buffer) > _MAX_METADATA_LINE_CHARS:
                 raise ValueError(
                     "git diff metadata line exceeds the 1 MiB safety limit"
@@ -147,6 +166,9 @@ class StreamingDiffParser:
     def finish(self) -> list[Chunk]:
         """Flush an unterminated final line and the active hunk."""
         output: list[Chunk] = []
+        if self._discarding_line:
+            self._line_buffer = ""
+            self._discarding_line = False
         if self._streaming_line_advances is not None:
             if self._line_buffer:
                 self._append_hunk_text(
@@ -162,24 +184,31 @@ class StreamingDiffParser:
         self._flush_hunk(output)
         return output
 
-    def _can_stream_partial_body(self, line: str) -> bool:
-        if not self._in_hunk or not line:
-            return False
+    @staticmethod
+    def _could_be_boundary(line: str) -> bool:
+        """Return whether a (partial) line may be a file or hunk header."""
         # Inside a hunk, "+++ ..." is a valid added source line. A real file
         # header follows a new "diff --git" boundary, which flushes the hunk.
         metadata_prefixes = ("diff --git ", "@@")
         if any(prefix.startswith(line) for prefix in metadata_prefixes):
+            return True
+        return any(line.startswith(prefix) for prefix in metadata_prefixes)
+
+    def _can_stream_partial_body(self, line: str) -> bool:
+        if not self._in_hunk or not line:
             return False
-        if any(line.startswith(prefix) for prefix in metadata_prefixes):
-            return False
-        return True
+        return not self._could_be_boundary(line)
 
     def _consume_line(self, line: str, output: list[Chunk]) -> None:
         stripped = line.rstrip("\n").rstrip("\r")
 
         if stripped.startswith("diff --git "):
             self._flush_hunk(output)
+            self._skipping_hunk = False
             self._current_file = None
+            return
+
+        if self._skipping_hunk and not stripped.startswith("@@"):
             return
 
         if not self._in_hunk and stripped.startswith("+++ "):
@@ -198,7 +227,8 @@ class StreamingDiffParser:
             new_start = int(match.group(1))
             count = match.group(2)
             new_count = int(count) if count is not None else 1
-            if new_count == 0:
+            self._skipping_hunk = new_count == 0
+            if self._skipping_hunk:
                 return
 
             self._hunk_start = new_start

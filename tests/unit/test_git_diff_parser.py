@@ -127,6 +127,33 @@ def test_deletion_hunk_skipped() -> None:
     assert len(chunks) == 0
 
 
+@pytest.mark.parametrize("header", ["@@ -1 +0,0 @@", "@@ -1,2 +4,0 @@ fn"])
+def test_huge_deleted_line_does_not_abort_diff(header: str) -> None:
+    """Deleting a minified bundle must not fail search over the rest of a diff."""
+    diff = (
+        "diff --git a/bundle.min.js b/bundle.min.js\n"
+        "--- a/bundle.min.js\n"
+        "+++ b/bundle.min.js\n"
+        f"{header}\n"
+        "-" + "x" * 2_000_000 + "\n"
+        "-tail\n"
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    parser = StreamingDiffParser()
+    chunks = []
+    for start in range(0, len(diff), 65_536):
+        chunks.extend(parser.feed(diff[start : start + 65_536]))
+    chunks.extend(parser.finish())
+
+    assert [chunk.file_path for chunk in chunks] == ["a.py"]
+    assert "+new\n" in chunks[0].code
+
+
 def test_empty_input_returns_empty_list() -> None:
     chunks = parse_diff_to_chunks("")
     assert chunks == []
