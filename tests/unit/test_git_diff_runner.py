@@ -129,10 +129,12 @@ async def test_root_commit_uses_empty_tree(tmp_path: Path) -> None:
         await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
 
     assert second_call_args is not None
-    # Range is a single string arg like "4b825d...aaaa..." — check substring
-    range_arg = second_call_args[2]  # ("git", "diff", "<range>", ...)
+    # ("git", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "<range>", "--")
+    assert second_call_args[:5] == ("git", "diff", "--no-color", "--no-ext-diff", "--no-textconv")
+    range_arg = second_call_args[5]
     assert EMPTY_TREE in range_arg
     assert HASH in range_arg
+    assert second_call_args[6] == "--"
 
 
 @pytest.mark.asyncio
@@ -186,3 +188,56 @@ async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
             await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
 
     assert call_count == 1  # no retry
+
+
+def _git(cwd: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.mark.asyncio
+async def test_real_git_ignores_user_diff_rewrites(tmp_path: Path) -> None:
+    """color.ui / diff.external / textconv must not empty or rewrite git-history diffs (#470)."""
+    import shutil
+    import subprocess
+
+    from chunkhound.core.git_diff.parser import parse_diff_to_chunks
+
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "a@b")
+    _git(repo, "config", "user.name", "a")
+    (repo / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "1")
+    (repo / "a.py").write_text("def a():\n    return 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "2")
+
+    # Hostile local config that previously broke the parser / runner.
+    _git(repo, "config", "color.ui", "always")
+    _git(repo, "config", "diff.external", "/bin/false")
+    attributes = repo / ".gitattributes"
+    attributes.write_text("*.py diff=hostile\n", encoding="utf-8")
+    converter = tmp_path / "hostile-textconv.sh"
+    converter.write_text("#!/bin/sh\necho CONVERTED\n", encoding="utf-8")
+    converter.chmod(0o755)
+    _git(repo, "config", "diff.hostile.textconv", str(converter))
+
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    parent = subprocess.check_output(["git", "rev-parse", "HEAD~1"], cwd=repo, text=True).strip()
+    raw = await run_git_diff(f"{parent}..{head}", repo)
+
+    assert "\x1b[" not in raw
+    assert "CONVERTED" not in raw
+    assert "diff --git" in raw
+    assert "return 2" in raw
+
+    chunks = parse_diff_to_chunks(raw)
+    paths = {str(c.file_path) for c in chunks}
+    assert "a.py" in paths
+    assert any("return 2" in c.code for c in chunks)
