@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import multiprocessing
+import os
 import sys
 import threading
 import time
@@ -278,9 +279,26 @@ def pages_to_chunks(pages: Sequence[Page]) -> list[Chunk]:
     return chunks
 
 
+def _redirect_stdout_to_stderr() -> None:
+    """Keep worker output off the parent's stdout.
+
+    The spawned worker inherits fd 1, which is the JSON-RPC channel under
+    ``chunkhound mcp`` stdio. MuPDF writes diagnostics for malformed PDFs
+    straight to fd 1, bypassing ``sys.stdout``, so redirect at the fd level.
+    """
+    if sys.stdout is not None:
+        sys.stdout.flush()
+    try:
+        target = sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        target = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(target, 1)
+
+
 def _pdf_parse_worker(content: bytes, connection: Connection) -> None:
     """Parse one PDF in a disposable process and send bounded JSON bytes."""
     try:
+        _redirect_stdout_to_stderr()
         parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
         bounded, truncated = _bounded_pdf_chunks(parsed)
         wire: list[_PDFChunkWire] = [

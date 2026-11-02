@@ -1,6 +1,8 @@
 """Contracts for composing in-process research over fetched pages."""
 
 import asyncio
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -567,3 +569,36 @@ async def test_research_cancellation_finalizes_page_producer() -> None:
             await task
 
     assert finalized.is_set()
+
+
+_MALFORMED_PDF = (
+    b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+    b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n"
+    b"4 0 obj\n<< /Length 999 >>\nstream\nBT foo bar baz ET\nendstream\nendobj\n"
+    b"xref\n0 1\nbroken\ntrailer\n<< /Root 1 0 R >>\nstartxref\n12345\n%%EOF"
+)
+
+
+def test_isolated_pdf_parser_keeps_stdout_clean_for_mcp_stdio() -> None:
+    """Malformed-PDF diagnostics must never reach stdout (MCP JSON-RPC channel)."""
+    script = (
+        "import asyncio, sys\n"
+        "from chunkhound.services.web_research_service import _parse_pdf_isolated\n"
+        "if __name__ == '__main__':\n"
+        "    try:\n"
+        "        asyncio.run(_parse_pdf_isolated("
+        "sys.stdin.buffer.read(), 'https://example.invalid/bad.pdf'))\n"
+        "    except Exception:\n"
+        "        pass\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        input=_MALFORMED_PDF,
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
+
+    assert result.stdout == b""
+    assert b"MuPDF" in result.stderr
