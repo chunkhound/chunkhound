@@ -115,7 +115,7 @@ class CodexCLIProvider(BaseCLIProvider):
             # discovery fails (no codex binary, unauthenticated, etc.).
             logger.warning(
                 "Codex model discovery failed; falling back to "
-                "%r. Check 'codex debug models' or "
+                "{!r}. Check 'codex debug models' or "
                 "set CHUNKHOUND_CODEX_DEFAULT_MODEL.",
                 CODEX_DEFAULT_SYNTHESIS_MODEL,
             )
@@ -143,7 +143,7 @@ class CodexCLIProvider(BaseCLIProvider):
         effort = candidate.strip().lower()
         if effort not in allowed:
             logger.warning(
-                "Unknown Codex reasoning effort '%s'; falling back to 'low'", candidate
+                "Unknown Codex reasoning effort '{}'; falling back to 'low'", candidate
             )
             return "low", "fallback"
 
@@ -160,7 +160,7 @@ class CodexCLIProvider(BaseCLIProvider):
         allowed = {"read-only", "workspace-write", "danger-full-access"}
         if candidate not in allowed:
             logger.warning(
-                "Unknown Codex sandbox mode '%s'; falling back to 'read-only'",
+                "Unknown Codex sandbox mode '{}'; falling back to 'read-only'",
                 candidate,
             )
             return "read-only"
@@ -174,7 +174,7 @@ class CodexCLIProvider(BaseCLIProvider):
         allowed = {"untrusted", "on-failure", "on-request", "never"}
         if candidate not in allowed:
             logger.warning(
-                "Unknown Codex approval policy '%s'; falling back to 'on-request'",
+                "Unknown Codex approval policy '{}'; falling back to 'on-request'",
                 candidate,
             )
             return "on-request"
@@ -444,7 +444,7 @@ class CodexCLIProvider(BaseCLIProvider):
         estimated_tokens = self.estimate_tokens(content)
         if debug_codex:
             logger.debug(
-                "Codex CLI request: model=%s, chars=%d, est_tokens=%d, max_tokens=%s",
+                "Codex CLI request: model={}, chars={}, est_tokens={}, max_tokens={}",
                 effective_model,
                 content_chars,
                 estimated_tokens,
@@ -537,8 +537,8 @@ class CodexCLIProvider(BaseCLIProvider):
             use_stdin = True if stdin_first else (len(content) > max_arg_chars)
         if debug_codex:
             logger.debug(
-                "Codex CLI transport selection: stdin_first=%s, use_stdin=%s, "
-                "max_arg_chars=%d",
+                "Codex CLI transport selection: stdin_first={}, use_stdin={}, "
+                "max_arg_chars={}",
                 stdin_first,
                 use_stdin,
                 max_arg_chars,
@@ -568,7 +568,7 @@ class CodexCLIProvider(BaseCLIProvider):
                     if use_stdin:
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI attempt %d: stdin transport (skip_git=%s)",
+                                "Codex CLI attempt {}: stdin transport (skip_git={})",
                                 attempt + 1,
                                 add_skip_git,
                             )
@@ -598,7 +598,7 @@ class CodexCLIProvider(BaseCLIProvider):
                         # argv mode
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI attempt %d: argv transport (skip_git=%s)",
+                                "Codex CLI attempt {}: argv transport (skip_git={})",
                                 attempt + 1,
                                 add_skip_git,
                             )
@@ -625,8 +625,8 @@ class CodexCLIProvider(BaseCLIProvider):
                         err = self._sanitize_text(raw_err)
                         if debug_codex:
                             logger.debug(
-                                "Codex CLI non-zero exit (attempt %d, "
-                                "use_stdin=%s): %s",
+                                "Codex CLI non-zero exit (attempt {}, "
+                                "use_stdin={}): {}",
                                 attempt + 1,
                                 use_stdin,
                                 err,
@@ -684,7 +684,7 @@ class CodexCLIProvider(BaseCLIProvider):
                             stdout_text
                         )
                         if debug_codex and usage:
-                            logger.debug("Codex CLI usage: %s", usage)
+                            logger.debug("Codex CLI usage: {}", usage)
                         if message and message.strip():
                             return message.strip()
                         # Fall back to raw output if we couldn't parse an agent message.
@@ -696,7 +696,7 @@ class CodexCLIProvider(BaseCLIProvider):
                     )
                     if debug_codex:
                         logger.debug(
-                            "Codex CLI timeout on attempt %d after %ds",
+                            "Codex CLI timeout on attempt {} after %ds",
                             attempt + 1,
                             request_timeout,
                         )
@@ -719,7 +719,7 @@ class CodexCLIProvider(BaseCLIProvider):
                         if debug_codex:
                             logger.debug(
                                 "Codex CLI stdin connection lost on "
-                                "attempt %d; switching to argv",
+                                "attempt {}; switching to argv",
                                 attempt + 1,
                             )
                         if attempt < self._max_retries - 1:
@@ -740,7 +740,7 @@ class CodexCLIProvider(BaseCLIProvider):
                             use_stdin = True
                             if debug_codex:
                                 logger.debug(
-                                    "Codex CLI argv too long on attempt %d; "
+                                    "Codex CLI argv too long on attempt {}; "
                                     "switching to stdin",
                                     attempt + 1,
                                 )
@@ -760,7 +760,7 @@ class CodexCLIProvider(BaseCLIProvider):
                 if overlay_home and Path(overlay_home).exists():
                     if keep_overlay:
                         logger.warning(
-                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; preserving overlay at %s",
+                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; preserving overlay at {}",
                             overlay_home,
                         )
                     else:
