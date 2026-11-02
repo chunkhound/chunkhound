@@ -680,7 +680,7 @@ async def search_impl(
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
     vector_source: str = "diff",
-    strategy: Literal["auto", "single_hop", "multi_hop"] = "auto",
+    strategy: Literal["single_hop", "multi_hop"] | None = None,
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -696,7 +696,7 @@ async def search_impl(
         commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
         last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
         vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
-        strategy: Semantic search strategy. 'auto' (default) uses multi-hop expansion with reranking when the provider supports reranking, else single-hop. 'single_hop' returns one vector search with no expansion or reranking — sub-second, for callers that rerank results themselves. 'multi_hop' requires a reranking provider. Ignored for type='regex'.
+        strategy: Semantic search strategy. Omit it to choose by provider: multi-hop expansion with reranking when the provider can rerank, else single-hop. 'single_hop' runs one vector search with no expansion or reranking — sub-second, for callers that rerank results themselves. 'multi_hop' forces expansion with reranking; if the provider cannot rerank, the service logs a warning and uses single-hop. Cannot be combined with commit_range, commit_hash or last_n_commits unless vector_source='db'. Ignored for type='regex'.
 
     Returns:
         Dict with 'results' and 'pagination' keys
@@ -709,12 +709,30 @@ async def search_impl(
         raise ValueError(
             f"Invalid search type: '{type}'. Must be 'semantic' or 'regex'."
         )
+    if strategy not in (None, "single_hop", "multi_hop"):
+        raise ValueError(
+            f"Invalid search strategy: '{strategy}'. "
+            "Must be 'single_hop' or 'multi_hop'."
+        )
 
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
     effective_commit_range = _resolve_commit_range(commit_range, commit_hash, last_n_commits)
+
+    # The diff search path has no strategies, so a forced strategy would be
+    # silently dropped there. Same rule as the CLI's --single-hop/--multi-hop.
+    if (
+        type == "semantic"
+        and strategy is not None
+        and effective_commit_range is not None
+        and vector_source != "db"
+    ):
+        raise ValueError(
+            "strategy cannot be combined with commit_range/commit_hash/"
+            "last_n_commits unless vector_source='db'."
+        )
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -747,7 +765,7 @@ async def search_impl(
             provider=provider_name,
             model=model_name,
             path_filter=path,
-            force_strategy=None if strategy == "auto" else strategy,
+            force_strategy=strategy,
         )
     else:  # regex
         # Perform regex search; pass query so results are scored by cosine similarity
