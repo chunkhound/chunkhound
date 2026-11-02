@@ -232,16 +232,63 @@ If installation is interrupted, ordinary opens and automatic indexing refuse
 mixed state. Stop database users, then use explicit `chunkhound pull [path]` to
 download and verify a fresh recovery candidate; local work may need re-indexing.
 Do not delete coordination files or restore arbitrary quarantine contents.
-Unknown/uninspectable DuckDB WALs fail closed for both read-only and writable
-opens: provision compatible local VSS explicitly, preserve the originals and
-recover a copy or restore a known-good complete index. Writable reopen is not a
-bypass. Incompatible recognized backups can block opening a healthy live file;
-do not delete them or restore them blindly. Never attach an old WAL to a new base.
+There is no atomic multi-file or power-loss rollback guarantee.
 
-See [Hub client operation and recovery](https://github.com/chunkhound/chunkhound/blob/main/docs/hub-client.md)
-for complete packaging, directory-layout, cooperative-locking, VSS provisioning,
-backup/recovery, spawn and cancellation requirements. There is no atomic
-multi-file or power-loss rollback guarantee.
+### WAL provisioning and recovery
+
+Unknown/uninspectable DuckDB WALs fail closed for both read-only and writable
+opens. WAL inspection disables automatic extension installation/loading and
+requires locally compatible VSS support with HNSW persistence configured before
+attaching the database read-only. A missing extension is a provisioning failure,
+not evidence of corruption. Provision for the actual DuckDB engine version,
+platform and service account; Python and native runtimes each need matching
+support.
+
+For the Python DuckDB runtime, the following explicit in-memory setup may
+**download extension code** from DuckDB's configured repository. Run it only
+with operator authorization for that download and the runtime/account being
+provisioned:
+
+```bash
+uv run python - <<'PY'
+import duckdb
+
+with duckdb.connect(":memory:") as connection:
+    connection.execute("INSTALL vss")
+    connection.execute("LOAD vss")
+    connection.execute("SET hnsw_enable_experimental_persistence = true")
+PY
+```
+
+This opens no production database and is **not WAL recovery**. It does not
+provision every native runtime; matching native and offline extension
+provisioning is owned by your deployment tooling.
+
+A healthy WAL may still require writes to replay and be uninspectable read-only.
+Writable reopen does not bypass the compatibility check. Stop database users;
+preserve the original database plus every WAL/recovery file and their names.
+Recover a separate copy with compatible DuckDB/VSS tooling, or restore a
+known-good complete compatible index. Validate the recovered or restored copy
+before deliberately replacing live state. Incompatible recognized backups can
+block opening a healthy live file: have an operator identify and preserve them
+and select a compatible recovery set, rather than deleting or blindly restoring
+them. Never attach an old WAL to a new base or discard a WAL just to force an open.
+
+### Coordination and filesystem requirements
+
+Read-only database use still requires coordination. Preprovision a usable
+adjacent `<database-path>.chunkhound.lock` file and its parent locations with
+appropriate permissions, or allow ChunkHound to create them. An existing lock file can be
+opened read-only; initial lock or parent creation can require writes. There is
+no unlocked fallback if coordination fails. Do not delete stable lock files as
+"stale": their presence does not show whether an owner is alive.
+
+Use trusted, stable database and parent paths on local filesystems with reliable
+advisory locks and same-filesystem rename. Static path aliases do not protect
+against hostile concurrent pathname or symlink mutation. Hard-link aliases and
+unvalidated NFS/SMB or cross-host behavior are outside the guarantee. Stop older
+ChunkHound and third-party database clients that do not participate in
+coordination before pulling.
 
 ## Remote Configuration
 
@@ -563,7 +610,7 @@ path for older installations. If no path is configured, the default is
 |---|---|---|---|
 | `max_disk_usage_mb` | `number` | `null` | Max DB size in MB before indexing stops (CLI flag uses GB) |
 | `fragmentation_threshold_pct` | `number` | `30` | Background/auto-compaction trigger: file-size overhead above the provider's estimated live DB size (%). 30 = compact when the DB is ~30% larger than live data. 0 = always, null = never. This does not disable the fixed `chunkhound index` compaction boundaries. CLI: `--fragmentation-threshold-pct`. |
-| `execute_timeout_seconds` | `number` | `null` | Timeout for **synchronous** serial DB executor waits (`execute_sync` / `_execute_in_db_thread_sync`) in seconds. `null` = built-in defaults (30s normal ops, 660s compaction). When set, replaces both defaults for every sync operation including compaction, HNSW rebuild, and queries. Does **not** apply to async dispatch (`execute_async`), which remains unbounded. CLI: `--db-execute-timeout`. Env: `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` (or legacy `CHUNKHOUND_DB_EXECUTE_TIMEOUT`). |
+| `execute_timeout_seconds` | `number` | `null` | Timeout in seconds for ordinary **synchronous** serial DB executor caller waits, including compaction, HNSW rebuild, and queries. `null` = built-in defaults (30s normal ops, 660s compaction); setting a value replaces both defaults. Async dispatch remains unbounded. Safe disconnect and trusted Rust reconnect/preparation drain required work without a fixed timeout. A caller timeout does not stop submitted work or release its handles. CLI: `--db-execute-timeout`. Env: `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` (or legacy `CHUNKHOUND_DB_EXECUTE_TIMEOUT`). |
 | `lancedb_index_type` | `string` | `null` | LanceDB vector index type: `auto`, `ivf_hnsw_sq`, or `ivf_rq` |
 | `lancedb_optimize_fragment_threshold` | `number` | `100` | Fragment count to trigger LanceDB compaction |
 
@@ -874,7 +921,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__PROVIDER` | Database backend (`duckdb` or `lancedb`) |
 | `CHUNKHOUND_DATABASE__PATH` | Database storage path |
 | `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` | Max database size in GB |
-| `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` | Sync serial DB executor timeout in seconds (overrides 30s/660s defaults when set; async dispatch unbounded) |
+| `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` | Ordinary synchronous DB caller-wait timeout in seconds; overrides 30s/660s defaults. Async dispatch and safe disconnect/trusted Rust reconnect drainage remain unbounded. See [Database Options](#database-options). |
 | `CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT` | Auto-compaction fragmentation threshold (%) |
 | `CHUNKHOUND_DATABASE__READ_ONLY` | Open DB read-only (`true`/`1`/`yes`) |
 | `CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE` | LanceDB vector index type |

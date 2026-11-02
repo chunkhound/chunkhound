@@ -149,11 +149,13 @@ class SerialDatabaseExecutor:
         """Initialize serial executor with single-threaded pool.
 
         Args:
-            execute_timeout_seconds: Optional timeout for sync
-                ``execute_sync`` waits only (async dispatch is unbounded).
-                When None, uses built-in defaults (30s normal, 660s
-                compaction). When set, applies to every sync operation
-                including compaction.
+            execute_timeout_seconds: Optional timeout for ordinary synchronous
+                caller waits, including compaction (async dispatch is unbounded).
+                When None, uses built-in defaults (30s normal, 660s compaction).
+                When set, replaces both defaults. A caller timeout does not stop
+                submitted work or release its handles. Safe disconnect and
+                trusted Rust reconnect/preparation drain required work without
+                a fixed timeout.
         """
         # Create single-threaded executor for all database operations
         # This ensures complete serialization and prevents concurrent access issues
@@ -177,12 +179,13 @@ class SerialDatabaseExecutor:
         self._finalization: concurrent.futures.Future[Any] | None = None
 
     def resolve_timeout(self, operation_name: str) -> float:
-        """Resolve the wait timeout for a named ``execute_sync`` operation.
+        """Resolve the timeout for an ordinary synchronous caller wait.
 
-        Used only by ``execute_sync`` (async dispatch has no timeout).
-        When ``execute_timeout_seconds`` is configured, that value is used for
-        every sync operation (including compaction). Otherwise compaction ops
-        get the extended default and all other ops get 30s.
+        When ``execute_timeout_seconds`` is configured, it replaces the defaults
+        of 30s for normal operations and 660s for compaction. The caller may stop
+        waiting, but submitted work still owns its handles. Async dispatch is
+        unbounded; safe disconnect and trusted Rust reconnect/preparation bypass
+        this timeout to drain required work without a fixed deadline.
         """
         if self._execute_timeout_seconds is not None:
             return self._execute_timeout_seconds
@@ -366,7 +369,7 @@ class SerialDatabaseExecutor:
                 provider, operation_name, args, kwargs, _bypass_rust_pipeline_guard
             )
 
-        # Run in executor synchronously with configured timeout
+        # Bound ordinary caller waits, not safe disconnect or trusted reconnect.
         future = self._submit(executor_operation)
         timeout_s = self.resolve_timeout(operation_name)
         try:

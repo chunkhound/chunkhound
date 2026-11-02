@@ -358,3 +358,6 @@ site/test-results/
 
 # Isolated development worktrees
 .worktrees/
+
+# Local documentation (not tracked)
+/docs/
