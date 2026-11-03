@@ -8,6 +8,7 @@ same chunking patterns as TextMapping.
 
 import importlib.util
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +32,15 @@ from chunkhound.parsers.universal_engine import UniversalConcept
 # every mapping, so an eager import here made EVERY parse worker load that model,
 # even for a repo with no PDFs - enough, across a few concurrent indexes, to fail
 # workers with ONNX "bad allocation" and stall indexing.
-PYMUPDF_AVAILABLE = importlib.util.find_spec("pymupdf") is not None
+# The sys.modules check comes first because find_spec raises ValueError for a module
+# already in sys.modules with __spec__ = None (e.g. a test stub).
+PYMUPDF_AVAILABLE = (
+    "pymupdf" in sys.modules or importlib.util.find_spec("pymupdf") is not None
+)
 
 
 def _fitz() -> Any:
+    """Import PyMuPDF on first use and return the module."""
     import pymupdf  # PyMuPDF
 
     return pymupdf
