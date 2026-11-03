@@ -142,6 +142,11 @@ LLMProviderLiteral = Literal[
     "openrouter",
     "orcarouter",
     "requesty",
+    "api-route",
+    "opper",
+    "obscurify-ai",
+    "atlascloud",
+    "runcrate",
     "opencode-cli",
 ]
 
@@ -182,6 +187,11 @@ CLI_PROVIDER_CHOICES = (
     "openrouter",
     "orcarouter",
     "requesty",
+    "api-route",
+    "opper",
+    "obscurify-ai",
+    "atlascloud",
+    "runcrate",
     "opencode-cli",
 )
 
@@ -328,7 +338,8 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Optional directory for claude-code-cli temp files (system-prompt "
-            "file and MCP config). The default is the system temp directory. "
+            "file, MCP config and settings). The default is the system temp "
+            "directory. "
             "Set this for a special case such as Docker or a limited user. "
             "Ignored by every other provider."
         ),

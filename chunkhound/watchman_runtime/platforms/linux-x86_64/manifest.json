@@ -15,7 +15,8 @@
   "launch_mode": "native_binary",
   "listener_transport": "unix_socket",
   "probe_args": ["--version"],
-  "wheel_platform_tags": ["manylinux_2_34_x86_64"],
+  "min_glibc": "2.36",
+  "wheel_platform_tags": ["manylinux_2_31_x86_64"],
   "path_env": {
     "LD_LIBRARY_PATH": ["lib"]
   },

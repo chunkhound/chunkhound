@@ -224,6 +224,62 @@ jobs:
         with:
           skip-tag-version-patch: 'true'
 
+  # Installs the wheels already built by watchman-runtime-validation's
+  # ubuntu-latest leg into clean containers with no Rust toolchain, via
+  # scripts/smoke_linux_wheel_install.sh:
+  # - ubuntu:20.04 (glibc 2.31) proves the manylinux_2_31 floor at runtime
+  #   (auditwheel repair enforces it statically during the build).
+  # - ubuntu:22.04 + its system Python 3.10 covers a common LTS user setup.
+  # Both are below the packaged Watchman payload's min_glibc, so both must
+  # default to the watchdog realtime backend.
+  old-linux-wheel-smoke:
+    needs: watchman-runtime-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 20.04 (glibc 2.31)
+            image_var: UBUNTU_20_04_IMAGE
+            apt_packages: ca-certificates curl
+            python: '3.12'
+          - name: Ubuntu 22.04 + Python 3.10
+            image_var: UBUNTU_22_04_IMAGE
+            apt_packages: ca-certificates curl python3.10 python3.10-venv
+            python: /usr/bin/python3.10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download native + main wheels built by watchman-runtime-validation
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '{repaired-native-wheel-ubuntu-latest,watchman-wheel-ubuntu-latest}'
+          path: old-linux-dist
+          merge-multiple: true
+
+      - name: Install main + native wheels on ${{ matrix.name }} and smoke test
+        env:
+          IMAGE_VAR: ${{ matrix.image_var }}
+          APT_PACKAGES: ${{ matrix.apt_packages }}
+          PYTHON_REQUEST: ${{ matrix.python }}
+        run: |
+          source .github/linux-baseline-images.env
+          docker run --rm \
+            -v "$(pwd)":/work:ro \
+            -v "$(pwd)/old-linux-dist":/dist:ro \
+            -e APT_PACKAGES -e PYTHON_REQUEST \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -w /tmp \
+            "${!IMAGE_VAR}" \
+            bash -euo pipefail -c '
+              apt-get update -qq
+              apt-get install -y -qq $APT_PACKAGES
+              bash /work/scripts/smoke_linux_wheel_install.sh "$PYTHON_REQUEST" watchdog
+            '
+
   # Run the public Makefile contract once on macOS rather than only checking
   # its printed commands. Other platforms exercise the equivalent native build
   # through the test matrix without multiplying this expensive build.
@@ -272,6 +328,7 @@ jobs:
       - site-build-validation
       - watchman-rollout-gate
       - native-wheel-smoke-arm64
+      - old-linux-wheel-smoke
       - native-dev-macos
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

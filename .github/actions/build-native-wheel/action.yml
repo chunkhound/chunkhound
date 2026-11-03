@@ -8,12 +8,20 @@ description: >
   watchman-rollout-gate jobs (all with skip-tag-version-patch: true, since a
   CI branch/PR ref has no release tag to derive a version from). Published
   native-wheel support is
-  macOS arm64, Linux x86_64/aarch64 (manylinux_2_34), and Windows x86_64.
+  macOS arm64, Linux x86_64/aarch64 (manylinux_2_31), and Windows x86_64.
   Intel macOS is deliberately excluded: free Intel macOS runners are retired,
   and arm64 cross-compilation has unresolved PyO3 framework-linking failures.
-  musl and older glibc need a separate manylinux-container build; no native
-  sdist fallback exists. Assumes the calling job has already checked out the
-  repo and installed `uv`.
+  Linux wheels are built inside a pinned Ubuntu 20.04 container (glibc 2.31)
+  instead of on the runner's own glibc (>=2.34 on ubuntu-latest/ubuntu-24.04-arm),
+  so the wheel installs on glibc 2.31+ hosts (including Ubuntu 20.04) rather
+  than only 2.34+. `auditwheel repair --plat manylinux_2_31_<arch>` then
+  bundles DuckDB and rejects any ELF symbol version above the 2.31 floor, so
+  the wheel's tag is enforced rather than assumed. (Rust std's weak
+  statx@GLIBC_2.28/getrandom@GLIBC_2.25 references are already within that
+  policy and need no patching.) DuckDB's bundled prebuilt
+  library needs glibc 2.25, below the 2.31 floor. musl needs a separate
+  build; no native sdist fallback exists. Assumes the
+  calling job has already checked out the repo and installed `uv`.
 
 inputs:
   out-dir:
@@ -37,13 +45,40 @@ runs:
       shell: bash
       run: uv python install 3.12
 
+    - name: Resolve manylinux_2_31 build pins
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        # Ubuntu 20.04 is the oldest supported glibc host (2.31). Pin its
+        # multi-arch manifest so a rerun uses the same baseline; bootstrap the
+        # current Rust/maturin toolchain inside it below.
+        # The image pin lives in .github/linux-baseline-images.env, shared
+        # with ci.yml's old-linux-wheel-smoke so build and runtime agree.
+        source .github/linux-baseline-images.env
+        {
+          echo "MANYLINUX_IMAGE=$UBUNTU_20_04_IMAGE"
+          echo "MANYLINUX_RUST_TOOLCHAIN=1.99.0"
+          echo "MANYLINUX_MATURIN_VERSION=1.15.0"
+        } >> "$GITHUB_ENV"
+
     - name: Set up Rust toolchain
+      if: runner.os != 'Linux'
       uses: ./.github/actions/setup-rust-toolchain
 
-    - name: Build native wheel
+    # The Linux build runs in a container with its own toolchain, so the
+    # host setup-rust-toolchain cache (host target/) is unused there. Cache
+    # the container's rustup/cargo homes and target dir instead, outside the
+    # workspace so a caller's own target/ cache never picks them up.
+    - name: Cache manylinux_2_31 Rust build
+      if: runner.os == 'Linux'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/manylinux-build
+        key: manylinux_2_31-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: manylinux_2_31-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-
+
+    - name: Patch Cargo.toml version from git tag
       shell: bash
-      env:
-        DUCKDB_DOWNLOAD_LIB: "1"
       run: |
         # maturin build has no --set-version flag; it reads the wheel version from
         # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
@@ -71,6 +106,107 @@ runs:
         path.write_text(new_text)
         PYEOF
         fi
+
+    - name: Build native wheel (Linux, manylinux_2_31 container)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        DUCKDB_DOWNLOAD_LIB: "1"
+        OUT_DIR: ${{ inputs.out-dir }}
+      run: |
+        # No QEMU: ubuntu-24.04-arm is itself an aarch64 host, so Ubuntu
+        # 20.04's multi-arch image runs natively there.
+        BUILD_CACHE="$RUNNER_TEMP/manylinux-build"
+        mkdir -p "$BUILD_CACHE/home" "$OUT_DIR"
+        # Resolve relative inputs against the workspace, then mount the output
+        # separately so callers may also provide an absolute out-dir.
+        OUT_DIR="$(realpath "$OUT_DIR")"
+        # maturin treats a sibling pyproject.toml as authoritative package metadata
+        # ("mixed" Rust/Python project support), which misnames this wheel as
+        # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
+        # Python package's pyproject.toml for the build; the trap restores it
+        # even if the container build fails.
+        mv pyproject.toml pyproject.toml.hidden
+        trap 'mv pyproject.toml.hidden pyproject.toml' EXIT
+
+        cat > "$RUNNER_TEMP/build-manylinux-2-31.sh" <<'CONTAINER_SCRIPT'
+        set -euo pipefail
+        # The base image deliberately supplies glibc 2.31 but no build tools.
+        # Build as root inside the container, then restore host ownership of
+        # its mounted output and cache so subsequent action steps and cache
+        # save/restore can access them.
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq build-essential ca-certificates curl
+        export HOME=/build/home
+        export RUSTUP_HOME=/build/rustup
+        export CARGO_HOME=/build/cargo
+        export CARGO_TARGET_DIR=/build/target
+        export PATH="$CARGO_HOME/bin:/build/venv/bin:/build/uv:$PATH"
+        bash -euo pipefail <<'BUILD_SCRIPT'
+        # The static musl bootstrap has no glibc requirement. Reinstall it on
+        # every build so a restored cache cannot retain a previous pin; share
+        # the helper with the oldest-runtime smoke job so the two cannot drift.
+        bash /work/scripts/install_pinned_musl_uv.sh /build/uv
+        if ! command -v rustup >/dev/null; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+        fi
+        rustup toolchain install "$MANYLINUX_RUST_TOOLCHAIN" --profile minimal
+        rustup default "$MANYLINUX_RUST_TOOLCHAIN"
+        [[ -x /build/venv/bin/python ]] || uv venv --python 3.12 /build/venv
+        # auditwheel supplies the PEP 600 manylinux_2_31 repair policy and
+        # needs patchelf; pin it here (Ubuntu 20.04's apt patchelf is 0.10).
+        uv pip install --python /build/venv/bin/python -q \
+          "maturin==$MANYLINUX_MATURIN_VERSION" "auditwheel==6.8.2" "patchelf==0.17.2.4"
+        cd /work
+        cargo clean -p chunkhound_native --release
+        # Build an un-repaired wheel, then let auditwheel bundle DuckDB, enforce
+        # the explicit manylinux_2_31 policy, and tag the result.
+        mkdir -p /out/unrepaired
+        maturin build --release --compatibility linux --auditwheel skip --out /out/unrepaired/
+        shopt -s nullglob
+        wheels=(/out/unrepaired/chunkhound_native-*.whl)
+        if [[ ${#wheels[@]} -ne 1 ]]; then
+          echo "Expected exactly one un-repaired chunkhound_native wheel" >&2
+          exit 1
+        fi
+        duckdb_lib="$(find "$CARGO_TARGET_DIR" -type f -name libduckdb.so -print -quit)"
+        if [[ -z "$duckdb_lib" ]]; then
+          echo "Could not find the DuckDB shared library for auditwheel repair" >&2
+          exit 1
+        fi
+        # Auditwheel's CLI requires the architecture-qualified PEP 600 policy
+        # name (for example, manylinux_2_31_aarch64), unlike maturin's base
+        # policy spelling. Repair both bundles DuckDB and validates every ELF.
+        auditwheel repair --plat "manylinux_2_31_$(uname -m)" --wheel-dir /out \
+          --ldpaths "$(dirname "$duckdb_lib")" "${wheels[0]}"
+        # /out is the action's published output: retain only the repaired wheel.
+        rm -rf /out/unrepaired
+        BUILD_SCRIPT
+        chown -R "$HOST_UID:$HOST_GID" /build /out
+        CONTAINER_SCRIPT
+
+        docker run --rm \
+          -v "$(pwd)":/work \
+          -v "$OUT_DIR":/out \
+          -v "$BUILD_CACHE":/build \
+          -v "$RUNNER_TEMP/build-manylinux-2-31.sh":/tmp/build-manylinux-2-31.sh:ro \
+          -e DUCKDB_DOWNLOAD_LIB \
+          -e HOST_UID="$(id -u)" \
+          -e HOST_GID="$(id -g)" \
+          -e MANYLINUX_RUST_TOOLCHAIN \
+          -e MANYLINUX_MATURIN_VERSION \
+          -e RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN' \
+          "$MANYLINUX_IMAGE" \
+          bash /tmp/build-manylinux-2-31.sh
+
+    - name: Build native wheel (macOS/Windows)
+      if: runner.os != 'Linux'
+      shell: bash
+      env:
+        DUCKDB_DOWNLOAD_LIB: "1"
+      run: |
         # maturin treats a sibling pyproject.toml as authoritative package metadata
         # ("mixed" Rust/Python project support), which misnames this wheel as
         # "chunkhound" (the main package) instead of "chunkhound_native". Hide the
@@ -96,20 +232,11 @@ runs:
         mkdir -p "${{ inputs.out-dir }}"
         # --auditwheel repair makes maturin bundle DuckDB's shared library
         # into the wheel and rewrite the extension's link path to resolve
-        # it relative to itself (auditwheel-equivalent on Linux, its own
-        # native re-implementations of delocate/delvewheel on macOS/Windows
-        # -- see maturin >=1.13). Without this flag maturin only *warns*
-        # about the external dependency on macOS/Windows instead of fixing
-        # it (Linux's default is already "repair"; passing it explicitly
-        # everywhere keeps every platform's behavior identical).
-        # On Linux, repair shells out to `patchelf`, which is an optional
-        # maturin extra (not a default dependency) -- request it explicitly
-        # or the build fails with "Failed to execute 'patchelf'".
-        if [[ "$RUNNER_OS" == "Linux" ]]; then
-          uvx --python 3.12 --from 'maturin[patchelf]' maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
-        else
-          uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
-        fi
+        # it relative to itself (its own native re-implementations of
+        # delocate/delvewheel on macOS/Windows -- see maturin >=1.13).
+        # Without this flag maturin only *warns* about the external
+        # dependency instead of fixing it.
+        uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
         mv pyproject.toml.hidden pyproject.toml
 
     - name: Smoke test native wheel API
@@ -125,7 +252,7 @@ runs:
         # macOS/Windows repair edge case) before it reaches PyPI -- alpha/beta/rc
         # tags publish with no other gate on the native wheel's importability.
         WORKSPACE_DIR="$(pwd)"
-        WHEEL_DIR="$WORKSPACE_DIR/${{ inputs.out-dir }}"
+        WHEEL_DIR="$(realpath "${{ inputs.out-dir }}")"
         TMP_DIR="$(mktemp -d)"
         cd "$TMP_DIR"
         uv run --no-project --python 3.12 --with "$WHEEL_DIR"/chunkhound_native-*.whl \

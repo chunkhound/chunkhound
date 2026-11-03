@@ -1297,6 +1297,16 @@ class OpenAIEmbeddingProvider:
                             "input length exceeds" in error_message
                             and "context length" in error_message
                         )
+                        # llama.cpp: https://github.com/ggml-org/llama.cpp/blob/ac8e1694d837b11ed0aab944a6a2eee34b9c4d80/tools/server/server-context.cpp#L4083
+                        or (
+                            "exceeds the available context size" in error_message
+                            and "tokens" in error_message
+                        )
+                        # llama.cpp: https://github.com/ggml-org/llama.cpp/blob/ac8e1694d837b11ed0aab944a6a2eee34b9c4d80/tools/server/server-context.cpp#L4074
+                        or (
+                            "is larger than the max context size" in error_message
+                            and "tokens" in error_message
+                        )
                     ):
                         total_tokens = self.estimate_batch_tokens(texts)
                         token_limit = (

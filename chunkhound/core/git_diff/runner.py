@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -15,6 +16,16 @@ _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # chars to cover SHA256 object hashes as well as the standard SHA1 40-char form.
 _SINGLE_COMMIT_RANGE_RE = re.compile(r'^([0-9a-fA-F]{4,64})\^\.\.([0-9a-fA-F]{4,64})\Z')
 
+# Isolate from user git config that rewrites diff output (color, external diff,
+# textconv). Keep LC_ALL=C so root-commit retry can match English stderr text.
+_GIT_DIFF_ARGS = ("git", "diff", "--no-color", "--no-ext-diff", "--no-textconv")
+
+
+def _git_diff_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    return env
+
 
 async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
     if (
@@ -25,10 +36,12 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
     ):
         raise ValueError(f"Unsafe git ref rejected: {commit_range!r}")
     proc = await asyncio.create_subprocess_exec(
-        "git", "diff", commit_range, "--",
+        *_GIT_DIFF_ARGS, commit_range, "--",
         cwd=str(cwd),
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_git_diff_env(),
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -49,10 +62,12 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
         if m and m.group(1) == m.group(2) and "unknown revision" in err:
             root_range = f"{_EMPTY_TREE_SHA}..{m.group(2)}"
             proc2 = await asyncio.create_subprocess_exec(
-                "git", "diff", root_range, "--",
+                *_GIT_DIFF_ARGS, root_range, "--",
                 cwd=str(cwd),
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_git_diff_env(),
             )
             try:
                 stdout2, stderr2 = await asyncio.wait_for(

@@ -171,3 +171,51 @@ def test_realtime_service_logs_install_default_backend_resolution(
         "explicit realtime backend is configured."
     ]
     assert service._last_warning is None
+
+
+@pytest.mark.parametrize(
+    ("host_libc", "expected"),
+    [
+        (("glibc", "2.31"), "watchdog"),
+        (("glibc", "2.35"), "watchdog"),
+        (("glibc", "2.36"), "watchman"),
+        (("musl", "1.2"), "watchdog"),
+    ],
+)
+def test_default_backend_falls_back_to_watchdog_when_host_glibc_is_too_old(
+    monkeypatch, host_libc, expected
+):
+    """The shipped Linux manifest's glibc floor decides the install default."""
+    monkeypatch.setattr(watchman_runtime_loader.platform, "libc_ver", lambda: host_libc)
+    monkeypatch.setattr(
+        watchman_runtime_loader,
+        "_normalize_platform_key",
+        lambda **_: ("linux", "x86_64"),
+    )
+    # Pretend the payload files were packaged into this install (as in a
+    # release wheel); the real manifest supplies min_glibc.
+    monkeypatch.setattr(
+        watchman_runtime_loader, "_running_from_source_tree", lambda: False
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader, "_packaged_resource_exists", lambda _path: True
+    )
+
+    assert default_realtime_backend_for_current_install() == expected
+
+
+def test_explicit_watchman_backend_on_too_old_glibc_fails_with_actionable_error(
+    monkeypatch, tmp_path
+):
+    """Explicitly requesting watchman below its glibc floor must not launch it."""
+    monkeypatch.setattr(
+        watchman_runtime_loader.platform, "libc_ver", lambda: ("glibc", "2.31")
+    )
+
+    with pytest.raises(
+        watchman_runtime_loader.UnsupportedWatchmanRuntimePlatformError,
+        match=r"requires glibc >= 2\.36, but this host has glibc 2\.31",
+    ):
+        watchman_runtime_loader.materialize_watchman_binary(
+            destination_root=tmp_path, system_name="Linux", machine_name="x86_64"
+        )
