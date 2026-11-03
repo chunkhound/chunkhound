@@ -166,6 +166,12 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         }
         # True until coverage is measured once, and again after any work.
         self._coverage_dirty = True
+        # True once an embed pass has run since the last non-embed mutation. A pass
+        # embeds every chunk missing a vector, so another one with nothing changed in
+        # between can only repeat it: chunks it could not embed (provider down, a chunk
+        # the model rejects) must not queue a repair pass, or the loop spins on
+        # embed -> coverage check -> embed. The next change or a restart retries them.
+        self._embed_pass_since_change = False
         self._pending_path_counts: dict[str, int] = {}
         self.failed_files: set[str] = set()
         self._last_warning: str | None = None

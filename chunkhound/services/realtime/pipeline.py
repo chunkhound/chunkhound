@@ -1512,8 +1512,10 @@ class RealtimePipelineMixin:
             "missing_chunks": missing,
             "checked_at": self._utc_now(),
         }
-        if missing and not any(
-            op == "embed" for op, _ in self._pending_mutations
+        if (
+            missing
+            and not self._embed_pass_since_change
+            and not any(op == "embed" for op, _ in self._pending_mutations)
         ):
             path = self.watch_path or Path(".")
             await self._enqueue_mutation(self._build_mutation("embed", path))
@@ -1549,6 +1551,9 @@ class RealtimePipelineMixin:
                     mutation, owned_when_dequeued = buffered_mutation
                     buffered_mutation = None
 
+                if mutation.operation != "embed":
+                    self._embed_pass_since_change = False
+
                 active_change_path: str | None = None
                 if mutation.operation in {"change", "scan"}:
                     active_change_path = str(mutation.path)
@@ -1567,6 +1572,7 @@ class RealtimePipelineMixin:
                         # Already covered by a promoted embed pass.
                         continue
                     completed = False
+                    self._embed_pass_since_change = True
                     try:
                         self._record_processing_started(mutation.path)
                         indexing_coordinator = self.services.indexing_coordinator

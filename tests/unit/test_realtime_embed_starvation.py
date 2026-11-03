@@ -122,3 +122,40 @@ async def test_idle_server_repairs_chunks_missing_vectors_and_reports_coverage(
     coverage = service._build_health_snapshot()["embedding_coverage"]
     assert coverage["missing_chunks"] == 0
     assert coverage["checked_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_chunks_an_embed_pass_cannot_fix_are_reported_not_retried_in_a_loop(
+    service: RealtimeIndexingService,
+) -> None:
+    """When an embed pass leaves chunks without a vector (provider down, a chunk the
+    model rejects), the idle loop must not queue pass after pass: one repair pass,
+    then the count is reported and the loop waits for the next change."""
+    passes: list[int] = []
+
+    async def count_chunks_missing_embeddings() -> int:
+        await asyncio.sleep(0)  # the real count runs in a thread, so it yields
+        return 7
+
+    async def generate_missing_embeddings() -> None:
+        passes.append(1)
+
+    service.services = SimpleNamespace(
+        indexing_coordinator=SimpleNamespace(
+            count_chunks_missing_embeddings=count_chunks_missing_embeddings,
+            generate_missing_embeddings=generate_missing_embeddings,
+        ),
+    )
+
+    process_task = asyncio.create_task(service._process_loop())
+    service.process_task = process_task
+    try:
+        await asyncio.sleep(0.3)
+    finally:
+        process_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await process_task
+
+    assert len(passes) == 1
+    coverage = service._build_health_snapshot()["embedding_coverage"]
+    assert coverage["missing_chunks"] == 7
