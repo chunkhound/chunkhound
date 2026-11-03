@@ -13,9 +13,11 @@ import base64
 import hashlib
 import html
 import html.parser
+import ipaddress
 import itertools
 import os
 import re
+import socket
 import subprocess
 import sys
 import urllib.error
@@ -489,25 +491,170 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         )
 
 
+class UnsafeFetchURLError(ValueError):
+    """Raised when a websearch fetch URL fails the SSRF pre-check.
+
+    A ValueError subclass so it surfaces through the same failure paths
+    as the other fetch rejections in this module (and, via ``_fetch_one``,
+    as a per-page warning rather than aborting the whole websearch).
+    """
+
+
+class _RedirectTargetError(Exception):
+    """Internal signal carrying a redirect destination (see ``_CaptureRedirect``)."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(url)
+        self.url = url
+
+
+class _CaptureRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that reports instead of following.
+
+    Raising ``_RedirectTargetError`` lets ``_fetch_url`` validate each redirect
+    destination before fetching it, instead of urllib silently following
+    a public-to-private redirect.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        raise _RedirectTargetError(newurl)
+
+
+_MAX_FETCH_REDIRECTS = 10
+
+
+def _validate_url_sync(url: str) -> None:
+    """SSRF pre-check for a fetch URL.
+
+    Rejects non-http(s) schemes, missing hostnames, unresolvable hosts,
+    and any resolved address that is loopback, private, link-local,
+    reserved, multicast, or unspecified (which covers cloud-metadata
+    addresses such as 169.254.169.254).
+
+    Mirrors ``chunkhound.utils.fetchurl._validate_url_and_resolve``; kept
+    as a separate implementation rather than imported because fetchurl
+    already imports this module, so importing it back would be circular.
+    The two checks must stay in step.
+
+    Out of scope, as in fetchurl: full DNS-rebind defence. A resolver
+    that returns a public IP here could return a private IP at fetch
+    time; closing that gap requires pinning the resolved IP through the
+    fetch, which the fetch stack does not currently support.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise UnsafeFetchURLError(f"Unsupported URL scheme: {parsed.scheme!r}")
+    hostname = parsed.hostname
+    if hostname is None:
+        raise UnsafeFetchURLError(f"URL has no hostname: {url!r}")
+
+    try:
+        addrs = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as e:
+        raise UnsafeFetchURLError(f"DNS resolution failed for {hostname!r}: {e}") from e
+
+    for _family, _type, _proto, _canon, sockaddr in addrs:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise UnsafeFetchURLError(
+                f"Blocked address {ip_str!r} for {hostname!r} "
+                f"(loopback/private/link-local/reserved/multicast/unspecified)"
+            )
+
+
+async def _validate_url(url: str) -> None:
+    """Async wrapper around ``_validate_url_sync`` (DNS may block)."""
+    await asyncio.to_thread(_validate_url_sync, url)
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """Origin triple used to drop Cookie headers on cross-origin hops."""
+    parsed = urllib.parse.urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return (
+        parsed.scheme.lower(),
+        (parsed.hostname or "").lower(),
+        port,
+    )
+
+
 def _fetch_url(
     url: str,
     extra_headers: dict[str, str] | None = None,
     follow_redirects: bool = True,
+    *,
+    validate_ssrf: bool = False,
 ) -> tuple[str, bytes, str]:
     # Header values are passed verbatim. http.client blocks CRLF, but
     # nothing else is validated — never pass attacker-influenced values.
     headers = {"User-Agent": "Mozilla/5.0"}
     if extra_headers:
         headers.update(extra_headers)
-    req = urllib.request.Request(url, headers=headers)
-    opener = (
-        urllib.request.build_opener()
-        if follow_redirects
-        else urllib.request.build_opener(_NoRedirect)
-    )
-    with opener.open(req, timeout=30) as resp:
-        ct = _normalize_ct(resp.headers.get("Content-Type"))
-        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+
+    if not validate_ssrf:
+        req = urllib.request.Request(url, headers=headers)
+        opener = (
+            urllib.request.build_opener()
+            if follow_redirects
+            else urllib.request.build_opener(_NoRedirect)
+        )
+        with opener.open(req, timeout=30) as resp:
+            ct = _normalize_ct(resp.headers.get("Content-Type"))
+            return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+
+    # SSRF-validated path: validate the initial URL and every redirect
+    # destination before fetching it. Redirects are followed manually
+    # (one hop at a time) so no hop is fetched unvalidated.
+    if not follow_redirects:
+        _validate_url_sync(url)
+        req = urllib.request.Request(url, headers=headers)
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=30) as resp:
+            ct = _normalize_ct(resp.headers.get("Content-Type"))
+            return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+
+    current = url
+    for hop in range(_MAX_FETCH_REDIRECTS + 1):
+        _validate_url_sync(current)
+        req = urllib.request.Request(current, headers=headers)
+        opener = urllib.request.build_opener(_CaptureRedirect)
+        try:
+            with opener.open(req, timeout=30) as resp:
+                ct = _normalize_ct(resp.headers.get("Content-Type"))
+                return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+        except _RedirectTargetError as redir:
+            if hop == _MAX_FETCH_REDIRECTS:
+                raise ValueError(f"Too many redirects fetching {url!r}") from redir
+            nxt = urllib.parse.urljoin(current, redir.url)
+            # Never forward a Cookie header to a different origin — the
+            # same credential-leak reason ``_NoRedirect`` exists for.
+            if _origin(current) != _origin(nxt):
+                headers.pop("Cookie", None)
+            current = nxt
+    # Unreachable: the loop either returns or raises on the last hop.
+    raise ValueError(f"Too many redirects fetching {url!r}")
 
 
 async def _close_tab_quietly(tab: zd.Tab) -> None:
@@ -523,7 +670,9 @@ async def _close_tab_quietly(tab: zd.Tab) -> None:
         pass
 
 
-async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
+async def _fetch_page(
+    browser: zd.Browser, url: str, *, validate_ssrf: bool = False
+) -> tuple[str, bytes, str]:
     """Fetch a single URL via raw CDP.
 
     Replicates Playwright's ``wait_until="commit"`` semantics by subscribing
@@ -531,6 +680,14 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
     content-type before Chrome's PDF viewer engages or HTML rendering starts.
     PDFs are re-fetched via urllib because headless Chrome cannot reliably
     expose PDF bytes through the DOM.
+
+    With ``validate_ssrf=True``, the initial URL is validated before
+    navigation and Chrome's final URL is validated before any content is
+    returned, so private-redirect content never enters the pipeline.
+    Limitation, stated plainly: Chrome performs the navigation itself,
+    so final-URL validation discards already-fetched internal content
+    rather than preventing Chrome's request — the urllib path (which
+    validates every hop before fetching) is the fully preventive one.
     """
     from zendriver import cdp
 
@@ -571,6 +728,10 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         tab.add_handler(cdp.network.ResponseReceived, on_response)
         await tab.send(cdp.network.enable())
 
+        if validate_ssrf:
+            # Reject direct private URLs before Chrome navigates anywhere.
+            await _validate_url(url)
+
         # Non-blocking navigate — does NOT wait for load. Bound the send
         # itself so a stalled websocket cannot hang here indefinitely.
         nav_result = await asyncio.wait_for(
@@ -595,9 +756,13 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
         response_event = await asyncio.wait_for(main_response, timeout=30)
         response = response_event.response
+        if validate_ssrf:
+            # Chrome already followed any redirects to reach this final
+            # URL; validating it here still keeps internal content out
+            # of the pipeline (see the docstring limitation).
+            await _validate_url(response.url or url)
         ct = _normalize_ct(
-            response.headers.get("content-type")
-            or response.headers.get("Content-Type")
+            response.headers.get("content-type") or response.headers.get("Content-Type")
         )
 
         if ct == "application/pdf":
@@ -644,7 +809,11 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             # the literal avoids a silent decode-behavior change there.
             extra = {"Cookie": cookie_header} if cookie_header else None
             _, body, _ = await asyncio.to_thread(
-                _fetch_url, pdf_url, extra, False  # follow_redirects=False
+                _fetch_url,
+                pdf_url,
+                extra,
+                False,  # follow_redirects=False
+                validate_ssrf=validate_ssrf,
             )
             return "application/pdf", body, "utf-8"
 
@@ -679,7 +848,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
 
 async def fetch_url_to_content(
-    url: str, browser: zd.Browser | None
+    url: str, browser: zd.Browser | None, *, validate_ssrf: bool = False
 ) -> tuple[str, str | bytes, dict[str, str | None]]:
     """Fetch one URL and return (kind, payload, source_metadata).
 
@@ -696,9 +865,11 @@ async def fetch_url_to_content(
     Raises ValueError on unsupported Content-Type or empty rendered body.
     """
     if browser is not None:
-        ct, body, charset = await _fetch_page(browser, url)
+        ct, body, charset = await _fetch_page(browser, url, validate_ssrf=validate_ssrf)
     else:
-        ct, body, charset = await asyncio.to_thread(_fetch_url, url)
+        ct, body, charset = await asyncio.to_thread(
+            _fetch_url, url, None, True, validate_ssrf=validate_ssrf
+        )
     source_metadata: dict[str, str | None] = {"title": None}
     if ct == "application/pdf":
         kind, content = _decode_pdf_or_fallback_html(body, charset)
@@ -751,7 +922,14 @@ async def _fetch_one(
         if progress_callback:
             progress_callback(f"Fetching {url}...")
         try:
-            ext, content, _source_metadata = await fetch_url_to_content(url, browser)
+            # The websearch pipeline is the SSRF boundary: result URLs
+            # come from a public search engine and may point or redirect
+            # anywhere, so validate them here. Low-level callers that
+            # already validate (fetchurl) or use local URLs (tests) keep
+            # the default ``validate_ssrf=False`` on fetch_url_to_content.
+            ext, content, _source_metadata = await fetch_url_to_content(
+                url, browser, validate_ssrf=True
+            )
             path = tmpdir / (_url_to_filename(url) + ext)
             if isinstance(content, bytes):
                 path.write_bytes(content)
