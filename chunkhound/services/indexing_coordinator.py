@@ -1549,7 +1549,7 @@ class IndexingCoordinator(BaseService):
                                     )
                             except Exception:
                                 logger.debug(
-                                    "change-detection fallback failed for %s",
+                                    "change-detection fallback failed for {}",
                                     rel,
                                     exc_info=True,
                                 )
@@ -2486,7 +2486,7 @@ class IndexingCoordinator(BaseService):
                 )
             except Exception as e:
                 logger.debug(
-                    "Failed to precompute repo roots for parallel discovery: %s", e
+                    "Failed to precompute repo roots for parallel discovery: {}", e
                 )
                 precomputed_roots = []
 
