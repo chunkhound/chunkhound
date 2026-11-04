@@ -52,20 +52,28 @@ dependencies = [
     "pydantic>=2.12.0",
     "pydantic-settings>=2.0.0",
     "loguru>=0.6.0",
-    # The MCP server uses the SDK 1.x low-level decorator API. MCP 2.x
-    # replaced it with constructor callbacks, so do not resolve an
-    # incompatible SDK until the server is migrated.
-    "mcp>=1.16.0,<2",
+    # The MCP server uses the SDK 2.x constructor-callback API. All mcp
+    # imports live exclusively in chunkhound/mcp_server/base.py — the single
+    # dispatch point (see docs/mcp-single-dispatch-design.html). The daemon,
+    # stdio, and HTTP wrappers call MCPServerBase.serve_connection() /
+    # build_streamable_http_app() and never import mcp themselves; this is
+    # enforced by tests/unit/test_mcp_wrapper_sdk_isolation.py.
+    "mcp>=2.3.0,<3",
     # Declared directly (not just pulled in transitively via mcp) because
-    # chunkhound/mcp_server/http_server.py imports their APIs directly.
-    # This adds no install weight beyond mcp's own requirements: mcp>=1.16.0
-    # already depends unconditionally on starlette>=0.27 and uvicorn>=0.31.1
-    # (no extras gating), so every chunkhound install — stdio-only or not —
-    # gets them anyway. Making these "optional" here would not save anyone
-    # an install; it would just let our own version floors drift from what
-    # mcp actually needs.
+    # chunkhound/mcp_server/base.py imports their APIs directly on behalf of
+    # every transport. This adds no install weight beyond mcp's own
+    # requirements: mcp>=2.3.0 already depends unconditionally on starlette
+    # and uvicorn (no extras gating), so every chunkhound install —
+    # stdio-only or not — gets them anyway.
     "starlette>=0.48.0",
     "uvicorn>=0.37.0",
+    # Declared directly for the same reason as starlette/uvicorn above:
+    # chunkhound/mcp_server/base.py imports these directly (serve_connection()
+    # uses create_context_streams/SessionMessage from mcp.shared and
+    # JSONRPCMessage from mcp_types; anyio.create_task_group drives the
+    # pump tasks). Previously only transitive via mcp.
+    "anyio>=4.5.0",
+    "mcp-types>=2.3.0,<3",
     "psutil>=5.8.0",
     "PyYAML>=6.0.0",
     "tiktoken>=0.9.0",
