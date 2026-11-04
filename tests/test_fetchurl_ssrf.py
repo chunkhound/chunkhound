@@ -1,10 +1,9 @@
 """SSRF gate for fetchurl — non-http(s) scheme, missing host, private IPs.
 
-Review round 2 removed the ``_validate_url_and_resolve`` wrapper, so
-these tests exercise the shared validator directly (raising
-``SsrfBlockedError``); the translation to ``FetchUrlError`` at
-fetchurl's boundary is covered by the ``_fetch_with_retry`` test
-below.
+These tests exercise the shared validator directly (raising
+``SsrfBlockedError``); fetchurl's boundary lets that error propagate
+unchanged, and the CLI/MCP boundaries catch it alongside
+``FetchUrlError`` (covered by the ``_fetch_with_retry`` test below).
 """
 
 from __future__ import annotations
@@ -32,12 +31,18 @@ async def test_fetchurl_ssrf_rejects_unsafe_urls(url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_with_retry_translates_ssrf_to_fetchurl_error(tmp_path) -> None:
-    """fetchurl's boundary translates SsrfBlockedError to FetchUrlError."""
-    from chunkhound.core.config.config import Config
-    from chunkhound.utils.fetchurl import FetchUrlError, _fetch_with_retry
+async def test_fetch_with_retry_propagates_ssrf_blocked_error(tmp_path) -> None:
+    """fetchurl's boundary lets SsrfBlockedError propagate unchanged.
 
-    with pytest.raises(FetchUrlError):
+    ``FetchUrlError`` is a plain ``ValueError`` for fetchurl-local
+    failures only; SSRF rejections keep the shared type and are caught
+    alongside ``FetchUrlError`` at the CLI/MCP boundaries.
+    """
+    from chunkhound.core.config.config import Config
+    from chunkhound.utils.fetchurl import _fetch_with_retry
+    from chunkhound.utils.ssrf import SsrfBlockedError
+
+    with pytest.raises(SsrfBlockedError):
         await _fetch_with_retry(
             "http://127.0.0.1:9/secret", Config(target_dir=tmp_path)
         )
