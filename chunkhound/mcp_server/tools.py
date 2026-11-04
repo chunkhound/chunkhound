@@ -947,6 +947,7 @@ async def fetchurl_impl(
     """
     from chunkhound.mcp_server.common import MCPError
     from chunkhound.utils.fetchurl import FetchUrlError, run_fetchurl
+    from chunkhound.utils.ssrf import SsrfBlockedError
 
     # Reranker availability is gated upstream: requires_reranker=True on the
     # @register_tool decorator hides fetchurl from tools/list and makes the
@@ -971,7 +972,7 @@ async def fetchurl_impl(
     # >= 3.11.
     except (TimeoutError, asyncio.TimeoutError) as e:
         raise MCPError("fetchurl timed out") from e
-    except FetchUrlError as e:
+    except (FetchUrlError, SsrfBlockedError) as e:
         raise MCPError(f"fetchurl failed: {e}") from e
     except urllib.error.HTTPError as e:
         raise MCPError(f"fetchurl failed: HTTP {e.code} {e.reason}") from e

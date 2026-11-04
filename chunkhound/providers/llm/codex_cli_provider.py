@@ -691,8 +691,6 @@ class CodexCLIProvider(BaseCLIProvider):
                     return stdout_text
 
                 except asyncio.TimeoutError as e:
-                    if proc and proc.returncode is None:
-                        await terminate_cli_process(proc)
                     last_error = RuntimeError(
                         f"codex exec timed out after {request_timeout}s"
                     )
@@ -752,7 +750,9 @@ class CodexCLIProvider(BaseCLIProvider):
                             continue
                     raise
                 finally:
-                    pass
+                    # Kill the CLI if it still runs (timeout, error or cancellation).
+                    if proc is not None:
+                        await terminate_cli_process(proc)
 
         finally:
             # Cleanup temporary resources regardless of success or failure

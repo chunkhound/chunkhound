@@ -126,7 +126,9 @@ async def test_fetch_page_html_branch(
     base, _ = local_fetch_page_server
     baseline = _page_target_count(chrome_browser)
 
-    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/html")
+    ct, body, charset = await _fetch_page(
+        chrome_browser, f"{base}/html", validate_ssrf=False
+    )
     assert ct == "text/html"
     assert isinstance(body, bytes) and len(body) > 0
     assert charset == "utf-8"
@@ -143,7 +145,9 @@ async def test_fetch_page_plain_text_branch(
     """Plain-text responses use the raw CDP body instead of rendered DOM."""
     base, _ = local_fetch_page_server
 
-    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/plain")
+    ct, body, charset = await _fetch_page(
+        chrome_browser, f"{base}/plain", validate_ssrf=False
+    )
 
     assert ct == "text/plain"
     assert body == b"# Raw Markdown\n\nserved as plain text\n"
@@ -167,7 +171,9 @@ async def test_fetch_page_pdf_branch(
     base, _ = local_fetch_page_server
     baseline = _page_target_count(chrome_browser)
 
-    ct, body, charset = await _fetch_page(chrome_browser, f"{base}/pdf")
+    ct, body, charset = await _fetch_page(
+        chrome_browser, f"{base}/pdf", validate_ssrf=False
+    )
     assert ct == "application/pdf"
     assert isinstance(body, bytes) and body.startswith(b"%PDF-")
     assert charset == "utf-8"
@@ -285,7 +291,9 @@ async def test_fetch_page_pdf_forwards_browser_cookies(
         [cdp.network.CookieParam(name="session", value="valid", url=f"{base}/")]
     )
 
-    ct, body, _ = await _fetch_page(chrome_browser, f"{base}/pdf-cookie")
+    ct, body, _ = await _fetch_page(
+        chrome_browser, f"{base}/pdf-cookie", validate_ssrf=False
+    )
 
     assert ct == "application/pdf"
     assert body.startswith(b"%PDF-")

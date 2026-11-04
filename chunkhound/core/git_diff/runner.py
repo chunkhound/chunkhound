@@ -1,5 +1,6 @@
 import asyncio
 import codecs
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
@@ -11,6 +12,17 @@ _SAFE_REF = re.compile(r"^[a-zA-Z0-9_.^~/:@{}\-]+\Z")
 
 _GIT_DIFF_TIMEOUT_SECONDS = 30
 _GIT_STDOUT_READ_BYTES = 64 * 1024
+
+# Isolate from user git config that rewrites diff output (color, external diff,
+# textconv). Keep LC_ALL=C so root-commit retry can match English stderr text.
+_GIT_DIFF_ARGS = ("--no-color", "--no-ext-diff", "--no-textconv")
+
+
+def _git_diff_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    return env
+
 
 # Cleanup must not hang even if a descendant keeps a pipe open.
 _GIT_CLEANUP_TIMEOUT_SECONDS = 5
@@ -79,6 +91,7 @@ async def _empty_tree_oid(cwd: Path | str) -> str:
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_git_diff_env(),
     )
     communication = asyncio.create_task(proc.communicate())
     try:
@@ -157,6 +170,7 @@ async def stream_git_diff_fragments(
             "-c",
             "core.quotePath=false",
             "diff",
+            *_GIT_DIFF_ARGS,
             "--src-prefix=a/",
             "--dst-prefix=b/",
             current_range,
@@ -164,6 +178,7 @@ async def stream_git_diff_fragments(
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_git_diff_env(),
         )
         if proc.stdout is None or proc.stderr is None:
             proc.kill()
