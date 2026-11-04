@@ -108,15 +108,30 @@ class EmbeddingManager:
             Embedding result with vectors and metadata
         """
         provider = self.get_provider(provider_name)
+        return _embedding_result(provider, await provider.embed(texts))
 
-        embeddings = await provider.embed(texts)
+    async def embed_query_texts(
+        self,
+        texts: list[str],
+        provider_name: str | None = None,
+    ) -> LocalEmbeddingResult:
+        """Like ``embed_texts``, for search queries compared against indexed chunks.
 
-        return LocalEmbeddingResult(
-            embeddings=embeddings,
-            model=provider.model,
-            provider=provider.name,
-            dims=provider.dims,
-        )
+        Uses the provider's ``embed_query``.
+        """
+        provider = self.get_provider(provider_name)
+        return _embedding_result(provider, await provider.embed_query(texts))
+
+
+def _embedding_result(
+    provider: EmbeddingProvider, embeddings: list[list[float]]
+) -> LocalEmbeddingResult:
+    return LocalEmbeddingResult(
+        embeddings=embeddings,
+        model=provider.model,
+        provider=provider.name,
+        dims=provider.dims,
+    )
 
 
 def create_openai_provider(
