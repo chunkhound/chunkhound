@@ -5,13 +5,11 @@ so both ``chunkhound.utils.fetchurl`` and ``chunkhound.utils.websearch_core``
 can import it without creating a cycle (fetchurl already imports
 websearch_core, which is why the two validators were duplicated before).
 
-Both callers' public exception types subclass ``SsrfBlockedError``
-(``FetchUrlError`` in fetchurl, ``UnsafeFetchURLError`` in websearch, kept
-for backwards compatibility), so code catching ``SsrfBlockedError`` catches
-either. Callers raise ``SsrfBlockedError`` directly from this module;
-fetchurl translates it to ``FetchUrlError`` inline at its own boundary
-where the CLI exception whitelist requires that type. The blocking logic
-itself lives here, once.
+Websearch raises ``SsrfBlockedError`` directly from this module.
+Fetchurl pre-validates with it and lets it propagate unchanged; the CLI
+and MCP boundaries catch it alongside fetchurl's own ``FetchUrlError``
+(which is a plain ``ValueError`` covering non-SSRF failures too). The
+blocking logic itself lives here, once.
 
 Validation rule: only http(s) URLs whose hostname resolves entirely to
 globally routable addresses are allowed. ``not ip.is_global`` (rather than
@@ -136,6 +134,11 @@ def validate_url_sync(
     except socket.gaierror as e:
         raise SsrfBlockedError(f"DNS resolution failed for {hostname!r}: {e}") from e
 
+    _check_resolved(hostname, addrs)
+
+
+def _check_resolved(hostname: str, addrs: list) -> None:
+    """Reject ``hostname`` unless every resolved address is globally routable."""
     for _family, _type, _proto, _canon, sockaddr in addrs:
         _check_ip(sockaddr[0], hostname)
 
@@ -143,5 +146,44 @@ def validate_url_sync(
 async def validate_url(
     url: str, *, dns_timeout: float | None = _DEFAULT_DNS_TIMEOUT
 ) -> None:
-    """Async wrapper around ``validate_url_sync`` (DNS may block)."""
-    await asyncio.to_thread(validate_url_sync, url, dns_timeout=dns_timeout)
+    """Async SSRF pre-check; same rejections as ``validate_url_sync``.
+
+    DNS resolution uses the event loop's ``getaddrinfo`` (backed by the
+    loop's executor) bounded by ``asyncio.wait_for``, so a slow lookup
+    fails closed without spawning a dedicated thread per call. The
+    synchronous path keeps its own thread in ``_resolve`` because
+    blocking ``getaddrinfo`` has no cancellable form there; that thread
+    is a daemon and cannot block interpreter exit.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise SsrfBlockedError(f"Unsupported URL scheme: {parsed.scheme!r}")
+    hostname = parsed.hostname
+    if hostname is None:
+        raise SsrfBlockedError(f"URL has no hostname: {url!r}")
+
+    # IP literals need no DNS round-trip (and no timeout risk).
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        _check_ip(hostname, hostname)
+        return
+
+    loop = asyncio.get_running_loop()
+    try:
+        if dns_timeout is None:
+            addrs = await loop.getaddrinfo(hostname, None)
+        else:
+            addrs = await asyncio.wait_for(
+                loop.getaddrinfo(hostname, None), timeout=dns_timeout
+            )
+    except asyncio.TimeoutError:
+        raise SsrfBlockedError(
+            f"DNS resolution timed out for {hostname!r} (>{dns_timeout:g}s)"
+        ) from None
+    except socket.gaierror as e:
+        raise SsrfBlockedError(f"DNS resolution failed for {hostname!r}: {e}") from e
+
+    _check_resolved(hostname, addrs)
