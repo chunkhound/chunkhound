@@ -70,6 +70,8 @@ async def test_serve_connection_answers_modern_per_request_envelope() -> None:
     )
 
     server = StdioMCPServer(config=MagicMock())
+    # on_list_tools waits (up to 5s) for initialization; _drive gives up sooner.
+    server._initialization_complete.set()
     responses = await _drive(
         server,
         [
