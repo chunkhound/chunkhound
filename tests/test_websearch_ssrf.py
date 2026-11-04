@@ -3,9 +3,11 @@ public-to-private redirects must not be fetched (issue #463).
 
 The public pipeline (``fetch_url_to_content`` → ``_fetch_one``) is the
 boundary: result URLs come from a public search engine, so they are
-attacker-influenced. Low-level helpers keep ``validate_ssrf=False`` by
-default so existing callers (fetchurl, which validates separately, and
-tests using local servers) are unaffected.
+attacker-influenced. Since review round 2, ``validate_ssrf`` defaults
+to True on ``_fetch_url``, ``_fetch_page`` and ``fetch_url_to_content``
+— secure by default. Callers that must opt out (fetchurl, which
+pre-validates and translates to its own error type, and tests using
+local servers) do so explicitly with ``validate_ssrf=False``.
 
 Redirect tests use a real local HTTP server plus a patched ``getaddrinfo``
 at the validation boundary only: the hostname ``public.test`` resolves to
@@ -33,12 +35,11 @@ except ImportError:  # pragma: no cover - CI installs zendriver
 else:
     _HAS_ZENDRIVER = True
 
+from chunkhound.utils.ssrf import SsrfBlockedError, validate_url_sync
 from chunkhound.utils.websearch_core import (
-    UnsafeFetchURLError,
     _fetch_one,
     _fetch_page,
     _fetch_url,
-    _validate_url_sync,
     fetch_url_to_content,
 )
 
@@ -60,14 +61,17 @@ def _stop_server(server, thread) -> None:
 
 
 def _patch_public_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Route ``public.test`` to loopback for connections, public for checks.
+    """The single DNS fixture for this file: route ``public.test`` to
+    loopback for connections, public for checks. All getaddrinfo
+    patching in this file goes through this helper (at the DNS
+    boundary only), so the fake is defined once and documented here.
 
     Validation calls ``getaddrinfo(hostname, None)``; urllib connections
     call it with the port set. Distinguishing on that argument keeps the
     fake at the validation boundary: real DNS is used for everything else.
 
     Also adds ``public.test`` to no_proxy: urllib's ProxyHandler honours
-    the environment, and in proxied environments (like this VM) the test
+    the environment, and in proxied environments the test
     fetch would otherwise be sent to the egress proxy instead of the
     local server.
     """
@@ -125,13 +129,28 @@ def _redirect_handler(target: str):
 )
 async def test_websearch_never_fetches_private_urls(url: str) -> None:
     """The public pipeline rejects private URLs before any connection."""
-    with pytest.raises(UnsafeFetchURLError):
+    with pytest.raises(SsrfBlockedError):
         await fetch_url_to_content(url, browser=None, validate_ssrf=True)
 
 
-def test_validate_url_sync_accepts_public_ip_literal() -> None:
+def test_ssrf_validator_accepts_public_ip_literal() -> None:
+    # Shared-module public API (not a websearch private helper):
     # IP literals resolve without DNS, so this needs no network access.
-    _validate_url_sync("http://93.184.216.34/")
+    validate_url_sync("http://93.184.216.34/")
+
+
+def test_ssrf_validator_fails_closed_on_dns_timeout(monkeypatch) -> None:
+    """A DNS lookup that never returns rejects the URL, never fetches it."""
+    import time
+
+    def _slow_getaddrinfo(host, port, *args, **kwargs):
+        time.sleep(5)
+        sockaddr = ("93.184.216.34", port or 0)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", sockaddr)]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _slow_getaddrinfo)
+    with pytest.raises(SsrfBlockedError, match="timed out"):
+        validate_url_sync("http://example.test/", dns_timeout=0.05)
 
 
 def test_fetch_url_blocks_private_url_before_connecting() -> None:
@@ -154,7 +173,7 @@ def test_fetch_url_blocks_private_url_before_connecting() -> None:
     server, thread = _start_server(_Handler)
     try:
         port = server.server_address[1]
-        with pytest.raises(UnsafeFetchURLError):
+        with pytest.raises(SsrfBlockedError):
             _fetch_url(f"http://127.0.0.1:{port}/secret", validate_ssrf=True)
         assert received == []
     finally:
@@ -188,7 +207,7 @@ def test_fetch_url_blocks_public_to_private_redirect(
         redirect_server, redirect_thread = _start_server(_redirect_handler(target))
         try:
             port = redirect_server.server_address[1]
-            with pytest.raises(UnsafeFetchURLError):
+            with pytest.raises(SsrfBlockedError):
                 _fetch_url(
                     f"http://{_PUBLIC_TEST_HOST}:{port}/start",
                     validate_ssrf=True,
@@ -363,7 +382,7 @@ async def test_fetch_one_treats_blocked_url_as_per_page_failure(
         mapping,
     )
     assert len(warnings) == 1
-    assert "UnsafeFetchURLError" in warnings[0]
+    assert "SsrfBlockedError" in warnings[0]
     assert list(tmp_path.iterdir()) == []
     assert mapping == {}
 
@@ -426,7 +445,7 @@ class _FakeBrowser:
 @pytest.mark.skipif(not _HAS_ZENDRIVER, reason="zendriver not installed")
 async def test_fetch_page_rejects_private_initial_url_before_navigation() -> None:
     tab = _FakeTab(final_url=None)
-    with pytest.raises(UnsafeFetchURLError):
+    with pytest.raises(SsrfBlockedError):
         await _fetch_page(  # type: ignore[arg-type]
             _FakeBrowser(tab), "http://127.0.0.1:9/secret", validate_ssrf=True
         )
@@ -437,12 +456,13 @@ async def test_fetch_page_rejects_private_initial_url_before_navigation() -> Non
 @pytest.mark.skipif(not _HAS_ZENDRIVER, reason="zendriver not installed")
 async def test_fetch_page_rejects_private_final_url_after_redirect() -> None:
     tab = _FakeTab(final_url="http://127.0.0.1:9/secret")
-    with pytest.raises(UnsafeFetchURLError):
+    with pytest.raises(SsrfBlockedError):
         await _fetch_page(  # type: ignore[arg-type]
             _FakeBrowser(tab),
             "http://93.184.216.34/start",
             validate_ssrf=True,
         )
-    # Navigation happened (Chrome follows redirects itself), but the
-    # private final URL was rejected before any content was returned.
-    assert tab.navigated == ["http://127.0.0.1:9/secret"]
+    # Outcome only: the private final URL was rejected before any
+    # content was returned. (Navigation itself happened - Chrome
+    # follows redirects itself - but this test must not lock in the
+    # redirect-gap behaviour; see issue #476 for the interception fix.)
