@@ -146,9 +146,15 @@ class UnifiedSearch:
             )
 
             page_size = self._config.initial_page_size if self._config else 30
-            search_tasks = [
-                search_service.search_semantic(
-                    query=expanded_q,
+            bulk_search = getattr(search_service, "search_semantic_many", None)
+            if asyncio.iscoroutinefunction(bulk_search):
+                # This is one shared source scan for all expanded queries. A
+                # failure here is a terminal source failure (for example, an
+                # invalid git revision or a failed transient stream), not an
+                # independent query failure. Let it propagate so callers do not
+                # report a successful research run with no relevant context.
+                search_results = await bulk_search(
+                    expanded_queries,
                     page_size=page_size,
                     # No threshold filtering; elbow detection computes threshold.
                     threshold=None,
@@ -157,9 +163,22 @@ class UnifiedSearch:
                     time_limit=time_limit,
                     result_limit=result_limit,
                 )
-                for expanded_q in expanded_queries
-            ]
-            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            else:
+                search_tasks = [
+                    search_service.search_semantic(
+                        query=expanded_q,
+                        page_size=page_size,
+                        threshold=None,
+                        force_strategy="multi_hop",
+                        path_filter=path_filter,
+                        time_limit=time_limit,
+                        result_limit=result_limit,
+                    )
+                    for expanded_q in expanded_queries
+                ]
+                search_results = await asyncio.gather(
+                    *search_tasks, return_exceptions=True
+                )
 
             # Unify results: deduplicate by chunk_id (same pattern as semantic+regex
             # unification).

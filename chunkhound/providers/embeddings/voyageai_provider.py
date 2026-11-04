@@ -21,6 +21,7 @@ from chunkhound.core.utils.voyageai_utils import (
     is_official_voyageai_endpoint,
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.utils.hashing import compute_embedding_space_identity
 
 from .shared_utils import (
     apply_client_side_truncation,
@@ -332,6 +333,7 @@ class VoyageAIEmbeddingProvider:
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
         self._discovered_native_dims: int | None = None
+        self._embedding_space_generation = 0
 
         self._output_dims = validate_positive_output_dims(output_dims, model=model)
         self._client_side_truncation = client_side_truncation
@@ -400,6 +402,16 @@ class VoyageAIEmbeddingProvider:
     def base_url(self) -> str:
         """Base URL for API requests."""
         return self._base_url or OFFICIAL_VOYAGEAI_BASE_V1
+
+    @property
+    def embedding_space_identity(self) -> str:
+        """Opaque identity for the configured VoyageAI-compatible model space."""
+        return compute_embedding_space_identity(
+            "voyageai-v2",
+            str(self._embedding_space_generation),
+            self.base_url,
+            self._api_key or "",
+        )
 
     @staticmethod
     def _resolve_http_verify_setting(
@@ -851,6 +863,9 @@ class VoyageAIEmbeddingProvider:
 
     def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
+        identity_keys = {"model", "output_dims", "client_side_truncation"}
+        if identity_keys & kwargs.keys():
+            self._embedding_space_generation += 1
         next_model = kwargs.get("model", self._model)
         next_is_known_model = next_model in VOYAGE_MODEL_CONFIG
         next_model_config = VOYAGE_MODEL_CONFIG.get(
