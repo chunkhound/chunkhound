@@ -1439,7 +1439,10 @@ async def test_stdio_tool_call_surfaces_generic_tool_failure_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_stdio_tool_call_uses_error_content_when_success_precedes_error() -> None:
-    """Stdio transport must raise the actual error-bearing content item."""
+    """Stdio transport must flag is_error and preserve the error-bearing
+    content item in place (SDK 2.x's CallToolResult.content keeps the full
+    mixed list in original order; it does not collapse to a single raised
+    error like the old SDK 1.x call_tool() decorator did)."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from mcp.types import TextContent
@@ -1464,7 +1467,8 @@ async def test_stdio_tool_call_uses_error_content_when_success_precedes_error() 
         response = await _invoke_call_tool(server, "daemon_status", {})
 
     assert response.is_error is True
-    payload = _tool_error_payload(response.content[0].text)
+    assert len(response.content) == 2
+    payload = _tool_error_payload(response.content[1].text)
     assert payload == {"type": "RuntimeError", "message": "second"}
 
 
@@ -1541,7 +1545,7 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
 
     import httpx
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
     from chunkhound.daemon import ipc
     from chunkhound.daemon.client_proxy import ClientProxy
@@ -1720,14 +1724,10 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                     transport=transport, base_url="http://chunkhound.test"
                 ) as http_client:
                     health_before = (await http_client.get("/health")).json()
-                    async with streamablehttp_client(
+                    async with streamable_http_client(
                         "http://chunkhound.test/mcp",
-                        httpx_client_factory=lambda **kwargs: httpx.AsyncClient(
-                            transport=transport,
-                            base_url="http://chunkhound.test",
-                            **kwargs,
-                        ),
-                    ) as (read_stream, write_stream, _):
+                        http_client=http_client,
+                    ) as (read_stream, write_stream):
                         async with ClientSession(
                             read_stream, write_stream
                         ) as http_session:
@@ -1737,7 +1737,7 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                             )
                     health_after = (await http_client.get("/health")).json()
 
-            assert http_truncated.isError is True
+            assert http_truncated.is_error is True
             assert _tool_error_payload(http_truncated.content[0].text) == expected_error
             assert health_before == health_after
             assert health_after["status"] == "ready"
@@ -1785,15 +1785,46 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                             "method": "tools/call",
                             "params": {"name": name, "arguments": arguments},
                         }
-                        await proxy._write_stdin_line(
-                            writer, (json.dumps(request) + "\n").encode()
-                        )
+                        # ClientProxy._write_stdin_line() was folded directly
+                        # into _forward_stdin_to_socket() during the stdio_lines
+                        # extraction (Task 3); replicate its parse-and-forward
+                        # logic here to drive one request at a time.
+                        ipc.write_frame(writer, request)
+                        await writer.drain()
                         response = await asyncio.wait_for(
                             ipc.read_frame(reader), timeout=5.0
                         )
                         assert response["id"] == request_id
                         assert "error" not in response
                         return response["result"]
+
+                    # The daemon now dispatches tools/call through the real
+                    # SDK session (serve_connection()), which gates every
+                    # non-exempt method behind a completed initialize
+                    # handshake -- unlike the old hand-rolled dispatcher this
+                    # replaced, which had no such lifecycle requirement.
+                    init_request = {
+                        "jsonrpc": "2.0",
+                        "id": "daemon-initialize",
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": {"name": "test-client", "version": "1.0.0"},
+                        },
+                    }
+                    ipc.write_frame(writer, init_request)
+                    await writer.drain()
+                    init_response = await asyncio.wait_for(
+                        ipc.read_frame(reader), timeout=5.0
+                    )
+                    assert init_response["id"] == "daemon-initialize"
+                    assert "error" not in init_response
+                    ipc.write_frame(
+                        writer,
+                        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    )
+                    await writer.drain()
 
                     daemon_status_before = await daemon_stdio_call(
                         "daemon-status-before", "daemon_status", {}
@@ -1877,7 +1908,7 @@ async def test_daemon_tool_call_propagates_mixed_content_error_flag() -> None:
     ]
 
     with patch(
-        "chunkhound.mcp_server.common.handle_tool_call",
+        "chunkhound.mcp_server.base.handle_tool_call",
         new=AsyncMock(return_value=mixed_contents),
     ):
         response = await _invoke_call_tool(daemon, "daemon_status", {})
@@ -1950,7 +1981,7 @@ def test_search_enum_restricted_without_embeddings():
     assert daemon_status_tool is not None, "daemon_status tool should be in list"
 
     # Verify the type enum is restricted to regex only
-    type_schema = search_tool.inputSchema["properties"]["type"]
+    type_schema = search_tool.input_schema["properties"]["type"]
     assert type_schema["enum"] == ["regex"], (
         f"Expected ['regex'] without embeddings, got {type_schema['enum']}"
     )
