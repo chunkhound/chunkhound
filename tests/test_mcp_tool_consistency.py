@@ -1351,16 +1351,11 @@ async def test_unknown_daemon_tool_returns_unknown_without_connect_attempt() -> 
         side_effect=DatabaseCompactionInProgressError("busy")
     )
 
-    response = await daemon._handle_tools_call(
-        {
-            "id": "1",
-            "params": {"name": "__missing_tool__", "arguments": {}},
-        }
-    )
+    response = await _invoke_call_tool(daemon, "__missing_tool__", {})
 
     daemon.ensure_tool_services.assert_not_awaited()
-    assert response["result"]["isError"] is True
-    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload["message"] == "Unknown tool: __missing_tool__"
 
 
@@ -1383,16 +1378,12 @@ async def test_daemon_handle_tools_call_skips_connect_for_non_db_tools() -> None
     connect_mock = AsyncMock()
     daemon._connect_provider = connect_mock
 
-    msg = {
-        "id": "1",
-        "params": {"name": "daemon_status", "arguments": {}},
-    }
     with patch(
         "chunkhound.mcp_server.common.handle_tool_call",
         new_callable=AsyncMock,
         return_value=[],
     ):
-        await daemon._handle_tools_call(msg)
+        await _invoke_call_tool(daemon, "daemon_status", {})
 
     connect_mock.assert_not_awaited()
 
@@ -1498,15 +1489,12 @@ async def test_daemon_tool_call_marks_compaction_busy_as_error() -> None:
         side_effect=DatabaseCompactionInProgressError("busy")
     )
 
-    response = await daemon._handle_tools_call(
-        {
-            "id": "1",
-            "params": {"name": "search", "arguments": {"type": "regex", "query": "x"}},
-        }
+    response = await _invoke_call_tool(
+        daemon, "search", {"type": "regex", "query": "x"}
     )
 
-    assert response["result"]["isError"] is True
-    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload == {
         "type": "DatabaseCompactionInProgressError",
         "message": "busy",
@@ -1534,15 +1522,10 @@ async def test_daemon_tool_call_marks_generic_tool_failure_as_error() -> None:
         new_callable=AsyncMock,
         side_effect=RuntimeError("boom"),
     ):
-        response = await daemon._handle_tools_call(
-            {
-                "id": "1",
-                "params": {"name": "daemon_status", "arguments": {}},
-            }
-        )
+        response = await _invoke_call_tool(daemon, "daemon_status", {})
 
-    assert response["result"]["isError"] is True
-    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload == {"type": "RuntimeError", "message": "boom"}
 
 
@@ -1897,16 +1880,11 @@ async def test_daemon_tool_call_propagates_mixed_content_error_flag() -> None:
         "chunkhound.mcp_server.common.handle_tool_call",
         new=AsyncMock(return_value=mixed_contents),
     ):
-        response = await daemon._handle_tools_call(
-            {
-                "id": "1",
-                "params": {"name": "daemon_status", "arguments": {}},
-            }
-        )
+        response = await _invoke_call_tool(daemon, "daemon_status", {})
 
-    assert response["result"]["isError"] is True
-    assert len(response["result"]["content"]) == 2
-    payload = _tool_error_payload(response["result"]["content"][1]["text"])
+    assert response.is_error is True
+    assert len(response.content) == 2
+    payload = _tool_error_payload(response.content[1].text)
     assert payload == {"type": "RuntimeError", "message": "second"}
 
 
