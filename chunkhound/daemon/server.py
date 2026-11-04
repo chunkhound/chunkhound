@@ -33,8 +33,10 @@ _DEFAULT_SHUTDOWN_DELAY = 0.0
 class ChunkHoundDaemon(MCPServerBase):
     """Daemon that owns the sole DuckDB connection and serves multiple clients.
 
-    All MCP protocol handling is implemented in pure JSON-RPC 2.0 without
-    depending on the MCP SDK so that the daemon can safely import independently.
+    MCP protocol handling is delegated to MCPServerBase.serve_connection()
+    (one call per client connection) over this module's length-prefixed IPC
+    frames; this module itself never imports the mcp SDK directly — see
+    docs/mcp-single-dispatch-design.html.
     """
 
     def __init__(
@@ -69,8 +71,16 @@ class ChunkHoundDaemon(MCPServerBase):
     # ------------------------------------------------------------------
 
     def _register_tools(self) -> None:
-        """No-op: daemon dispatches tools via JSON-RPC directly."""
-        pass
+        """Build the shared SDK Server so serve_connection() has a handler.
+
+        Previously a no-op because the daemon dispatched tools via its own
+        hand-rolled JSON-RPC loop (_dispatch_mcp). Now that _handle_client
+        routes every connection through the inherited serve_connection(),
+        self.server must be built here exactly like stdio/http — otherwise
+        serve_connection()'s ``assert self.server is not None`` fails on the
+        very first client connection.
+        """
+        self._register_common_tool_handlers()
 
     def _realtime_startup_mode(self) -> str:
         """Report daemon-mode startup timing for the public status surface."""
@@ -266,23 +276,19 @@ class ChunkHoundDaemon(MCPServerBase):
             ipc.write_frame(writer, {"type": "registered", "client_id": client_id})
             await writer.drain()
 
-            # --- MCP JSON-RPC message loop ---
-            while True:
+            # --- MCP protocol session: one serve_connection() per connection ---
+            async def _read_frame() -> dict[str, Any] | None:
                 try:
-                    msg = await ipc.read_frame(reader)
+                    frame = await ipc.read_frame(reader)
                 except asyncio.IncompleteReadError:
-                    break
-                except Exception as e:
-                    self.debug_log(f"IPC read error: {e!r}")
-                    break
+                    return None
+                return frame if isinstance(frame, dict) else None
 
-                if not isinstance(msg, dict):
-                    continue
+            async def _write_frame(frame: dict[str, Any]) -> None:
+                ipc.write_frame(writer, frame)
+                await writer.drain()
 
-                response = await self._dispatch_mcp(msg, client_id)
-                if response is not None:
-                    ipc.write_frame(writer, response)
-                    await writer.drain()
+            await self.serve_connection(_read_frame, _write_frame)
 
         except asyncio.TimeoutError:
             self.debug_log("Client registration timed out")

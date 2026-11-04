@@ -143,34 +143,29 @@ class StdioMCPServer(MCPServerBase):
         """Run the stdio server with proper lifecycle management."""
         try:
             if _MCP_AVAILABLE:
-                # Set initialization options with capabilities
-                from mcp.server.lowlevel import NotificationOptions
-                from mcp.server.models import InitializationOptions
-
-                init_options = InitializationOptions(
-                    server_name="ChunkHound Code Search",
-                    server_version=__version__,
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                )
-
-                # Run with lifespan management
                 async with self.server_lifespan():
-                    # Run the stdio server
-                    import mcp.server.stdio
+                    import json
 
-                    async with mcp.server.stdio.stdio_server() as (
-                        read_stream,
-                        write_stream,
-                    ):
-                        self.debug_log("Stdio server started, awaiting requests")
-                        await self.server.run(
-                            read_stream,
-                            write_stream,
-                            init_options,
+                    from chunkhound.utils import stdio_lines
+
+                    lines = stdio_lines.iter_stdin_lines()
+
+                    async def read_frame() -> dict[str, Any] | None:
+                        async for line in lines:
+                            try:
+                                frame = json.loads(line.decode())
+                            except json.JSONDecodeError:
+                                continue  # matches ClientProxy's existing behavior
+                            return frame if isinstance(frame, dict) else None
+                        return None
+
+                    async def write_frame(frame: dict[str, Any]) -> None:
+                        stdio_lines.write_stdout_line(
+                            (json.dumps(frame) + "\n").encode()
                         )
+
+                    self.debug_log("Stdio server started, awaiting requests")
+                    await self.serve_connection(read_frame, write_frame)
             else:
                 # Minimal fallback stdio: read initialize request,
                 # respond with matching ID so tests can proceed

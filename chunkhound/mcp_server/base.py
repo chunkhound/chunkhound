@@ -114,11 +114,11 @@ class MCPServerBase(ABC):
             getattr(config, "target_dir", None) or Path.cwd(),
         )
 
-        # Underlying MCP protocol server. Constructed lazily in
-        # _register_common_tool_handlers() by subclasses that actually
-        # dispatch tools through the SDK (stdio/HTTP); left None for
-        # subclasses whose _register_tools() is a no-op (e.g. the daemon,
-        # which dispatches tools via its own JSON-RPC IPC loop instead).
+        # Underlying MCP protocol server. Constructed in
+        # _register_common_tool_handlers(), which every concrete subclass's
+        # _register_tools() calls (stdio, HTTP, and the daemon) so that
+        # serve_connection()/build_streamable_http_app() always have a
+        # non-None self.server to drive.
         self._initialization_complete = asyncio.Event()
         self.server: Server | None = None
 

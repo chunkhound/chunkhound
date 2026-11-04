@@ -29,11 +29,6 @@ from chunkhound.core.config.config import Config
 from .base import _MCP_AVAILABLE, MCPServerBase
 from .status import derive_daemon_status
 
-if _MCP_AVAILABLE:
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-else:  # pragma: no cover - optional dependency path
-    StreamableHTTPSessionManager = None  # type: ignore[assignment,misc]
-
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
     from starlette.applications import Starlette
     from starlette.types import Receive, Scope, Send
@@ -137,13 +132,9 @@ class HttpMCPServer(MCPServerBase):
         self.auth_token: str | None = config.mcp.auth_token
         self.cors: bool = config.mcp.cors
 
-        if _MCP_AVAILABLE:
-            self._session_manager = StreamableHTTPSessionManager(
-                app=self.server,  # type: ignore[arg-type]
-                stateless=False,
-            )
-        else:
-            self._session_manager = None  # type: ignore[assignment]
+        self._session_manager = (
+            self.build_streamable_http_app(stateless=False) if _MCP_AVAILABLE else None
+        )
 
     def _register_tools(self) -> None:
         """Register tool handlers with the HTTP server."""
@@ -208,7 +199,11 @@ class HttpMCPServer(MCPServerBase):
             self._initialization_complete.set()
             self.debug_log("HTTP server initialization complete")
 
-            async with self._session_manager.run():
+            # self._session_manager is only None when _MCP_AVAILABLE is False,
+            # in which case run() raises before _lifespan is ever entered (see
+            # HttpMCPServer.run() below) — narrower than mypy can infer from the
+            # ternary assignment in __init__.
+            async with self._session_manager.run():  # type: ignore[union-attr]
                 yield
         finally:
             await self.cleanup()
