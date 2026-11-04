@@ -2,12 +2,12 @@
 
 import asyncio
 import threading
-from contextlib import suppress
 from pathlib import Path
 
 import pytest
 from loguru import logger
 
+import chunkhound_native as native
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
 from chunkhound.embeddings import EmbeddingManager
@@ -32,7 +32,7 @@ async def indexed_project(
 ):
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
     config = Config(
-        database={"path": str(tmp_path / "index_test.duckdb")},
+        database={"path": str(tmp_path / "chunks.db")},
         indexing={"include": ["**/*.py"], "exclude": []},
     )
     config.target_dir = tmp_path
@@ -115,7 +115,7 @@ async def test_indexing_allows_loop_progress_and_restores_vector_indexes(
 
 
 @pytest.mark.parametrize("operation_name", _OPERATIONS)
-async def test_scan_cancellation_returns_before_ddl_and_disconnect_waits_for_it(
+async def test_scan_cancellation_and_disconnect_wait_for_hnsw_completion(
     indexed_project, monkeypatch, operation_name
 ):
     db, service, root = indexed_project
@@ -138,21 +138,37 @@ async def test_scan_cancellation_returns_before_ddl_and_disconnect_waits_for_it(
     monkeypatch.setattr(db, "_executor_disconnect", observed_close)
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
-        indexing.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(indexing, timeout=2)
-        assert not finished.is_set(), "scan cancellation must not drain HNSW DDL"
+        for _ in range(3):
+            indexing.cancel()
+            progress = asyncio.Event()
+            loop.call_soon(progress.set)
+            await asyncio.wait_for(progress.wait(), timeout=2)
+            assert not indexing.done(), "cancellation must wait for HNSW completion"
+            assert not finished.is_set()
+            with pytest.raises(native.DatabaseBusyError):
+                native.acquire_install_lease(str(db.db_path), "duckdb").close()
+
         closing = asyncio.create_task(asyncio.to_thread(disconnect))
         await asyncio.wait_for(close_started.wait(), timeout=2)
+        assert not closing.done(), "disconnect must wait for HNSW completion"
+        assert close_observations == []
+        assert not finished.is_set()
+        with pytest.raises(native.DatabaseBusyError):
+            native.acquire_install_lease(str(db.db_path), "duckdb").close()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await indexing
+        assert finished.is_set()
+        await closing
     finally:
         release.set()
-        with suppress(asyncio.CancelledError):
-            await indexing
-        if closing is not None:
-            await closing
+        tasks = [indexing] if closing is None else [indexing, closing]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     assert close_observations == [True]
     assert not db.is_connected
+    native.acquire_install_lease(str(db.db_path), "duckdb").close()
 
 
 @pytest.mark.parametrize("operation_name", _OPERATIONS)

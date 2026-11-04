@@ -39,19 +39,35 @@ pub(super) fn read_file_states(backend: &DuckDbHnswBackend) -> Result<Vec<DbFile
         return Ok(Vec::new());
     }
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare(FILE_STATE_SELECT)?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(DbFileEntry {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                mtime: row.get(2)?,
-                size_bytes: row.get(3)?,
-                content_hash: row.get(4)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+    let read_result = (|| -> Result<Vec<DbFileEntry>, DbError> {
+        let mut stmt = conn.prepare(FILE_STATE_SELECT)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(DbFileEntry {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    mtime: row.get(2)?,
+                    size_bytes: row.get(3)?,
+                    content_hash: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })();
+    let close_result = conn.close().map_err(|(connection, error)| {
+        // DuckDB returns its connection on failed close. Drop that returned owner
+        // before publishing completion, but do NOT claim cleanup succeeded.
+        drop(connection);
+        DbError::DuckDb(error)
+    });
+    match (read_result, close_result) {
+        (Err(error), Err(close_error)) => {
+            log::error!("native diff read and close both failed: {close_error}");
+            Err(error)
+        }
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Ok(rows), Ok(())) => Ok(rows),
+    }
 }
 
 /// Mirrors `indexing_coordinator.py`'s `_check_disk_usage_limit` for a

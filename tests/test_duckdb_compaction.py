@@ -4,6 +4,7 @@ Every test reuses the existing synthetic-vector infrastructure used elsewhere
 in the suite.
 """
 
+import hashlib
 import io
 import os
 import pathlib
@@ -16,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 from loguru import logger
 
 import pytest
+
+from chunkhound.core.index_format import IndexFormatError
 
 duckdb = pytest.importorskip("duckdb")
 
@@ -885,10 +888,10 @@ class TestCompactionCrashRecovery:
         assert file_backed_db.get_stats()["files"] == 2
         _assert_db_integrity(file_backed_db.db_path)
 
-    def test_stale_backup_cleaned_up_when_live_db_is_healthy(
+    def test_corrupt_stale_backup_blocks_recovery_without_mutation(
         self, file_backed_db: DuckDBProvider
     ) -> None:
-        """Stale compaction artifacts are cleaned up when live DB is intact."""
+        """A healthy live DB cannot authorize deleting uninspectable candidates."""
         db_path = Path(cast(str, file_backed_db.db_path))
         file_backed_db._execute_in_db_thread_sync(
             "insert_file",
@@ -909,21 +912,18 @@ class TestCompactionCrashRecovery:
         backup_path.write_bytes(b"stale backup")
         staged_path.write_bytes(b"stale staged")
 
-        live_size_before = db_path.stat().st_size
-
+        before = {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in db_path.parent.rglob("*") if p.is_file()
+        }
         recovered = DuckDBProvider(db_path, base_directory=db_path.parent)
         recovered.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
-        recovered.connect()
-        try:
-            # Live DB is intact — data preserved
-            assert recovered.get_stats()["files"] == 1
-            # Stale artifacts cleaned up
-            assert not backup_path.exists()
-            assert not staged_path.exists()
-            # Live file unchanged
-            assert db_path.stat().st_size == live_size_before
-        finally:
-            recovered.disconnect()
+        with pytest.raises(IndexFormatError, match="format compatibility is unknown"):
+            recovered.connect()
+        assert {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in db_path.parent.rglob("*") if p.is_file()
+        } == before
 
     def test_compacted_file_corruption_triggers_restore_from_backup(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
@@ -1001,10 +1001,10 @@ class TestCompactionGuard:
         finally:
             db._executor.set_compaction_in_progress(False)
 
-    def test_readonly_connect_does_not_mutate_compaction_artifacts(
+    def test_readonly_refuses_corrupt_compaction_artifacts_without_mutation(
         self, tmp_path: Path
     ) -> None:
-        """Read-only connect leaves pre-existing compaction artifacts untouched."""
+        """Read-only opens also fail closed, preserving all recovery artifacts."""
         db_path = tmp_path / "readonly_guard.duckdb"
         db = DuckDBProvider(db_path, base_directory=tmp_path)
         db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
@@ -1016,29 +1016,22 @@ class TestCompactionGuard:
         staged_path = db_path.with_suffix(db_path.suffix + ".compact_new")
         backup_path.write_bytes(b"backup artifact")
         staged_path.write_bytes(b"staged artifact")
-        artifacts_before = {
-            path: (path.read_bytes(), path.stat().st_mtime_ns)
-            for path in (backup_path, staged_path)
+        before = {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in tmp_path.rglob("*") if p.is_file()
         }
-        live_before = (db_path.read_bytes(), db_path.stat().st_mtime_ns)
 
         ro_db = DuckDBProvider(
             db_path,
             base_directory=tmp_path,
             config=DatabaseConfig(fragmentation_threshold_pct=30.0, read_only=True),
         )
-        ro_db.connect()
-        try:
-            assert ro_db.get_stats()["files"] == 0
-            artifacts_after = {
-                path: (path.read_bytes(), path.stat().st_mtime_ns)
-                for path in (backup_path, staged_path)
-            }
-            live_after = (db_path.read_bytes(), db_path.stat().st_mtime_ns)
-            assert artifacts_after == artifacts_before
-            assert live_after == live_before
-        finally:
-            ro_db.disconnect()
+        with pytest.raises(IndexFormatError, match="format compatibility is unknown"):
+            ro_db.connect()
+        assert {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in tmp_path.rglob("*") if p.is_file()
+        } == before
 
 
 class TestEmbeddingTableNamePattern:
@@ -2352,7 +2345,7 @@ class TestAutoCompactionMaintenance:
         monkeypatch.setattr(
             provider._connection_manager,
             "connect",
-            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         buf = io.StringIO()
         sink_id = logger.add(buf, level="ERROR")

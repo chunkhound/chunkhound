@@ -4,7 +4,7 @@ Covers user-visible invariants:
   (a) An existing DB opens read-only and serves regex search.
   (b) Writes through the provider's public API are rejected.
   (c) Config.validate_for_command rejects read_only=True for non-mcp commands.
-  (d) Reopening a DB with a stale WAL under read_only surfaces a recovery hint.
+  (d) An uninspectable WAL blocks recovery with preservation/copy guidance.
   (e) Read-only deferred-start sets query_ready_at and never starts realtime.
   (f) derive_daemon_status reports "ready" for a pre-indexed read-only DB.
   (g) mcp_command rewrites no_daemon=True when read_only is set.
@@ -12,8 +12,9 @@ Covers user-visible invariants:
 
 import argparse
 import asyncio
+import hashlib
+import os
 import subprocess
-import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,11 +109,9 @@ def stale_wal_db_path(tmp_path):
     """Build a DB with an unreplayable WAL behind it.
 
     A subprocess writes via the production stack and exits via os._exit to
-    skip the close-time CHECKPOINT (provider.disconnect() unconditionally
-    checkpoints). The resulting WAL is structurally valid but chunks-only,
-    which DuckDB silently discards in read-only mode. Appending garbage
-    bytes forces the replay path to raise — the exact failure mode the
-    production guard wraps with the recovery hint.
+    skip the close-time CHECKPOINT. Appending garbage bytes then forces
+    replay to fail. Strict format preflight must block automatic recovery
+    in both writable and read-only mode while preserving all originals.
     """
     db_path = tmp_path / "chunks.db"
     script = textwrap.dedent(
@@ -136,8 +135,9 @@ def stale_wal_db_path(tmp_path):
         """
     )
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        ["uv", "run", "python", "-c", script],
         cwd=str(Path(__file__).resolve().parents[1]),
+        env={**os.environ, "UV_NO_SYNC": "1"},
         capture_output=True,
         text=True,
         timeout=60,
@@ -152,13 +152,53 @@ def stale_wal_db_path(tmp_path):
     return db_path
 
 
-def test_read_only_stale_wal_surfaces_recovery_hint(stale_wal_db_path, tmp_path):
-    cfg = DatabaseConfig(read_only=True)
-    reader = DuckDBProvider(
-        stale_wal_db_path, base_directory=tmp_path, config=cfg
+@pytest.mark.parametrize("read_only", [False, True])
+def test_uninspectable_wal_blocks_recovery_with_preservation_guidance(
+    stale_wal_db_path, tmp_path, read_only
+):
+    before = {
+        p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*") if p.is_file()
+    }
+    # Corrupt native WAL replay stays in a subprocess, not the pytest process.
+    script = textwrap.dedent(
+        """
+        import sys
+        from pathlib import Path
+        import pytest
+        from chunkhound.core.config.database_config import DatabaseConfig
+        from chunkhound.core.index_format import IndexFormatError
+        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+        path = Path(sys.argv[1])
+        reader = DuckDBProvider(path, base_directory=path.parent,
+            config=DatabaseConfig(read_only=sys.argv[2] == "True"))
+        with pytest.raises(IndexFormatError) as caught:
+            reader.connect()
+        message = str(caught.value)
+        assert "format compatibility is unknown" in message
+        assert "automatic recovery is blocked" in message
+        assert "Preserve the database" in message
+        assert "WAL/recovery files" in message
+        assert "recover a copy" in message
+        assert "Reopening writable does not bypass" in message
+        assert "Reopen without --read-only to recover" not in message
+        assert "Unsupported index format" not in message
+        """
     )
-    with pytest.raises(RuntimeError, match="Reopen without --read-only to recover"):
-        reader.connect()
+    result = subprocess.run(
+        ["uv", "run", "python", "-c", script, str(stale_wal_db_path), str(read_only)],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "UV_NO_SYNC": "1"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {
+        p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*") if p.is_file()
+    } == before
 
 
 async def _start_read_only_server(db_path, tmp_path):

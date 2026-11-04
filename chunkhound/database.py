@@ -172,8 +172,7 @@ class Database:
                 unsuccessful shutdown for a durable one.
         """
         with self._connection_lock:
-            if self._provider.is_connected:
-                self._provider.disconnect()
+            self._provider.disconnect()
 
     def is_connected(self) -> bool:
         """Check if database is connected."""

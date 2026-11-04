@@ -66,34 +66,6 @@ from .chunk_cache_service import ChunkCacheService
 from .progress_utils import _update_speed_field
 from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
 
-# Lazy multiprocessing start-method guard — applied once before pool creation.
-# RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
-# 'spawn' starts a fresh Python interpreter, avoiding fork-related segfaults.
-# Windows/macOS already use 'spawn'; Python 3.14 will make it the default everywhere.
-_mp_configured = False
-
-
-def _ensure_mp_start_method() -> None:
-    """Set the multiprocessing start method once, lazily, before pool creation."""
-    global _mp_configured
-    if _mp_configured:
-        return
-    desired = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
-    current = multiprocessing.get_start_method(allow_none=True)
-    if current != desired:
-        try:
-            multiprocessing.set_start_method(desired, force=True)
-            logger.debug(
-                f"Set multiprocessing start method to '{desired}' (was {current})"
-            )
-        except RuntimeError:
-            logger.debug(
-                f"Multiprocessing start method remains"
-                f" '{multiprocessing.get_start_method()}'; desired '{desired}'"
-            )
-    _mp_configured = True
-
-
 def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
     return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
 
@@ -821,9 +793,11 @@ class IndexingCoordinator(BaseService):
         ]
 
         # Process batches in parallel using ProcessPoolExecutor
-        _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
             # Submit all batches for concurrent processing
             # Pass config for structured file size filtering (JSON/YAML/TOML)
             timeout_s = timeout_s_probe
@@ -2518,9 +2492,11 @@ class IndexingCoordinator(BaseService):
             )
 
         # Process subtrees in parallel
-        _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
             futures = []
             for subtree in top_level_items:
                 # Filter precomputed repo roots to those under this subtree

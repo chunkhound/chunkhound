@@ -16,6 +16,7 @@ from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.config import Config
 from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
 from chunkhound.core.embedding_model_drift import ModelDrift, format_drift_warning
+from chunkhound.core.index_format import IndexFormatError
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.daemon.process import pid_alive
 from chunkhound.registry import (
@@ -118,16 +119,39 @@ def _suggest_model_upgrade(formatter: RichOutputFormatter) -> None:
 
 
 def _is_db_lock_error(exc: Exception) -> bool:
-    """Return True if *exc* looks like a DuckDB exclusive-lock failure."""
-    msg = str(exc).lower()
+    """Recognize local lock failures without displaying a sanitized cause."""
+    wrapped_format_error = isinstance(exc, IndexFormatError)
+    if wrapped_format_error:
+        # Preflight deliberately hides engine text (paths and other details).
+        # Inspect only its explicit DuckDB IO cause, not arbitrary format text
+        # or exception chains: an unsupported/corrupt format is not contention.
+        import duckdb
+
+        cause = exc.__cause__
+        if not isinstance(cause, duckdb.IOException):
+            return False
+        exc = cause
+    msg = str(exc).lower().removeprefix("io error: ").strip()
+    # Match diagnostic forms, never phrases anywhere in engine text: even a
+    # corrupt file's quoted path may contain every one of these lock phrases.
     return (
-        "could not set lock" in msg
-        or "database is locked" in msg
-        # Windows: DuckDB reports "being used by another process" in IOException
-        or "being used by another process" in msg
+        msg.startswith("could not set lock on file")
+        or msg == "database is locked"
+        # Windows puts the path and OS sharing diagnostic on the first line;
+        # DuckDB may append lock-owner process details on subsequent lines.
+        or (
+            msg.startswith("cannot open file")
+            and msg.partition("\n")[0].rstrip("\r").endswith(
+                "the process cannot access the file because it is being used "
+                "by another process."
+            )
+        )
         # Windows: WAL file locked — PermissionError raised by WAL recovery code
         or (isinstance(exc, PermissionError) and ".wal" in msg)
-        or ("locked" in msg and "duckdb" in type(exc).__module__.lower())
+        or (
+            msg == "locked by another process"
+            and "duckdb" in type(exc).__module__.lower()
+        )
     )
 
 
@@ -250,6 +274,24 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     args.db = db_path
     if not _validate_run_arguments(args, formatter, config):
         sys.exit(1)
+
+    if (
+        not _mcp_mode()
+        and not getattr(args, "no_embeddings", False)
+        and not config.embeddings_disabled
+        and config.hub.url
+    ):
+        from chunkhound.hub.client import pull
+        from chunkhound.hub.errors import (
+            HubDatabaseMismatch,
+            HubInstallationInterrupted,
+            HubReaderCloseError,
+        )
+
+        try:
+            await pull(config, automatic=True)
+        except (HubDatabaseMismatch, HubInstallationInterrupted, HubReaderCloseError):
+            raise SystemExit(1) from None
 
     # MCP has no interactive layer and must not write to stdout, so it gets no
     # decision hook at all; the registry then keeps the indexed model and logs
@@ -508,7 +550,10 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(0)
     except Exception as e:
         formatter.error(f"Run command failed: {e}")
-        logger.exception("Run command error details")
+        # Expected format refusals deliberately retain a typed engine cause for
+        # lock recovery. Rendering its chain would defeat the sanitized message.
+        if not isinstance(e, IndexFormatError):
+            logger.exception("Run command error details")
         sys.exit(1)
 
 

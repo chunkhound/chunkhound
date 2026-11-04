@@ -20,6 +20,7 @@ from chunkhound.core.config.config import Config
 
 # Import embedding factory for unified provider creation
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.embedding_dimensions import configured_embedding_dims
 from chunkhound.core.embedding_model_drift import (
     ActiveModel,
     ActiveModelStateError,
@@ -44,21 +45,6 @@ from chunkhound.parsers.parser_factory import get_parser_factory
 # Answers "the configured model or dims differ from the index; switch to them?".
 # True re-embeds under the configuration, False keeps the index's settings.
 ModelDriftDecision = Callable[[ModelDrift], bool]
-
-
-def _configured_embedding_dims(provider: EmbeddingProvider) -> int | None:
-    """Dimensions the provider will embed at, or None if it cannot know yet.
-
-    An explicit ``output_dims`` wins. Otherwise a provider that knows its
-    model's dimensions reports them; an unknown model on a custom endpoint only
-    learns them from its first response, and guessing would flag drift against
-    an index that is actually fine.
-    """
-    if provider.output_dims is not None:
-        return provider.output_dims
-    if provider.supported_dimensions:
-        return provider.dims
-    return None
 
 
 class LazyLanguageParsers(MutableMapping[Language, Any]):
@@ -141,11 +127,15 @@ class ProviderRegistry:
         self._language_parsers: LazyLanguageParsers = LazyLanguageParsers()
         self._config: Config | None = None
         self._embedding_manager: EmbeddingManager | None = None
+        self._database_initialization_pending = False
+        self._pending_model_drift_decision: ModelDriftDecision | None = None
 
     def configure(
         self,
         config: Config,
         on_model_drift: ModelDriftDecision | None = None,
+        *,
+        connect_database: bool = True,
     ) -> None:
         """Configure the registry with application settings.
 
@@ -153,14 +143,19 @@ class ProviderRegistry:
         dimensions disagree with what the index was built with. Omitting it
         keeps the index's settings, which is what MCP and other non-interactive
         entry points want; the CLI passes a callback that asks the operator.
+
+        With ``connect_database=False``, the caller must connect the registered
+        provider and call ``complete_database_initialization`` before database use.
         """
         self._config = config
-
-        # Create and register providers based on configuration
+        self._database_initialization_pending = not connect_database
+        self._pending_model_drift_decision = on_model_drift
         self._setup_embedding_provider()
-        self._setup_database_provider()
+        self._setup_database_provider(connect_database=connect_database)
         self._setup_language_parsers()
-        self._resolve_embedding_model_drift(on_model_drift)
+        if connect_database:
+            self._resolve_embedding_model_drift(on_model_drift)
+            self._pending_model_drift_decision = None
 
     def register_embedding_provider(self, provider: EmbeddingProvider) -> None:
         """Register a caller-built embedding provider, held to the index.
@@ -171,7 +166,18 @@ class ProviderRegistry:
         already announced the pin when it resolved its own provider.
         """
         self.register_provider("embedding", provider, singleton=True)
-        self._resolve_embedding_model_drift(None, announce=False)
+        if not self._database_initialization_pending:
+            self._resolve_embedding_model_drift(None, announce=False)
+
+    def complete_database_initialization(self) -> None:
+        """Finish deferred index-dependent setup after the owner connects."""
+        if not self._database_initialization_pending:
+            return
+        if not self.get_provider("database").is_connected:
+            raise RuntimeError("Connect the database before completing service setup")
+        self._resolve_embedding_model_drift(self._pending_model_drift_decision)
+        self._pending_model_drift_decision = None
+        self._database_initialization_pending = False
 
     def _resolve_embedding_model_drift(
         self,
@@ -220,7 +226,7 @@ class ProviderRegistry:
                 ActiveModel(indexed.provider, indexed.model, indexed.dims),
             )
 
-        configured_dims = _configured_embedding_dims(embedding_provider)
+        configured_dims = configured_embedding_dims(embedding_provider)
         drift = detect_model_drift(
             indexed,
             embedding_provider.name,
@@ -508,7 +514,7 @@ class ProviderRegistry:
 
     # Private setup methods - explicit provider creation
 
-    def _setup_database_provider(self) -> None:
+    def _setup_database_provider(self, *, connect_database: bool = True) -> None:
         """Create and register the database provider based on configuration."""
         if not self._config:
             # Default to DuckDB if no config
@@ -519,7 +525,8 @@ class ProviderRegistry:
             provider = DuckDBProvider(
                 db_path=".chunkhound/db", base_directory=Path.cwd()
             )
-            provider.connect()
+            if connect_database:
+                provider.connect()
             self.register_provider("database", provider, singleton=True)
             return
 
@@ -558,7 +565,8 @@ class ProviderRegistry:
             )
 
         # Connect and register
-        provider.connect()
+        if connect_database:
+            provider.connect()
         self.register_provider("database", provider, singleton=True)
 
     def _setup_embedding_provider(self) -> None:

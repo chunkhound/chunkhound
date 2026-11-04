@@ -175,6 +175,7 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.daemon_parser import add_daemon_subparser
     from .parsers.fetchurl_parser import add_fetchurl_subparser
     from .parsers.mcp_parser import add_mcp_subparser
+    from .parsers.pull_parser import add_pull_subparser
     from .parsers.quickresearch_parser import add_quickresearch_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
@@ -186,6 +187,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Add command subparsers
     add_run_subparser(subparsers)
+    add_pull_subparser(subparsers)
     add_mcp_subparser(subparsers)
     add_search_subparser(subparsers)
     add_websearch_subparser(subparsers)
@@ -328,6 +330,10 @@ async def async_main() -> None:
             from .commands.run import run_command
 
             await run_command(args, config)
+        elif args.command == "pull":
+            from .commands.pull import pull_command
+
+            await pull_command(args, config)
         elif args.command == "mcp":
             # Dynamic import to avoid early chunkhound module loading
             from .commands.mcp import mcp_command
