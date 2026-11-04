@@ -26,6 +26,11 @@ _MAX_RESULT_WINDOW = 2000
 # Both-mode keeps this below the general paging window so it does not turn
 # every hybrid query into a 2000-hit DB request.
 _HYBRID_BOTH_SNAPSHOT_SIZE = 500
+# Target texts per chunk-embedding request (AGENTS.md: batch at least 100,
+# never above the provider limit). Cache misses accumulate across stream
+# batches until this fills, so cache hits and path filters do not fragment
+# requests.
+_EMBED_BATCH_TARGET = 100
 
 
 def _overfetch_factor() -> int:
@@ -134,6 +139,75 @@ class TransientSearchService:
             return await self._embedding_manager.embed_texts(texts)
         return await self._embedding_manager.embed_texts(texts, provider_name=provider)
 
+    def _embed_batch_target(self, provider: str | None) -> int:
+        """Return min(_EMBED_BATCH_TARGET, provider document limit)."""
+        try:
+            limit = self._embedding_manager.get_provider(
+                provider
+            ).get_max_documents_per_batch()
+        except Exception:
+            return _EMBED_BATCH_TARGET
+        if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+            return min(_EMBED_BATCH_TARGET, limit)
+        return _EMBED_BATCH_TARGET
+
+    async def _vectorized_batches(
+        self,
+        path_prefix: str | None,
+        cache_ns: dict[str, Any],
+        provider: str | None,
+    ) -> AsyncIterator[list[tuple[int, Any, np.ndarray]]]:
+        """Yield ``(ordinal, chunk, unit_vector)`` batches for one stream scan.
+
+        Ordinals follow source order, so callers keep the earlier-chunk tie
+        break no matter when a chunk is scored. Cache hits are yielded at once;
+        misses wait (as chunks only, never vectors) until a full embedding
+        request can be sent, plus one final partial request. Live vectors stay
+        bounded by one stream batch or one embedding request.
+        """
+        target = self._embed_batch_target(provider)
+        pending: list[tuple[int, Any]] = []
+        ordinal = 0
+
+        async def flush() -> list[tuple[int, Any, np.ndarray]]:
+            texts = [chunk.code for _, chunk in pending]
+            embedded = await self._embed_texts(texts, provider)
+            self._validate_embedding_result(embedded, cache_ns)
+            if len(embedded.embeddings) != len(texts):
+                raise RuntimeError(
+                    "Embedding provider returned an unexpected number of vectors"
+                )
+            resolved = []
+            for (index, chunk), vector in zip(pending, embedded.embeddings):
+                self._vector_cache.put(chunk.code, vector, **cache_ns)
+                resolved.append((index, chunk, self._normalise(vector)))
+            pending.clear()
+            return resolved
+
+        async for chunks in self._chunk_stream():
+            hits: list[tuple[int, Any, np.ndarray]] = []
+            for chunk in chunks:
+                if path_prefix and not (
+                    chunk.file_path
+                    and path_matches_filter(str(chunk.file_path), path_prefix)
+                ):
+                    continue
+                vector = self._vector_cache.get(chunk.code, **cache_ns)
+                if vector is not None:
+                    hits.append((ordinal, chunk, self._normalise(vector)))
+                else:
+                    pending.append((ordinal, chunk))
+                ordinal += 1
+                if len(pending) >= target:
+                    if hits:
+                        yield hits
+                        hits = []
+                    yield await flush()
+            if hits:
+                yield hits
+        if pending:
+            yield await flush()
+
     @staticmethod
     def _cache_namespace(result: Any) -> dict[str, Any]:
         identity = getattr(result, "embedding_space_identity", None)
@@ -217,43 +291,12 @@ class TransientSearchService:
             "candidate pool must cover the requested offset+page_size slice"
         )
         heap: list[tuple[float, int, dict[str, Any]]] = []
-        ordinal = 0
         qualifying_count = 0
 
-        async for chunks in self._chunk_stream():
-            filtered = [
-                chunk
-                for chunk in chunks
-                if not path_prefix
-                or (
-                    chunk.file_path
-                    and path_matches_filter(str(chunk.file_path), path_prefix)
-                )
-            ]
-            if not filtered:
-                continue
-
-            vectors: list[Sequence[float] | np.ndarray | None] = [
-                self._vector_cache.get(chunk.code, **cache_ns) for chunk in filtered
-            ]
-            missing_indices = [
-                index for index, vector in enumerate(vectors) if vector is None
-            ]
-            if missing_indices:
-                texts = [filtered[index].code for index in missing_indices]
-                embedded = await self._embed_texts(texts, provider)
-                self._validate_embedding_result(embedded, cache_ns)
-                for index, vector in zip(missing_indices, embedded.embeddings):
-                    vectors[index] = vector
-                    self._vector_cache.put(filtered[index].code, vector, **cache_ns)
-
-            live = sum(1 for vector in vectors if vector is not None)
-            self.peak_live_vectors = max(self.peak_live_vectors, len(heap) + live)
-
-            for chunk, vector in zip(filtered, vectors):
-                if vector is None:
-                    continue
-                score = float(np.dot(self._normalise(vector), query_vector))
+        async for batch in self._vectorized_batches(path_prefix, cache_ns, provider):
+            self.peak_live_vectors = max(self.peak_live_vectors, len(heap) + len(batch))
+            for ordinal, chunk, vector in batch:
+                score = float(np.dot(vector, query_vector))
                 if threshold is not None and score < threshold:
                     continue
                 qualifying_count += 1
@@ -261,7 +304,6 @@ class TransientSearchService:
                 # The root is the worst retained rank: lowest score, then
                 # latest source position. Ties in output prefer earlier chunks.
                 entry = (score, -ordinal, result)
-                ordinal += 1
                 if len(heap) < effective_limit:
                     heapq.heappush(heap, entry)
                 elif entry[:2] > heap[0][:2]:
@@ -342,49 +384,16 @@ class TransientSearchService:
             [] for _ in queries
         ]
         qualifying_counts = [0] * len(queries)
-        ordinal = 0
         peak_live_vectors = 0
 
-        async for chunks in self._chunk_stream():
-            filtered = [
-                chunk
-                for chunk in chunks
-                if not path_prefix
-                or (
-                    chunk.file_path
-                    and path_matches_filter(str(chunk.file_path), path_prefix)
-                )
-            ]
-            if not filtered:
-                continue
-            vectors: list[Sequence[float] | np.ndarray | None] = [
-                self._vector_cache.get(chunk.code, **cache_ns) for chunk in filtered
-            ]
-            missing_indices = [
-                index for index, vector in enumerate(vectors) if vector is None
-            ]
-            if missing_indices:
-                texts = [filtered[index].code for index in missing_indices]
-                embedded = await self._embed_texts(texts, provider)
-                self._validate_embedding_result(embedded, cache_ns)
-                for index, vector in zip(missing_indices, embedded.embeddings):
-                    vectors[index] = vector
-                    self._vector_cache.put(filtered[index].code, vector, **cache_ns)
-
-            available = [
-                (chunk, self._normalise(vector))
-                for chunk, vector in zip(filtered, vectors)
-                if vector is not None
-            ]
-            if not available:
-                continue
-            chunk_matrix = np.stack([vector for _, vector in available])
+        async for batch in self._vectorized_batches(path_prefix, cache_ns, provider):
+            chunk_matrix = np.stack([vector for _, _, vector in batch])
             scores = chunk_matrix @ query_vectors.T
             peak_live_vectors = max(
                 peak_live_vectors,
-                sum(len(heap) for heap in heaps) + len(available),
+                sum(len(heap) for heap in heaps) + len(batch),
             )
-            for chunk_index, (chunk, _) in enumerate(available):
+            for chunk_index, (ordinal, chunk, _) in enumerate(batch):
                 for query_index, heap in enumerate(heaps):
                     score = float(scores[chunk_index, query_index])
                     if threshold is not None and score < threshold:
@@ -395,7 +404,6 @@ class TransientSearchService:
                         heapq.heappush(heap, entry)
                     elif entry[:2] > heap[0][:2]:
                         heapq.heapreplace(heap, entry)
-                ordinal += 1
 
         self.peak_live_vectors = peak_live_vectors
         outputs = []

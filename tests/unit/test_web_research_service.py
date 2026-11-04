@@ -521,16 +521,17 @@ async def test_research_propagates_error_after_partial_page_stream() -> None:
             yield f"https://example.invalid/{index}", ".md", f"page {index}"
         raise RuntimeError("page stream failed")
 
-    manager = MagicMock()
-    manager.embed_texts = AsyncMock(
-        return_value=LocalEmbeddingResult(
-            embeddings=[[1.0, 0.0]],
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        return LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0] for _ in texts],
             model="test",
             provider="test",
             dims=2,
             embedding_space_identity="test-space",
         )
-    )
+
+    manager = MagicMock()
+    manager.embed_texts = AsyncMock(side_effect=embed)
     captured: dict = {}
     observed: list[BaseException] = []
     research = MagicMock()

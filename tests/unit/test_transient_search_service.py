@@ -1323,3 +1323,128 @@ async def test_hybrid_both_exposes_final_partial_snapshot_page() -> None:
     assert len(final) == 200
     assert final_page["has_more"] is False
     assert final_page["next_offset"] is None
+
+
+def _spying_embedding_manager(
+    max_documents: int = 2048,
+) -> tuple[MagicMock, list[list[str]]]:
+    """Embed every text to a vector derived from its trailing number."""
+    requests: list[list[str]] = []
+
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        if texts not in (["query"], ["query", "other"]):
+            requests.append(list(texts))
+        vectors = []
+        for text in texts:
+            if text in {"query", "other"}:
+                vectors.append([1.0, 0.0])
+            else:
+                # Few distinct scores, so ties exercise source-order breaking.
+                angle = (int(text.rsplit("-", 1)[1]) % 7) / 10
+                vectors.append([math.cos(angle), math.sin(angle)])
+        return LocalEmbeddingResult(
+            embeddings=vectors,
+            model="test-model",
+            provider="test",
+            dims=2,
+            embedding_space_identity="test-space",
+        )
+
+    manager = MagicMock()
+    manager.get_provider.return_value.get_max_documents_per_batch.return_value = (
+        max_documents
+    )
+    manager.embed_texts = AsyncMock(side_effect=embed)
+    return manager, requests
+
+
+def _numbered_chunks(count: int) -> list:
+    return [
+        make_chunk(
+            f"c{index}",
+            file_path=("src/api/" if index % 20 == 0 else "src/other/")
+            + f"f{index}.py",
+            start_line=index + 1,
+            code=f"chunk-{index}",
+        )
+        for index in range(count)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario", ["narrow_path_filter", "partial_cache_hits", "bulk_partial_hits"]
+)
+async def test_chunk_embedding_requests_are_full_batches(scenario: str) -> None:
+    """Cache hits and path filters must not fragment embedding requests."""
+    chunks = _numbered_chunks(5_000)
+    manager, requests = _spying_embedding_manager()
+    cache = VectorCache(max_entries=10_000)
+    service = TransientSearchService(
+        make_original(), stream_chunks(chunks), "diff", manager, cache
+    )
+    path_filter = "src/api" if scenario == "narrow_path_filter" else None
+    if scenario != "narrow_path_filter":
+        # Warm every tenth chunk so each 100-chunk stream batch has 90 misses.
+        warm = TransientSearchService(
+            make_original(), stream_chunks(chunks[::10]), "diff", manager, cache
+        )
+        await warm.search_semantic("query")
+        requests.clear()
+
+    if scenario == "bulk_partial_hits":
+        await service.search_semantic_many(["query", "other"])
+    else:
+        await service.search_semantic("query", path_filter=path_filter)
+
+    assert requests
+    assert all(len(request) == 100 for request in requests[:-1])
+    expected = 250 if scenario == "narrow_path_filter" else 4_500
+    assert sum(len(request) for request in requests) == expected
+
+
+@pytest.mark.asyncio
+async def test_chunk_embedding_requests_respect_provider_document_limit() -> None:
+    manager, requests = _spying_embedding_manager(max_documents=64)
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(_numbered_chunks(500)),
+        "diff",
+        manager,
+        VectorCache(max_entries=0),
+    )
+    await service.search_semantic("query")
+    assert max(len(request) for request in requests) == 64
+
+
+@pytest.mark.asyncio
+async def test_partial_cache_hits_preserve_ranking_and_tie_order() -> None:
+    chunks = _numbered_chunks(1_000)
+
+    async def pages(warm_every: int | None) -> list[list[tuple[str, int]]]:
+        manager, _ = _spying_embedding_manager()
+        cache = VectorCache(max_entries=0 if warm_every is None else 10_000)
+        if warm_every is not None:
+            await TransientSearchService(
+                make_original(),
+                stream_chunks(chunks[::warm_every]),
+                "diff",
+                manager,
+                cache,
+            ).search_semantic("query")
+        service = TransientSearchService(
+            make_original(), stream_chunks(chunks), "diff", manager, cache
+        )
+        return [
+            [
+                (row["content"], row["start_line"])
+                for row in (
+                    await service.search_semantic("query", page_size=25, offset=offset)
+                )[0]
+            ]
+            for offset in (0, 25)
+        ]
+
+    baseline = await pages(None)
+    assert await pages(3) == baseline
+    assert await pages(1) == baseline
