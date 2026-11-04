@@ -65,7 +65,8 @@ async def test_evicted_pages_support_concurrent_late_search_and_async_source(
         refetched.append(url)
         await asyncio.sleep(0)
         index = int(url.rsplit("/", 1)[1])
-        yield url, ".md", body(index) + (" changed" if revision else "")
+        # Only page 0 changes upstream; the rest stay stable.
+        yield url, ".md", body(index) + (" changed" if revision and index == 0 else "")
 
     monkeypatch.setattr(web, "fetch_pages", refetch)
 
@@ -107,10 +108,22 @@ async def test_evicted_pages_support_concurrent_late_search_and_async_source(
         assert body(0)[:20] in evidence["https://example.invalid/0"]
         revision = changed
         if changed:
-            with pytest.raises(
-                RuntimeError, match="Web source changed since first read"
-            ):
-                await services.search_service.search_semantic("changed replay")
+            provider._sources.clear()
+            provider._source_bytes = 0
+            replay, _ = await services.search_service.search_semantic(
+                "changed replay", page_size=20
+            )
+            # The changed page is dropped; the other sources keep working and
+            # no result mixes in the new revision.
+            assert {row["content"] for row in replay} == {
+                body(i) for i in range(1, count)
+            }
+            assert (
+                await provider.get_transient_file_content_async(
+                    "https://example.invalid/0"
+                )
+                is None
+            )
         else:
             assert await provider.get_transient_file_content_async(
                 "https://example.invalid/0"
@@ -122,17 +135,23 @@ async def test_evicted_pages_support_concurrent_late_search_and_async_source(
         return MagicMock(deep_research=deep_research)
 
     monkeypatch.setattr(web.ResearchServiceFactory, "create", create)
+    warnings: list[str] = []
+    assert await web.research_web_pages(
+        "query",
+        pages(),
+        MagicMock(),
+        _embedding_manager(),
+        MagicMock(),
+        warning_callback=warnings.append,
+    ) == {"answer": "done"}
+    dropped = [w for w in warnings if w.startswith("Dropped from research")]
     if changed:
-        # Expanded research searches may swallow individual search errors.
-        # A revision mismatch must still fail the overall research session.
-        with pytest.raises(RuntimeError, match="Web source changed since first read"):
-            await web.research_web_pages(
-                "query", pages(), MagicMock(), _embedding_manager(), MagicMock()
-            )
+        assert dropped == [
+            "Dropped from research: Web source changed since first read: "
+            "https://example.invalid/0"
+        ]
     else:
-        assert await web.research_web_pages(
-            "query", pages(), MagicMock(), _embedding_manager(), MagicMock()
-        ) == {"answer": "done"}
+        assert dropped == []
 
 
 @pytest.mark.asyncio
@@ -202,7 +221,7 @@ async def test_pdf_cache_avoids_reparse_until_bounded_cache_eviction(
 
 
 @pytest.mark.asyncio
-async def test_pdf_refetch_parse_failure_is_sticky(monkeypatch) -> None:
+async def test_unreplayable_only_source_fails_research(monkeypatch) -> None:
     captured = {}
     body = b"%PDF stable body"
     url = "https://example.invalid/stable.pdf"
@@ -234,15 +253,10 @@ async def test_pdf_refetch_parse_failure_is_sticky(monkeypatch) -> None:
         assert (await services.search_service.search_semantic("first"))[0]
         services.provider._sources.clear()
         services.provider._source_bytes = 0
-        with pytest.raises(
-            RuntimeError, match="Unable to replay previously usable web source"
-        ):
-            await services.search_service.search_semantic("second")
-        with pytest.raises(
-            RuntimeError, match="Unable to replay previously usable web source"
-        ):
-            await services.search_service.search_semantic("third")
-        raise RuntimeError("Unable to replay previously usable web source")
+        # The dropped source is neither served nor refetched again.
+        assert (await services.search_service.search_semantic("second"))[0] == []
+        assert (await services.search_service.search_semantic("third"))[0] == []
+        return {"answer": "must not escape"}
 
     def create(**kwargs):
         captured.update(kwargs)
@@ -252,8 +266,9 @@ async def test_pdf_refetch_parse_failure_is_sticky(monkeypatch) -> None:
     monkeypatch.setattr(web, "fetch_pages", refetch)
     monkeypatch.setattr(web.ResearchServiceFactory, "create", create)
 
+    warnings: list[str] = []
     with pytest.raises(
-        RuntimeError, match="Unable to replay previously usable web source"
+        RuntimeError, match="Every web source became unavailable during research"
     ):
         await web.research_web_pages(
             "query",
@@ -261,8 +276,12 @@ async def test_pdf_refetch_parse_failure_is_sticky(monkeypatch) -> None:
             MagicMock(),
             _embedding_manager(),
             MagicMock(),
+            warning_callback=warnings.append,
         )
     assert calls == 2
+    assert warnings[-1] == (
+        f"Dropped from research: Unable to replay previously usable web source: {url}"
+    )
 
 
 @pytest.mark.asyncio

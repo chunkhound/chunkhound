@@ -512,14 +512,20 @@ def _fingerprint(text: str) -> bytes:
     return digest.digest()
 
 
+class _SourceUnavailableError(RuntimeError):
+    """An evicted page cannot be replayed at the revision first read."""
+
+
 class _BoundedPageStream:
     """Replay URL descriptors, never a corpus of chunks or source bodies.
 
     The one-shot input advances only on demand under a lock. Each scan derives
     fresh chunks, with at most four scans active. Evicted sources are live
-    refetched (no disk snapshot); normalized text must match its first-read
-    fingerprint or research fails rather than mixing revisions. A caller-owned
-    Sequence is not copied, and its memory remains the caller's responsibility.
+    refetched (no disk snapshot). A source whose refetch fails or no longer
+    matches its first-read fingerprint is dropped for the rest of the session
+    with a warning, so research never mixes revisions and one unstable page
+    does not fail the whole run. A caller-owned Sequence is not copied, and
+    its memory remains the caller's responsibility.
     """
 
     def __init__(
@@ -538,7 +544,9 @@ class _BoundedPageStream:
         self._complete = False
         self._closed = False
         self._error: BaseException | None = None
+        self._dropped: set[str] = set()
         self.usable_page_count = 0
+        self.dropped_usable_page_count = 0
         provider._load_source = self.load_source
 
     def _record_error(self, exc: BaseException) -> None:
@@ -549,10 +557,24 @@ class _BoundedPageStream:
             self._error.__cause__ = None
         self._complete = True
 
-    async def _refetch(self, descriptor: _PageDescriptor) -> tuple[str, list[Chunk]]:
+    async def _refetch(
+        self, descriptor: _PageDescriptor
+    ) -> tuple[str, list[Chunk]] | None:
+        """Replay a source, or return None once it has been dropped."""
         self.raise_stream_error()
+        if descriptor.url in self._dropped:
+            return None
         try:
             return await self._refetch_page(descriptor)
+        except _SourceUnavailableError as exc:
+            # Pages change and fetches fail between reads. Losing one source
+            # is recoverable; serving a different revision is not.
+            self._dropped.add(descriptor.url)
+            if descriptor.usable:
+                self.dropped_usable_page_count += 1
+            if self._warning_callback is not None:
+                self._warning_callback(f"Dropped from research: {exc}")
+            return None
         except Exception as exc:
             self._record_error(exc)
             raise
@@ -572,7 +594,9 @@ class _BoundedPageStream:
         try:
             page = await anext(fetched, None)
             if page is None:
-                raise RuntimeError(f"Unable to refetch web source: {descriptor.url}")
+                raise _SourceUnavailableError(
+                    f"Unable to refetch web source: {descriptor.url}"
+                )
             if descriptor.is_pdf:
                 content = page[2]
                 fingerprint = (
@@ -581,18 +605,18 @@ class _BoundedPageStream:
                     else _fingerprint(content)
                 )
                 if fingerprint != descriptor.fingerprint:
-                    raise RuntimeError(
+                    raise _SourceUnavailableError(
                         f"Web source changed since first read: {descriptor.url}"
                     )
             text, chunks, fingerprint, warned = await _normalized_page(
                 page, self._warning_callback
             )
             if fingerprint != descriptor.fingerprint:
-                raise RuntimeError(
+                raise _SourceUnavailableError(
                     f"Web source changed since first read: {descriptor.url}"
                 )
             if warned or (descriptor.usable and not chunks):
-                raise RuntimeError(
+                raise _SourceUnavailableError(
                     f"Unable to replay previously usable web source: "
                     f"{descriptor.url}"
                 )
@@ -608,8 +632,8 @@ class _BoundedPageStream:
             descriptor = self._by_url.get(url)
             if descriptor is None:
                 return None
-            text, _ = await self._refetch(descriptor)
-            return text
+            replayed = await self._refetch(descriptor)
+            return replayed[0] if replayed is not None else None
 
     async def _page_chunks(self, index: int) -> list[Chunk] | None:
         async with self._lock:
@@ -619,8 +643,8 @@ class _BoundedPageStream:
                 descriptor = self._descriptors[index]
                 if not descriptor.usable:
                     return []
-                _, chunks = await self._refetch(descriptor)
-                return chunks
+                replayed = await self._refetch(descriptor)
+                return replayed[1] if replayed is not None else []
             if self._complete:
                 self.raise_stream_error()
                 return None
@@ -737,4 +761,8 @@ async def research_web_pages(
     chunk_stream.raise_stream_error()
     if chunk_stream.usable_page_count == 0:
         raise ValueError("No usable page content was produced")
+    if chunk_stream.dropped_usable_page_count == chunk_stream.usable_page_count:
+        # Dropping one unstable page is recoverable; an answer with every
+        # source withdrawn mid-research is not trustworthy.
+        raise RuntimeError("Every web source became unavailable during research")
     return result
