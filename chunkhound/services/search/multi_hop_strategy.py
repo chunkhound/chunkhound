@@ -118,7 +118,7 @@ class MultiHopStrategy:
         if effective_result_limit is not None:
             if effective_result_limit < initial_limit:
                 logger.debug(
-                    "result_limit=%d caps initial fetch from %d to %d",
+                    "result_limit={} caps initial fetch from {} to {}",
                     effective_result_limit,
                     initial_limit,
                     effective_result_limit,
@@ -257,13 +257,13 @@ class MultiHopStrategy:
                 remaining_budget = effective_result_limit - len(all_results)
                 if remaining_budget <= 0:
                     logger.debug(
-                        "Dynamic expansion terminated: %d result limit reached",
+                        "Dynamic expansion terminated: {} result limit reached",
                         effective_result_limit,
                     )
                     break
                 if len(new_candidates) > remaining_budget:
                     logger.debug(
-                        "result_limit=%d truncates expansion from %d to %d",
+                        "result_limit={} truncates expansion from {} to {}",
                         effective_result_limit,
                         len(new_candidates),
                         remaining_budget,
