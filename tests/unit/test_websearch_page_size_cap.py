@@ -61,11 +61,13 @@ def test_fetch_url_rejects_response_over_the_size_cap(
     oversized_page_server: str,
 ) -> None:
     with pytest.raises(ValueError, match="exceeds maximum page size"):
-        _fetch_url(f"{oversized_page_server}/huge")
+        _fetch_url(f"{oversized_page_server}/huge", validate_ssrf=False)
 
 
 def test_fetch_url_allows_response_under_the_size_cap(
     oversized_page_server: str,
 ) -> None:
-    _ct, body, _charset = _fetch_url(f"{oversized_page_server}/small")
+    _ct, body, _charset = _fetch_url(
+        f"{oversized_page_server}/small", validate_ssrf=False
+    )
     assert body == b"small page body"
