@@ -97,7 +97,10 @@ def test_write_stdout_line_writes_and_flushes(monkeypatch: pytest.MonkeyPatch) -
             nonlocal flushed
             flushed = True
 
-    monkeypatch.setattr(sys.stdout, "buffer", _FakeBuffer())
+    # sys.stdout.buffer is a read-only property on the real TextIOWrapper
+    # (confirmed: `sys.stdout.buffer = x` raises AttributeError even outside
+    # pytest) -- replace the whole sys.stdout object instead of its attribute.
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(buffer=_FakeBuffer()))
 
     write_stdout_line(b'{"ok":true}\n')
 
