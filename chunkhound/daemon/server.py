@@ -21,7 +21,6 @@ from typing import Any
 
 from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.version import __version__
 
 from . import ipc
 from .client_manager import ClientManager
@@ -36,7 +35,9 @@ class ChunkHoundDaemon(MCPServerBase):
     MCP protocol handling is delegated to MCPServerBase.serve_connection()
     (one call per client connection) over this module's length-prefixed IPC
     frames; this module itself never imports the mcp SDK directly — see
-    docs/mcp-single-dispatch-design.html.
+    docs/mcp-single-dispatch-design.html. The IPC registration handshake
+    (register/registered) stays hand-rolled since it is proxy-to-daemon
+    authentication, not MCP protocol.
     """
 
     def __init__(
@@ -303,111 +304,6 @@ class ChunkHoundDaemon(MCPServerBase):
                 await writer.wait_closed()
             except Exception:
                 pass
-
-    # ------------------------------------------------------------------
-    # MCP JSON-RPC dispatch
-    # ------------------------------------------------------------------
-
-    async def _dispatch_mcp(
-        self, msg: dict[str, Any], client_id: str
-    ) -> dict[str, Any] | None:
-        """Route a JSON-RPC 2.0 message to the correct handler.
-
-        Returns a JSON-RPC response dict, or None for notifications.
-        """
-        method: str = msg.get("method", "")
-        req_id = msg.get("id")
-
-        # Notifications have no "id" — fire-and-forget
-        if req_id is None and method.startswith("notifications/"):
-            return None
-
-        try:
-            if method == "initialize":
-                return await self._handle_initialize(msg)
-            elif method == "tools/list":
-                return await self._handle_tools_list(msg)
-            elif method == "tools/call":
-                return await self._handle_tools_call(msg)
-            elif method == "ping":
-                return {"jsonrpc": "2.0", "id": req_id, "result": {}}
-            elif method.startswith("notifications/"):
-                return None
-            else:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {
-                        "code": -32601,
-                        "message": f"Method not found: {method}",
-                    },
-                }
-        except Exception as e:
-            self.debug_log(f"Dispatch error for {method}: {e}")
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32603, "message": str(e)},
-            }
-
-    async def _handle_initialize(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Respond to the MCP initialize request."""
-        return {
-            "jsonrpc": "2.0",
-            "id": msg.get("id"),
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {
-                    "name": "ChunkHound Code Search",
-                    "version": __version__,
-                },
-                "capabilities": {"tools": {}},
-            },
-        }
-
-    async def _handle_tools_list(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Respond to the tools/list request with available tool schemas."""
-        try:
-            await asyncio.wait_for(self._initialization_complete.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass
-
-        tools = self._build_filtered_tool_dicts()
-        return {
-            "jsonrpc": "2.0",
-            "id": msg.get("id"),
-            "result": {"tools": tools},
-        }
-
-    async def _handle_tools_call(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Execute a tool and return its result."""
-        params = msg.get("params", {})
-        tool_name: str = params.get("name", "")
-        arguments: dict[str, Any] = params.get("arguments", {})
-
-        from chunkhound.mcp_server.common import handle_tool_call, tool_call_failed
-
-        text_contents = await handle_tool_call(
-            tool_name=tool_name,
-            arguments=arguments,
-            services=self.services,
-            embedding_manager=self.embedding_manager,
-            initialization_complete=self._initialization_complete,
-            debug_mode=self.debug_mode,
-            scan_progress=self._scan_progress_for_tool(tool_name),
-            llm_manager=self.llm_manager,
-            config=self.config,
-            ensure_services=self.ensure_tool_services,
-            analytics_recorder=self.analytics_recorder,
-        )
-
-        content = [{"type": tc.type, "text": tc.text} for tc in text_contents]
-
-        return {
-            "jsonrpc": "2.0",
-            "id": msg.get("id"),
-            "result": {"content": content, "isError": tool_call_failed(text_contents)},
-        }
 
     # ------------------------------------------------------------------
     # Shutdown
