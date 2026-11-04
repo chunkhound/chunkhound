@@ -1435,6 +1435,92 @@ class RealtimePipelineMixin:
             self._set_error(f"Error indexing new directory {dir_path}: {e}")
         finally:
             self._record_processing_finished(dir_path, completed=completed)
+    def _overdue_embed_mutations(self) -> list[RealtimeMutation]:
+        """Pending embeds, if the oldest has waited past _EMBED_MAX_WAIT_SECONDS."""
+        now = time.monotonic()
+        last = self._last_promoted_embed_attempt
+        if last is not None and now - last < self._EMBED_MAX_WAIT_SECONDS:
+            return []
+        pending = [
+            m for (op, _), m in self._pending_mutations.items() if op == "embed"
+        ]
+        if not pending:
+            return []
+        oldest: float | None = None
+        for m in pending:
+            queued = self._parse_status_timestamp(m.first_queued_at)
+            if queued is not None:
+                ts = queued.timestamp()
+                oldest = ts if oldest is None else min(oldest, ts)
+        if oldest is None or time.time() - oldest < self._EMBED_MAX_WAIT_SECONDS:
+            return []
+        return pending
+
+    async def _run_promoted_embed_pass(self, overdue: list[RealtimeMutation]) -> None:
+        """Run one embed pass ahead of queued changes; settle the embeds it covers."""
+        self._last_promoted_embed_attempt = time.monotonic()
+        self._record_processing_started(overdue[0].path)
+        completed = False
+        try:
+            await self.services.indexing_coordinator.generate_missing_embeddings()
+            completed = True
+        except DatabaseTemporarilyUnavailableError:
+            # Compaction owns the DB; the embeds stay pending and are retried after the
+            # wait interval, or reached in normal queue order.
+            pass
+        except Exception as error:
+            logger.warning(
+                f"Embedding generation failed in realtime (promoted pass): {error}"
+            )
+            self._record_processing_error()
+            self._set_warning(
+                f"Embedding generation failed in realtime promoted embed pass: {error}"
+            )
+        finally:
+            self._record_processing_finished(overdue[0].path, completed=completed)
+        if completed:
+            # Their heap entries remain and are skipped as unowned when dequeued.
+            for m in overdue:
+                self._release_pending_mutation(m)
+            self._emit_status_update()
+
+    async def _refresh_embedding_coverage(self) -> None:
+        """Measure chunks missing a vector; queue an embed pass if any are missing.
+
+        Nothing else repairs them: a chunk whose embedding was never written (starved,
+        failed, or the server stopped first) stays invisible to semantic search, and a
+        CLI index skips unchanged files. Leaves _coverage_dirty set when the database is
+        temporarily unavailable so the idle loop retries.
+        """
+        # Must never raise: the loop calls this before blocking on the queue, so an
+        # escaping error with the flag still set would spin the loop without yielding.
+        try:
+            coordinator = getattr(self.services, "indexing_coordinator", None)
+            counter = getattr(coordinator, "count_chunks_missing_embeddings", None)
+            if counter is None:
+                self._coverage_dirty = False
+                return
+            missing = await counter()
+        except DatabaseTemporarilyUnavailableError:
+            return
+        except Exception as error:
+            logger.debug(f"Embedding coverage check failed: {error}")
+            self._coverage_dirty = False
+            return
+        self._coverage_dirty = False
+        self._embedding_coverage = {
+            "missing_chunks": missing,
+            "checked_at": self._utc_now(),
+        }
+        if (
+            missing
+            and not self._embed_pass_since_change
+            and not any(op == "embed" for op, _ in self._pending_mutations)
+        ):
+            path = self.watch_path or Path(".")
+            await self._enqueue_mutation(self._build_mutation("embed", path))
+        self._emit_status_update()
+
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
@@ -1444,13 +1530,29 @@ class RealtimePipelineMixin:
         while True:
             try:
                 if buffered_mutation is None:
-                    _, _, queued_mutation = await self.file_queue.get()
+                    if self._coverage_dirty and self.file_queue.empty():
+                        await self._refresh_embedding_coverage()
+                    try:
+                        _, _, queued_mutation = await asyncio.wait_for(
+                            self.file_queue.get(),
+                            timeout=(
+                                self._COVERAGE_RETRY_SECONDS
+                                if self._coverage_dirty
+                                else None
+                            ),
+                        )
+                    except TimeoutError:
+                        continue
+                    self._coverage_dirty = True
                     mutation, owned_when_dequeued = self._prepare_dequeued_mutation(
                         queued_mutation
                     )
                 else:
                     mutation, owned_when_dequeued = buffered_mutation
                     buffered_mutation = None
+
+                if mutation.operation != "embed":
+                    self._embed_pass_since_change = False
 
                 active_change_path: str | None = None
                 if mutation.operation in {"change", "scan"}:
@@ -1459,9 +1561,18 @@ class RealtimePipelineMixin:
                         mutation.source_generation
                     )
 
+                if mutation.operation != "embed":
+                    overdue = self._overdue_embed_mutations()
+                    if overdue:
+                        await self._run_promoted_embed_pass(overdue)
+
                 # Fast path for embedding generation without re-parsing the file.
                 if mutation.operation == "embed":
+                    if not owned_when_dequeued:
+                        # Already covered by a promoted embed pass.
+                        continue
                     completed = False
+                    self._embed_pass_since_change = True
                     try:
                         self._record_processing_started(mutation.path)
                         indexing_coordinator = self.services.indexing_coordinator
