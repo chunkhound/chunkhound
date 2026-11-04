@@ -46,7 +46,6 @@ from chunkhound.services.prompts import fetchurl as fetchurl_prompts
 from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
 )
-from chunkhound.utils.ssrf import SsrfBlockedError
 from chunkhound.utils.ssrf import validate_url as _validate_ssrf
 from chunkhound.utils.websearch_core import (
     _managed_browser,
@@ -65,13 +64,13 @@ __all__ = [
 ]
 
 
-class FetchUrlError(SsrfBlockedError):
-    """Raised by fetchurl for SSRF rejection, missing PyMuPDF, or unexpected kind.
-
-    A ``SsrfBlockedError`` subclass (and therefore a ValueError), so code
-    catching the shared SSRF type catches fetchurl rejections too, while
-    the CLI/MCP exception whitelists that match ``FetchUrlError`` exactly
-    keep working.
+class FetchUrlError(ValueError):
+    """Raised by fetchurl for missing PyMuPDF, unexpected kind, or other
+    fetchurl-local failures — deliberately NOT an SSRF type, because it
+    also covers non-SSRF failures. SSRF rejections from the shared
+    validator propagate as ``SsrfBlockedError`` and are caught alongside
+    ``FetchUrlError`` at the CLI and MCP boundaries (see
+    ``api/cli/commands/fetchurl.py`` and ``mcp_server/tools.py``).
     """
 
 
@@ -131,14 +130,12 @@ def _derive_page_title(
     return _normalize_title(candidate)
 
 
-# NOTE (review round 2): the former ``_validate_url_and_resolve``
-# wrapper was removed. The shared ``chunkhound.utils.ssrf`` validator is
-# called directly in ``_fetch_with_retry`` below, which translates
-# ``SsrfBlockedError`` to ``FetchUrlError`` inline — the one place the
-# CLI exception whitelist requires that type. Out of scope, as before:
-# full DNS-rebind defence (urllib and Chrome re-resolve independently),
-# and validated redirects (see the tracking issue proposed for this gap
-# in the review-round report — fetchurl validates only the initial URL).
+# The shared ``chunkhound.utils.ssrf`` validator is called directly in
+# ``_fetch_with_retry`` below; its ``SsrfBlockedError`` propagates
+# unchanged and is caught alongside ``FetchUrlError`` at the CLI/MCP
+# boundaries. Out of scope, as before: full DNS-rebind defence (urllib
+# and Chrome re-resolve independently), and validated redirects —
+# fetchurl validates only the initial URL (see chunkhound issue #478).
 
 def _classify_and_raise_if_terminal(e: BaseException) -> None:
     """Re-raise ``e`` if non-retryable; return silently if retryable.
@@ -227,13 +224,9 @@ async def _fetch_with_retry(
     the loop downgrades to urllib, so ``max_retries=3`` with an attempt-0
     browser death yields two remaining urllib attempts, not three.
     """
-    # SSRF pre-check, translated to this module's error type inline
-    # (see the NOTE above the deleted wrapper): the CLI whitelist
-    # matches FetchUrlError, not the shared SsrfBlockedError.
-    try:
-        await _validate_ssrf(url)
-    except SsrfBlockedError as e:
-        raise FetchUrlError(str(e)) from e
+    # SSRF pre-check. Rejections propagate as ``SsrfBlockedError``,
+    # which the CLI and MCP boundaries catch alongside ``FetchUrlError``.
+    await _validate_ssrf(url)
 
     async with _managed_browser(warning_callback) as managed_browser:
         # Rebindable local: on a browser-fatal exception we set this to None
@@ -248,14 +241,12 @@ async def _fetch_with_retry(
                 await asyncio.sleep(delay)
             try:
                 # Explicit opt-out: fetchurl already pre-validated the
-                # URL above (and translates the result to FetchUrlError).
-                # Letting fetch_url_to_content's new secure default run
-                # as well would surface SsrfBlockedError instead of
-                # FetchUrlError and re-validate on every retry. Note
-                # the consequence, proposed as a tracking issue (see
-                # the review-round report): fetchurl therefore still
-                # validates only the initial URL — its redirects are
-                # unchecked, unlike websearch's hop-by-hop validation.
+                # URL above. Letting fetch_url_to_content's secure
+                # default run as well would re-validate on every retry.
+                # Consequence, tracked in chunkhound issue #478:
+                # fetchurl therefore still validates only the initial
+                # URL — its redirects are unchecked, unlike websearch's
+                # hop-by-hop validation.
                 return await fetch_url_to_content(
                     url, browser, validate_ssrf=False
                 )
