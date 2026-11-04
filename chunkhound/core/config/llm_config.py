@@ -147,6 +147,7 @@ LLMProviderLiteral = Literal[
     "obscurify-ai",
     "atlascloud",
     "runcrate",
+    "cheapaimodel",
     "opencode-cli",
 ]
 
@@ -192,6 +193,7 @@ CLI_PROVIDER_CHOICES = (
     "obscurify-ai",
     "atlascloud",
     "runcrate",
+    "cheapaimodel",
     "opencode-cli",
 )
 

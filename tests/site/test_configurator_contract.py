@@ -262,6 +262,14 @@ def test_runcrate_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_cheapaimodel_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "cheapaimodel")
+
+    assert config["provider"] == "cheapaimodel"
+    assert config["model"] == "deepseek-v4-1-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 
