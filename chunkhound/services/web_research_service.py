@@ -85,6 +85,11 @@ class _EmptySearchService:
 
 
 class _TransientProvider:
+    # Search results carry the exact fetched page text, so research uses each
+    # chunk as its own evidence. Never re-slice the stored source by chunk line
+    # numbers: PDF chunk lines do not map onto the normalized page text.
+    transient_chunks_are_source = True
+
     def __init__(self) -> None:
         # An explicit synthesis contract, not a claim that sources fit this size.
         self.transient_source_budget_bytes = 1_000_000

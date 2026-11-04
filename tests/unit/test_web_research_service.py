@@ -17,7 +17,10 @@ from chunkhound.core.types.common import (
     LineNumber,
 )
 from chunkhound.embeddings import LocalEmbeddingResult
-from chunkhound.services.research.shared.file_reader import resolve_source_text
+from chunkhound.services.research.shared.file_reader import (
+    FileReader,
+    resolve_source_text,
+)
 from chunkhound.services.transient_search_service import TransientSearchService
 from chunkhound.services.vector_cache import VectorCache
 from chunkhound.services.web_research_service import (
@@ -602,3 +605,60 @@ def test_isolated_pdf_parser_keeps_stdout_clean_for_mcp_stdio() -> None:
 
     assert result.stdout == b""
     assert b"MuPDF" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_large_pdf_research_evidence_is_the_matched_chunk_text() -> None:
+    """Synthesis must receive the exact PDF text each search hit matched.
+
+    PDF chunk line numbers do not map onto the normalized page text, so a
+    large PDF must not be re-sliced by line range when evidence is selected.
+    """
+    pdf_url = "https://example.invalid/cast_research_paper.pdf"
+    content = Path("tests/fixtures/cast_research_paper.pdf").read_bytes()
+
+    async def embed(texts: list[str]) -> LocalEmbeddingResult:
+        return LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0] for _ in texts],
+            model="test",
+            provider="test",
+            dims=2,
+            embedding_space_identity="test-space",
+        )
+
+    embedding_manager = MagicMock()
+    embedding_manager.embed_texts = AsyncMock(side_effect=embed)
+    llm_manager = MagicMock()
+    llm_manager.get_utility_provider.return_value.estimate_tokens = len
+    captured: dict = {}
+    research = MagicMock()
+
+    async def deep_research(query: str, previous_query: str | None = None):
+        services = captured["db_services"]
+        results, _ = await services.search_service.search_semantic(query, page_size=20)
+        source = await services.provider.get_transient_file_content_async(pdf_url)
+        assert source and len(source) * 4 > 64_000  # The large-source path.
+        files = await FileReader(services).read_files_with_budget(results, llm_manager)
+        return {"results": results, "evidence": files[pdf_url]}
+
+    research.deep_research = deep_research
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return research
+
+    with patch(
+        "chunkhound.services.web_research_service.ResearchServiceFactory.create",
+        side_effect=create,
+    ):
+        result = await research_web_pages(
+            "query",
+            [(pdf_url, ".pdf", content)],
+            MagicMock(),
+            embedding_manager,
+            llm_manager,
+        )
+
+    assert result["results"]
+    for hit in result["results"]:
+        assert hit["content"] in result["evidence"]
