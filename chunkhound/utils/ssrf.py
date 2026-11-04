@@ -5,10 +5,13 @@ so both ``chunkhound.utils.fetchurl`` and ``chunkhound.utils.websearch_core``
 can import it without creating a cycle (fetchurl already imports
 websearch_core, which is why the two validators were duplicated before).
 
-Both callers keep their own public exception type — fetchurl raises
-``FetchUrlError``, websearch raises ``UnsafeFetchURLError`` — and translate
-``SsrfBlockedError`` into it in a thin wrapper. The blocking logic itself
-lives here, once.
+Both callers' public exception types subclass ``SsrfBlockedError``
+(``FetchUrlError`` in fetchurl, ``UnsafeFetchURLError`` in websearch, kept
+for backwards compatibility), so code catching ``SsrfBlockedError`` catches
+either. Callers raise ``SsrfBlockedError`` directly from this module;
+fetchurl translates it to ``FetchUrlError`` inline at its own boundary
+where the CLI exception whitelist requires that type. The blocking logic
+itself lives here, once.
 
 Validation rule: only http(s) URLs whose hostname resolves entirely to
 globally routable addresses are allowed. ``not ip.is_global`` (rather than
@@ -54,12 +57,20 @@ def _check_ip(ip_str: str, hostname: str) -> None:
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        return
+        # Fail closed: an unparseable address must never pass a security
+        # check silently (unreachable in practice — callers pass either
+        # a validated IP literal or a getaddrinfo result — but the check
+        # is the wrong place to be lenient).
+        raise SsrfBlockedError(
+            f"Unparseable address {ip_str!r} for {hostname!r}"
+        ) from None
     # Unwrap IPv4-mapped IPv6 so ::ffff:127.0.0.1 is judged as 127.0.0.1.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     # Multicast is the exception to is_global: 224.0.0.0/4 reports
-    # is_global True on some Pythons, so it needs its own check.
+    # is_global True (verified on Python 3.12.3: 224.0.0.1 and
+    # 233.252.175.1 both report is_global True and is_multicast True),
+    # so it needs its own check.
     if not ip.is_global or ip.is_multicast:
         raise SsrfBlockedError(
             f"Blocked non-public address {ip_str!r} for {hostname!r}"

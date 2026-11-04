@@ -65,8 +65,14 @@ __all__ = [
 ]
 
 
-class FetchUrlError(Exception):
-    """Raised by fetchurl for SSRF rejection, missing PyMuPDF, or unexpected kind."""
+class FetchUrlError(SsrfBlockedError):
+    """Raised by fetchurl for SSRF rejection, missing PyMuPDF, or unexpected kind.
+
+    A ``SsrfBlockedError`` subclass (and therefore a ValueError), so code
+    catching the shared SSRF type catches fetchurl rejections too, while
+    the CLI/MCP exception whitelists that match ``FetchUrlError`` exactly
+    keep working.
+    """
 
 
 def _wrap(url: str, answer: str) -> str:
@@ -125,24 +131,14 @@ def _derive_page_title(
     return _normalize_title(candidate)
 
 
-async def _validate_url_and_resolve(url: str) -> None:
-    """SSRF pre-check, in this module's exception type.
-
-    Thin translation over the shared ``chunkhound.utils.ssrf`` validator
-    (which websearch also uses) — the blocking logic lives there, once,
-    including the DNS timeout and the ``not ip.is_global`` rule.
-
-    Out of scope: full DNS-rebind defence. urllib and Chrome re-resolve the
-    hostname independently on the actual fetch, so a resolver that returned
-    a public IP here could still return a private IP at fetch time. Closing
-    that gap requires pinning the resolved IP through the fetch, which the
-    fetch stack does not currently support.
-    """
-    try:
-        await _validate_ssrf(url)
-    except SsrfBlockedError as e:
-        raise FetchUrlError(str(e)) from e
-
+# NOTE (review round 2): the former ``_validate_url_and_resolve``
+# wrapper was removed. The shared ``chunkhound.utils.ssrf`` validator is
+# called directly in ``_fetch_with_retry`` below, which translates
+# ``SsrfBlockedError`` to ``FetchUrlError`` inline — the one place the
+# CLI exception whitelist requires that type. Out of scope, as before:
+# full DNS-rebind defence (urllib and Chrome re-resolve independently),
+# and validated redirects (see the tracking issue proposed for this gap
+# in the review-round report — fetchurl validates only the initial URL).
 
 def _classify_and_raise_if_terminal(e: BaseException) -> None:
     """Re-raise ``e`` if non-retryable; return silently if retryable.
@@ -231,7 +227,13 @@ async def _fetch_with_retry(
     the loop downgrades to urllib, so ``max_retries=3`` with an attempt-0
     browser death yields two remaining urllib attempts, not three.
     """
-    await _validate_url_and_resolve(url)
+    # SSRF pre-check, translated to this module's error type inline
+    # (see the NOTE above the deleted wrapper): the CLI whitelist
+    # matches FetchUrlError, not the shared SsrfBlockedError.
+    try:
+        await _validate_ssrf(url)
+    except SsrfBlockedError as e:
+        raise FetchUrlError(str(e)) from e
 
     async with _managed_browser(warning_callback) as managed_browser:
         # Rebindable local: on a browser-fatal exception we set this to None
@@ -245,7 +247,18 @@ async def _fetch_with_retry(
                 delay = random.uniform(0, min(8.0, 0.5 * (2**attempt)))
                 await asyncio.sleep(delay)
             try:
-                return await fetch_url_to_content(url, browser)
+                # Explicit opt-out: fetchurl already pre-validated the
+                # URL above (and translates the result to FetchUrlError).
+                # Letting fetch_url_to_content's new secure default run
+                # as well would surface SsrfBlockedError instead of
+                # FetchUrlError and re-validate on every retry. Note
+                # the consequence, proposed as a tracking issue (see
+                # the review-round report): fetchurl therefore still
+                # validates only the initial URL — its redirects are
+                # unchecked, unlike websearch's hop-by-hop validation.
+                return await fetch_url_to_content(
+                    url, browser, validate_ssrf=False
+                )
             except Exception as e:
                 if browser is not None and _is_browser_fatal(e):
                     if warning_callback:
