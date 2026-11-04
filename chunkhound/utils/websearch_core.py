@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     import zendriver as zd
 
 from chunkhound.core.config.config import Config
+from chunkhound.utils.ssrf import validate_url, validate_url_sync
 
 _MAX_FETCH_CONCURRENCY = 5
 
@@ -489,25 +490,128 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         )
 
 
+class _RedirectTargetError(Exception):
+    """Internal signal carrying a redirect destination (see ``_CaptureRedirect``)."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(url)
+        self.url = url
+
+
+class _CaptureRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that reports instead of following.
+
+    Raising ``_RedirectTargetError`` lets ``_fetch_url`` validate each redirect
+    destination before fetching it, instead of urllib silently following
+    a public-to-private redirect.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        # Close the response before signalling: raising without closing
+        # would leave the socket open until GC.
+        try:
+            fp.close()
+        except Exception:
+            pass
+        raise _RedirectTargetError(newurl)
+
+
+_MAX_FETCH_REDIRECTS = 10
+
+
+# Validation is ``chunkhound.utils.ssrf.validate_url_sync`` /
+# ``validate_url`` called directly (raising ``SsrfBlockedError``), and
+# openers are ``urllib.request.build_opener`` called directly. The proxy
+# caveat lives on ``_fetch_url`` below, where the opener is actually used.
+
+
+def _open_and_read(
+    opener: urllib.request.OpenerDirector, req: urllib.request.Request
+) -> tuple[str, bytes, str]:
+    """Open one request and return (content-type, body, charset)."""
+    with opener.open(req, timeout=30) as resp:
+        ct = _normalize_ct(resp.headers.get("Content-Type"))
+        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """Origin triple used to drop Cookie headers on cross-origin hops."""
+    parsed = urllib.parse.urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return (
+        parsed.scheme.lower(),
+        (parsed.hostname or "").lower(),
+        port,
+    )
+
+
 def _fetch_url(
     url: str,
     extra_headers: dict[str, str] | None = None,
     follow_redirects: bool = True,
+    *,
+    validate_ssrf: bool = True,
 ) -> tuple[str, bytes, str]:
     # Header values are passed verbatim. http.client blocks CRLF, but
     # nothing else is validated — never pass attacker-influenced values.
     headers = {"User-Agent": "Mozilla/5.0"}
     if extra_headers:
         headers.update(extra_headers)
-    req = urllib.request.Request(url, headers=headers)
-    opener = (
-        urllib.request.build_opener()
-        if follow_redirects
-        else urllib.request.build_opener(_NoRedirect)
-    )
-    with opener.open(req, timeout=30) as resp:
-        ct = _normalize_ct(resp.headers.get("Content-Type"))
-        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+
+    # Note on proxies: ``urllib.request.build_opener()`` includes a
+    # ProxyHandler honouring the environment, so when HTTP(S)_PROXY is
+    # set the proxy — not this process — resolves the target hostname.
+    # The SSRF check below still blocks private hostnames before any
+    # request is made, but for a DNS hostname it cannot guarantee what
+    # the proxy resolves it to. No guard is added: rejecting every
+    # proxied fetch would break legitimate corporate-proxy users, and
+    # the check remains the correct fail-closed behaviour for direct
+    # (unproxied) fetches.
+    if not validate_ssrf:
+        req = urllib.request.Request(url, headers=headers)
+        opener = (
+            urllib.request.build_opener()
+            if follow_redirects
+            else urllib.request.build_opener(_NoRedirect)
+        )
+        return _open_and_read(opener, req)
+
+    # SSRF-validated path: validate the initial URL and every redirect
+    # destination before fetching it. Redirects are followed manually
+    # (one hop at a time) so no hop is fetched unvalidated.
+    if not follow_redirects:
+        validate_url_sync(url)
+        req = urllib.request.Request(url, headers=headers)
+        return _open_and_read(urllib.request.build_opener(_NoRedirect), req)
+
+    current = url
+    hop = 0
+    while True:
+        validate_url_sync(current)
+        req = urllib.request.Request(current, headers=headers)
+        try:
+            return _open_and_read(urllib.request.build_opener(_CaptureRedirect), req)
+        except _RedirectTargetError as redir:
+            if hop >= _MAX_FETCH_REDIRECTS:
+                raise ValueError(f"Too many redirects fetching {url!r}") from redir
+            nxt = urllib.parse.urljoin(current, redir.url)
+            # Never forward a Cookie header to a different origin — the
+            # same credential-leak reason ``_NoRedirect`` exists for.
+            if _origin(current) != _origin(nxt):
+                headers.pop("Cookie", None)
+            current = nxt
+            hop += 1
 
 
 async def _close_tab_quietly(tab: zd.Tab) -> None:
@@ -523,7 +627,9 @@ async def _close_tab_quietly(tab: zd.Tab) -> None:
         pass
 
 
-async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
+async def _fetch_page(
+    browser: zd.Browser, url: str, *, validate_ssrf: bool = True
+) -> tuple[str, bytes, str]:
     """Fetch a single URL via raw CDP.
 
     Replicates Playwright's ``wait_until="commit"`` semantics by subscribing
@@ -531,6 +637,21 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
     content-type before Chrome's PDF viewer engages or HTML rendering starts.
     PDFs are re-fetched via urllib because headless Chrome cannot reliably
     expose PDF bytes through the DOM.
+
+    With ``validate_ssrf=True``, the initial URL is validated before
+    navigation and Chrome's final URL is validated before any content is
+    returned, so private-redirect content never enters the pipeline.
+    Chrome-path limitation: Chrome
+    performs the navigation itself, so final-URL validation discards
+    already-fetched internal content rather than preventing Chrome's
+    request. A side-effecting GET to an internal host or metadata
+    endpoint can still go out on the default Chrome path (blind SSRF);
+    only the urllib path (which validates every hop before fetching) is
+    fully preventive. Properly closing this needs CDP Fetch.requestPaused
+    interception, tracked in chunkhound issue #476
+    (https://github.com/chunkhound/chunkhound/issues/476) — until then,
+    users who need fully preventive validation should use the urllib
+    path (``browser=None``).
     """
     from zendriver import cdp
 
@@ -571,6 +692,10 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         tab.add_handler(cdp.network.ResponseReceived, on_response)
         await tab.send(cdp.network.enable())
 
+        if validate_ssrf:
+            # Reject direct private URLs before Chrome navigates anywhere.
+            await validate_url(url)
+
         # Non-blocking navigate — does NOT wait for load. Bound the send
         # itself so a stalled websocket cannot hang here indefinitely.
         nav_result = await asyncio.wait_for(
@@ -595,6 +720,11 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
         response_event = await asyncio.wait_for(main_response, timeout=30)
         response = response_event.response
+        if validate_ssrf:
+            # Chrome already followed any redirects to reach this final
+            # URL; validating it here still keeps internal content out
+            # of the pipeline (see the docstring limitation).
+            await validate_url(response.url or url)
         ct = _normalize_ct(
             response.headers.get("content-type")
             or response.headers.get("Content-Type")
@@ -644,7 +774,11 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             # the literal avoids a silent decode-behavior change there.
             extra = {"Cookie": cookie_header} if cookie_header else None
             _, body, _ = await asyncio.to_thread(
-                _fetch_url, pdf_url, extra, False  # follow_redirects=False
+                _fetch_url,
+                pdf_url,
+                extra,
+                False,  # follow_redirects=False
+                validate_ssrf=validate_ssrf,
             )
             return "application/pdf", body, "utf-8"
 
@@ -679,7 +813,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
 
 async def fetch_url_to_content(
-    url: str, browser: zd.Browser | None
+    url: str, browser: zd.Browser | None, *, validate_ssrf: bool = True
 ) -> tuple[str, str | bytes, dict[str, str | None]]:
     """Fetch one URL and return (kind, payload, source_metadata).
 
@@ -696,9 +830,11 @@ async def fetch_url_to_content(
     Raises ValueError on unsupported Content-Type or empty rendered body.
     """
     if browser is not None:
-        ct, body, charset = await _fetch_page(browser, url)
+        ct, body, charset = await _fetch_page(browser, url, validate_ssrf=validate_ssrf)
     else:
-        ct, body, charset = await asyncio.to_thread(_fetch_url, url)
+        ct, body, charset = await asyncio.to_thread(
+            _fetch_url, url, None, True, validate_ssrf=validate_ssrf
+        )
     source_metadata: dict[str, str | None] = {"title": None}
     if ct == "application/pdf":
         kind, content = _decode_pdf_or_fallback_html(body, charset)
@@ -751,7 +887,16 @@ async def _fetch_one(
         if progress_callback:
             progress_callback(f"Fetching {url}...")
         try:
-            ext, content, _source_metadata = await fetch_url_to_content(url, browser)
+            # The websearch pipeline is the SSRF boundary: result URLs
+            # come from a public search engine and may point or redirect
+            # anywhere, so they are validated here — by the
+            # ``validate_ssrf=True`` default on ``fetch_url_to_content``,
+            # not by an explicit flag at this call site. Callers that
+            # must opt out (fetchurl, which pre-validates, and tests
+            # using local servers) do so explicitly.
+            ext, content, _source_metadata = await fetch_url_to_content(
+                url, browser
+            )
             path = tmpdir / (_url_to_filename(url) + ext)
             if isinstance(content, bytes):
                 path.write_bytes(content)
