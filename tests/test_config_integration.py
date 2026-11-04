@@ -354,10 +354,10 @@ def test_gemini_legacy_env_model_does_not_satisfy_runtime_config_validation(
     ]
 
 
-def test_voyage_api_key_used_for_provider_from_local_config(
+def test_voyage_api_key_rejected_for_provider_from_local_config(
     monkeypatch, clean_environment
 ) -> None:
-    """VOYAGE_API_KEY must apply when .chunkhound.json selects voyageai."""
+    """VOYAGE_API_KEY alone must fail when .chunkhound.json selects voyageai."""
     monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
 
     with windows_safe_tempdir() as temp_path:
@@ -365,28 +365,52 @@ def test_voyage_api_key_used_for_provider_from_local_config(
             json.dumps({"embedding": {"provider": "voyageai"}}), encoding="utf-8"
         )
 
-        config = Config(target_dir=temp_path)
-
-    assert config.embedding is not None
-    assert config.embedding.provider == "voyageai"
-    assert config.embedding.api_key.get_secret_value() == "voyage-env-key"
-    assert config.embedding.get_missing_config() == []
+        with pytest.raises(ValueError, match="VOYAGE_API_KEY is no longer supported"):
+            Config(target_dir=temp_path)
 
 
-def test_voyage_api_key_used_for_provider_from_cli(
+def test_voyage_api_key_rejected_for_provider_from_cli(
     monkeypatch, clean_environment
 ) -> None:
-    """VOYAGE_API_KEY must apply when --provider voyageai is passed."""
+    """VOYAGE_API_KEY alone must fail when --provider voyageai is passed."""
     monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
     parser = argparse.ArgumentParser()
     EmbeddingConfig.add_cli_arguments(parser)
     args = parser.parse_args(["--provider", "voyageai"])
 
     with windows_safe_tempdir() as temp_path:
-        config = Config(args=args, target_dir=temp_path)
+        with pytest.raises(ValueError, match="VOYAGE_API_KEY is no longer supported"):
+            Config(args=args, target_dir=temp_path)
 
-    assert config.embedding is not None
-    assert config.embedding.api_key.get_secret_value() == "voyage-env-key"
+
+def test_voyage_api_key_rejected_for_provider_from_env(
+    monkeypatch, clean_environment
+) -> None:
+    """VOYAGE_API_KEY alone must fail when the env layer selects voyageai."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__PROVIDER", "voyageai")
+
+    with windows_safe_tempdir() as temp_path:
+        with pytest.raises(ValueError, match="VOYAGE_API_KEY is no longer supported"):
+            Config(target_dir=temp_path)
+
+
+def test_voyage_api_key_rejected_for_provider_from_global_config(
+    monkeypatch, clean_environment
+) -> None:
+    """VOYAGE_API_KEY alone must fail when the global config selects voyageai."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
+
+    with windows_safe_tempdir() as td:
+        td = Path(td)
+        global_cfg = td / "global.json"
+        global_cfg.write_text(
+            json.dumps({"embedding": {"provider": "voyageai"}}), encoding="utf-8"
+        )
+        monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_cfg))
+
+        with pytest.raises(ValueError, match="VOYAGE_API_KEY is no longer supported"):
+            Config(target_dir=td)
 
 
 def test_voyage_api_key_does_not_override_configured_key(
@@ -404,6 +428,22 @@ def test_voyage_api_key_does_not_override_configured_key(
 
     assert config.embedding is not None
     assert config.embedding.api_key.get_secret_value() == "file-key"
+
+
+def test_voyage_api_key_ignored_when_key_configured(
+    monkeypatch, clean_environment
+) -> None:
+    """A configured key silences the migration error even with VOYAGE_API_KEY set."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__API_KEY", "chunkhound-key")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__PROVIDER", "voyageai")
+
+    with windows_safe_tempdir() as temp_path:
+        config = Config(target_dir=temp_path)
+
+    assert config.embedding is not None
+    assert config.embedding.provider == "voyageai"
+    assert config.embedding.api_key.get_secret_value() == "chunkhound-key"
 
 
 def test_voyage_api_key_not_used_for_openai_provider(

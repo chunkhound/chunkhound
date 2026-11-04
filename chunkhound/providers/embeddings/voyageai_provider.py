@@ -269,7 +269,7 @@ class VoyageAIEmbeddingProvider:
         """Initialize VoyageAI embedding provider.
 
         Args:
-            api_key: VoyageAI API key (defaults to VOYAGE_API_KEY env var)
+            api_key: VoyageAI API key (defaults to CHUNKHOUND_EMBEDDING__API_KEY)
             model: Model name to use for embeddings
             rerank_model: Model name to use for reranking (SDK path only)
             batch_size: Maximum batch size for API requests
