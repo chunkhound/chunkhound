@@ -10,7 +10,11 @@ out (protocol dispatch under test here does not touch the database).
 from __future__ import annotations
 
 import pytest
-from mcp_types import CLIENT_INFO_META_KEY, PROTOCOL_VERSION_META_KEY
+from mcp_types import (
+    CLIENT_CAPABILITIES_META_KEY,
+    CLIENT_INFO_META_KEY,
+    PROTOCOL_VERSION_META_KEY,
+)
 
 
 @pytest.mark.asyncio
@@ -55,6 +59,7 @@ async def test_daemon_serves_modern_per_request_envelope(daemon_harness) -> None
                 "_meta": {
                     PROTOCOL_VERSION_META_KEY: "2026-07-28",
                     CLIENT_INFO_META_KEY: {"name": "modern-client", "version": "0.0.0"},
+                    CLIENT_CAPABILITIES_META_KEY: {},
                 }
             },
         },
