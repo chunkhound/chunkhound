@@ -4,6 +4,10 @@ Vectors are stored as ``float32`` arrays (``dim * 4`` bytes) rather than Python
 float lists, which cost ~8x more per entry once object overhead is counted. A
 full 10_000-entry cache at dim=1536 is ~60MB instead of ~470MB.
 
+Keys use a 64-bit XXH3 text digest; a collision (negligible at the default
+10_000 entries) would return another text's vector. Expired entries are
+dropped lazily on read; the entry cap bounds memory regardless.
+
 Mutations are serialized with a threading lock so a shared process cache is
 safe across threads. Async callers on one event loop do not await inside
 get/put, so they never hold the lock across a yield.

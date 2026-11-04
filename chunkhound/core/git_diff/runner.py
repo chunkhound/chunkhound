@@ -176,6 +176,7 @@ async def stream_git_diff_fragments(
             current_range,
             "--",
             cwd=str(cwd),
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_git_diff_env(),
