@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChunkHound MCP Area Analysis</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 1180px; margin: 0 auto; padding: 28px 24px 80px; color: #1f2430; line-height: 1.55; background: #fff; }
+  h1 { font-size: 1.8rem; margin-bottom: 4px; }
+  h2 { font-size: 1.35rem; margin-top: 2.4em; border-bottom: 2px solid #d8dde6; padding-bottom: 6px; }
+  h3 { font-size: 1.05rem; margin-top: 1.6em; color: #2b4a7a; }
+  .meta { color: #5a6275; font-size: .92rem; margin-top: 0; }
+  code { background: #f1f3f7; padding: 1px 5px; border-radius: 3px; font-size: .88em; }
+  ul { padding-left: 1.3em; margin: .4em 0; }
+  li { margin: 3px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: .92rem; }
+  th, td { border: 1px solid #d8dde6; padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: #eef1f6; }
+  .box { border: 1px solid #d8dde6; border-left: 4px solid #2b6cb0; background: #f7f9fc; padding: 10px 16px; margin: 14px 0; }
+  .warn { border-left-color: #c05621; background: #fffaf3; }
+  .ok { color: #1c7c3c; font-weight: 600; }
+  .no { color: #b32d2d; font-weight: 600; }
+  .part { color: #a86a00; font-weight: 600; }
+  .unk { color: #6b7280; font-weight: 600; }
+  .diagram { overflow-x: auto; border: 1px solid #d8dde6; padding: 8px; background: #fcfcfd; }
+  .legend span { display: inline-block; margin-right: 18px; font-size: .88rem; }
+  .sw { display: inline-block; width: 14px; height: 14px; vertical-align: middle; border: 1.5px solid #333; margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<h1>ChunkHound MCP Area Analysis</h1>
+<p class="meta">Updated 2026-10-29 from a direct read of the ChunkHound code and the MCP SDK 2.3.0 source.</p>
+
+<div class="box">
+  <strong>Key findings</strong>
+  <ul>
+    <li><b>Three front ends, one tool core:</b> the daemon (hand-written JSON-RPC, no SDK), the SDK stdio server, and the SDK HTTP server. The default <code>chunkhound mcp</code> uses the daemon — the one path the SDK never touches, so SDK 2.x features only reach the other two.</li>
+    <li><b>Everything advertises an old protocol today.</b> The daemon and stdio fallback hardcode <code>2024-11-05</code>; the installed SDK (<code>mcp 1.16.0</code>) tops out at <code>2025-06-18</code>.</li>
+    <li><b>Clients differ:</b> Claude Code speaks <code>2026-07-28</code> when offered, with strict reply validation; Pi only speaks the legacy handshake (<code>2025-11-25</code>).</li>
+    <li><b>Target version is an open decision</b> between <code>2025-11-25</code> and <code>2026-07-28</code>. The latter cuts Pi off the default daemon path; the former has no cutover.</li>
+    <li>The daemon serializes one request at a time per client, with no progress, cancellation, or streaming — all of which SDK 2.3.0 provides.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. MCP component diagram and data flow</h2>
+
+<p class="legend">
+  <span><i class="sw" style="background:#dbeafe"></i>Clients / CLI</span>
+  <span><i class="sw" style="background:#e0ecff;border-color:#1d4ed8"></i>Daemon path (no SDK)</span>
+  <span><i class="sw" style="background:#dcfce7;border-color:#15803d"></i>SDK paths (in-process)</span>
+  <span><i class="sw" style="background:#ffedd5;border-color:#c2410c"></i>Shared core</span>
+  <span><i class="sw" style="background:#f3f4f6;border-color:#6b7280"></i>Backing services</span>
+  <span>solid arrow = request/response flow, dashed = spawn / start / control</span>
+  <span>stdio = newline-delimited JSON-RPC</span>
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1260 700" width="100%" style="min-width:820px" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+    <marker id="as" markerWidth="9" markerHeight="9" refX="1" refY="4.5" orient="auto-start-reverse"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+  </defs>
+
+  <!-- Group titles -->
+  <g font-size="10" fill="#444" font-weight="600">
+    <text x="20" y="30">stdio · default → daemon (one proxy per client)</text>
+    <text x="20" y="270">stdio · no-daemon (one SDK server process per client)</text>
+    <text x="20" y="497">HTTP · one shared server process</text>
+  </g>
+
+  <!-- Clients -->
+  <g fill="#dbeafe" stroke="#1e3a8a" stroke-width="1.3">
+    <rect x="20" y="40" width="150" height="60" rx="5"/>
+    <rect x="20" y="110" width="150" height="60" rx="5"/>
+    <rect x="20" y="280" width="150" height="75" rx="5"/>
+    <rect x="20" y="365" width="150" height="75" rx="5"/>
+    <rect x="20" y="510" width="150" height="40" rx="5"/>
+    <rect x="20" y="570" width="150" height="40" rx="5"/>
+    <!-- chunkhound mcp entry, one per client process -->
+    <rect x="200" y="40" width="150" height="60" rx="5"/>
+    <rect x="200" y="110" width="150" height="60" rx="5"/>
+    <rect x="200" y="280" width="150" height="75" rx="5"/>
+    <rect x="200" y="365" width="150" height="75" rx="5"/>
+    <rect x="200" y="450" width="150" height="38" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="95" y="75">Client #1</text>
+    <text x="95" y="145">Client #2</text>
+    <text x="95" y="322">Client #3</text>
+    <text x="95" y="407">Client #4</text>
+    <text x="95" y="534">Client #5</text>
+    <text x="95" y="594">Client #6</text>
+
+    <text x="275" y="62" font-weight="600">chunkhound mcp</text><text x="275" y="78" font-size="10.5">mcp_command() routing</text><text x="275" y="92" font-size="10.5">→ ClientProxy</text>
+    <text x="275" y="132" font-weight="600">chunkhound mcp</text><text x="275" y="148" font-size="10.5">mcp_command() routing</text><text x="275" y="162" font-size="10.5">→ ClientProxy</text>
+    <text x="275" y="303" font-weight="600">chunkhound mcp</text><text x="275" y="319" font-size="10.5">--no-daemon</text><text x="275" y="333" font-size="10.5">→ stdio.main</text>
+    <text x="275" y="388" font-weight="600">chunkhound mcp</text><text x="275" y="404" font-size="10.5">--stdio, env false</text><text x="275" y="418" font-size="10.5">or read_only → stdio.main</text>
+    <text x="275" y="466" font-weight="600">chunkhound mcp</text><text x="275" y="480" font-size="10.5">--transport http</text>
+  </g>
+
+  <!-- Daemon path -->
+  <rect x="390" y="40" width="210" height="60" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <rect x="390" y="110" width="210" height="60" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="495" y="58" font-weight="600">ClientProxy #1</text><text x="495" y="73" font-size="10.5">stdio ↔ IPC bridge (json.loads per line)</text><text x="495" y="87" font-size="10.5">register handshake, orphan watchdog</text>
+    <text x="495" y="128" font-weight="600">ClientProxy #2</text><text x="495" y="143" font-size="10.5">stdio ↔ IPC bridge (json.loads per line)</text><text x="495" y="157" font-size="10.5">register handshake, orphan watchdog</text>
+  </g>
+  <rect x="390" y="190" width="210" height="55" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="495" y="209" font-weight="600">DaemonDiscovery</text>
+    <text x="495" y="224" font-size="10.5">lock file (pid, socket, token)</text>
+    <text x="495" y="238" font-size="10.5">registry, startup lock, spawn</text>
+  </g>
+  <rect x="730" y="40" width="210" height="125" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="835" y="60" font-weight="600">ChunkHoundDaemon</text>
+    <text x="835" y="76" font-size="10.5">_handle_client: token check</text>
+    <text x="835" y="91" font-size="10.5">serial loop per client</text>
+    <text x="835" y="106" font-size="10.5">_dispatch_mcp: initialize,</text>
+    <text x="835" y="120" font-size="10.5">tools/list, tools/call, ping</text>
+    <text x="835" y="138" font-size="10.5">hand-rolled JSON-RPC 2.0</text>
+    <text x="835" y="153" font-size="10.5">no MCP SDK</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M170,70 L200,70" marker-end="url(#a)"/>
+    <path d="M170,140 L200,140" marker-end="url(#a)"/>
+    <path d="M350,70 L390,70" marker-end="url(#a)"/>
+    <path d="M350,140 L390,140" marker-end="url(#a)"/>
+    <path d="M600,70 L730,70" marker-start="url(#as)" marker-end="url(#a)"/>
+    <path d="M600,140 L730,140" marker-start="url(#as)" marker-end="url(#a)"/>
+    <path d="M495,170 L495,190" marker-end="url(#a)"/>
+    <path d="M600,217 L690,217 L690,158 L730,158" stroke-dasharray="5,4" marker-end="url(#a)"/>
+  </g>
+  <text x="640" y="62" font-size="10">IPC frames</text>
+  <text x="610" y="232" font-size="10">spawn `_daemon`</text>
+
+  <!-- SDK stdio, one process per client -->
+  <rect x="390" y="280" width="210" height="75" rx="5" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+  <rect x="390" y="365" width="210" height="75" rx="5" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="495" y="298" font-weight="600">StdioMCPServer #1</text><text x="495" y="313" font-size="10.5">SDK Server + stdio_server()</text><text x="495" y="327" font-size="10.5">lifespan runs initialize()</text><text x="495" y="341" font-size="10.5">own DuckDB connection</text>
+    <text x="495" y="383" font-weight="600">StdioMCPServer #2</text><text x="495" y="398" font-size="10.5">SDK Server + stdio_server()</text><text x="495" y="412" font-size="10.5">lifespan runs initialize()</text><text x="495" y="426" font-size="10.5">own DuckDB connection</text>
+  </g>
+  <!-- SDK http -->
+  <rect x="390" y="505" width="210" height="150" rx="5" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="495" y="525" font-weight="600">HttpMCPServer</text>
+    <text x="495" y="541" font-size="10.5">Starlette: /health, /mcp</text>
+    <text x="495" y="556" font-size="10.5">bearer-auth middleware, CORS</text>
+    <text x="495" y="571" font-size="10.5">StreamableHTTPSessionManager</text>
+    <text x="495" y="586" font-size="10.5">(stateless=False today)</text>
+    <text x="495" y="601" font-size="10.5">SDK Server, one session per client</text>
+    <text x="495" y="616" font-size="10.5">single process, own DuckDB</text>
+    <text x="495" y="631" font-size="10.5">no daemon</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M170,317 L200,317" marker-end="url(#a)"/>
+    <path d="M170,402 L200,402" marker-end="url(#a)"/>
+    <path d="M350,317 L390,317" marker-end="url(#a)"/>
+    <path d="M350,402 L390,402" marker-end="url(#a)"/>
+    <path d="M170,530 L190,530 L190,580"/>
+    <path d="M170,590 L190,590 L190,580"/>
+    <path d="M190,580 L390,580" marker-start="url(#as)" marker-end="url(#a)"/>
+    <path d="M350,469 L370,469 L370,500 L495,500 L495,505" stroke-dasharray="5,4" marker-end="url(#a)"/>
+  </g>
+  <text x="200" y="573" font-size="10.5">Streamable HTTP /mcp</text>
+  <text x="365" y="496" font-size="10.5" fill="#15803d">starts</text>
+
+  <!-- bus into core -->
+  <g stroke="#c2410c" stroke-width="1.6" fill="none">
+    <path d="M940,100 L965,100 L965,285"/>
+    <path d="M600,317 L965,317 L965,285"/>
+    <path d="M600,402 L965,402 L965,285"/>
+    <path d="M600,580 L965,580 L965,285"/>
+    <path d="M965,285 L985,285" marker-end="url(#a)"/>
+  </g>
+  <text x="700" y="310" font-size="10.5" fill="#9a3412">call_tool → handle_all_tools</text>
+  <text x="700" y="395" font-size="10.5" fill="#9a3412">same handler</text>
+  <text x="750" y="573" font-size="10.5" fill="#9a3412">same handler</text>
+  <text x="945" y="182" font-size="10.5" fill="#9a3412" transform="rotate(-90 953,182)">tools/call</text>
+
+  <!-- Shared core -->
+  <rect x="985" y="40" width="240" height="135" rx="5" fill="#ffedd5" stroke="#c2410c" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1105" y="60" font-weight="600">MCPServerBase (ABC)</text>
+    <text x="1105" y="76" font-size="10.5">base of daemon, stdio, http servers</text>
+    <text x="1105" y="94" font-size="10.5">initialize(), startup barrier, cleanup</text>
+    <text x="1105" y="109" font-size="10.5">ensure_tool_services / _connect_provider</text>
+    <text x="1105" y="124" font-size="10.5">_build_filtered_tool_dicts (tools/list)</text>
+    <text x="1105" y="139" font-size="10.5">_register_common_tool_handlers</text>
+    <text x="1105" y="154" font-size="10.5">(SDK Server + call_tool/list_tools)</text>
+  </g>
+  <rect x="985" y="235" width="240" height="105" rx="5" fill="#ffedd5" stroke="#c2410c" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1105" y="255" font-weight="600">common.handle_tool_call</text>
+    <text x="1105" y="271" font-size="10.5">→ tools.execute_tool / TOOL_REGISTRY</text>
+    <text x="1105" y="289" font-size="10.5">search · code_research · fetchurl</text>
+    <text x="1105" y="304" font-size="10.5">daemon_status · websearch</text>
+    <text x="1105" y="322" font-size="10.5">error contract: tool_call_failed</text>
+  </g>
+
+  <!-- Backing -->
+  <g fill="#f3f4f6" stroke="#6b7280" stroke-width="1.3">
+    <rect x="985" y="395" width="240" height="75" rx="5"/>
+    <rect x="985" y="490" width="240" height="75" rx="5"/>
+    <rect x="985" y="585" width="240" height="75" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="1105" y="418" font-weight="600">DatabaseServices + DuckDB</text>
+    <text x="1105" y="434" font-size="10.5">single writer; compaction and Rust</text>
+    <text x="1105" y="449" font-size="10.5">pipeline make is_connected false</text>
+    <text x="1105" y="513" font-weight="600">EmbeddingManager / LLMManager</text>
+    <text x="1105" y="529" font-size="10.5">embedding + rerank providers, LLM</text>
+    <text x="1105" y="544" font-size="10.5">external APIs, web (fetchurl/websearch)</text>
+    <text x="1105" y="608" font-weight="600">Realtime watcher + initial scan</text>
+    <text x="1105" y="624" font-size="10.5">Watchman / watchdog, scan_progress</text>
+    <text x="1105" y="639" font-size="10.5">feeds DuckDB, status for daemon_status</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#a)">
+    <path d="M1105,340 L1105,395"/>
+    <path d="M1225,310 L1240,310 L1240,527 L1225,527"/>
+    <path d="M1225,622 L1245,622 L1245,432 L1225,432"/>
+  </g>
+</svg>
+</div>
+
+<h3>Data flow per path</h3>
+<ul>
+  <li><b>A. Default (daemon):</b> most stdio clients (Claude Code, Pi, pi-mcp-adapter) with no flags. client → <code>ClientProxy</code> → IPC (Unix socket; TCP on Windows) → <code>ChunkHoundDaemon._dispatch_mcp</code> → <code>handle_tool_call</code>. The proxy is a dumb frame relay (token-authenticated via the lock file); <code>DaemonDiscovery</code> spawns the daemon if none is running. One daemon per project, exits after the last client disconnects.</li>
+  <li><b>B. Direct stdio (SDK, <code>--no-daemon</code>):</b> used for <code>--no-daemon</code>, <code>--stdio</code>, <code>CHUNKHOUND_DAEMON_MODE=false</code>, read-only, or the <code>chunkhound-mcp</code> script. Each client gets its own process: client → <code>StdioMCPServer</code> → SDK <code>Server</code> → <code>handle_tool_call</code>. N clients = N SDK servers = N DuckDB connections.</li>
+  <li><b>C. HTTP (SDK):</b> one process serves all HTTP clients. client → Starlette (bearer-auth <code>/mcp</code>, unauthenticated <code>/health</code>) → <code>StreamableHTTPSessionManager(stateless=False)</code> → SDK <code>Server</code> → <code>handle_tool_call</code>. Never uses the daemon.</li>
+</ul>
+
+<h3>Components</h3>
+<table>
+  <tr><th>Component</th><th>File</th><th>Role</th></tr>
+  <tr><td><code>mcp_command</code></td><td><code>api/cli/commands/mcp.py</code></td><td>Routing: HTTP first, then no-daemon, read-only, or proxy.</td></tr>
+  <tr><td><code>ClientProxy</code></td><td><code>daemon/client_proxy.py</code></td><td>Stdio↔IPC bridge, register handshake, orphan watchdog.</td></tr>
+  <tr><td><code>DaemonDiscovery</code>, IPC</td><td><code>daemon/discovery.py</code>, <code>daemon/ipc</code></td><td>Lock file, registry, spawn, authenticated ping.</td></tr>
+  <tr><td><code>ChunkHoundDaemon</code>, <code>ClientManager</code></td><td><code>daemon/server.py</code>, <code>client_manager.py</code></td><td>Hand-rolled MCP dispatcher, client registry, graceful shutdown.</td></tr>
+  <tr><td><code>MCPServerBase</code></td><td><code>mcp_server/base.py</code></td><td>Lifecycle, provider gating, tool listing, the SDK <code>Server</code>'s <code>call_tool</code> handler.</td></tr>
+  <tr><td><code>StdioMCPServer</code>, <code>HttpMCPServer</code></td><td><code>mcp_server/stdio.py</code>, <code>http_server.py</code></td><td>SDK transports.</td></tr>
+  <tr><td><code>handle_tool_call</code>, <code>TOOL_REGISTRY</code></td><td><code>mcp_server/common.py</code>, <code>tools.py</code></td><td>Shared tool core. Every path converges here.</td></tr>
+</table>
+
+<h3>Routing rules (verified in code)</h3>
+<ul>
+  <li><code>--transport http</code> wins over everything; <code>--stdio</code> is ignored there (with a warning).</li>
+  <li>No-daemon triggers on <code>--no-daemon</code>, <code>--stdio</code>, <code>CHUNKHOUND_DAEMON_MODE=false</code>, or <code>database.read_only</code>. Otherwise the proxy/daemon path runs.</li>
+  <li><b>Resolved:</b> <code>chunkhound mcp stdio</code> does <i>not</i> select stdio mode — <code>stdio</code> parses as the positional <code>path</code>, so it takes the daemon path with <code>project_dir = &lt;cwd&gt;/stdio</code>. Fixture tests and the benchmark script exercise the daemon, not the SDK stdio server.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>2. Protocol analysis: 2025-11-25 vs 2026-07-28</h2>
+
+<h3>What ChunkHound speaks today</h3>
+<ul>
+  <li><b>Daemon:</b> hardcodes <code>protocolVersion: "2024-11-05"</code>, ignoring what the client requests.</li>
+  <li><b>SDK paths:</b> installed <code>mcp 1.16.0</code> tops out at <code>2025-06-18</code>. The stdio startup-error fallback also hardcodes <code>2024-11-05</code>.</li>
+</ul>
+
+<h3>Protocol comparison</h3>
+<table>
+  <tr><th>Aspect</th><th>2025-11-25</th><th>2026-07-28</th></tr>
+  <tr><td>Lifecycle</td><td><code>initialize</code> handshake; connection-scoped session</td><td>Stateless. No handshake; every request carries <code>protocolVersion</code>/<code>clientCapabilities</code> in <code>_meta</code>.</td></tr>
+  <tr><td>Discovery</td><td>Via <code>initialize</code></td><td><code>server/discover</code> MUST (versions, capabilities, identity); also the stdio compat probe.</td></tr>
+  <tr><td>HTTP sessions</td><td><code>Mcp-Session-Id</code>, SSE stream, resumability</td><td>No sessions. Each POST self-contained; SSE resumability removed.</td></tr>
+  <tr><td>Results</td><td>Plain results</td><td>Required <code>resultType</code> (<code>complete</code>/<code>input_required</code>).</td></tr>
+  <tr><td>Caching</td><td>None</td><td><code>tools/list</code> etc. require <code>ttlMs</code>/<code>cacheScope</code>.</td></tr>
+  <tr><td><code>ping</code>, logging, roots</td><td>Present</td><td><code>ping</code>/<code>logging/setLevel</code>/<code>roots/list_changed</code> removed.</td></tr>
+  <tr><td>Server-initiated requests</td><td>Sampling, elicitation, roots/list</td><td>Replaced by multi round-trip requests (<code>input_required</code> + <code>inputResponses</code>).</td></tr>
+  <tr><td>Subscriptions</td><td><code>resources/subscribe</code></td><td><code>subscriptions/listen</code> (response is the stream).</td></tr>
+  <tr><td>Tasks</td><td>Experimental core feature</td><td>Moved to the <code>tasks</code> extension.</td></tr>
+  <tr><td>Errors</td><td><code>-32002</code> resource-not-found</td><td><code>-32602</code>; new range <code>-32020..-32099</code>.</td></tr>
+</table>
+<p><b>Impact on ChunkHound:</b> the five tools never use sampling, elicitation, roots, subscriptions, or tasks — the change is wire-level only, not behavioral.</p>
+
+<h3>Client support</h3>
+<table>
+  <tr><th>Client</th><th>2025-11-25</th><th>2026-07-28</th><th>Notes</th></tr>
+  <tr>
+    <td><b>Claude Code</b></td>
+    <td><span class="ok">Supported</span></td>
+    <td><span class="ok">Supported</span>, via <code>server/discover</code></td>
+    <td>Strict validation: a reply missing <code>resultType</code>/<code>ttlMs</code>/<code>cacheScope</code> drops the server's tools. Declares <code>roots</code>/<code>elicitation</code>, not sampling/tasks. Progress is UI-only.</td>
+  </tr>
+  <tr>
+    <td><b>Pi</b> (built-in)</td>
+    <td><span class="ok">Supported</span> (negotiates down)</td>
+    <td><span class="no">Not supported</span></td>
+    <td>Speaks only <code>initialize</code> — a 2026-07-28-only server is unreachable. Progress works over the legacy handshake, UI-only.</td>
+  </tr>
+  <tr>
+    <td><b>pi-mcp-adapter</b> 5.3/5.4</td>
+    <td><span class="unk">Not tested</span></td>
+    <td><span class="part">Supported, one gap</span></td>
+    <td>Breaks only for servers advertising the tasks extension; ChunkHound doesn't, so unaffected.</td>
+  </tr>
+</table>
+
+
+<!-- ============================================================ -->
+<h2>3. Latest SDK server capabilities (mcp 2.3.0)</h2>
+<p class="meta">Verified against the <code>mcp</code> 2.3.0 wheel source. The SDK serves two eras: handshake (2024-11-05–2025-11-25) and stateless (2026-07-28). Each row notes which era needs it.</p>
+
+<table>
+  <tr><th>Capability</th><th>What it provides</th></tr>
+  <tr><td>Dual-era serving (<code>serve_dual_era_loop</code>)</td><td><b>Both eras.</b> The client's first request decides the era (a per-request <code>_meta</code> envelope = modern; <code>initialize</code> = legacy). <code>Server.run()</code> wraps it.</td></tr>
+  <tr><td>Built-in <code>server/discover</code></td><td><b>2026-07-28.</b> Returns modern versions/capabilities/<code>instructions</code>, derived live from registered handlers. Legacy peers can't reach it.</td></tr>
+  <tr><td><code>cache_hints</code></td><td><b>2026-07-28</b> (SEP-2549). <code>CacheHint(ttl_ms, scope)</code> per method; the runner fills <code>ttlMs</code>/<code>cacheScope</code> unless the handler already set them.</td></tr>
+  <tr><td>Inbound validation (<code>classify_inbound_request</code>)</td><td><b>2026-07-28.</b> Missing <code>_meta</code> &rarr; <code>-32602</code>; header/body mismatch &rarr; <code>-32020</code>; unsupported version &rarr; <code>-32022</code>.</td></tr>
+  <tr><td>Constructor callbacks</td><td><b>Both eras.</b> <code>on_list_tools</code>, <code>on_call_tool</code>, etc. (the <code>@call_tool()</code> decorator style has no definition in <code>lowlevel/server.py</code>).</td></tr>
+  <tr><td>Stateless Streamable HTTP</td><td><b>2026-07-28.</b> Self-contained POSTs, no <code>Mcp-Session-Id</code>; cancellation is closing the response stream. Legacy keeps the stateful transport.</td></tr>
+  <tr><td>Progress</td><td><b>Modern path.</b> Sends a notification on the request's own stream if the client sent a <code>progressToken</code>; server-to-client requests are refused there.</td></tr>
+  <tr><td>Middleware / OpenTelemetry</td><td><b>Both eras.</b> A default <code>OpenTelemetryMiddleware</code> tags <code>mcp.method.name</code>, <code>mcp.protocol.version</code>, <code>gen_ai.tool.name</code>.</td></tr>
+  <tr><td>Multi round-trip requests</td><td><b>2026-07-28.</b> Handlers return <code>InputRequiredResult</code>; a middleware seals/verifies <code>requestState</code> (AES-GCM).</td></tr>
+  <tr><td><code>subscriptions/listen</code></td><td><b>2026-07-28.</b> One subscription stream per call, fed by a pluggable <code>SubscriptionBus</code> (in-memory by default).</td></tr>
+  <tr><td>Single-request entry (<code>serve_one</code>)</td><td><b>2026-07-28.</b> Serves one <code>(method, params)</code> pair with a fresh per-request connection; for custom transports.</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>4. Leveraging the SDK server on the daemon path</h2>
+
+<h3>Why the daemon path misses the SDK today</h3>
+<ul>
+  <li>The daemon builds no SDK <code>Server</code> (<code>self.server</code> is <code>None</code>; <code>_register_tools</code> is a no-op). Its docstring says it works "without depending on the MCP SDK" so it can import independently.</li>
+  <li>The proxy and daemon speak <b>framed JSON-RPC over IPC</b>, not an SDK stream pair. SDK features that need a live stream (progress, notifications) have nowhere to go.</li>
+  <li>Dispatch is <b>serial per client</b>: <code>_handle_client</code> awaits <code>_dispatch_mcp</code> before reading the next frame. A long <code>code_research</code> call blocks that client's other requests, and a cancellation could not be read until the call ends.</li>
+  <li>All SDK-side value (<code>discover</code>, <code>resultType</code>, validation, <code>cache_hints</code>, middleware, OTel, progress, <code>subscriptions/listen</code>) is unreachable unless re-implemented by hand.</li>
+  <li>Re-implementing the minimum by hand (about 30 lines plus the pure helper <code>classify_inbound_request</code>) is cheap, but it leaves progress, cancellation, concurrency, and middleware out, and leaves two protocol implementations to keep in step.</li>
+</ul>
+
+<h3>Options</h3>
+<table>
+  <tr><th></th><th>Option A<br>Keep the daemon's own dispatcher; borrow only SDK helper functions<br><i>(SDK as a library, no SDK server)</i></th><th>Option B<br>Run an SDK <code>Server</code> inside the daemon, one <code>run()</code> per client<br><i>(SDK sessions live in the daemon process; the proxy stays a relay)</i></th><th>Option C<br>Run the SDK <code>Server</code> in the proxy; daemon becomes a plain tool backend<br><i>(SDK server lives in the proxy process)</i></th></tr>
+  <tr><td><b>Where the SDK server runs</b></td><td>Nowhere</td><td>Daemon (one per project; one SDK session per client connection)</td><td>Proxy (one per client)</td></tr>
+  <tr><td><b>What the daemon speaks</b></td><td>MCP, hand-written</td><td>MCP, via the SDK (one session per client connection)</td><td>An internal tool-call RPC, not MCP</td></tr>
+  <tr><td><b>Idea</b></td><td>Daemon keeps its dispatcher, adds <code>mcp_common/protocol.py</code> and the validation ladder.</td><td>The proxy stays a relay. The daemon builds the SDK <code>Server</code> once (shared <code>on_call_tool</code>/<code>on_list_tools</code>) and, for each proxy connection, starts <code>Server.run()</code> over an in-memory stream pair fed by the IPC frames. It registers no SDK lifespan and keeps its own once-only startup.</td><td>The proxy runs the SDK <code>Server</code> over stdio. Its handlers call the daemon over IPC with an internal <code>call_tool</code>/<code>list_tools</code> RPC.</td></tr>
+  <tr><td><b>Gains</b></td><td>Smallest change, no new daemon dependency weight, ships the cutover.</td><td><b>Dual-era per connection</b>: <code>run()</code> serves the legacy handshake era and the modern era, chosen once by the client's first request (source-verified in SDK 2.3.0). discover, <code>resultType</code>, validation, cache hints and middleware/OTel come with the SDK. Closing the read stream cancels the connection's in-flight handlers, <code>notifications/cancelled</code> interrupts the handler by default, and progress rides the same stream. The proxy is unchanged, so there is no per-client SDK import, no internal RPC and no proxy-to-daemon version policy. One tool-wiring path shared with stdio/HTTP.</td><td>All SDK features at the edge. <b>Dual-era</b>: a legacy <code>initialize</code> works, so Pi can use the default path. The daemon becomes protocol-agnostic. Negotiation is per client, not per daemon.</td></tr>
+  <tr><td><b>Costs</b></td><td>Under 2026-07-28, Pi loses the default path. Duplicated protocol logic. No progress, cancel, or concurrency. The "no SDK" docstring is already contradicted by importing <code>mcp.shared.inbound</code>.</td><td>The daemon becomes MCP-aware again, and every client session runs inside the process that owns the DB writer (weaker isolation than C). Each IPC frame must be converted to and from a typed <code>SessionMessage</code>. <code>run()</code> enters the server lifespan on every call, so none is registered with the SDK. Needs SDK 2.x (installed is 1.16.0). HTTP needs an adapter hosted in the daemon. Source-verified, not run.</td><td>Proxy imports the SDK on every client start (latency, memory per client). IPC becomes an internal API that needs its own versioning. Progress needs streamed IPC frames.</td></tr>
+  <tr><td><b>Under target 2025-11-25</b></td><td class="ok">Trivial: fix the version string and negotiation. Pi and Claude Code keep working.</td><td class="ok">Works. <code>run()</code> serves the handshake era over any stream pair (source-verified, not run).</td><td class="ok">Works. SDK serves the handshake in the proxy.</td></tr>
+  <tr><td><b>Under target 2026-07-28</b></td><td class="no">Pi excluded on the default path</td><td class="ok">Pi (legacy) and Claude Code v2 (modern) are each served on their own connection, because <code>run()</code> is the dual-era loop (source-verified, not run).</td><td class="ok">Pi served (legacy) and Claude Code v2 served</td></tr>
+  <tr><td><b>Risk</b></td><td class="ok">Low (either target)</td><td class="part">Medium-low</td><td class="part">Medium-high</td></tr>
+</table>
+
+<h3>Option B: SDK <code>run()</code> per client in the daemon, relay proxy</h3>
+<div class="box">
+  <strong>Status:</strong> implemented (mcp-daemon-option-b-plan.md, Tasks 1-6 complete and committed on branch <code>mcp-daemon-option-b</code>). The proxy stays an unmodified relay (no SDK import, old proxies keep working); the SDK runs inside the daemon via <code>MCPServerBase.serve_connection()</code>, one dual-era session per IPC connection. HTTP reuses the same dispatch point via <code>build_streamable_http_app()</code>.
+  <b>Manual end-to-end verification (plan Task 7): INCOMPLETE as of 2024 implementation pass.</b> The dev environment used for implementation has no working <code>chunkhound_native</code> build (its Rust crate's build script cannot download a required <code>libduckdb</code> release artifact over a network-egress-blocked connection to github.com) — this blocks indexing, the daemon, and any real client connection, so Task 7's Steps 1-5 (live Pi/stdio/HTTP client connections, cancellation, concurrent clients) could not be executed. What WAS verified in that environment: an isolated interpreter-level reproduction of <code>serve_connection()</code>'s legacy-handshake, modern-per-request-envelope, and malformed-frame-is-fatal behavior against the real installed <code>mcp==2.3.0</code> SDK, matching every automated test's intent; <code>chunkhound mcp --no-daemon .</code> invoked end-to-end up to (and including a well-formed JSON-RPC error surfaced for) the chunkhound_native failure point, confirming the rewritten stdio wrapper's control flow and error path are intact; the static single-dispatch-point isolation test (AST-based, no chunkhound_native dependency) confirmed base.py is the sole mcp-importing module; and a full diff of <code>pytest tests/ --collect-only</code> against unmodified <code>main</code> showed zero new test failures, only two new test files subject to the same pre-existing environment gap. <b>Before this plan is considered fully done, re-run Task 7 Steps 1-5 in an environment with a working chunkhound_native build (e.g. one with network access for the Rust crate's duckdb download, or a prebuilt wheel) and update this note with the actual client versions tested and the outcome.</b>
+</div>
+
+<p class="legend">
+  <span><i class="sw" style="background:#dbeafe"></i>Clients</span>
+  <span><i class="sw" style="background:#fef9c3;border-color:#a16207"></i>Proxy (relay only, unchanged)</span>
+  <span><i class="sw" style="background:#e0ecff;border-color:#1d4ed8"></i>Daemon</span>
+  <span><i class="sw" style="background:#dcfce7;border-color:#15803d"></i>SDK session (one per client, in the daemon)</span>
+  <span><i class="sw" style="background:#ffedd5;border-color:#c2410c"></i>Shared core</span>
+  <span><i class="sw" style="background:#f3f4f6;border-color:#6b7280"></i>Backing services</span>
+  <span>numbers = request order, dashed = spawn</span>
+</p>
+
+<div class="diagram">
+<svg viewBox="0 -34 1260 574" width="100%" style="min-width:820px" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="ba" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+    <marker id="bas" markerWidth="9" markerHeight="9" refX="1" refY="4.5" orient="auto-start-reverse"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+  </defs>
+
+  <!-- diagram header -->
+  <text x="20" y="-12" font-size="15" font-weight="700" fill="#1f2430">Option B: SDK <tspan font-family="monospace">run()</tspan> per client in the daemon, relay proxy</text>
+  <line x1="20" y1="-4" x2="1240" y2="-4" stroke="#d8dde6" stroke-width="1"/>
+
+  <!-- column titles -->
+  <g font-size="11" fill="#555" font-weight="600" text-anchor="middle">
+    <text x="105" y="22">MCP clients</text>
+    <text x="365" y="22">one proxy process per client</text>
+    <text x="765" y="22">single daemon process (session host)</text>
+    <text x="1115" y="22">tool core + services</text>
+  </g>
+
+  <!-- clients -->
+  <g fill="#dbeafe" stroke="#1e3a8a" stroke-width="1.3">
+    <rect x="20" y="84" width="170" height="50" rx="5"/>
+    <rect x="20" y="150" width="170" height="50" rx="5"/>
+    <rect x="20" y="216" width="170" height="50" rx="5"/>
+    <rect x="20" y="282" width="170" height="50" rx="5"/>
+    <rect x="20" y="372" width="170" height="52" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="105" y="105">Claude Code (v2 runtime)</text><text x="105" y="122" font-size="10.5">modern 2026-07-28</text>
+    <text x="105" y="171">Claude Code (v1 runtime)</text><text x="105" y="188" font-size="10.5">legacy handshake</text>
+    <text x="105" y="237">Pi</text><text x="105" y="254" font-size="10.5">legacy handshake, 2025-11-25</text>
+    <text x="105" y="303">other stdio client</text><text x="105" y="320" font-size="10.5">either era</text>
+    <text x="105" y="394">HTTP clients</text><text x="105" y="411" font-size="10.5">connect by URL</text>
+  </g>
+
+  <!-- relay proxies -->
+  <g fill="#fef9c3" stroke="#a16207" stroke-width="1.5">
+    <rect x="240" y="84" width="250" height="50" rx="5"/>
+    <rect x="240" y="150" width="250" height="50" rx="5"/>
+    <rect x="240" y="216" width="250" height="50" rx="5"/>
+    <rect x="240" y="282" width="250" height="50" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="365" y="104" font-weight="600">ClientProxy #1 (relay)</text><text x="365" y="121" font-size="10.5">stdin ↔ IPC frames, no SDK import</text>
+    <text x="365" y="170" font-weight="600">ClientProxy #2 (relay)</text><text x="365" y="187" font-size="10.5">stdin ↔ IPC frames, no SDK import</text>
+    <text x="365" y="236" font-weight="600">ClientProxy #3 (relay)</text><text x="365" y="253" font-size="10.5">stdin ↔ IPC frames, no SDK import</text>
+    <text x="365" y="302" font-weight="600">ClientProxy #4 (relay)</text><text x="365" y="319" font-size="10.5">stdin ↔ IPC frames, no SDK import</text>
+  </g>
+
+  <!-- client -> proxy -->
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M190,109 L240,109" marker-start="url(#bas)" marker-end="url(#ba)"/>
+    <path d="M190,175 L240,175" marker-start="url(#bas)" marker-end="url(#ba)"/>
+    <path d="M190,241 L240,241" marker-start="url(#bas)" marker-end="url(#ba)"/>
+    <path d="M190,307 L240,307" marker-start="url(#bas)" marker-end="url(#ba)"/>
+  </g>
+  <text x="193" y="78" font-size="10" fill="#444">① stdio</text>
+
+  <!-- daemon -->
+  <rect x="600" y="36" width="330" height="476" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="765" y="56" font-weight="600">ChunkHoundDaemon</text>
+    <text x="765" y="72" font-size="10.5" fill="#1d4ed8">session host in MCPServerBase</text>
+  </g>
+
+  <!-- SDK sessions -->
+  <g fill="#dcfce7" stroke="#15803d" stroke-width="1.5">
+    <rect x="620" y="84" width="290" height="50" rx="5"/>
+    <rect x="620" y="150" width="290" height="50" rx="5"/>
+    <rect x="620" y="216" width="290" height="50" rx="5"/>
+    <rect x="620" y="282" width="290" height="50" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="765" y="104" font-weight="600">Session #1: SDK run()</text><text x="765" y="121" font-size="10.5">modern era: server/discover, cache hints</text>
+    <text x="765" y="170" font-weight="600">Session #2: SDK run()</text><text x="765" y="187" font-size="10.5">legacy era: initialize handshake</text>
+    <text x="765" y="236" font-weight="600">Session #3: SDK run()</text><text x="765" y="253" font-size="10.5">legacy era: initialize handshake</text>
+    <text x="765" y="302" font-weight="600">Session #4: SDK run()</text><text x="765" y="319" font-size="10.5">era chosen per connection</text>
+  </g>
+  <text x="765" y="348" text-anchor="middle" font-size="10" fill="#1d4ed8">per session: era negotiation · cancel · progress · cache hints</text>
+  <text x="765" y="362" text-anchor="middle" font-size="10" fill="#1d4ed8">one shared SDK Server (handlers built once) · no SDK lifespan</text>
+
+  <!-- proxy -> session -->
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M490,109 L620,109" marker-start="url(#bas)" marker-end="url(#ba)"/>
+    <path d="M490,175 L620,175" marker-start="url(#bas)" marker-end="url(#ba)"/>
+    <path d="M490,241 L620,241" marker-start="url(#bas)" marker-end="url(#ba)"/>
+    <path d="M490,307 L620,307" marker-start="url(#bas)" marker-end="url(#ba)"/>
+  </g>
+  <text x="496" y="78" font-size="10" fill="#444">② IPC frames</text>
+  <text x="496" y="92" font-size="9" fill="#444">(raw JSON-RPC)</text>
+  <text x="496" y="126" font-size="9" fill="#1d4ed8">IPC frame ↔ message</text>
+  <text x="496" y="139" font-size="9" fill="#1d4ed8">mem. streams → run()</text>
+
+  <!-- HTTP adapter inside daemon -->
+  <rect x="620" y="372" width="290" height="44" rx="5" fill="#fff" stroke="#1d4ed8" stroke-width="1.3"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="765" y="391" font-weight="600">HTTP adapter + listener</text><text x="765" y="407" font-size="10.5">StreamableHTTPSessionManager, bearer token</text>
+  </g>
+  <rect x="620" y="436" width="290" height="50" rx="5" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="765" y="456" font-weight="600">Session #5: SDK run()</text><text x="765" y="473" font-size="10.5">one per HTTP session (Mcp-Session-Id)</text>
+  </g>
+  <path d="M765,416 L765,436" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#ba)"/>
+  <path d="M190,398 L620,398" stroke="#374151" stroke-width="1.4" fill="none" marker-start="url(#bas)" marker-end="url(#ba)"/>
+  <text x="196" y="392" font-size="10" fill="#444">POST / GET / DELETE /mcp</text>
+
+  <!-- discovery -->
+  <rect x="240" y="440" width="250" height="52" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="365" y="462" font-weight="600">DaemonDiscovery</text><text x="365" y="479" font-size="10.5">lock file, registry, startup lock</text>
+  </g>
+  <path d="M490,466 L600,466" stroke="#374151" stroke-width="1.4" fill="none" stroke-dasharray="5,4" marker-end="url(#ba)"/>
+  <text x="494" y="458" font-size="10" fill="#444">spawn `_daemon` if absent</text>
+  <path d="M365,332 L365,440" stroke="#374151" stroke-width="1.4" fill="none" stroke-dasharray="5,4" marker-end="url(#ba)"/>
+
+  <!-- core + services -->
+  <rect x="980" y="84" width="270" height="104" rx="5" fill="#ffedd5" stroke="#c2410c" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1115" y="106" font-weight="600">Shared tool core</text>
+    <text x="1115" y="128" font-size="10.5">common.handle_tool_call</text>
+    <text x="1115" y="146" font-size="10.5">tools.execute_tool / TOOL_REGISTRY</text>
+    <text x="1115" y="164" font-size="10.5">5 tools, one definition for every path</text>
+    <text x="1115" y="180" font-size="10.5">③ run tool in the session's handler</text>
+  </g>
+  <rect x="980" y="220" width="270" height="112" rx="5" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1115" y="242" font-weight="600">Backing services</text>
+    <text x="1115" y="264" font-size="10.5">DuckDB (single writer)</text>
+    <text x="1115" y="282" font-size="10.5">embedding provider, LLM provider</text>
+    <text x="1115" y="300" font-size="10.5">indexing + file watcher</text>
+    <text x="1115" y="318" font-size="10.5">④ read / write, then result returns ⑤</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M930,136 L980,136" marker-end="url(#ba)"/>
+    <path d="M1115,188 L1115,220" marker-start="url(#bas)" marker-end="url(#ba)"/>
+  </g>
+</svg>
+</div>
+
+<h3>Data flow for one message (Option B)</h3>
+<p>Client → proxy (parses the line, does nothing else) → IPC frame → daemon unpacks it into a typed <code>SessionMessage</code> on that client's in-memory stream. That client's <code>run()</code> picks its era from the first request, handles handshake/discovery/validation, and calls <code>handle_tool_call</code> — same shared core and DB writer as every other path. The reply retraces the same hops back to stdout. On disconnect, the stream closes, <code>run()</code> exits, and its in-flight handlers are cancelled (source-verified, not yet run).</p>
+
+<h3>What changes compared with today (Option B)</h3>
+<ul>
+  <li><b>Daemon:</b> loses the hand-rolled dispatcher and hardcoded <code>2024-11-05</code>; gains an SDK session per connection with real cancellation/progress.</li>
+  <li><b>Proxy:</b> unchanged relay, no SDK import.</li>
+  <li><b>New:</b> an IPC-frame↔<code>SessionMessage</code> adapter and an HTTP adapter in the daemon; no registered SDK lifespan (<code>run()</code> would re-enter it per connection).</li>
+  <li><b>Unchanged:</b> <code>--no-daemon</code>/<code>--stdio</code>/read-only routing, the shared tool core, the single DuckDB writer.</li>
+</ul>
+
+<h3>Option C: SDK Server in each proxy, daemon as a tool backend</h3>
+<div class="box">
+  <strong>Status:</strong> candidate, not decided — alternative to Option B, a spike decides between them. Each proxy hosts its own SDK server (own era negotiation) and calls the daemon through a small internal RPC (<code>list_tools</code>, <code>call_tool</code>) that needs its own versioning; the daemon stops speaking MCP and becomes a plain tool backend owning the DB writer. Needs SDK 2.x in the proxy for 2026-07-28 (<code>mcp&gt;=1.24.0,&lt;2</code> suffices for 2025-11-25-only).
+  <b>Not verified:</b> SDK import cost per proxy, and the stdio cancellation signal in 2026-07-28.
+</div>
+
+<p class="legend">
+  <span><i class="sw" style="background:#dbeafe"></i>Clients</span>
+  <span><i class="sw" style="background:#dcfce7;border-color:#15803d"></i>SDK server (one per client, in the proxy)</span>
+  <span><i class="sw" style="background:#e0ecff;border-color:#1d4ed8"></i>Daemon (no MCP protocol)</span>
+  <span><i class="sw" style="background:#ffedd5;border-color:#c2410c"></i>Shared core</span>
+  <span><i class="sw" style="background:#f3f4f6;border-color:#6b7280"></i>Backing services</span>
+  <span>numbers = request order, dashed = spawn / unchanged path</span>
+</p>
+
+<div class="diagram">
+<svg viewBox="0 -34 1260 594" width="100%" style="min-width:820px" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="ca" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+    <marker id="cas" markerWidth="9" markerHeight="9" refX="1" refY="4.5" orient="auto-start-reverse"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+  </defs>
+
+  <!-- diagram header -->
+  <text x="20" y="-12" font-size="15" font-weight="700" fill="#1f2430">Option C: SDK Server in each proxy, daemon as a tool backend</text>
+  <line x1="20" y1="-4" x2="1240" y2="-4" stroke="#d8dde6" stroke-width="1"/>
+
+  <!-- column titles -->
+  <g font-size="11" fill="#555" font-weight="600" text-anchor="middle">
+    <text x="105" y="22">MCP clients</text>
+    <text x="365" y="22">one proxy process per client</text>
+    <text x="765" y="22">single daemon process</text>
+    <text x="1100" y="22">tool core + services</text>
+  </g>
+
+  <!-- clients -->
+  <g fill="#dbeafe" stroke="#1e3a8a" stroke-width="1.3">
+    <rect x="20" y="40" width="170" height="52" rx="5"/>
+    <rect x="20" y="110" width="170" height="52" rx="5"/>
+    <rect x="20" y="180" width="170" height="52" rx="5"/>
+    <rect x="20" y="250" width="170" height="52" rx="5"/>
+    <rect x="20" y="410" width="170" height="52" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="105" y="62">Claude Code (v2 runtime)</text><text x="105" y="79" font-size="10.5">modern 2026-07-28</text>
+    <text x="105" y="132">Claude Code (v1 runtime)</text><text x="105" y="149" font-size="10.5">legacy handshake</text>
+    <text x="105" y="202">Pi</text><text x="105" y="219" font-size="10.5">legacy handshake, 2025-11-25</text>
+    <text x="105" y="272">other stdio client</text><text x="105" y="289" font-size="10.5">either era</text>
+    <text x="105" y="432">HTTP clients</text><text x="105" y="449" font-size="10.5">connect by URL</text>
+  </g>
+
+  <!-- proxies with SDK server -->
+  <g fill="#dcfce7" stroke="#15803d" stroke-width="1.5">
+    <rect x="240" y="40" width="250" height="52" rx="5"/>
+    <rect x="240" y="110" width="250" height="52" rx="5"/>
+    <rect x="240" y="180" width="250" height="52" rx="5"/>
+    <rect x="240" y="250" width="250" height="52" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="365" y="60" font-weight="600">ClientProxy #1 + SDK Server</text><text x="365" y="77" font-size="10.5">modern era: server/discover, cache hints</text>
+    <text x="365" y="130" font-weight="600">ClientProxy #2 + SDK Server</text><text x="365" y="147" font-size="10.5">legacy era: initialize handshake</text>
+    <text x="365" y="200" font-weight="600">ClientProxy #3 + SDK Server</text><text x="365" y="217" font-size="10.5">legacy era: initialize handshake</text>
+    <text x="365" y="270" font-weight="600">ClientProxy #4 + SDK Server</text><text x="365" y="287" font-size="10.5">era chosen per connection</text>
+  </g>
+
+  <!-- client -> proxy -->
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M190,66 L240,66" marker-start="url(#cas)" marker-end="url(#ca)"/>
+    <path d="M190,136 L240,136" marker-start="url(#cas)" marker-end="url(#ca)"/>
+    <path d="M190,206 L240,206" marker-start="url(#cas)" marker-end="url(#ca)"/>
+    <path d="M190,276 L240,276" marker-start="url(#cas)" marker-end="url(#ca)"/>
+  </g>
+  <text x="193" y="36" font-size="10" fill="#444">① stdio</text>
+
+  <!-- proxy -> daemon -->
+  <rect x="640" y="40" width="250" height="262" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="765" y="62" font-weight="600">ChunkHoundDaemon (tool backend)</text>
+    <text x="765" y="84" font-size="10.5">accept IPC + register token check</text>
+    <text x="765" y="102" font-size="10.5">internal RPC: list_tools, call_tool</text>
+    <text x="765" y="120" font-size="10.5">one task per request (concurrent)</text>
+    <text x="765" y="138" font-size="10.5">per-client write lock on frames</text>
+    <text x="765" y="156" font-size="10.5">cancel client's tasks on disconnect</text>
+    <text x="765" y="174" font-size="10.5">progress frames tied to request ID</text>
+    <text x="765" y="204" font-size="10.5" fill="#1d4ed8">owns the single DuckDB writer</text>
+    <text x="765" y="222" font-size="10.5" fill="#1d4ed8">no initialize, no protocol versions</text>
+    <text x="765" y="240" font-size="10.5" fill="#1d4ed8">no hand-rolled JSON-RPC dispatcher</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M490,66 L640,66" marker-start="url(#cas)" marker-end="url(#ca)"/>
+    <path d="M490,136 L640,136" marker-start="url(#cas)" marker-end="url(#ca)"/>
+    <path d="M490,206 L640,206" marker-start="url(#cas)" marker-end="url(#ca)"/>
+    <path d="M490,276 L640,276" marker-start="url(#cas)" marker-end="url(#ca)"/>
+  </g>
+  <text x="496" y="36" font-size="10" fill="#444">② internal RPC over IPC</text>
+  <text x="496" y="56" font-size="9.5" fill="#444">(request, progress, result)</text>
+
+  <!-- discovery -->
+  <rect x="240" y="330" width="250" height="52" rx="5" fill="#e0ecff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="365" y="352" font-weight="600">DaemonDiscovery</text><text x="365" y="369" font-size="10.5">lock file, registry, startup lock</text>
+  </g>
+  <path d="M490,356 L765,356 L765,302" stroke="#374151" stroke-width="1.4" fill="none" stroke-dasharray="5,4" marker-end="url(#ca)"/>
+  <text x="560" y="350" font-size="10" fill="#444">spawn `_daemon` if absent</text>
+  <path d="M365,302 L365,330" stroke="#374151" stroke-width="1.4" fill="none" stroke-dasharray="5,4" marker-end="url(#ca)"/>
+
+  <!-- core + services -->
+  <rect x="960" y="40" width="280" height="110" rx="5" fill="#ffedd5" stroke="#c2410c" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1100" y="62" font-weight="600">Shared tool core</text>
+    <text x="1100" y="84" font-size="10.5">common.handle_tool_call</text>
+    <text x="1100" y="102" font-size="10.5">tools.execute_tool / TOOL_REGISTRY</text>
+    <text x="1100" y="120" font-size="10.5">5 tools, one definition for every path</text>
+    <text x="1100" y="138" font-size="10.5">③ run tool, report progress</text>
+  </g>
+  <rect x="960" y="190" width="280" height="112" rx="5" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1100" y="212" font-weight="600">Backing services</text>
+    <text x="1100" y="234" font-size="10.5">DuckDB (single writer)</text>
+    <text x="1100" y="252" font-size="10.5">embedding provider, LLM provider</text>
+    <text x="1100" y="270" font-size="10.5">indexing + file watcher</text>
+    <text x="1100" y="288" font-size="10.5">④ read / write, then result returns ⑤</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M890,95 L960,95" marker-end="url(#ca)"/>
+    <path d="M1100,150 L1100,190" marker-start="url(#cas)" marker-end="url(#ca)"/>
+  </g>
+
+  <!-- HTTP path, unchanged -->
+  <rect x="240" y="410" width="250" height="52" rx="5" fill="#dcfce7" stroke="#15803d" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="365" y="430" font-weight="600">HttpMCPServer (SDK, own process)</text><text x="365" y="447" font-size="10.5">Streamable HTTP, bearer token</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M190,436 L240,436" marker-start="url(#cas)" marker-end="url(#ca)"/>
+    <path d="M490,436 L1100,436 L1100,302" stroke-dasharray="5,4" marker-end="url(#ca)"/>
+  </g>
+  <text x="560" y="428" font-size="10" fill="#444">unchanged: own in-process core + services, no daemon</text>
+  <text x="193" y="404" font-size="10" fill="#444">POST / GET / DELETE /mcp</text>
+</svg>
+</div>
+
+<h3>Data flow for one message (Option C)</h3>
+<p>Client → the SDK <code>Server</code> inside that proxy handles the protocol (handshake or <code>discover</code>, negotiation, validation, response fields). It then calls the daemon over the existing register/auth IPC via the internal RPC (<code>list_tools</code>/<code>call_tool</code>, tagged with a request ID; <code>DaemonDiscovery</code> spawns the daemon if needed). The daemon runs each request as its own task, calling <code>handle_tool_call</code> against the same shared core and DB writer as every other path, and reports progress as frames carrying the request ID. The result frame returns to the proxy, which writes it to stdout in the client's wire format. On disconnect, the daemon cancels that client's in-flight tasks (proxy's orphan watchdog unchanged).</p>
+
+<h3>What changes compared with today (Option C)</h3>
+<ul>
+  <li><b>Daemon:</b> loses the hand-rolled dispatcher and hardcoded <code>2024-11-05</code>; gains per-request tasks, a write lock, cancellation, and progress frames.</li>
+  <li><b>Proxy:</b> becomes a full SDK server whose handlers call the daemon, instead of forwarding raw lines.</li>
+  <li><b>Unchanged:</b> HTTP path, <code>--no-daemon</code>/<code>--stdio</code>/read-only routing, the shared tool core, the single DuckDB writer.</li>
+  <li><b>Risks to check first:</b> SDK cold-start per proxy, the stdio cancellation signal in 2026-07-28, and a version field on the internal RPC so mismatched proxy/daemon versions fail clearly.</li>
+</ul>
+
+<h3>Why the design keeps a shared tool core</h3>
+<ul>
+  <li>The core (<code>common.handle_tool_call</code>, <code>tools.execute_tool</code>, <code>TOOL_REGISTRY</code>) is the one definition of the 5 tools: argument validation, execution, and error shaping. It already exists and is not new to either option.</li>
+  <li>Three callers need it: the daemon, <code>StdioMCPServer</code> (<code>--no-daemon</code>), and <code>HttpMCPServer</code>. Without it each would carry its own copy and the paths would drift apart.</li>
+  <li>It keeps the daemon protocol-free. The daemon only calls into the core and never builds MCP responses.</li>
+  <li>It is why the tool-wiring change matters: the SDK handlers in the proxy and in <code>StdioMCPServer</code> should call the same bound methods.</li>
+</ul>
+
+<h3>The <code>--no-daemon</code> flow (also <code>--stdio</code>, read-only, <code>CHUNKHOUND_DAEMON_MODE=false</code>)</h3>
+<ul>
+  <li>No proxy, no daemon, no IPC. The SDK <code>Server</code> and the tool core run in the same process the client spawned.</li>
+  <li>Neither option changes this path. It already has a live SDK server, so it gets the SDK upgrade directly.</li>
+  <li><b>Each client gets its own process and its own DuckDB connection.</b> Two clients with writers on the same database conflict. This is the reason the daemon exists. Read-only mode avoids the conflict, which is why it is forced onto this path.</li>
+</ul>
+
+<p class="legend">
+  <span><i class="sw" style="background:#dbeafe"></i>Clients / CLI</span>
+  <span><i class="sw" style="background:#dcfce7;border-color:#15803d"></i>SDK server (in-process)</span>
+  <span><i class="sw" style="background:#ffedd5;border-color:#c2410c"></i>Shared core</span>
+  <span><i class="sw" style="background:#f3f4f6;border-color:#6b7280"></i>Backing services</span>
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1260 360" width="100%" style="min-width:820px" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="na" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+    <marker id="nas" markerWidth="9" markerHeight="9" refX="1" refY="4.5" orient="auto-start-reverse"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+  </defs>
+  <g font-size="11" fill="#555" font-weight="600" text-anchor="middle">
+    <text x="105" y="22">MCP clients</text>
+    <text x="365" y="22">one process per client</text>
+    <text x="765" y="22">shared tool core</text>
+    <text x="1100" y="22">backing services</text>
+  </g>
+
+  <!-- clients -->
+  <g fill="#dbeafe" stroke="#1e3a8a" stroke-width="1.3">
+    <rect x="20" y="40" width="170" height="52" rx="5"/>
+    <rect x="20" y="130" width="170" height="52" rx="5"/>
+    <rect x="20" y="220" width="170" height="52" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="105" y="62">Claude Code</text><text x="105" y="79" font-size="10.5">modern or legacy</text>
+    <text x="105" y="152">Pi</text><text x="105" y="169" font-size="10.5">legacy, 2025-11-25</text>
+    <text x="105" y="242">other stdio client</text><text x="105" y="259" font-size="10.5">either era</text>
+  </g>
+
+  <!-- processes -->
+  <g fill="#dcfce7" stroke="#15803d" stroke-width="1.5">
+    <rect x="240" y="40" width="250" height="52" rx="5"/>
+    <rect x="240" y="130" width="250" height="52" rx="5"/>
+    <rect x="240" y="220" width="250" height="52" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="365" y="60" font-weight="600">StdioMCPServer #1</text><text x="365" y="77" font-size="10.5">SDK Server + stdio_server, modern era</text>
+    <text x="365" y="150" font-weight="600">StdioMCPServer #2</text><text x="365" y="167" font-size="10.5">SDK Server + stdio_server, legacy era</text>
+    <text x="365" y="240" font-weight="600">StdioMCPServer #3</text><text x="365" y="257" font-size="10.5">SDK Server + stdio_server, per connection</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M190,66 L240,66" marker-start="url(#nas)" marker-end="url(#na)"/>
+    <path d="M190,156 L240,156" marker-start="url(#nas)" marker-end="url(#na)"/>
+    <path d="M190,246 L240,246" marker-start="url(#nas)" marker-end="url(#na)"/>
+  </g>
+  <text x="193" y="36" font-size="10" fill="#444">① stdio</text>
+
+  <!-- core (a copy runs inside each process) -->
+  <g fill="#ffedd5" stroke="#c2410c" stroke-width="1.5">
+    <rect x="640" y="40" width="250" height="52" rx="5"/>
+    <rect x="640" y="130" width="250" height="52" rx="5"/>
+    <rect x="640" y="220" width="250" height="52" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="765" y="60" font-weight="600">handle_tool_call (in-process)</text><text x="765" y="77" font-size="10.5">execute_tool / TOOL_REGISTRY</text>
+    <text x="765" y="150" font-weight="600">handle_tool_call (in-process)</text><text x="765" y="167" font-size="10.5">execute_tool / TOOL_REGISTRY</text>
+    <text x="765" y="240" font-weight="600">handle_tool_call (in-process)</text><text x="765" y="257" font-size="10.5">execute_tool / TOOL_REGISTRY</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M490,66 L640,66" marker-start="url(#nas)" marker-end="url(#na)"/>
+    <path d="M490,156 L640,156" marker-start="url(#nas)" marker-end="url(#na)"/>
+    <path d="M490,246 L640,246" marker-start="url(#nas)" marker-end="url(#na)"/>
+  </g>
+  <text x="496" y="36" font-size="10" fill="#444">② direct call, same process</text>
+
+  <!-- services -->
+  <g fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5">
+    <rect x="990" y="40" width="250" height="52" rx="5"/>
+    <rect x="990" y="130" width="250" height="52" rx="5"/>
+    <rect x="990" y="220" width="250" height="52" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="1115" y="60" font-weight="600">own services #1</text><text x="1115" y="77" font-size="10.5">DuckDB connection, providers</text>
+    <text x="1115" y="150" font-weight="600">own services #2</text><text x="1115" y="167" font-size="10.5">DuckDB connection, providers</text>
+    <text x="1115" y="240" font-weight="600">own services #3</text><text x="1115" y="257" font-size="10.5">DuckDB connection, providers</text>
+  </g>
+  <g stroke="#374151" stroke-width="1.4" fill="none">
+    <path d="M890,66 L990,66" marker-start="url(#nas)" marker-end="url(#na)"/>
+    <path d="M890,156 L990,156" marker-start="url(#nas)" marker-end="url(#na)"/>
+    <path d="M890,246 L990,246" marker-start="url(#nas)" marker-end="url(#na)"/>
+  </g>
+  <text x="896" y="36" font-size="10" fill="#444">③ read / write</text>
+
+  <!-- shared DB -->
+  <rect x="990" y="305" width="250" height="40" rx="5" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.5"/>
+  <text x="1115" y="330" text-anchor="middle" fill="#111" font-size="11">same DuckDB file: writer conflict if not read-only</text>
+  <g stroke="#b91c1c" stroke-width="1.2" fill="none" stroke-dasharray="4,3">
+    <path d="M1115,92 L1215,92 L1215,305"/>
+    <path d="M1115,182 L1190,182 L1190,305"/>
+    <path d="M1115,272 L1115,305"/>
+  </g>
+  <text x="240" y="330" font-size="10.5" fill="#444">④ result returns the same way to the SDK server, which writes it to stdout in the client's era.</text>
+</svg>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Rust integration options for the MCP layer</h2>
+<p class="meta">This is a separate axis from section 4. Section 4 asks <i>where the SDK session host runs</i> (daemon vs. proxy), using the Python <code>mcp</code> SDK either way. This section asks <i>how much of the stack moves to Rust</i> if the official Rust SDK (<code>rmcp</code>, <a href="https://github.com/modelcontextprotocol/rust-sdk">modelcontextprotocol/rust-sdk</a>) is used instead.</p>
+
+<div class="box">
+  <strong>Today's baseline (unchanged by this section):</strong> Rust (<code>chunkhound_native</code>) only does indexing — scanning, diffing, DuckDB writes, HNSW maintenance, and embedding calls for OpenAI/Azure/VoyageAI. It is a library loaded <i>into</i> the Python process (a PyO3 extension module), never the other way around. Python always initiates; when Rust needs Python (parsing, non-native embedding providers) it briefly re-acquires the GIL and calls a plain blocking Python function. <b>The query/serving path (search, code_research, fetchurl, daemon_status, websearch) has zero Rust involvement today</b> — it runs entirely on Python's own <code>duckdb</code> bindings and the Python tool core (<code>mcp_server/tools.py</code>), which is also what the CLI commands call directly.
+</div>
+
+<p>A full rewrite ladder has five points (protocol only &rarr; +daemon &rarr; +daemon+proxy &rarr; +daemon+proxy+search &rarr; full tool-call revision). The <code>+daemon</code> and <code>+daemon+proxy</code> stops pay the heaviest architectural cost on the ladder — flipping process ownership to Rust, which forces embedding or sidecar-ing a full Python interpreter (the harder, reversed direction from today's library-call pattern) — while leaving <b>100% of every request's real work in Python</b>, so they are not listed as standalone options below. Only the realistic stopping points are shown: the lowest-effort way to adopt the Rust SDK, and the best mid- and high-effort options.</p>
+
+<table>
+  <tr><th>Tier</th><th>Scope</th><th>What stays Python</th><th>Effort / new complexity</th><th>Payoff</th></tr>
+  <tr>
+    <td><b>Low</b><br>(recommended entry point for <code>rmcp</code>)</td>
+    <td>Only the protocol/session layer moves to Rust: load <code>rmcp</code> as a Rust extension <i>inside</i> the still-Python daemon process — the same direction as today's <code>chunkhound_native</code> (Python hosts, Rust is a library), just handling handshake, <code>discover</code>, version negotiation, validation, and framing instead of indexing. The daemon process, proxy, and all tool execution are untouched.</td>
+    <td>Daemon process/<code>asyncio</code> loop, proxy, all 5 tools, DB queries, embeddings, LLM calls, CLI.</td>
+    <td class="ok">Low-moderate. Needs a Tokio runtime embedded inside the PyO3 extension and a GIL-safe bridge able to call <i>async</i> Python tool functions (new, but keeps Python as process owner — no interpreter embedding, no packaging inversion).</td>
+    <td>Gets <code>rmcp</code>'s protocol behavior (dual-era serving, <code>discover</code>, validation, cache hints, progress, cancellation, middleware) without changing process ownership. Every tool call still executes 100% in Python, so this does not reduce Python's share of per-request time — the win is protocol-layer conformance/perf, not request latency.</td>
+  </tr>
+  <tr>
+    <td><b>Mid</b></td>
+    <td>Daemon becomes a Rust process hosting <code>rmcp</code> (protocol + session + discovery/lock-file logic), the proxy is also rewritten in Rust, <b>and</b> the <code>search</code> tool's DB read path (regex match, vector similarity) is ported to Rust — reusing the existing <code>duckdb</code> crate, the schema and HNSW index Rust already built during indexing, and the existing native embedding adapters (OpenAI/Azure/VoyageAI) to embed the query text.</td>
+    <td><code>code_research</code> (LLM orchestration), <code>fetchurl</code>, <code>websearch</code>, non-native embedding providers, config, CLI — reached from the Rust daemon via an embedded or sidecar Python interpreter.</td>
+    <td class="part">Substantial. Flips process ownership to Rust, so Python must now be embedded or run as a sidecar worker (the harder, reversed call direction) — plus a new query-path port.</td>
+    <td><b>First tier that delivers real benefit:</b> the single most frequent tool call (<code>search</code>) runs end-to-end without touching Python at all.</td>
+  </tr>
+  <tr>
+    <td><b>High</b></td>
+    <td>Full tool-call revision: all 5 tools, every embedding/LLM provider, <code>code_research</code>'s multi-step research orchestration, the realtime file watcher, and config all ported to Rust.</td>
+    <td>Nothing load-bearing — no embedded or sidecar Python needed anywhere in the serving path.</td>
+    <td class="no">Largest — comparable to a backend rewrite (new LLM provider abstraction, agentic control flow, HTML/markdown handling, config parsing, file watching, all in Rust).</td>
+    <td>Maximum: single language, single process, no GIL/async-runtime bridging overhead anywhere.</td>
+  </tr>
+</table>
+
+<!-- ============================================================ -->
+</body>
+</html>

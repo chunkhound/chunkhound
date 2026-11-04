@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChunkHound MCP — Single-Dispatch-Point Design</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 1180px; margin: 0 auto; padding: 28px 24px 80px; color: #1f2430; line-height: 1.55; background: #fff; }
+  h1 { font-size: 1.8rem; margin-bottom: 4px; }
+  h2 { font-size: 1.35rem; margin-top: 2.4em; border-bottom: 2px solid #d8dde6; padding-bottom: 6px; }
+  h3 { font-size: 1.05rem; margin-top: 1.6em; color: #2b4a7a; }
+  .meta { color: #5a6275; font-size: .92rem; margin-top: 0; }
+  code { background: #f1f3f7; padding: 1px 5px; border-radius: 3px; font-size: .88em; font-family: "SFMono-Regular", Consolas, Menlo, monospace; }
+  ul { padding-left: 1.3em; margin: .4em 0; }
+  li { margin: 3px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: .92rem; }
+  th, td { border: 1px solid #d8dde6; padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: #eef1f6; }
+  .box { border: 1px solid #d8dde6; border-left: 4px solid #2b6cb0; background: #f7f9fc; padding: 10px 16px; margin: 14px 0; }
+  .ok { color: #1c7c3c; font-weight: 600; }
+  .diagram { overflow-x: auto; border: 1px solid #d8dde6; padding: 8px; background: #fcfcfd; }
+  .legend span { display: inline-block; margin-right: 18px; font-size: .88rem; }
+  .sw { display: inline-block; width: 14px; height: 14px; vertical-align: middle; border: 1.5px solid #333; margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<h1>ChunkHound MCP — Single-Dispatch-Point Design</h1>
+<p class="meta">Extends Option B (<a href="mcp-daemon-option-b-plan.html">mcp-daemon-option-b-plan.html</a>) with one additional constraint: there is exactly one place in the codebase that imports the <code>mcp</code> SDK.</p>
+
+<div class="box">
+  <strong>The idea in one sentence:</strong> <code>MCPServerBase</code> is the only module that knows the MCP protocol exists. <code>ChunkHoundDaemon</code>, <code>StdioMCPServer</code>, and <code>HttpMCPServer</code> become thin, protocol-version-agnostic wrappers that each supply a transport (IPC frames, stdin/stdout lines, or an ASGI app) and call two inherited methods — <code>serve_connection()</code> and <code>build_streamable_http_app()</code> — without ever importing <code>mcp</code> themselves. <code>ClientProxy</code> was already SDK-free and is unaffected.
+</div>
+
+<div class="box">
+  <strong>Implementation status:</strong> implemented (branch <code>mcp-daemon-option-b-plan</code> / <code>mcp-daemon-option-b-plan.md</code> Tasks 1-6), including the static isolation test (<code>tests/unit/test_mcp_wrapper_sdk_isolation.py</code>, §4). <b>Manual end-to-end verification against real clients on all three transports is INCOMPLETE</b>: the implementation environment had no working <code>chunkhound_native</code> build (network-blocked Rust crate download), which blocks indexing and any real daemon/client connection. Automated-test-equivalent logic was verified via isolated interpreter-level reproduction against the real installed SDK and via full-suite collection diffing against unmodified <code>main</code> (zero new failures). Re-run full manual verification (plan Task 7, Steps 1-5) in an environment with a working native build before treating this design as fully proven in production.
+</div>
+
+<h2>1. Why</h2>
+<ul>
+  <li><b>Today:</b> SDK-touching code is scattered across four places — <code>MCPServerBase._register_common_tool_handlers()</code> (tool wiring), <code>StdioMCPServer.run()</code> (builds <code>InitializationOptions</code>/<code>NotificationOptions</code>, opens <code>mcp.server.stdio.stdio_server()</code>), <code>HttpMCPServer.__init__</code> (builds <code>StreamableHTTPSessionManager</code> directly), and the Option B plan's planned <code>daemon/sdk_session.py</code> (a fourth, daemon-only copy of the per-connection driver). Any future protocol change (a new SDK version, a new era, a new negotiation rule) touches up to four files.</li>
+  <li><b>With this design:</b> all of that collapses into two methods on <code>MCPServerBase</code>. A protocol-version change is a change to one file. The daemon, stdio, and HTTP wrappers don't change at all unless their own transport plumbing changes.</li>
+  <li><b>Enforcement, not just convention:</b> a static test parses the AST of each wrapper file and fails the build if any of them import <code>mcp</code> — see §4.</li>
+</ul>
+
+<h2>2. Component diagram</h2>
+
+<p class="legend">
+  <span><i class="sw" style="background:#fef9c3;border-color:#a16207"></i>SDK-free relay (unchanged)</span>
+  <span><i class="sw" style="background:#dbeafe;border-color:#1d4ed8"></i>SDK-free wrapper (this design's contribution)</span>
+  <span><i class="sw" style="background:#dcfce7;border-color:#15803d"></i>Sole SDK import point</span>
+  <span><i class="sw" style="background:#ffedd5;border-color:#c2410c"></i>Shared tool core</span>
+  <span><i class="sw" style="background:#f3f4f6;border-color:#6b7280"></i>Backing services</span>
+  <span>solid arrow = call / data flow, dashed = inheritance</span>
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1260 760" width="100%" style="min-width:860px" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="da" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+    <marker id="das" markerWidth="9" markerHeight="9" refX="1" refY="4.5" orient="auto-start-reverse"><path d="M0,0 L9,4.5 L0,9 z" fill="#374151"/></marker>
+  </defs>
+
+  <text x="20" y="24" font-size="15" font-weight="700" fill="#1f2430">One dispatch point: MCPServerBase owns every mcp import; daemon/stdio/http never do</text>
+  <line x1="20" y1="32" x2="1240" y2="32" stroke="#d8dde6" stroke-width="1"/>
+
+  <!-- column titles -->
+  <g font-size="11" fill="#555" font-weight="600" text-anchor="middle">
+    <text x="105" y="58">clients</text>
+    <text x="365" y="58">SDK-free wrappers (own transport + service lifecycle)</text>
+    <text x="830" y="58">sole SDK import point</text>
+    <text x="1115" y="58">tool core + services</text>
+  </g>
+
+  <!-- clients -->
+  <g fill="#dbeafe" stroke="#1e3a8a" stroke-width="1.3">
+    <rect x="20" y="80" width="170" height="46" rx="5"/>
+    <rect x="20" y="300" width="170" height="46" rx="5"/>
+    <rect x="20" y="420" width="170" height="46" rx="5"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="105" y="98">stdio clients</text><text x="105" y="114" font-size="10">(Claude Code, Pi, ...)</text>
+    <text x="105" y="318">no-daemon stdio client</text><text x="105" y="334" font-size="10">--no-daemon / --stdio / read-only</text>
+    <text x="105" y="438">HTTP clients</text><text x="105" y="454" font-size="10">connect by URL</text>
+  </g>
+
+  <!-- ClientProxy (unchanged, SDK-free relay) -->
+  <rect x="240" y="80" width="230" height="46" rx="5" fill="#fef9c3" stroke="#a16207" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="355" y="98" font-weight="600">ClientProxy</text><text x="355" y="114" font-size="10">stdio ↔ IPC relay, no mcp import</text>
+  </g>
+  <path d="M190,103 L240,103" stroke="#374151" stroke-width="1.4" fill="none" marker-start="url(#das)" marker-end="url(#da)"/>
+
+  <!-- Daemon wrapper -->
+  <rect x="240" y="170" width="230" height="90" rx="5" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="355" y="190" font-weight="600">ChunkHoundDaemon</text>
+    <text x="355" y="206" font-size="10">owns IPC socket, DB, providers</text>
+    <text x="355" y="221" font-size="10">per connection: read_frame/write_frame</text>
+    <text x="355" y="236" font-size="10">= ipc.read_frame / ipc.write_frame</text>
+    <text x="355" y="251" font-size="10" fill="#1d4ed8">no mcp import</text>
+  </g>
+  <path d="M355,126 L355,170" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#da)"/>
+  <text x="362" y="150" font-size="10" fill="#444">IPC frames, one conn per client</text>
+
+  <!-- Stdio no-daemon wrapper -->
+  <rect x="240" y="290" width="230" height="90" rx="5" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="355" y="310" font-weight="600">StdioMCPServer</text>
+    <text x="355" y="326" font-size="10">owns its own DB, providers, watcher</text>
+    <text x="355" y="341" font-size="10">read_frame/write_frame = stdin/stdout</text>
+    <text x="355" y="356" font-size="10">JSON lines (same framing as ClientProxy)</text>
+    <text x="355" y="371" font-size="10" fill="#1d4ed8">no mcp import</text>
+  </g>
+  <path d="M190,323 L240,323" stroke="#374151" stroke-width="1.4" fill="none" marker-start="url(#das)" marker-end="url(#da)"/>
+
+  <!-- HTTP wrapper -->
+  <rect x="240" y="410" width="230" height="90" rx="5" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="355" y="430" font-weight="600">HttpMCPServer</text>
+    <text x="355" y="446" font-size="10">Starlette: /health, /mcp, bearer-auth</text>
+    <text x="355" y="461" font-size="10">calls build_streamable_http_app()</text>
+    <text x="355" y="476" font-size="10">owns its own DB, providers, watcher</text>
+    <text x="355" y="491" font-size="10" fill="#1d4ed8">no mcp import</text>
+  </g>
+  <path d="M190,443 L240,443" stroke="#374151" stroke-width="1.4" fill="none" marker-start="url(#das)" marker-end="url(#da)"/>
+
+  <!-- Inheritance dashed lines into MCPServerBase -->
+  <g stroke="#1d4ed8" stroke-width="1.3" fill="none" stroke-dasharray="4,3">
+    <path d="M470,215 L560,215 L560,280 L700,280"/>
+    <path d="M470,335 L560,335 L560,320 L700,320"/>
+    <path d="M470,455 L560,455 L560,360 L700,360"/>
+  </g>
+  <text x="520" y="208" font-size="9.5" fill="#1d4ed8">extends</text>
+
+  <!-- MCPServerBase: sole SDK import point -->
+  <rect x="700" y="170" width="260" height="330" rx="5" fill="#dcfce7" stroke="#15803d" stroke-width="1.8"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="830" y="192" font-weight="600" font-size="13">MCPServerBase</text>
+    <text x="830" y="208" font-size="10.5" fill="#15803d">the only file that imports mcp / mcp.types</text>
+  </g>
+  <rect x="716" y="225" width="228" height="100" rx="4" fill="#fff" stroke="#15803d" stroke-width="1.2"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="830" y="243" font-weight="600" font-size="11">serve_connection(read_frame, write_frame)</text>
+    <text x="830" y="259" font-size="10">builds in-memory SessionMessage stream pair</text>
+    <text x="830" y="274" font-size="10">builds InitializationOptions/get_capabilities</text>
+    <text x="830" y="289" font-size="10">drives self.server.run(...) — dual-era</text>
+    <text x="830" y="304" font-size="10">used by: daemon (per conn), stdio (direct)</text>
+  </g>
+  <rect x="716" y="335" width="228" height="68" rx="4" fill="#fff" stroke="#15803d" stroke-width="1.2"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="830" y="353" font-weight="600" font-size="11">build_streamable_http_app(**opts)</text>
+    <text x="830" y="369" font-size="10">wraps StreamableHTTPSessionManager</text>
+    <text x="830" y="384" font-size="10">used by: HttpMCPServer only</text>
+  </g>
+  <rect x="716" y="413" width="228" height="68" rx="4" fill="#fff" stroke="#15803d" stroke-width="1.2"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="830" y="431" font-weight="600" font-size="11">_register_common_tool_handlers()</text>
+    <text x="830" y="447" font-size="10">on_call_tool / on_list_tools callbacks</text>
+    <text x="830" y="462" font-size="10">builds the one self.server per process</text>
+  </g>
+
+  <!-- MCPServerBase -> shared core -->
+  <path d="M960,320 L990,320" stroke="#9a3412" stroke-width="1.6" fill="none" marker-end="url(#da)"/>
+  <text x="965" y="312" font-size="10" fill="#9a3412">handle_tool_call</text>
+
+  <!-- Shared core -->
+  <rect x="990" y="235" width="250" height="100" rx="5" fill="#ffedd5" stroke="#c2410c" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1115" y="255" font-weight="600">Shared tool core</text>
+    <text x="1115" y="273" font-size="10.5">mcp_server/common.py</text>
+    <text x="1115" y="288" font-size="10.5">tools.py / TOOL_REGISTRY</text>
+    <text x="1115" y="303" font-size="10.5">one definition for every path</text>
+  </g>
+
+  <!-- backing services -->
+  <rect x="990" y="365" width="250" height="100" rx="5" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="1115" y="385" font-weight="600">Backing services</text>
+    <text x="1115" y="403" font-size="10.5">DuckDB (single writer per process)</text>
+    <text x="1115" y="418" font-size="10.5">embedding / LLM providers</text>
+    <text x="1115" y="433" font-size="10.5">realtime watcher</text>
+  </g>
+  <path d="M1115,335 L1115,365" stroke="#374151" stroke-width="1.4" fill="none" marker-start="url(#das)" marker-end="url(#da)"/>
+
+  <!-- Enforcement note -->
+  <rect x="240" y="540" width="690" height="80" rx="5" fill="#fff" stroke="#b91c1c" stroke-width="1.3" stroke-dasharray="5,4"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="585" y="560" font-weight="600" fill="#b91c1c">Enforcement: tests/unit/test_mcp_wrapper_sdk_isolation.py</text>
+    <text x="585" y="578" font-size="10.5">AST-parses ChunkHoundDaemon, ClientProxy, StdioMCPServer, HttpMCPServer source</text>
+    <text x="585" y="593" font-size="10.5">fails the build if any of them contain `import mcp` / `from mcp ...`</text>
+    <text x="585" y="608" font-size="10.5">keeps MCPServerBase.py the single, enforced dispatch point over time</text>
+  </g>
+
+  <!-- key: one process per wrapper type note -->
+  <text x="20" y="700" font-size="10.5" fill="#444">Daemon: one process, N connections, N serve_connection() sessions sharing one self.server and one DB. · Stdio no-daemon / HTTP: one process per client / one process for all HTTP clients, each still only touching the SDK via the inherited base-class methods.</text>
+</svg>
+</div>
+
+<h2>3. Common flows</h2>
+
+<h3>Flow A — daemon path (default)</h3>
+<ol>
+  <li>Client spawns <code>chunkhound mcp</code> → routes to <code>ClientProxy</code> (SDK-free, unchanged).</li>
+  <li><code>ClientProxy</code> discovers/spawns the daemon (<code>DaemonDiscovery</code>), registers over IPC, then relays stdio JSON lines ↔ IPC msgpack frames — exactly as today.</li>
+  <li>On the daemon side, <code>ChunkHoundDaemon._handle_client()</code> (after the proxy's <code>register</code>/<code>registered</code> handshake) calls the **inherited** <code>self.serve_connection(read_frame=ipc.read_frame, write_frame=ipc.write_frame)</code>.</li>
+  <li><code>serve_connection()</code> (defined once, in <code>MCPServerBase</code>) builds the SDK stream pair, drives <code>self.server.run(...)</code> for that connection — dual-era negotiation, <code>tools/list</code>/<code>tools/call</code> dispatch — and calls <code>handle_tool_call</code> against the daemon's single DB/provider state.</li>
+  <li><code>ChunkHoundDaemon</code>'s own source file never imported <code>mcp</code> to make any of this happen.</li>
+</ol>
+
+<h3>Flow B — no-daemon / --stdio / read-only</h3>
+<ol>
+  <li>Client spawns <code>chunkhound mcp --no-daemon</code> (or <code>--stdio</code>, or read-only is forced) → routes to <code>StdioMCPServer</code>, which owns its own DB/providers/watcher (no daemon exists to proxy to).</li>
+  <li><code>StdioMCPServer.run()</code> builds its own <code>read_frame</code>/<code>write_frame</code> pair — plain stdin/stdout JSON-line read/write, the same framing <code>ClientProxy</code> already uses, just without the IPC hop.</li>
+  <li>It calls the same **inherited** <code>self.serve_connection(read_frame, write_frame)</code> the daemon uses — identical protocol handling, different transport underneath.</li>
+  <li><code>stdio.py</code>'s own source file never imports <code>mcp</code> either — it used to (today's <code>mcp.server.stdio.stdio_server()</code>, <code>InitializationOptions</code>, <code>NotificationOptions</code>), and this design moves that out.</li>
+</ol>
+
+<h3>Flow C — HTTP</h3>
+<ol>
+  <li>Client connects to the standalone <code>chunkhound mcp --transport http</code> process (never touches the daemon, same as today).</li>
+  <li><code>HttpMCPServer</code> calls the **inherited** <code>self.build_streamable_http_app(stateless=False)</code> instead of constructing <code>StreamableHTTPSessionManager</code> itself.</li>
+  <li>The returned ASGI app is mounted at <code>/mcp</code> behind the existing bearer-auth/CORS Starlette middleware (unchanged — those are not SDK-specific).</li>
+  <li><code>http_server.py</code>'s own source file never imports <code>mcp</code> either — it used to (<code>from mcp.server.streamable_http_manager import StreamableHTTPSessionManager</code>), and this design moves that out.</li>
+</ol>
+
+<h3>What never changes</h3>
+<ul>
+  <li><code>ClientProxy</code> and the IPC wire format (<code>daemon/ipc/codec.py</code>) — untouched by this design, already SDK-free.</li>
+  <li>The shared tool core (<code>mcp_server/common.py</code>, <code>tools.py</code>) — every flow still converges on the same <code>handle_tool_call</code>.</li>
+  <li>The routing rules in <code>api/cli/commands/mcp.py</code> that pick which wrapper runs.</li>
+  <li>No Rust integration anywhere in this design, consistent with the Option B decision.</li>
+</ul>
+
+<p class="meta">Companion plan: <a href="mcp-daemon-option-b-plan.html">mcp-daemon-option-b-plan.html</a> (task-level detail; needs the restructuring described in that conversation — fold the planned <code>daemon/sdk_session.py</code> module into <code>MCPServerBase.serve_connection()</code>, add <code>build_streamable_http_app()</code>, and add the AST-based isolation test above).</p>
+
+</body>
+</html>
