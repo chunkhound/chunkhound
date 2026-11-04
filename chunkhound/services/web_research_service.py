@@ -126,19 +126,22 @@ class _TransientProvider:
         # Do not retain raw PDF bytes after bounded normalization. The source
         # fingerprint remains in the descriptor for live-refetch validation.
         content = cached_page[2]
-        # Count raw and normalized text separately even when they share storage.
-        # Include chunk text again because it may not share string storage with
-        # the normalized synthesis text, plus generous container overhead.
-        chunk_size = sum(
-            sys.getsizeof(chunk) + sys.getsizeof(chunk.code)
-            for chunk in cached_chunks or ()
-        )
+        # Count each distinct object once: raw and normalized text (and chunk
+        # strings) often share storage, so summing per reference overcounts.
+        seen: set[int] = set()
+
+        def sized(obj: object) -> int:
+            if id(obj) in seen:
+                return 0
+            seen.add(id(obj))
+            return sys.getsizeof(obj)
+
         size = (
             sum(
-                sys.getsizeof(item)
+                sized(item)
                 for item in (cached_page, source_url, extension, content, text)
             )
-            + chunk_size
+            + sum(sized(chunk) + sized(chunk.code) for chunk in cached_chunks or ())
             + 512
         )
         if size > _SOURCE_CACHE_BYTES:

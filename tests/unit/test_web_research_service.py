@@ -725,3 +725,16 @@ async def test_large_pdf_research_evidence_is_the_matched_chunk_text() -> None:
     assert result["results"]
     for hit in result["results"]:
         assert hit["content"] in result["evidence"]
+
+
+def test_large_markdown_page_is_cached_once_counted() -> None:
+    from chunkhound.services.web_research_service import (
+        _text_chunks,
+        _TransientProvider,
+    )
+
+    url = "https://example.com/big"
+    text = "".join(f"line {i} " + "x" * 80 + "\n" for i in range(130_000))  # ~11 MiB
+    provider = _TransientProvider()
+    provider._store((url, ".md", text), text, _text_chunks(url, text))
+    assert provider.get_transient_file_content(url) == text
