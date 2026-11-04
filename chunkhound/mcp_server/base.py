@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -67,7 +67,7 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps on import
 # already-registered call_tool handler observe the patched behavior — the
 # handler closure below resolves this name from these module globals on
 # every call, not from a value captured once at registration time.
-from .common import first_error_tool_content, handle_tool_call  # noqa: E402
+from .common import handle_tool_call, tool_call_failed  # noqa: E402
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
@@ -1424,26 +1424,25 @@ class MCPServerBase(ABC):
         return tools
 
     def _register_common_tool_handlers(self) -> None:
-        """Register call_tool/list_tools handlers shared by every transport.
+        """Build the shared SDK Server with tool-call/list-tools callbacks.
 
-        Transport subclasses call this from their ``_register_tools()``
-        implementation so tool dispatch never drifts between stdio and HTTP.
+        This is the single place in the codebase that builds an
+        ``mcp.server.Server``. Every transport (daemon, stdio, HTTP) reaches
+        it only through the inherited ``serve_connection()`` /
+        ``build_streamable_http_app()`` methods below -- none of them import
+        ``mcp`` directly.
         """
         if not _MCP_AVAILABLE:
             return  # no-op when SDK not available
 
-        self.server = Server("ChunkHound Code Search", version=__version__)
-
-        # The MCP SDK's call_tool decorator expects a SINGLE handler function
-        # with signature (tool_name: str, arguments: dict) that handles ALL tools
-        @self.server.call_tool()  # type: ignore[misc]
-        async def handle_all_tools(
-            tool_name: str, arguments: dict[str, Any]
-        ) -> list[types.TextContent]:
+        async def on_call_tool(
+            ctx: Any,
+            params: "types.CallToolRequestParams",
+        ) -> "types.CallToolResult":
             """Universal tool handler that routes to the unified handler."""
             text_contents = await handle_tool_call(
-                tool_name=tool_name,
-                arguments=arguments,
+                tool_name=params.name,
+                arguments=params.arguments or {},
                 services=self.services,
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,
@@ -1454,22 +1453,15 @@ class MCPServerBase(ABC):
                 ensure_services=self.ensure_tool_services,
                 analytics_recorder=self.analytics_recorder,
             )
-            error_content = first_error_tool_content(text_contents)
-            if error_content is not None:
-                raise RuntimeError(error_content.text)
-            return text_contents
+            return types.CallToolResult(
+                content=list(text_contents),
+                is_error=tool_call_failed(text_contents),
+            )
 
-        self._register_list_tools()
-
-    def _register_list_tools(self) -> None:
-        """Register the list_tools handler shared by every transport."""
-        # Only called from _register_common_tool_handlers(), which constructs
-        # self.server immediately before calling this.
-        assert self.server is not None
-
-        @self.server.list_tools()  # type: ignore[misc]
-        async def list_tools() -> list[types.Tool]:
-            """List available tools."""
+        async def on_list_tools(
+            ctx: Any,
+            params: Any,
+        ) -> "types.ListToolsResult":
             # Wait for initialization
             try:
                 await asyncio.wait_for(
@@ -1478,8 +1470,14 @@ class MCPServerBase(ABC):
             except asyncio.TimeoutError:
                 # Return basic tools even if not fully initialized
                 pass
+            return types.ListToolsResult(tools=self.build_available_tools())
 
-            return self.build_available_tools()
+        self.server = Server(
+            "ChunkHound Code Search",
+            version=__version__,
+            on_call_tool=on_call_tool,
+            on_list_tools=on_list_tools,
+        )
 
     def build_available_tools(self) -> list[types.Tool]:
         """Build list of tools available based on current configuration.
@@ -1495,6 +1493,87 @@ class MCPServerBase(ABC):
             )
             for d in self._build_filtered_tool_dicts()
         ]
+
+    async def serve_connection(
+        self,
+        read_frame: Callable[[], Awaitable[dict[str, Any] | None]],
+        write_frame: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Drive one dual-era SDK session over a generic duplex-frame transport.
+
+        ``read_frame``/``write_frame`` exchange plain JSON-RPC dicts; this
+        method owns everything SDK-specific. Callers never see an mcp type.
+
+        A frame that is valid JSON but fails JSON-RPC shape validation is
+        connection-fatal: the session ends rather than skipping the frame
+        and continuing.
+
+        Used by:
+        - ChunkHoundDaemon, once per client IPC connection.
+        - StdioMCPServer, once per process, with read_frame/write_frame backed
+          by stdio line framing (no daemon, no IPC hop).
+        """
+        import anyio
+        from mcp.server.lowlevel import NotificationOptions
+        from mcp.server.models import InitializationOptions
+        from mcp.shared._context_streams import create_context_streams
+        from mcp.shared.message import SessionMessage
+        from mcp_types.jsonrpc import jsonrpc_message_adapter
+
+        assert self.server is not None  # _register_tools() always builds it
+
+        init_options = InitializationOptions(
+            server_name="ChunkHound Code Search",
+            server_version=__version__,
+            capabilities=self.server.get_capabilities(
+                notification_options=NotificationOptions(),
+                experimental_capabilities={},
+            ),
+        )
+
+        read_stream_writer, read_stream = create_context_streams(0)
+        write_stream, write_stream_reader = create_context_streams(0)
+
+        async def pump_in() -> None:
+            async with read_stream_writer:
+                while True:
+                    frame = await read_frame()
+                    if frame is None:
+                        break
+                    try:
+                        message = SessionMessage(
+                            message=jsonrpc_message_adapter.validate_python(frame)
+                        )
+                    except Exception as exc:
+                        self.debug_log(
+                            f"serve_connection: invalid JSON-RPC frame, closing: {exc}"
+                        )
+                        break  # connection-fatal, not skip-and-continue
+                    await read_stream_writer.send(message)
+
+        async def pump_out() -> None:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    payload = session_message.message.model_dump(
+                        by_alias=True, mode="json", exclude_none=True
+                    )
+                    await write_frame(payload)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(pump_in)
+            tg.start_soon(pump_out)
+            try:
+                await self.server.run(read_stream, write_stream, init_options)
+            finally:
+                await read_stream_writer.aclose()
+                await write_stream.aclose()
+
+    def build_streamable_http_app(self, **kwargs: Any) -> Any:
+        """Wrap StreamableHTTPSessionManager construction for HttpMCPServer."""
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+        assert self.server is not None
+        return StreamableHTTPSessionManager(app=self.server, **kwargs)
 
     @abstractmethod
     def _register_tools(self) -> None:
