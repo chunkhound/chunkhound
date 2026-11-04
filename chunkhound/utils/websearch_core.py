@@ -13,11 +13,9 @@ import base64
 import hashlib
 import html
 import html.parser
-import ipaddress
 import itertools
 import os
 import re
-import socket
 import subprocess
 import sys
 import urllib.error
@@ -36,6 +34,8 @@ if TYPE_CHECKING:
     import zendriver as zd
 
 from chunkhound.core.config.config import Config
+from chunkhound.utils.ssrf import SsrfBlockedError
+from chunkhound.utils.ssrf import validate_url_sync as _validate_url_shared
 
 _MAX_FETCH_CONCURRENCY = 5
 
@@ -532,58 +532,48 @@ _MAX_FETCH_REDIRECTS = 10
 
 
 def _validate_url_sync(url: str) -> None:
-    """SSRF pre-check for a fetch URL.
+    """SSRF pre-check for a fetch URL, in this module's exception type.
 
-    Rejects non-http(s) schemes, missing hostnames, unresolvable hosts,
-    and any resolved address that is loopback, private, link-local,
-    reserved, multicast, or unspecified (which covers cloud-metadata
-    addresses such as 169.254.169.254).
-
-    Mirrors ``chunkhound.utils.fetchurl._validate_url_and_resolve``; kept
-    as a separate implementation rather than imported because fetchurl
-    already imports this module, so importing it back would be circular.
-    The two checks must stay in step.
-
-    Out of scope, as in fetchurl: full DNS-rebind defence. A resolver
-    that returns a public IP here could return a private IP at fetch
-    time; closing that gap requires pinning the resolved IP through the
-    fetch, which the fetch stack does not currently support.
+    Thin translation over the shared ``chunkhound.utils.ssrf`` validator
+    (which fetchurl also uses) — the blocking logic lives there, once.
     """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise UnsafeFetchURLError(f"Unsupported URL scheme: {parsed.scheme!r}")
-    hostname = parsed.hostname
-    if hostname is None:
-        raise UnsafeFetchURLError(f"URL has no hostname: {url!r}")
-
     try:
-        addrs = socket.getaddrinfo(hostname, None)
-    except socket.gaierror as e:
-        raise UnsafeFetchURLError(f"DNS resolution failed for {hostname!r}: {e}") from e
-
-    for _family, _type, _proto, _canon, sockaddr in addrs:
-        ip_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            continue
-        if (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise UnsafeFetchURLError(
-                f"Blocked address {ip_str!r} for {hostname!r} "
-                f"(loopback/private/link-local/reserved/multicast/unspecified)"
-            )
+        _validate_url_shared(url)
+    except SsrfBlockedError as e:
+        raise UnsafeFetchURLError(str(e)) from e
 
 
 async def _validate_url(url: str) -> None:
     """Async wrapper around ``_validate_url_sync`` (DNS may block)."""
     await asyncio.to_thread(_validate_url_sync, url)
+
+
+def _build_opener(
+    handler: type[urllib.request.BaseHandler] | None = None,
+) -> urllib.request.OpenerDirector:
+    """Build a urllib opener for one fetch.
+
+    Note on proxies: ``build_opener()`` includes a ProxyHandler honouring
+    the environment, so when HTTP(S)_PROXY is set the proxy — not this
+    process — resolves the target hostname. The SSRF check above still
+    blocks private hostnames before any request is made, but for a DNS
+    hostname it cannot guarantee what the proxy resolves it to. No guard
+    is added here: rejecting every proxied fetch would break legitimate
+    corporate-proxy users, and the check remains the correct fail-closed
+    behaviour for direct (unproxied) fetches.
+    """
+    if handler is None:
+        return urllib.request.build_opener()
+    return urllib.request.build_opener(handler)
+
+
+def _open_and_read(
+    opener: urllib.request.OpenerDirector, req: urllib.request.Request
+) -> tuple[str, bytes, str]:
+    """Open one request and return (content-type, body, charset)."""
+    with opener.open(req, timeout=30) as resp:
+        ct = _normalize_ct(resp.headers.get("Content-Type"))
+        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -616,13 +606,11 @@ def _fetch_url(
     if not validate_ssrf:
         req = urllib.request.Request(url, headers=headers)
         opener = (
-            urllib.request.build_opener()
+            _build_opener()
             if follow_redirects
-            else urllib.request.build_opener(_NoRedirect)
+            else _build_opener(_NoRedirect)
         )
-        with opener.open(req, timeout=30) as resp:
-            ct = _normalize_ct(resp.headers.get("Content-Type"))
-            return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+        return _open_and_read(opener, req)
 
     # SSRF-validated path: validate the initial URL and every redirect
     # destination before fetching it. Redirects are followed manually
@@ -630,22 +618,17 @@ def _fetch_url(
     if not follow_redirects:
         _validate_url_sync(url)
         req = urllib.request.Request(url, headers=headers)
-        opener = urllib.request.build_opener(_NoRedirect)
-        with opener.open(req, timeout=30) as resp:
-            ct = _normalize_ct(resp.headers.get("Content-Type"))
-            return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+        return _open_and_read(_build_opener(_NoRedirect), req)
 
     current = url
-    for hop in range(_MAX_FETCH_REDIRECTS + 1):
+    hop = 0
+    while True:
         _validate_url_sync(current)
         req = urllib.request.Request(current, headers=headers)
-        opener = urllib.request.build_opener(_CaptureRedirect)
         try:
-            with opener.open(req, timeout=30) as resp:
-                ct = _normalize_ct(resp.headers.get("Content-Type"))
-                return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+            return _open_and_read(_build_opener(_CaptureRedirect), req)
         except _RedirectTargetError as redir:
-            if hop == _MAX_FETCH_REDIRECTS:
+            if hop >= _MAX_FETCH_REDIRECTS:
                 raise ValueError(f"Too many redirects fetching {url!r}") from redir
             nxt = urllib.parse.urljoin(current, redir.url)
             # Never forward a Cookie header to a different origin — the
@@ -653,8 +636,7 @@ def _fetch_url(
             if _origin(current) != _origin(nxt):
                 headers.pop("Cookie", None)
             current = nxt
-    # Unreachable: the loop either returns or raises on the last hop.
-    raise ValueError(f"Too many redirects fetching {url!r}")
+            hop += 1
 
 
 async def _close_tab_quietly(tab: zd.Tab) -> None:
@@ -684,10 +666,16 @@ async def _fetch_page(
     With ``validate_ssrf=True``, the initial URL is validated before
     navigation and Chrome's final URL is validated before any content is
     returned, so private-redirect content never enters the pipeline.
-    Limitation, stated plainly: Chrome performs the navigation itself,
-    so final-URL validation discards already-fetched internal content
-    rather than preventing Chrome's request — the urllib path (which
-    validates every hop before fetching) is the fully preventive one.
+    Chrome-path limitation, stated plainly — do not soften this: Chrome
+    performs the navigation itself, so final-URL validation discards
+    already-fetched internal content rather than preventing Chrome's
+    request. A side-effecting GET to an internal host or metadata
+    endpoint can still go out on the default Chrome path (blind SSRF);
+    only the urllib path (which validates every hop before fetching) is
+    fully preventive. Properly closing this needs CDP Fetch.requestPaused
+    interception, which is tracked as a follow-up issue for this PR —
+    until then, users who need fully preventive validation should use
+    the urllib path (``browser=None``).
     """
     from zendriver import cdp
 
@@ -762,7 +750,8 @@ async def _fetch_page(
             # of the pipeline (see the docstring limitation).
             await _validate_url(response.url or url)
         ct = _normalize_ct(
-            response.headers.get("content-type") or response.headers.get("Content-Type")
+            response.headers.get("content-type")
+            or response.headers.get("Content-Type")
         )
 
         if ct == "application/pdf":

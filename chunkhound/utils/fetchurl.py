@@ -19,7 +19,6 @@ not grow the pattern further without discussion.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import random
 import re
 import socket
@@ -47,6 +46,8 @@ from chunkhound.services.prompts import fetchurl as fetchurl_prompts
 from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
 )
+from chunkhound.utils.ssrf import SsrfBlockedError
+from chunkhound.utils.ssrf import validate_url as _validate_ssrf
 from chunkhound.utils.websearch_core import (
     _managed_browser,
     fetch_url_to_content,
@@ -125,11 +126,11 @@ def _derive_page_title(
 
 
 async def _validate_url_and_resolve(url: str) -> None:
-    """SSRF pre-check. Rejects non-http(s), missing host, and private IPs.
+    """SSRF pre-check, in this module's exception type.
 
-    DNS lookup runs in a worker thread — cold-cache getaddrinfo can
-    block for hundreds of ms and would stall the event loop if called
-    directly from this coroutine.
+    Thin translation over the shared ``chunkhound.utils.ssrf`` validator
+    (which websearch also uses) — the blocking logic lives there, once,
+    including the DNS timeout and the ``not ip.is_global`` rule.
 
     Out of scope: full DNS-rebind defence. urllib and Chrome re-resolve the
     hostname independently on the actual fetch, so a resolver that returned
@@ -137,36 +138,10 @@ async def _validate_url_and_resolve(url: str) -> None:
     that gap requires pinning the resolved IP through the fetch, which the
     fetch stack does not currently support.
     """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise FetchUrlError(f"Unsupported URL scheme: {parsed.scheme!r}")
-    hostname = parsed.hostname
-    if hostname is None:
-        raise FetchUrlError(f"URL has no hostname: {url!r}")
-
     try:
-        addrs = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
-    except socket.gaierror as e:
-        raise FetchUrlError(f"DNS resolution failed for {hostname!r}: {e}") from e
-
-    for family, _type, _proto, _canon, sockaddr in addrs:
-        ip_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            continue
-        if (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise FetchUrlError(
-                f"Blocked address {ip_str!r} for {hostname!r} "
-                f"(loopback/private/link-local/reserved/multicast/unspecified)"
-            )
+        await _validate_ssrf(url)
+    except SsrfBlockedError as e:
+        raise FetchUrlError(str(e)) from e
 
 
 def _classify_and_raise_if_terminal(e: BaseException) -> None:
