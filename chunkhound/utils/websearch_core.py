@@ -34,11 +34,7 @@ if TYPE_CHECKING:
     import zendriver as zd
 
 from chunkhound.core.config.config import Config
-from chunkhound.utils.ssrf import (
-    SsrfBlockedError,
-    validate_url,
-    validate_url_sync,
-)
+from chunkhound.utils.ssrf import validate_url, validate_url_sync
 
 _MAX_FETCH_CONCURRENCY = 5
 
@@ -494,18 +490,6 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         )
 
 
-class UnsafeFetchURLError(SsrfBlockedError):
-    """Websearch's SSRF rejection type, kept for backwards compatibility.
-
-    A ``SsrfBlockedError`` subclass (and therefore still a ValueError), so
-    it surfaces through the same failure paths as the other fetch
-    rejections in this module (and, via ``_fetch_one``, as a per-page
-    warning rather than aborting the whole websearch). Internal validation
-    in this module now raises ``SsrfBlockedError`` directly from
-    ``chunkhound.utils.ssrf``; callers catching either type catch both.
-    """
-
-
 class _RedirectTargetError(Exception):
     """Internal signal carrying a redirect destination (see ``_CaptureRedirect``)."""
 
@@ -543,13 +527,10 @@ class _CaptureRedirect(urllib.request.HTTPRedirectHandler):
 _MAX_FETCH_REDIRECTS = 10
 
 
-# NOTE (review round 2): the former ``_validate_url_sync`` /
-# ``_validate_url`` wrappers and the ``_build_opener`` wrapper were
-# removed. Validation is now ``chunkhound.utils.ssrf.validate_url_sync``
-# / ``validate_url`` called directly (raising ``SsrfBlockedError``), and
+# Validation is ``chunkhound.utils.ssrf.validate_url_sync`` /
+# ``validate_url`` called directly (raising ``SsrfBlockedError``), and
 # openers are ``urllib.request.build_opener`` called directly. The proxy
-# caveat formerly documented on ``_build_opener`` lives on ``_fetch_url``
-# below, where the opener is actually used.
+# caveat lives on ``_fetch_url`` below, where the opener is actually used.
 
 
 def _open_and_read(
@@ -660,7 +641,7 @@ async def _fetch_page(
     With ``validate_ssrf=True``, the initial URL is validated before
     navigation and Chrome's final URL is validated before any content is
     returned, so private-redirect content never enters the pipeline.
-    Chrome-path limitation, stated plainly — do not soften this: Chrome
+    Chrome-path limitation: Chrome
     performs the navigation itself, so final-URL validation discards
     already-fetched internal content rather than preventing Chrome's
     request. A side-effecting GET to an internal host or metadata
@@ -911,8 +892,8 @@ async def _fetch_one(
             # anywhere, so they are validated here — by the
             # ``validate_ssrf=True`` default on ``fetch_url_to_content``,
             # not by an explicit flag at this call site. Callers that
-            # must opt out (fetchurl, which pre-validates and translates
-            # to its own error type) do so explicitly.
+            # must opt out (fetchurl, which pre-validates, and tests
+            # using local servers) do so explicitly.
             ext, content, _source_metadata = await fetch_url_to_content(
                 url, browser
             )
