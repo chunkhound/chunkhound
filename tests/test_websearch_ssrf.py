@@ -1,7 +1,7 @@
 """SSRF gate for websearch — direct private URLs, unsafe schemes, and
 public-to-private redirects must not be fetched (issue #463).
 
-The public pipeline (``fetch_url_to_content`` → ``_fetch_one``) is the
+The public pipeline (``fetch_url_to_content`` → ``_fetch_content``) is the
 boundary: result URLs come from a public search engine, so they are
 attacker-influenced. ``validate_ssrf`` defaults to True on
 ``_fetch_url``, ``_fetch_page`` and ``fetch_url_to_content`` — secure
@@ -37,7 +37,7 @@ else:
 
 from chunkhound.utils.ssrf import SsrfBlockedError, validate_url_sync
 from chunkhound.utils.websearch_core import (
-    _fetch_one,
+    _fetch_content,
     _fetch_page,
     _fetch_url,
     fetch_url_to_content,
@@ -383,27 +383,19 @@ def test_fetch_url_keeps_cookie_on_same_origin_redirect(
     assert received["/landing"] == ["session=abc"]
 
 
-async def test_fetch_one_treats_blocked_url_as_per_page_failure(
-    tmp_path,
-) -> None:
-    """A blocked URL warns and saves nothing; other results continue."""
+async def test_fetch_content_treats_blocked_url_as_per_page_failure() -> None:
+    """A blocked URL warns and yields nothing; other results continue."""
     warnings: list[str] = []
-    mapping: dict[str, str] = {}
-    await _fetch_one(
+    result = await _fetch_content(
         "http://127.0.0.1:9/secret",
-        tmp_path,
         None,
         None,
         warnings.append,
         asyncio.Semaphore(1),
-        mapping,
     )
+    assert result is None
     assert len(warnings) == 1
-    # Outcome, not error-type name: the blocked URL warned and saved
-    # nothing; other results continue (see the mapping assertion below).
     assert "Failed to fetch http://127.0.0.1:9/secret" in warnings[0]
-    assert list(tmp_path.iterdir()) == []
-    assert mapping == {}
 
 
 # --- Chrome path (validation logic only, via a fake tab) -------------------
@@ -428,7 +420,8 @@ class _FakeTab:
         self.closed = False
 
     def add_handler(self, _event_type: object, handler: Any) -> None:
-        self.handler = handler
+        if self.handler is None:  # first: ResponseReceived; ignore DataReceived
+            self.handler = handler
 
     async def send(self, _cmd: object) -> Any:
         if not self.enabled:
@@ -439,6 +432,7 @@ class _FakeTab:
         assert self.final_url is not None
         event = SimpleNamespace(
             loader_id="loader1",
+            request_id="req1",
             response=SimpleNamespace(
                 url=self.final_url,
                 headers={"content-type": "text/html"},
