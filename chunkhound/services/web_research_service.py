@@ -269,21 +269,6 @@ def _bounded_pdf_chunks(parsed: Sequence[Chunk]) -> tuple[list[Chunk], bool]:
     return chunks, truncated
 
 
-def pages_to_chunks(pages: Sequence[Page]) -> list[Chunk]:
-    """Synchronously convert pages; production PDF research uses isolation."""
-    chunks: list[Chunk] = []
-    for source_url, extension, content in pages:
-        if extension == ".pdf" and isinstance(content, bytes):
-            parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
-            bounded, _ = _bounded_pdf_chunks(parsed)
-            chunks.extend(
-                replace(chunk, file_path=FilePath(source_url)) for chunk in bounded
-            )
-        elif isinstance(content, str):
-            chunks.extend(_text_chunks(source_url, content))
-    return chunks
-
-
 def _redirect_stdout_to_stderr() -> None:
     """Keep worker output off the parent's stdout.
 

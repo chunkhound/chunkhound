@@ -18,7 +18,7 @@ from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.search_service import SearchService
 from chunkhound.services.transient_search_service import TransientSearchService
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
-from tests.unit.test_diff_aware_search_service import make_chunk
+from tests.unit.transient_search_helpers import make_chunk
 
 _MARKER = "path_filter_parity_marker"
 

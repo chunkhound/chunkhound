@@ -13,16 +13,11 @@ from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvi
 from chunkhound.services.transient_search_service import TransientSearchService
 from chunkhound.services.vector_cache import VectorCache
 from chunkhound.utils.hashing import compute_embedding_space_identity
-from tests.unit.test_diff_aware_search_service import make_chunk, make_original
-
-
-def stream_chunks(chunks, batch_size: int = 100) -> object:
-    async def stream() -> AsyncIterator[list]:
-        for start in range(0, len(chunks), batch_size):
-            await asyncio.sleep(0)
-            yield chunks[start : start + batch_size]
-
-    return stream
+from tests.unit.transient_search_helpers import (
+    make_chunk,
+    make_original,
+    stream_chunks,
+)
 
 
 def embedding_manager() -> MagicMock:

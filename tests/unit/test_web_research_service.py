@@ -1,8 +1,10 @@
 """Contracts for composing in-process research over fetched pages."""
 
 import asyncio
+import re
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,8 +26,8 @@ from chunkhound.services.research.shared.file_reader import (
 from chunkhound.services.transient_search_service import TransientSearchService
 from chunkhound.services.vector_cache import VectorCache
 from chunkhound.services.web_research_service import (
+    _bounded_pdf_chunks,
     _parse_pdf_isolated,
-    pages_to_chunks,
     research_web_pages,
 )
 from tests.helpers.pdf_worker_fixture import (
@@ -35,6 +37,63 @@ from tests.helpers.pdf_worker_fixture import (
 )
 
 
+async def _embed(texts: list[str]) -> LocalEmbeddingResult:
+    return LocalEmbeddingResult(
+        embeddings=[[1.0, 0.0] for _ in texts],
+        model="test",
+        provider="test",
+        dims=2,
+        embedding_space_identity="test-space",
+    )
+
+
+def _fake_pdf_parser(parsed: list[Chunk]):
+    """Stand in for the PDF worker process; keep production bounding."""
+
+    async def parse_pdf(content: bytes, source_url: str) -> list[Chunk]:
+        bounded, _ = _bounded_pdf_chunks(parsed)
+        return [replace(chunk, file_path=source_url) for chunk in bounded]
+
+    return parse_pdf
+
+
+async def _research_results(pages, warnings: list[str] | None = None) -> list[dict]:
+    """Run public web research and return every chunk semantic search exposes."""
+    captured: dict = {}
+    found: list[dict] = []
+
+    async def deep_research(query: str, previous_query: str | None = None):
+        results, _ = await captured["db_services"].search_service.search_semantic(
+            query, page_size=1000
+        )
+        found.extend(results)
+        return {"answer": "done"}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return MagicMock(deep_research=deep_research)
+
+    with patch(
+        "chunkhound.services.web_research_service.ResearchServiceFactory.create",
+        side_effect=create,
+    ):
+        await research_web_pages(
+            "query",
+            pages,
+            MagicMock(),
+            MagicMock(embed_texts=AsyncMock(side_effect=_embed)),
+            MagicMock(),
+            warning_callback=None if warnings is None else warnings.append,
+        )
+    return found
+
+
+def _part(result: dict) -> int:
+    match = re.search(r"(\d+)$", str(result["symbol"]))
+    return int(match.group(1)) if match else 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("extension", [".md", ".pdf"])
 @pytest.mark.parametrize(
     "content",
@@ -45,9 +104,11 @@ from tests.helpers.pdf_worker_fixture import (
     ],
     ids=["cjk-single-line", "mixed-emoji-single-line", "whitespace-heavy"],
 )
-def test_web_chunks_fit_openai_embedding_limit_without_losing_text(
-    extension: str, content: str
+async def test_web_chunks_fit_openai_embedding_limit_without_losing_text(
+    extension: str, content: str, monkeypatch
 ) -> None:
+    from chunkhound.services import web_research_service as web
+
     encoding = tiktoken.encoding_for_model("text-embedding-3-small")
     url = f"https://example.invalid/source{extension}"
     parsed = Chunk(
@@ -59,31 +120,30 @@ def test_web_chunks_fit_openai_embedding_limit_without_losing_text(
         file_id=FileId(0),
         language=Language.PDF,
         parent_header="Chapter 7",
-        metadata={"page": 7},
     )
+    monkeypatch.setattr(web, "_WEB_VECTOR_CACHE", VectorCache(max_entries=0))
     # The third-party PDF parser boundary may return large semantic chunks.
-    with patch(
-        "chunkhound.services.web_research_service.PDFMapping.parse_pdf_content",
-        return_value=[parsed],
-    ):
-        chunks = pages_to_chunks(
-            [(url, extension, b"%PDF" if extension == ".pdf" else content)]
-        )
+    monkeypatch.setattr(web, "_parse_pdf_isolated", _fake_pdf_parser([parsed]))
 
-    assert len(chunks) > 1
-    assert "".join(chunk.code for chunk in chunks) == content
-    assert len({chunk.symbol for chunk in chunks}) == len(chunks)
-    for chunk in chunks:
-        assert chunk.file_path == url
-        assert len(chunk.code.encode("utf-8")) <= 4800
-        assert len(encoding.encode(chunk.code, disallowed_special=())) <= 8191
+    results = sorted(
+        await _research_results(
+            [(url, extension, b"%PDF" if extension == ".pdf" else content)]
+        ),
+        key=_part,
+    )
+
+    assert len(results) > 1
+    assert "".join(result["content"] for result in results) == content
+    assert len({result["symbol"] for result in results}) == len(results)
+    for result in results:
+        assert result["file_path"] == url
+        assert len(result["content"].encode("utf-8")) <= 4800
+        assert len(encoding.encode(result["content"], disallowed_special=())) <= 8191
         if extension == ".pdf":
-            assert chunk.symbol.startswith(parsed.symbol)
-            assert (chunk.start_line, chunk.end_line) == (70, 71)
-            assert chunk.parent_header == parsed.parent_header
-            assert chunk.metadata == parsed.metadata
+            assert result["symbol"].startswith(parsed.symbol)
+            assert (result["start_line"], result["end_line"]) == (70, 71)
         else:
-            assert (chunk.start_line, chunk.end_line) == (1, 1)
+            assert (result["start_line"], result["end_line"]) == (1, 1)
 
 
 @pytest.mark.asyncio
@@ -232,14 +292,20 @@ async def test_isolated_pdf_parser_extracts_fixture_without_disk_writes() -> Non
     assert all(len(chunk.code) <= 1_200 for chunk in chunks)
 
 
-def test_pages_to_chunks_keeps_source_url_without_writing_files() -> None:
-    chunks = pages_to_chunks(
+@pytest.mark.asyncio
+async def test_web_results_keep_source_url_without_writing_files(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    results = await _research_results(
         [("https://example.invalid/docs", ".md", "# Docs\nUseful content")]
     )
 
-    assert chunks
-    assert chunks[0].file_path == "https://example.invalid/docs"
-    assert chunks[0].code == "# Docs\nUseful content"
+    assert [(r["file_path"], r["content"]) for r in results] == [
+        ("https://example.invalid/docs", "# Docs\nUseful content")
+    ]
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -285,45 +351,41 @@ async def test_research_factory_receives_transient_search_service() -> None:
     assert isinstance(captured["db_services"].search_service, TransientSearchService)
 
 
-def test_pages_to_chunks_skips_unusable_pdf_error_chunks() -> None:
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("symbol", "code"),
+    [
+        ("pdf_unavailable", "PDF parsing not available (PyMuPDF not installed)"),
+        ("pdf_parse_error", "Error parsing PDF: malformed file"),
+    ],
+)
+async def test_research_skips_unusable_pdf_error_chunks(
+    symbol: str, code: str, monkeypatch
+) -> None:
+    from chunkhound.services import web_research_service as web
+
     error = Chunk(
-        symbol="pdf_unavailable",
+        symbol=symbol,
         start_line=LineNumber(1),
         end_line=LineNumber(1),
-        code="PDF parsing not available (PyMuPDF not installed)",
+        code=code,
         chunk_type=ChunkType.UNKNOWN,
         file_id=FileId(0),
         language=Language.PDF,
     )
+    monkeypatch.setattr(web, "_parse_pdf_isolated", _fake_pdf_parser([error]))
+    warnings: list[str] = []
 
-    with patch(
-        "chunkhound.services.web_research_service.PDFMapping.parse_pdf_content",
-        return_value=[error],
-    ):
-        assert (
-            pages_to_chunks([("https://example.invalid/a.pdf", ".pdf", b"%PDF")]) == []
-        )
-
-
-def test_pages_to_chunks_skips_pdf_parse_errors() -> None:
-    error = Chunk(
-        symbol="pdf_parse_error",
-        start_line=LineNumber(1),
-        end_line=LineNumber(1),
-        code="Error parsing PDF: malformed file",
-        chunk_type=ChunkType.UNKNOWN,
-        file_id=FileId(0),
-        language=Language.PDF,
+    results = await _research_results(
+        [
+            ("https://example.invalid/bad.pdf", ".pdf", b"%PDF"),
+            ("https://example.invalid/docs", ".md", "Useful content"),
+        ],
+        warnings,
     )
 
-    with patch(
-        "chunkhound.services.web_research_service.PDFMapping.parse_pdf_content",
-        return_value=[error],
-    ):
-        assert (
-            pages_to_chunks([("https://example.invalid/bad.pdf", ".pdf", b"%PDF")])
-            == []
-        )
+    assert [r["file_path"] for r in results] == ["https://example.invalid/docs"]
+    assert warnings == ["No usable content parsed from https://example.invalid/bad.pdf"]
 
 
 def test_resolve_source_text_uses_transient_provider() -> None:

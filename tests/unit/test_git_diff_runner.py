@@ -9,49 +9,34 @@ import pytest
 from chunkhound.core.git_diff.parser import stream_diff_to_chunks
 from chunkhound.core.git_diff.runner import (
     _MAX_STDERR_BYTES,
-    stream_git_diff_file_blocks,
     stream_git_diff_fragments,
 )
 
 
-class _LineStdout:
+async def _diff_text(commit_range: str, cwd: Path) -> str:
+    return "".join(
+        [fragment async for fragment in stream_git_diff_fragments(commit_range, cwd)]
+    )
+
+
+class _Stdout:
+    """Fake git stdout; each ``read`` call returns the next queued payload."""
+
     def __init__(
-        self, lines: list[bytes], hang: bool = False, error: Exception | None = None
+        self, reads: list[bytes], hang: bool = False, error: Exception | None = None
     ) -> None:
-        self._lines = list(lines)
+        self._reads = list(reads)
         self._hang = hang
         self._error = error
-
-    async def readline(self) -> bytes:
-        if self._error is not None:
-            raise self._error
-        if self._lines:
-            return self._lines.pop(0)
-        if self._hang:
-            await asyncio.Event().wait()
-        return b""
 
     async def read(self, n: int = -1) -> bytes:
         if self._error is not None:
             raise self._error
-        if self._lines:
-            data = b"".join(self._lines)
-            self._lines.clear()
-            return data
+        if self._reads:
+            return self._reads.pop(0)
         if self._hang:
             await asyncio.Event().wait()
         return b""
-
-    async def readuntil(self, separator: bytes = b"\n") -> bytes:
-        # This test double always hands out complete, pre-terminated lines
-        # (or a clean EOF), so it never needs to exercise the
-        # LimitOverrunError recovery path -- that's covered separately by
-        # test_stream_reassembles_line_longer_than_reader_limit against a
-        # real asyncio.StreamReader.
-        line = await self.readline()
-        if not line:
-            raise asyncio.IncompleteReadError(b"", None)
-        return line
 
 
 class _Stderr:
@@ -74,14 +59,14 @@ class _Stderr:
 class StreamProcess:
     def __init__(
         self,
-        lines: list[bytes],
+        reads: list[bytes],
         hang_stdout: bool = False,
         hang_stderr: bool = False,
         error: Exception | None = None,
         exit_code: int = 0,
         stderr: bytes = b"",
     ) -> None:
-        self.stdout = _LineStdout(lines, hang=hang_stdout, error=error)
+        self.stdout = _Stdout(reads, hang=hang_stdout, error=error)
         self.stderr = _Stderr(payload=stderr, hang=hang_stderr)
         self.returncode: int | None = None
         self.killed = False
@@ -97,7 +82,7 @@ class StreamProcess:
 
 
 @pytest.mark.asyncio
-async def test_streams_complete_file_blocks_from_real_git(
+async def test_real_git_diff_yields_new_content_per_changed_file(
     tmp_path: Path,
 ) -> None:
     proc = await asyncio.create_subprocess_exec(
@@ -124,14 +109,16 @@ async def test_streams_complete_file_blocks_from_real_git(
     for name in ("one.py", "two.py"):
         (tmp_path / name).write_text(f"{name} = 2\n", encoding="utf-8")
 
-    blocks = [
-        block async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
+    chunks = [
+        chunk
+        async for chunk in stream_diff_to_chunks(
+            stream_git_diff_fragments("HEAD", cwd=tmp_path)
+        )
     ]
 
-    assert len(blocks) == 2
-    assert all(block.startswith("diff --git ") for block in blocks)
-    assert "one.py" in blocks[0]
-    assert "two.py" in blocks[1]
+    assert [str(chunk.file_path) for chunk in chunks] == ["one.py", "two.py"]
+    assert "one.py = 2" in chunks[0].code
+    assert "two.py = 2" in chunks[1].code
 
 
 @pytest.mark.asyncio
@@ -217,8 +204,8 @@ async def test_closing_stream_reaps_real_git_with_full_stdout(tmp_path: Path) ->
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=tracked_exec):
-        stream = stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
-        assert "a.py" in await anext(stream)
+        stream = stream_diff_to_chunks(stream_git_diff_fragments("HEAD", cwd=tmp_path))
+        assert str((await anext(stream)).file_path) == "a.py"
         # Allow git to fill the pipe while the consumer is paused at yield.
         await asyncio.sleep(0.2)
         await asyncio.wait_for(stream.aclose(), timeout=2)
@@ -259,12 +246,10 @@ async def test_stream_reassembles_line_longer_than_reader_limit(
     long_line = "x" * 200_000  # comfortably over the 64 KiB default reader limit
     (tmp_path / "bundle.js").write_text(f"var x = 1;\n{long_line}\n", encoding="utf-8")
 
-    blocks = [
-        block async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
-    ]
+    diff = await _diff_text("HEAD", tmp_path)
 
-    assert len(blocks) == 1
-    assert f"+{long_line}" in blocks[0]
+    assert diff.count("diff --git ") == 1
+    assert f"+{long_line}\n" in diff
 
 
 @pytest.mark.asyncio
@@ -313,23 +298,16 @@ async def test_stream_root_commit_uses_repository_empty_tree(
     root_hash = stdout.decode().strip()
     assert len(root_hash) == (40 if object_format == "sha1" else 64)
 
-    blocks = [
-        block
-        async for block in stream_git_diff_file_blocks(
-            f"{root_hash}^..{root_hash}", cwd=tmp_path
-        )
-    ]
+    diff = await _diff_text(f"{root_hash}^..{root_hash}", tmp_path)
 
-    assert len(blocks) == 1
-    assert blocks[0].startswith("diff --git ")
-    assert "root.py" in blocks[0]
-    assert "+root = True" in blocks[0]
+    assert diff.startswith("diff --git a/root.py b/root.py\n")
+    assert "+root = True\n" in diff
 
 
 @pytest.mark.asyncio
 async def test_unsafe_ref_rejected() -> None:
     with pytest.raises(ValueError, match="Unsafe git ref rejected"):
-        async for _ in stream_git_diff_file_blocks("--output=/tmp/x", cwd=Path("/tmp")):
+        async for _ in stream_git_diff_fragments("--output=/tmp/x", cwd=Path("/tmp")):
             pass
 
 
@@ -338,7 +316,7 @@ async def test_option_injection_rejected() -> None:
     """Git options must be rejected even though they pass the char regex."""
     for bad_ref in ("--cached", "--staged", "-p", "--no-index"):
         with pytest.raises(ValueError, match="Unsafe git ref rejected"):
-            async for _ in stream_git_diff_file_blocks(bad_ref, cwd=Path("/tmp")):
+            async for _ in stream_git_diff_fragments(bad_ref, cwd=Path("/tmp")):
                 pass
 
 
@@ -347,8 +325,8 @@ async def test_root_commit_retry_also_fails(tmp_path: Path) -> None:
     """If the empty-tree retry also fails, the error from the retry is raised."""
     commit_hash = "b" * 40
     procs = [
-        StreamProcess(lines=[], exit_code=128, stderr=b"fatal: unknown revision bbbb^"),
-        StreamProcess(lines=[], exit_code=128, stderr=b"fatal: not a git repository"),
+        StreamProcess(reads=[], exit_code=128, stderr=b"fatal: unknown revision bbbb^"),
+        StreamProcess(reads=[], exit_code=128, stderr=b"fatal: not a git repository"),
     ]
     call_count = 0
 
@@ -365,7 +343,7 @@ async def test_root_commit_retry_also_fails(tmp_path: Path) -> None:
         ),
     ):
         with pytest.raises(ValueError, match="not a git repository"):
-            async for _ in stream_git_diff_file_blocks(
+            async for _ in stream_git_diff_fragments(
                 f"{commit_hash}^..{commit_hash}", cwd=tmp_path
             ):
                 pass
@@ -383,12 +361,12 @@ async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
         nonlocal call_count
         call_count += 1
         return StreamProcess(
-            lines=[], exit_code=128, stderr=b"fatal: bad object HEAD~999"
+            reads=[], exit_code=128, stderr=b"fatal: bad object HEAD~999"
         )
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
         with pytest.raises(ValueError, match="bad object"):
-            async for _ in stream_git_diff_file_blocks(
+            async for _ in stream_git_diff_fragments(
                 f"{commit_hash}^..{commit_hash}", cwd=tmp_path
             ):
                 pass
@@ -400,11 +378,11 @@ async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
 async def test_stream_caps_stderr_retained_in_memory(tmp_path: Path) -> None:
     """A pathologically large stderr payload must not be fully buffered."""
     huge_stderr = b"fatal: bad object HEAD~999 " + b"x" * (10 * _MAX_STDERR_BYTES)
-    proc = StreamProcess(lines=[], exit_code=128, stderr=huge_stderr)
+    proc = StreamProcess(reads=[], exit_code=128, stderr=huge_stderr)
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(ValueError) as exc_info:
-            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+            async for _ in stream_git_diff_fragments("HEAD", cwd=tmp_path):
                 pass
 
     message = str(exc_info.value)
@@ -418,11 +396,11 @@ async def test_stream_stderr_drain_reaches_eof_past_the_cap(
 ) -> None:
     """Draining must continue past the cap so git never blocks on a full pipe."""
     huge_stderr = b"x" * (10 * _MAX_STDERR_BYTES)
-    proc = StreamProcess(lines=[], exit_code=128, stderr=huge_stderr)
+    proc = StreamProcess(reads=[], exit_code=128, stderr=huge_stderr)
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(ValueError):
-            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+            async for _ in stream_git_diff_fragments("HEAD", cwd=tmp_path):
                 pass
 
     assert proc.stderr._payload == b""
@@ -437,19 +415,11 @@ async def test_stream_buffered_reads_avoid_per_line_timeout(
     import chunkhound.core.git_diff.runner as runner_module
 
     monkeypatch.setattr(runner_module, "_GIT_DIFF_TIMEOUT_SECONDS", 0.05)
-    proc = StreamProcess(
-        lines=[
-            b"diff --git a/a.py b/a.py\n",
-            *([b"+line\n"] * 10_000),
-        ]
-    )
+    proc = StreamProcess(reads=[b"diff --git a/a.py b/a.py\n" + b"+line\n" * 10_000])
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        blocks = [
-            block async for block in stream_git_diff_file_blocks("HEAD", cwd=tmp_path)
-        ]
+        diff = await _diff_text("HEAD", tmp_path)
 
-    assert len(blocks) == 1
-    assert blocks[0].count("+line\n") == 10_000
+    assert diff.count("+line\n") == 10_000
 
 
 @pytest.mark.asyncio
@@ -459,20 +429,20 @@ async def test_stream_timeout_kills_process(
     import chunkhound.core.git_diff.runner as runner_module
 
     monkeypatch.setattr(runner_module, "_GIT_DIFF_TIMEOUT_SECONDS", 0.05)
-    proc = StreamProcess(lines=[], hang_stdout=True, hang_stderr=True)
+    proc = StreamProcess(reads=[], hang_stdout=True, hang_stderr=True)
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(TimeoutError, match="timed out"):
-            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+            async for _ in stream_git_diff_fragments("HEAD", cwd=tmp_path):
                 pass
     assert proc.killed is True
 
 
 @pytest.mark.asyncio
 async def test_stream_cancel_kills_process(tmp_path: Path) -> None:
-    proc = StreamProcess(lines=[], hang_stdout=True, hang_stderr=True)
+    proc = StreamProcess(reads=[], hang_stdout=True, hang_stderr=True)
 
     async def consume() -> None:
-        async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+        async for _ in stream_git_diff_fragments("HEAD", cwd=tmp_path):
             pass
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
@@ -486,10 +456,10 @@ async def test_stream_cancel_kills_process(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_stream_unexpected_io_kills_process(tmp_path: Path) -> None:
-    proc = StreamProcess(lines=[], error=OSError("pipe closed"), hang_stderr=True)
+    proc = StreamProcess(reads=[], error=OSError("pipe closed"), hang_stderr=True)
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(OSError, match="pipe closed"):
-            async for _ in stream_git_diff_file_blocks("HEAD", cwd=tmp_path):
+            async for _ in stream_git_diff_fragments("HEAD", cwd=tmp_path):
                 pass
     assert proc.killed is True
 
@@ -500,7 +470,7 @@ async def test_stream_budget_excludes_consumer_time(
 ) -> None:
     """A slow consumer (embedding a batch) must not trip git's liveness guard.
 
-    The generator pauses at each yield while the caller embeds that file block.
+    The generator pauses at each yield while the caller embeds that fragment.
     That time is not spent waiting on git, so it must not count against the
     timeout — otherwise a large commit range kills its own git process.
     """
@@ -508,19 +478,17 @@ async def test_stream_budget_excludes_consumer_time(
 
     monkeypatch.setattr(runner_module, "_GIT_DIFF_TIMEOUT_SECONDS", 0.2)
     proc = StreamProcess(
-        lines=[
-            b"diff --git a/a.py b/a.py\n",
-            b"+first\n",
-            b"diff --git a/b.py b/b.py\n",
-            b"+second\n",
+        reads=[
+            b"diff --git a/a.py b/a.py\n+first\n",
+            b"diff --git a/b.py b/b.py\n+second\n",
         ]
     )
-    blocks: list[str] = []
+    fragments: list[str] = []
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        async for block in stream_git_diff_file_blocks("HEAD~1..HEAD", cwd=tmp_path):
-            blocks.append(block)
+        async for fragment in stream_git_diff_fragments("HEAD~1..HEAD", cwd=tmp_path):
+            fragments.append(fragment)
             await asyncio.sleep(0.15)  # 2 x 0.15s = 0.3s > the 0.2s git budget
 
-    assert len(blocks) == 2
-    assert "a.py" in blocks[0]
-    assert "b.py" in blocks[1]
+    assert "".join(fragments) == (
+        "diff --git a/a.py b/a.py\n+first\ndiff --git a/b.py b/b.py\n+second\n"
+    )
