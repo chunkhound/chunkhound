@@ -3,11 +3,11 @@ public-to-private redirects must not be fetched (issue #463).
 
 The public pipeline (``fetch_url_to_content`` → ``_fetch_one``) is the
 boundary: result URLs come from a public search engine, so they are
-attacker-influenced. Since review round 2, ``validate_ssrf`` defaults
-to True on ``_fetch_url``, ``_fetch_page`` and ``fetch_url_to_content``
-— secure by default. Callers that must opt out (fetchurl, which
-pre-validates and translates to its own error type, and tests using
-local servers) do so explicitly with ``validate_ssrf=False``.
+attacker-influenced. ``validate_ssrf`` defaults to True on
+``_fetch_url``, ``_fetch_page`` and ``fetch_url_to_content`` — secure
+by default. Callers that must opt out (fetchurl, which pre-validates,
+and tests using local servers) do so explicitly with
+``validate_ssrf=False``.
 
 Redirect tests use a real local HTTP server plus a patched ``getaddrinfo``
 at the validation boundary only: the hostname ``public.test`` resolves to
@@ -151,6 +151,23 @@ def test_ssrf_validator_fails_closed_on_dns_timeout(monkeypatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", _slow_getaddrinfo)
     with pytest.raises(SsrfBlockedError, match="timed out"):
         validate_url_sync("http://example.test/", dns_timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_ssrf_validator_async_fails_closed_on_dns_timeout(monkeypatch) -> None:
+    """The async validator also fails closed on a slow DNS lookup."""
+    import time
+
+    from chunkhound.utils.ssrf import validate_url
+
+    def _slow_getaddrinfo(host, port, *args, **kwargs):
+        time.sleep(0.5)
+        sockaddr = ("93.184.216.34", port or 0)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", sockaddr)]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _slow_getaddrinfo)
+    with pytest.raises(SsrfBlockedError, match="timed out"):
+        await validate_url("http://example.test/", dns_timeout=0.05)
 
 
 def test_fetch_url_blocks_private_url_before_connecting() -> None:
@@ -382,7 +399,9 @@ async def test_fetch_one_treats_blocked_url_as_per_page_failure(
         mapping,
     )
     assert len(warnings) == 1
-    assert "SsrfBlockedError" in warnings[0]
+    # Outcome, not error-type name: the blocked URL warned and saved
+    # nothing; other results continue (see the mapping assertion below).
+    assert "Failed to fetch http://127.0.0.1:9/secret" in warnings[0]
     assert list(tmp_path.iterdir()) == []
     assert mapping == {}
 
@@ -394,12 +413,17 @@ async def test_fetch_one_treats_blocked_url_as_per_page_failure(
 
 
 class _FakeTab:
-    """Minimal tab double: enable, then (optionally) navigate."""
+    """Minimal tab double: enable, then (optionally) navigate.
+
+    Dispatch is by protocol state, not by send count: the first send
+    enables the network domain, and any later send is the navigate —
+    the same enable-before-navigate order ``_fetch_page`` itself uses.
+    """
 
     def __init__(self, final_url: str | None) -> None:
         self.final_url = final_url
         self.handler: Any = None
-        self.sends = 0
+        self.enabled = False
         self.navigated: list[str] = []
         self.closed = False
 
@@ -407,8 +431,8 @@ class _FakeTab:
         self.handler = handler
 
     async def send(self, _cmd: object) -> Any:
-        self.sends += 1
-        if self.sends == 1:
+        if not self.enabled:
+            self.enabled = True
             return None  # cdp.network.enable()
         # cdp.page.navigate(): report the final URL through the handler
         # (buffered, since nav_loader_id is not set yet) and return it.

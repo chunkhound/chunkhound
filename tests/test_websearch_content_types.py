@@ -125,8 +125,8 @@ async def test_fetch_page_reads_raw_text_from_pinned_cdp_response_shape(
         Network, "get_response_body", return_value=body_command
     ) as get_body:
         with patch.dict(sys.modules, {"zendriver": zendriver}):
-                # CDP-shape test, not an SSRF test: opt out explicitly (the
-                # default is now validate_ssrf=True, and example.test has no DNS).
+            # CDP-shape test, not an SSRF test: opt out explicitly (the
+            # default is now validate_ssrf=True, and example.test has no DNS).
             result = await _fetch_page(
                 Browser(), "https://example.test/raw.md", validate_ssrf=False
             )
