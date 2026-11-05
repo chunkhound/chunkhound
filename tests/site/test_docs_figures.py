@@ -41,10 +41,7 @@ _ROW_FIGURES = ("/docs/pi-schematic/", "/docs/enterprise/")
 _FIT_WIDTHS = [1440, 1280, 1024, 710, 640, 390]
 # Approved captions on the workflows page: each figure ships once, at the
 # section it frames, so losing one is a copy regression rather than restyling.
-_WORKFLOW_CAPTIONS = (
-    "One boundary, two owners",
-    "A soft stop lands on a checkpoint",
-)
+_WORKFLOW_CAPTIONS = ("A soft stop lands on a checkpoint",)
 
 _ROW_MEASURE = """
 return page.evaluate(() => ({
