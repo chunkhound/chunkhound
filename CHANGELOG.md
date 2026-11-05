@@ -2,12 +2,12 @@
 
 All notable changes to ChunkHound will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
 ### Added
+- Added Enterprise Setup, pi-schematic, and Workflows documentation pages.
 - **Vercel AI Gateway LLM provider** — Vercel AI Gateway is now supported as an OpenAI-compatible LLM provider (`provider: vercel` or `CHUNKHOUND_LLM_PROVIDER=vercel`). Like every registry provider it requires an explicit `model`; the configurator's Vercel preset defaults to `poolside/laguna-s-2.1`. Because the gateway's output-cap omission behavior is not yet verifiable, the default research route sends the configured `llm.output_limit_fallback` cap (default 64,000) instead of omitting the cap.
 
 ### Changed

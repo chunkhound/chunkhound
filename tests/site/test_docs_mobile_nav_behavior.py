@@ -80,6 +80,9 @@ toggle.click();
 const afterOpen = drawerState();
 
 const links = [...sidebar.querySelectorAll('a')];
+// Focus wrap targets the last link; derive its label so the contract survives
+// guide reordering or grouping.
+const lastLabel = links[links.length - 1].textContent.trim();
 links[links.length - 1].focus();
 const forward = pressKey('Tab', false);
 
@@ -100,6 +103,7 @@ const afterScrim = drawerState();
 console.log(JSON.stringify({
   initial,
   afterOpen,
+  lastLabel,
   forward,
   backward,
   afterEscape,
@@ -135,7 +139,7 @@ console.log(JSON.stringify({
     }
     assert rendered["forward"] == {"prevented": True, "active": "filter"}
     assert rendered["backward"]["prevented"] is True
-    assert rendered["backward"]["active"] == "Contributing"
+    assert rendered["backward"]["active"] == rendered["lastLabel"]
     assert rendered["afterEscape"] == {
         "expanded": "false",
         "label": "Open docs menu",

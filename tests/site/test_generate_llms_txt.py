@@ -27,6 +27,7 @@ POSITIONING = {
 LEGACY_SENTENCE = "Local-first semantic and regex code search"
 DOCS = {
     "configuration.md": ("Configuration", "Config body line."),
+    "enterprise.md": ("Enterprise Setup", "Enterprise body line."),
     "cli-reference.md": ("CLI Reference", "CLI body line."),
     "changelog.md": ("Changelog", "Changelog body line."),
 }
@@ -83,31 +84,160 @@ def _strip_frontmatter(text: str) -> str:
     return text
 
 
-def test_every_markdown_docs_page_reaches_llms_full() -> None:
-    """A new .md docs page must fail here, not silently vanish from
-    llms-full.txt. Rather than parse the generator's flatten list, we run the
-    real generator over the real docs and require every page's body to reach
-    the output, so the check is on what the generator emits."""
-    docs_dir = ROOT / "site" / "src" / "pages" / "docs"
-    real_docs = {p.relative_to(docs_dir): p for p in docs_dir.rglob("*.md")}
+def _substantive_lines(body: str) -> list[str]:
+    """Lines whose text must reach agents: prose, headings, list items, table
+    rows, and blockquotes. Presentation HTML blocks start with `<`; they are
+    flattened on purpose, so they are not asserted."""
+    return [
+        stripped
+        for line in body.splitlines()
+        if (stripped := line.strip())
+        and not stripped.startswith(("<", "```"))
+        and len(stripped) >= 40
+    ]
 
+
+# Inline code span: a backtick run closed by a run of the same length.
+INLINE_CODE = re.compile(r"(`+)(?:(?!\1)[^\n])*?\1")
+
+
+def _inline_code_spans(markdown: str) -> set[str]:
+    """Verbatim inline code spans outside fenced blocks."""
+    prose = re.sub(r"```[\s\S]*?```|~~~[\s\S]*?~~~", "", markdown)
+    return {match.group(0) for match in INLINE_CODE.finditer(prose)}
+
+
+def _generate_over_real_docs() -> tuple[dict[pathlib.Path, str], str]:
+    """Run the real generator over the real docs; return bodies and output."""
+    docs_dir = ROOT / "site" / "src" / "pages" / "docs"
+    bodies = {
+        path.relative_to(docs_dir): path.read_text(encoding="utf-8")
+        for path in docs_dir.rglob("*.md")
+    }
     with tempfile.TemporaryDirectory() as tmp:
         repo_root = pathlib.Path(tmp)
         _write_fake_repo(repo_root)
-        staged_docs = repo_root / "site" / "src" / "pages" / "docs"
-        for relative, source in real_docs.items():
-            staged = staged_docs / relative
+        for relative, body in bodies.items():
+            staged = repo_root / "site" / "src" / "pages" / "docs" / relative
             staged.parent.mkdir(parents=True, exist_ok=True)
-            staged.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            staged.write_text(body, encoding="utf-8")
+        result = _run_generate(repo_root)
+        assert result.returncode == 0, result.stderr
+        return bodies, _output(repo_root, "llms-full.txt")
+
+
+def test_every_markdown_docs_page_reaches_llms_full() -> None:
+    """A new .md docs page must fail here, not silently vanish from
+    llms-full.txt. Run the real generator over the real docs and require each
+    page's heading and substantive lines to reach the output, so the check is
+    on what agents read, not on the generator's internals."""
+    bodies, full = _generate_over_real_docs()
+    for relative, body in bodies.items():
+        text = _strip_frontmatter(body)
+        heading = next(line for line in text.splitlines() if line.startswith("# "))
+        assert heading in full, f"{relative} heading is missing from llms-full.txt"
+        for line in _substantive_lines(text):
+            assert line in full, f"{relative} line is missing: {line[:60]!r}"
+
+
+def test_inline_code_placeholders_survive_verbatim() -> None:
+    """`<pid>` inside inline code is a placeholder, not presentation HTML:
+    agents must receive every inline code span byte-for-byte."""
+    bodies, full = _generate_over_real_docs()
+    spans = set().union(
+        *(_inline_code_spans(_strip_frontmatter(body)) for body in bodies.values())
+    )
+    placeholders = {span for span in spans if "<" in span}
+    assert placeholders, "extractor found no placeholders; the test is blind"
+    missing = sorted(span for span in placeholders if span not in full)
+    assert not missing, f"inline code spans lost from llms-full.txt: {missing}"
+
+
+STRUCTURE_PAGE = """# Structure Page
+
+## Kept heading
+
+- list item that carries `--last-n <N>` and keeps its bullet
+> blockquote line with `--commit-range <A..B>` intact
+| Command | Placeholder |
+| --- | --- |
+| `search` | `<query>` |
+"""
+
+
+def test_headings_lists_blockquotes_and_tables_reach_the_output() -> None:
+    """Markdown structure is not presentation markup: headings, list items,
+    blockquotes, and table rows must survive flattening."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo_root = pathlib.Path(tmp)
+        _write_fake_repo(repo_root)
+        (repo_root / "site" / "src" / "pages" / "docs" / "enterprise.md").write_text(
+            f"---\ntitle: Enterprise Setup\n---\n\n{STRUCTURE_PAGE}", encoding="utf-8"
+        )
 
         result = _run_generate(repo_root)
         assert result.returncode == 0, result.stderr
         full = _output(repo_root, "llms-full.txt")
 
-    for relative, source in real_docs.items():
-        body = _strip_frontmatter(source.read_text(encoding="utf-8")).strip()
-        assert body, f"{relative} has no body to reach llms-full.txt"
-        assert body in full, f"{relative} is missing from llms-full.txt"
+    for line in (
+        "# Structure Page",
+        "## Kept heading",
+        "- list item that carries `--last-n <N>` and keeps its bullet",
+        "> blockquote line with `--commit-range <A..B>` intact",
+        "| `search` | `<query>` |",
+    ):
+        assert line in full, f"structure line is missing: {line!r}"
+
+
+FIGURE_PAGE = """# Fleet Setup
+
+Visible intro prose that agents must keep.
+
+<figure class="d-figure" role="group" aria-label="Fleet diagram">
+  <figcaption>One bucket in the middle: config down, analytics up</figcaption>
+  <span class="sr-only">Screen-reader duplicate of the diagram story.</span>
+  <svg class="d-row-icon" viewBox="0 0 20 20"><path d="M2 2h16" /></svg>
+  <div class="d-node"><code>config/&lt;repo&gt;/prod/envelope.json</code></div>
+</figure>
+
+<aside class="docs-callout">
+  <p class="docs-callout-title"><svg viewBox="0 0 20 20"><path d="M1 1" /></svg>
+    Least privilege</p>
+  <div class="docs-callout-body"><p>Write-only: <code>PutObject</code> only.</p></div>
+</aside>
+
+<!-- editor note -->
+"""
+FENCED_HTML = '```html\n<figure class="d-figure"><svg></svg></figure>\n```'
+
+
+def test_presentation_html_is_flattened_but_fenced_code_is_byte_identical() -> None:
+    """Agents get the visible prose, never the site's presentation markup, and
+    an HTML example inside a fence survives untouched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo_root = pathlib.Path(tmp)
+        _write_fake_repo(repo_root)
+        (repo_root / "site" / "src" / "pages" / "docs" / "enterprise.md").write_text(
+            f"---\ntitle: Enterprise Setup\n---\n\n{FIGURE_PAGE}\n{FENCED_HTML}\n",
+            encoding="utf-8",
+        )
+
+        result = _run_generate(repo_root)
+        assert result.returncode == 0, result.stderr
+        full = _output(repo_root, "llms-full.txt")
+
+    section = full.split("# Fleet Setup", 1)[1].split("\n---\n", 1)[0]
+    prose = re.sub(r"```[\s\S]*?```", "", section)
+    assert "Visible intro prose that agents must keep." in prose
+    assert "One bucket in the middle: config down, analytics up" in prose
+    assert "Least privilege" in prose
+    assert "PutObject" in prose
+    assert "config/<repo>/prod/envelope.json" in prose
+    assert "Screen-reader duplicate" not in prose
+    assert "editor note" not in prose
+    for markup in ("class=", "<figure", "<svg", "sr-only", "d-figure", "d-node"):
+        assert markup not in prose
+    assert FENCED_HTML in section
 
 
 def test_mcp_anchor_linked_by_llms_txt_exists_in_getting_started() -> None:

@@ -31,11 +31,9 @@ from __future__ import annotations
 
 import html
 import re
-from functools import lru_cache
-from pathlib import Path
 
-from PIL import ImageFont
-
+from tests.site.browser_helpers import homepage_probe
+from tests.site.css_helpers import rules
 from tests.site.dom_helpers import (
     DIST,
     browser_dom,
@@ -46,6 +44,34 @@ from tests.site.dom_helpers import (
 from tests.site.tsx_runner import run_tsx_json
 
 _HOMEPAGE = "index.html"
+_WORKFLOWS_PAGE = "docs/workflows/index.html"
+
+# A docs page that receives every shared bundle but never mounts TerminalFrame.
+# A frame rule there would mean the frame escaped the homepage's inline styles.
+_NO_TERMINAL_PAGE = "docs/architecture/index.html"
+
+# Selectors only the frame stylesheet defines; the hero bundle styles the card,
+# not the frame's seam, composer and controls.
+_FRAME_OWNED_SELECTORS = (
+    ".terminal-composer",
+    ".terminal-seam",
+    ".terminal-control",
+    ".terminal-jump",
+    ".terminal-dots",
+)
+
+# The picker is rendered only by the workflow demo, so its rules must stay on
+# that page rather than in a shared bundle or the homepage's inline styles.
+_WORKFLOW_ONLY_SELECTORS = (
+    ".workflow-picker",
+    ".workflow-picker [data-option]",
+    ".workflow-picker-hint",
+)
+
+_INERT_HTML = re.compile(r"<(style|script)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_TERMINAL_CARD_MARKUP = re.compile(
+    r"class\s*=\s*[\"'][^\"']*\bterminal-card\b[^\"']*[\"']"
+)
 
 # The notes annotate the engine's run: one note per fan-out source class. The
 # agent's own turns — the question and the verdict — emit beats but take no
@@ -66,41 +92,6 @@ _EXPECTED_ROW_BEATS = [
     "synthesis",
     "answer",
 ]
-
-# A note is a two-line object: a label row (ordinal + source class + headline)
-# and one line of detail. Both lines share the note's narrowest track — a phone,
-# budgeted conservatively at 300px, minus the 3px rail and the 12/16px inline
-# padding = 269px. The prose is Inter at --text-sm (13px), so the budget is
-# MEASURED in the font's own advances (a proportional face cannot be budgeted in
-# `ch`): the headline at weight 600 and the detail at 400 must each fit that
-# measure. A longer line wraps, and a three-line note drags the run's rhythm with
-# it.
-_NOTE_TRACK_FLOOR_PX = 300
-_NOTE_CONTENT_PX = _NOTE_TRACK_FLOOR_PX - 3 - 12 - 16
-_NOTE_FONT_PX = 13
-_INTER_FONT = (
-    Path(__file__).resolve().parents[2] / "brand" / "fonts" / "inter-variable.ttf"
-)
-
-
-@lru_cache(maxsize=2)
-def _inter_advance_px(weight: int):
-    """Measure text in the brand's Inter face at `weight`.
-
-    Pillow rasterizes the brand's vendored Inter variable font — the face the
-    hero notes are designed against. It is a metric fixture, NOT the font the
-    site serves: the live site loads Inter from Google Fonts, so these advances
-    pin the note's width budget against the brand face, not the served bytes.
-    """
-    font = ImageFont.truetype(str(_INTER_FONT), _NOTE_FONT_PX)
-    font.set_variation_by_axes(
-        [
-            weight if b"weight" in axis["name"].lower() else axis["default"]
-            for axis in font.get_variation_axes()
-        ]
-    )
-    return font.getlength
-
 
 # The note's own vocabulary: the source classes the positioning subheadline
 # promises. A note label outside this set has nothing in the run to point at
@@ -206,12 +197,6 @@ def test_hero_narrative_covers_every_engine_beat() -> None:
         assert step["label"].strip()
         assert step["headline"].strip()
         assert step["detail"].strip()
-        assert _inter_advance_px(600)(step["headline"]) <= _NOTE_CONTENT_PX, (
-            f"note headline overruns its line: {step['headline']!r}"
-        )
-        assert _inter_advance_px(400)(step["detail"]) <= _NOTE_CONTENT_PX, (
-            f"note detail overruns its line: {step['detail']!r}"
-        )
     # One note per fan-out call: the notes can never outrun the demo.
     assert len(narrative) == len(data["DEMO"]["calls"])
 
@@ -498,3 +483,153 @@ def test_hero_no_js_shows_the_full_narrative() -> None:
         assert promise in raw, f"missing from the no-JS promises: {promise!r}"
     for interface in ("CLI", "MCP", "GitHub"):
         assert interface in raw, f"missing from the no-JS interfaces: {interface!r}"
+
+
+def _pages_rendering_terminal_card() -> list[str]:
+    """Pages whose markup mounts the terminal, ignoring style/script blocks."""
+    return [
+        page.relative_to(DIST).as_posix()
+        for page in sorted(DIST.rglob("*.html"))
+        if _TERMINAL_CARD_MARKUP.search(
+            _INERT_HTML.sub("", page.read_text(encoding="utf-8"))
+        )
+    ]
+
+
+def _assert_frame_rules_ship(page: str) -> None:
+    """Every frame-owned rule must resolve inside `page`'s own CSS index."""
+    missing = f"{page} renders .terminal-card but ships no base rule"
+    assert rules(".terminal-card", page=page, media=""), missing
+    for selector in _FRAME_OWNED_SELECTORS:
+        assert rules(selector, page=page), f"{page} ships no {selector} rule"
+
+
+def test_homepage_inline_css_owns_the_terminal_frame() -> None:
+    """The frame travels with the homepage's inline stylesheet, not a shared
+    bundle: a page that never mounts the terminal still receives every bundle,
+    so the frame's own selectors must be absent there and present on the
+    homepage (the default page index)."""
+    assert not rules(".terminal-card", page=_NO_TERMINAL_PAGE, media="")
+    for selector in _FRAME_OWNED_SELECTORS:
+        assert not rules(selector, page=_NO_TERMINAL_PAGE), selector
+    _assert_frame_rules_ship(_HOMEPAGE)
+
+
+def test_workflows_inline_css_stays_off_the_homepage() -> None:
+    """The workflow picker is a workflows-only surface. Its rules must be
+    present in that page's index and absent from the homepage's, which also
+    proves no shared bundle carries them."""
+    for selector in _WORKFLOW_ONLY_SELECTORS:
+        assert rules(selector, page=_WORKFLOWS_PAGE), selector
+        assert not rules(selector), selector
+
+
+def test_every_page_rendering_the_terminal_ships_its_own_frame_css() -> None:
+    """Every built page that mounts `.terminal-card` must ship its rules in that
+    page's own index. The base rule is unconditional, so the hero bundle's
+    wide-layout override cannot stand in for it: if the homepage loses its
+    inline frame rules while the workflows page keeps its copy, the homepage's
+    index has no base rule or frame selectors and this drift guard fails."""
+    pages = _pages_rendering_terminal_card()
+    assert _HOMEPAGE in pages and _WORKFLOWS_PAGE in pages
+    for page in pages:
+        _assert_frame_rules_ship(page)
+
+
+# Base.astro is the only font authority: these faces must load before a
+# production-font measure means what it says.
+_PRODUCTION_FACES = [
+    "Inter 400 loaded",
+    "Inter 500 loaded",
+    "Inter 600 loaded",
+    "Inter 700 loaded",
+    "JetBrains Mono 400 loaded",
+]
+
+# A real homepage render with opt-in font fixtures or the blocked-font fallback;
+# forced FontFace loads surface a missing fixture as a load failure.
+_MEASURE_NOTES = """
+console.log(JSON.stringify(await homepageProbe(['dark'], async (page) => {
+  const faces = await page.evaluate(async () => {
+    await Promise.all([...document.fonts].map((face) => face.load()));
+    await document.fonts.ready;
+    return [...document.fonts].map((font) => `${font.family} ${font.weight} ${font.status}`);
+  });
+  const notes = {};
+  for (const width of [390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(100);
+    notes[width] = await page.evaluate(() => {
+      const card = document.querySelector('.terminal-card');
+      const cardRect = card.getBoundingClientRect();
+      return [...document.querySelectorAll('.note')].map((note) => {
+        const rect = note.getBoundingClientRect();
+        // keep arrows anonymous inside evaluate: tsx keep-names rewrites the
+        // named ones into __name(...) calls playwright cannot serialize in-page.
+        const [headlineLines, detailLines] =
+          ['.note-headline', '.note-detail'].map((selector) => {
+            const range = document.createRange();
+            range.selectNodeContents(note.querySelector(selector));
+            return [...range.getClientRects()].filter((r) => r.width > 0).length;
+          });
+        return {
+          scrollWidth: note.scrollWidth,
+          clientWidth: note.clientWidth,
+          insideCard: rect.left >= cardRect.left - 1 && rect.right <= cardRect.right + 1,
+          headlineLines,
+          detailLines,
+        };
+      });
+    });
+  }
+  return { faces, notes };
+}, PRODUCTION_FONTS)));
+"""
+
+
+def _measure_notes(production_fonts: bool) -> dict:
+    """Opt-in fixture-backed Google stylesheet; default keeps fonts blocked."""
+    prefix = f"const PRODUCTION_FONTS = {str(production_fonts).lower()};\n"
+    return homepage_probe(prefix + _MEASURE_NOTES)
+
+
+def _assert_notes_fit(width: str, notes: list[dict]) -> None:
+    """Universal contract: a note never overflows or escapes its card."""
+    assert notes, f"no notes rendered at {width}px"
+    for note in notes:
+        assert note["clientWidth"] > 0
+        assert note["scrollWidth"] <= note["clientWidth"] + 1, (
+            f"note overflows horizontally at {width}px"
+        )
+        assert note["insideCard"], f"note escapes the terminal card at {width}px"
+
+
+def _assert_single_line_notes(width: str, notes: list[dict]) -> None:
+    """Production-font-only claim: each note renders on exactly one line.
+
+    Fallback fonts vary by OS, so line counts are not a portable contract.
+    """
+    for note in notes:
+        assert note["headlineLines"] == 1, f"headline wraps at {width}px"
+        assert note["detailLines"] == 1, f"detail wraps at {width}px"
+
+
+def test_hero_notes_fit_their_cards_at_narrow_widths(built_site) -> None:
+    """Production-font geometry (fixture-backed, exactly what Base.astro
+    requests): the reliable measure of the two-line budget, counted only after
+    the matching FontFace entries exist and are loaded."""
+    rendered = _measure_notes(production_fonts=True)["dark"]
+    assert sorted(rendered["faces"]) == _PRODUCTION_FACES
+    for width, notes in rendered["notes"].items():
+        _assert_notes_fit(width, notes)
+        _assert_single_line_notes(width, notes)
+
+
+def test_hero_notes_fit_their_cards_with_fallback_fonts(built_site) -> None:
+    """Fallback-font geometry: the same fits hold when the production stylesheet
+    never arrives (no FontFace exists), so a font outage never widens the notes
+    out of their cards."""
+    rendered = _measure_notes(production_fonts=False)["dark"]
+    assert rendered["faces"] == []
+    for width, notes in rendered["notes"].items():
+        _assert_notes_fit(width, notes)

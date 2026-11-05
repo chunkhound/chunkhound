@@ -177,3 +177,236 @@
     gap: 0;
   }
 }
+
+/* ── Rows ─────────────────────────────────────────────────────── */
+
+/* The shared row anatomy: a rail that names the row (icon, label, qualifier)
+   and a lane that carries its facts. Every band in a multi-row figure uses it,
+   so names, qualifiers, and lane columns line up down the figure instead of
+   drifting with each label's width. The enterprise page writes this markup as
+   raw HTML, because a `.md` page cannot import the component. */
+.d-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.9fr) minmax(0, 2fr);
+  grid-template-rows: auto auto;
+  column-gap: var(--space-4);
+  /* Space between the name and qualifier tracks. DiagramNode's own gap uses
+     the same token, so both grids keep one rhythm. */
+  row-gap: var(--space-1);
+  align-items: start;
+}
+
+/* The rail joins the row's tracks instead of keeping its own: the label sits
+   on the titles' track and the qualifier on the details' track, so the two
+   halves agree however the text wraps. A rail with private `auto` rows would
+   align only while its height happened to match the lane's. The row owns the
+   row gap; a subgrid ignores the one declared here. The icon column has a
+   fixed width, so labels start at the same x whatever glyph a row carries. */
+.d-row-rail {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  grid-template-rows: subgrid;
+  column-gap: var(--space-2);
+  align-items: start;
+  margin: 0;
+}
+
+/* The accent is opt-in: it marks the row's part while the label stays
+   tertiary, so the rail still reads as a caption. A figure that already
+   spends its accent elsewhere leaves it off. */
+.d-row-icon,
+.d-row-mark {
+  grid-column: 1;
+  /* Centred on the row, not on the label: the mark belongs to the whole rail,
+     so it sits in the middle of whatever the two tracks add up to, including
+     when the label wraps to a second line. */
+  grid-row: 1 / -1;
+  align-self: center;
+  /* A mark, not a line of text: the explicit 1.3em box keeps the glyph off the
+     row's sizing path, so a tall image cannot inflate a track. */
+  display: flex;
+  height: 1.3em;
+  color: var(--text-tertiary);
+}
+
+/* One glyph box for every row: the label's x is fixed by the track, but the
+   gutter to it must not change with the glyph's intrinsic width. A wordmark
+   (`.d-row-mark`) keeps its own aspect, so it is exempt. */
+.d-row-icon {
+  width: 1.3em;
+}
+
+.d-row-icon[data-tone="accent"] {
+  color: var(--primary);
+}
+
+/* The fleet's mark is the brand hound, theme-swapped like every other lockup. */
+.d-row-mark img {
+  display: block;
+  width: auto;
+  height: 1.3em;
+}
+
+/* Scoped past `.d-row-mark img` so the inactive theme loses the cascade. */
+.d-row-mark .d-row-mark-dark {
+  display: none;
+}
+
+[data-theme="dark"] .d-row-mark .d-row-mark-light {
+  display: none;
+}
+
+[data-theme="dark"] .d-row-mark .d-row-mark-dark {
+  display: block;
+}
+
+.d-row-label {
+  grid-column: 2;
+  grid-row: 1;
+  line-height: var(--lh-sm);
+}
+
+/* In the label's column, not spanning the icon: a qualifier hangs under the
+   name it qualifies, and both start at one left edge. */
+.d-row-caption {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+/* Column count equals the node count: every node takes one equal column, so
+   the lane never wraps away from the shared tracks. */
+.d-row-lane {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-template-rows: subgrid;
+  column-gap: var(--space-5);
+}
+
+/* Nodes reuse the row's tracks, so titles and details align across columns
+   however the text wraps. */
+.d-row-lane > .d-node {
+  grid-row: 1 / -1;
+  grid-template-rows: subgrid;
+}
+
+/* A column-structured stack keeps its data columns at every width, because the
+   arrows between rows point at them. The row carries the flag, so the modifier
+   and the thing it modifies cannot drift apart. Auto flow cannot create an
+   empty second column, so a lone node needs the explicit two-track template:
+   it consumes one prefix, not both. */
+.d-row[data-cols="2"] .d-row-lane {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.d-row[data-cols="2"] .d-row-lane > .d-node:only-child,
+.d-row[data-cols="2"] .d-row-lane > .d-row-arrow:only-child {
+  grid-column: 2;
+}
+
+/* Paths break only at their own separators, never mid-segment. */
+.d-node-detail code {
+  font-size: 1em;
+  overflow-wrap: normal;
+  line-height: 1.5;
+}
+
+/* The bucket is the row every other row depends on. */
+.d-row[data-tone="accent"] {
+  border-color: var(--primary);
+}
+
+/* A row between two bands: no rail, one arrow per data column. It keeps the
+   band's box (same padding, plus a transparent hairline for the absent frame)
+   so its lane lands on the band lanes' columns; a wider box would move the far
+   column off the node it points at. One row, because an arrow is one line. */
+.d-row-link {
+  padding: var(--space-2) var(--space-4);
+  border: var(--border-w-default) solid transparent;
+  grid-template-rows: auto;
+}
+
+.d-row-arrow {
+  grid-row: 1 / -1;
+  align-self: center;
+  justify-self: center;
+  position: relative;
+  /* A border, not a background: the rule is a stroke, and the contrast contract
+     reads every `background` token as a text surface. */
+  width: 0;
+  height: var(--space-5);
+  border-left: var(--border-w-default) solid var(--text-tertiary);
+}
+
+.d-row-arrow::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-style: solid;
+  border-width: 0 1px 1px 0;
+  border-color: var(--text-tertiary);
+}
+
+.d-row-arrow[data-dir="up"]::after {
+  top: 0;
+  transform: translate(-50%, 0) rotate(-135deg);
+}
+
+.d-row-arrow[data-dir="down"]::after {
+  bottom: 0;
+  transform: translate(-50%, 0) rotate(45deg);
+}
+
+/* Narrow: one rail above one lane. Subgrid needs a multi-row parent, so every
+   participant returns to its own grid. */
+@media (max-width: 640px) {
+  .d-row {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-2);
+  }
+
+  .d-row-rail {
+    grid-column: 1;
+    grid-row: 1;
+    /* Back to private rows and a private gap: the rail no longer spans the
+       parent's tracks, so the 4px name/qualifier rhythm is its own here. */
+    grid-template-rows: auto auto;
+    row-gap: var(--space-1);
+  }
+
+  .d-row-lane {
+    grid-column: 1;
+    grid-row: 2;
+    grid-auto-flow: row;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    row-gap: var(--space-3);
+  }
+
+  .d-row-lane > .d-node {
+    grid-row: auto;
+    grid-template-rows: none;
+  }
+
+  .d-row-arrow {
+    grid-row: auto;
+  }
+
+  /* The column-structured variant keeps its two columns here too. A lone node
+     spans both: at this width the half-empty lane reads as a gap, and the
+     figure above already names the column it consumes. */
+  .d-row[data-cols="2"] .d-row-lane {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .d-row[data-cols="2"] .d-row-lane > .d-node:only-child,
+  .d-row[data-cols="2"] .d-row-lane > .d-row-arrow:only-child {
+    grid-column: 1 / -1;
+  }
+}

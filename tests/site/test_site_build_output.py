@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.site.browser_helpers import homepage_probe
+from tests.site.css_helpers import shipped_css
+from tests.site.dom_helpers import DIST
 from tests.site.html_helpers import (
     NUMERIC_LANGUAGE_CLAIM,
     canonical_href,
@@ -14,10 +17,12 @@ from tests.site.html_helpers import (
 )
 from tests.site.png_helpers import png_dimensions
 from tests.site.process_runner import run_text_process
-from tests.site.tsx_runner import isolated_subprocess_env, run_tsx_json, run_tsx_raw
-
-ROOT = Path(__file__).resolve().parents[2]
-DIST = ROOT / "site" / "dist"
+from tests.site.tsx_runner import (
+    ROOT,
+    isolated_subprocess_env,
+    run_tsx_json,
+    run_tsx_raw,
+)
 
 VERSION_FILE = ROOT / "chunkhound" / "_version.py"
 VERSION_RESOLUTION_FAILURE = "Unable to resolve ChunkHound version for docs build"
@@ -225,28 +230,54 @@ def test_homepage_layout_has_expected_sections_and_order() -> None:
     assert '<nav class="nav-tabs"' not in homepage
 
 
-def test_homepage_hero_is_one_terminal_surface() -> None:
+def test_homepage_hero_is_one_terminal_surface(built_site) -> None:
     """The hero is one full-bleed terminal surface: the full-width h1 leads it,
     then the run's window — the session control in the seam row above the live
-    region, all inside .terminal-card — with no separate intro band or detached
-    proof stage."""
-    homepage = (DIST / "index.html").read_text(encoding="utf-8")
+    region — and the surface itself owns the code background.
 
-    h1 = homepage.index("<h1")
-    card = homepage.index('class="terminal-card"')
-    control = homepage.index('class="terminal-control"')
-    region = homepage.index('aria-label="Example AI agent conversation')
-    assert h1 < card < control < region
-    assert "hero-intro" not in homepage
-    assert "hero-stage" not in homepage
+    Measure the rendered hero, not class names or stylesheet syntax: a
+    reimplementation may rename either while keeping the visible contract.
+    """
+    result = homepage_probe("""
+const result = await homepageProbe(['dark'], async page => page.evaluate(() => {
+  const hero = document.querySelector('main > section');
+  const heading = hero?.querySelector('h1') ?? null;
+  const demo = hero?.querySelector(
+    '[role="region"][aria-label="Example AI agent conversation powered by ChunkHound"]'
+  ) ?? null;
+  const control = hero?.querySelector(
+    'button[aria-label="Replay demo"], button[aria-label="Stop animation"]'
+  ) ?? null;
+  const token = getComputedStyle(document.documentElement)
+    .getPropertyValue('--code-bg').trim();
+  const probe = document.createElement('span');
+  probe.style.color = token;
+  document.body.append(probe);
+  const expected = getComputedStyle(probe).color;
+  probe.remove();
+  return {
+    headingCount: hero?.querySelectorAll('h1').length ?? 0,
+    demoCount: hero?.querySelectorAll('[role="region"]').length ?? 0,
+    controlCount: hero?.querySelectorAll(
+      'button[aria-label="Replay demo"], button[aria-label="Stop animation"]'
+    ).length ?? 0,
+    headingBeforeDemo: !!(heading && demo &&
+      (heading.compareDocumentPosition(demo) & Node.DOCUMENT_POSITION_FOLLOWING)),
+    controlBeforeDemo: !!(control && demo &&
+      (control.compareDocumentPosition(demo) & Node.DOCUMENT_POSITION_FOLLOWING)),
+    background: hero ? getComputedStyle(hero).backgroundColor : null,
+    expected,
+  };
+}));
+console.log(JSON.stringify(result['dark']));
+""")
 
-    # The surface itself owns the full-bleed code background. The hero's CSS
-    # was extracted to site/src/styles/hero-terminal.css (global, no Astro
-    # scoping attribute), so match the plain `.hero` rule.
-    css = "".join(
-        bundle.read_text(encoding="utf-8") for bundle in (DIST / "_astro").glob("*.css")
-    )
-    assert re.search(r"\.hero\{[^}]*background:\s*var\(--code-bg\)", css), (
+    assert result["headingCount"] == 1
+    assert result["demoCount"] == 1
+    assert result["controlCount"] == 1
+    assert result["headingBeforeDemo"]
+    assert result["controlBeforeDemo"]
+    assert result["background"] == result["expected"], (
         "the hero section must own the full-bleed code surface"
     )
 
@@ -280,9 +311,7 @@ def test_homepage_section_banding_alternates_positionally() -> None:
         "the closing activation section must be the last section in <main>"
     )
 
-    css = "".join(
-        bundle.read_text(encoding="utf-8") for bundle in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
     assert _BAND_RULE.search(css), (
         "Homepage banding must be positional "
         "(main > section:nth-of-type(even):not(.brand-surface) "
@@ -302,9 +331,7 @@ def test_homepage_closing_section_uses_the_brand_surface() -> None:
         "the closing section must declare the brand surface"
     )
 
-    css = "".join(
-        bundle.read_text(encoding="utf-8") for bundle in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
     assert re.search(
         r"\.brand-surface\s*\{[^}]*background:\s*var\(--brand-surface\)", css
     ), "the brand surface must be a shared global recipe, not a section one-off"
@@ -482,6 +509,39 @@ def test_cli_reference_and_configuration_docs_render_expected_content() -> None:
     assert 'aria-modal="true"' not in sidebar_tag.group(0)
     assert 'tabindex="-1"' not in sidebar_tag.group(0)
     assert "cdn.jsdelivr.net" not in configuration
+
+
+def test_built_enterprise_docs_cover_one_store_pull_and_push() -> None:
+    enterprise = (DIST / "docs" / "enterprise" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    # The operator contract: one bucket holds config and analytics; the pull
+    # path uses a proxy when the store needs SigV4; analytics uses static,
+    # write-only credentials.
+    assert "config/&lt;repo&gt;/prod/envelope.json" in enterprise
+    assert "SigV4" in enterprise
+    assert "proxy" in enterprise.lower()
+    assert "PutObject" in enterprise
+    assert "Credentials are static" in enterprise
+    assert "no STS token" in enterprise
+
+
+def test_built_analytics_facts_have_one_owner() -> None:
+    """Credential policy belongs to Enterprise Setup; key layout, buffer cap,
+    and fetch budget belong to Configuration. A second copy lets one page
+    silently falsify the other."""
+    enterprise = (DIST / "docs" / "enterprise" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    configuration = (DIST / "docs" / "configuration" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    for fact in ("Credentials are static", "no STS token"):
+        assert fact in enterprise
+        assert fact not in configuration
+    for fact in ("analytics/&lt;repository&gt;", "10 MB", "Single attempt"):
+        assert fact in configuration
+        assert fact not in enterprise
 
 
 def test_closing_install_command_is_one_click_target() -> None:
@@ -895,45 +955,23 @@ def test_built_docs_code_blocks_render_copy_status() -> None:
 
 
 def test_built_docs_pages_render_toc_links_server_side() -> None:
-    for page, anchors in {
-        "getting-started": (
-            "#install",
-            "#index-and-verify",
-            "#use-it-from-your-agent",
-            "#example-prompts",
-            "#mcp",
-            "#where-to-next",
-        ),
-        "contributing": (
-            "#getting-started",
-            "#development-workflow",
-            "#the-review-process",
-            "#what-makes-a-good-pr",
-        ),
-        "configuration": (
-            "#configuration-file",
-            "#configuration-precedence",
-            "#embedding-providers",
-            "#advanced-routing",
-        ),
-        "cli-reference": (
-            "#chunkhound-index",
-            "#chunkhound-search",
-            "#chunkhound-research",
-            "#common-flags",
-        ),
-        "changelog": (
-            "#unreleased",
-            "#breaking-changes",
-            "#added",
-            "#changed",
-        ),
-    }.items():
+    for page in (
+        "getting-started",
+        "contributing",
+        "configuration",
+        "enterprise",
+        "cli-reference",
+        "changelog",
+    ):
         html = (DIST / "docs" / page / "index.html").read_text(encoding="utf-8")
-
-        assert '<nav class="toc-list" data-toc>' in html
+        toc = re.search(r'<nav class="toc-list" data-toc>(.*?)</nav>', html, re.DOTALL)
+        assert toc, f"Missing server-rendered TOC on {page}"
+        anchors = re.findall(r'href="#([^"]+)"', toc.group(1))
+        assert anchors, f"TOC on {page} has no links"
         for anchor in anchors:
-            assert f'href="{anchor}"' in html, f"Missing TOC anchor {anchor} on {page}"
+            assert f'id="{anchor}"' in html, (
+                f"TOC anchor #{anchor} has no target on {page}"
+            )
 
 
 def test_built_site_has_og_png_assets() -> None:

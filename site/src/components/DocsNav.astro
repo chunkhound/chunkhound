@@ -1,12 +1,12 @@
 ---
 /**
- * The site's documentation navigation — filter + guide list. Single source of
- * truth for the docs sidebar AND the mobile menu on marketing pages, so the
- * menu is identical everywhere. Owns its styles so it renders correctly in
- * either container (docs grid column vs. off-canvas drawer).
+ * The site's documentation navigation — filter + grouped guide list. Single
+ * source of truth for the docs sidebar AND the mobile menu on marketing pages,
+ * so the menu is identical everywhere. Owns its styles so it renders correctly
+ * in either container (docs grid column vs. off-canvas drawer).
  */
 import PhosphorIcon from "./PhosphorIcon.astro";
-import { DOCS_PAGES, isActivePath } from "../lib/nav";
+import { DOCS_SECTIONS, isActivePath } from "../lib/nav";
 
 interface Props {
   currentPath: string;
@@ -29,27 +29,53 @@ const isActive = (href: string): boolean => isActivePath(currentPath, href);
     data-docs-nav-filter
   />
 
-  <div class="sidebar-section" data-sidebar-section>
-    <div class="sidebar-section-title">Guides</div>
-    <nav aria-label="Documentation guides">
-      {DOCS_PAGES.map((g) => (
-        <a
-          href={g.href}
-          class:list={["sidebar-link", { active: isActive(g.href) }]}
-          data-sidebar-link
+  {DOCS_SECTIONS.map((section) => {
+    // One landmark per group: APG requires a distinct accessible name for each
+    // nav on a page, so the visible title names its own nav via aria-labelledby.
+    const titleId = `docs-section-${section.id}`;
+    return (
+      <div class="sidebar-section" data-sidebar-section>
+        <div
+          class="sidebar-section-title"
+          id={titleId}
+          data-sidebar-section-title
         >
-          <PhosphorIcon name={g.icon} size="16" weight="duotone" aria-hidden="true" />
-          <span>{g.title}</span>
-        </a>
-      ))}
-    </nav>
-  </div>
+          {section.title}
+        </div>
+        <nav aria-labelledby={titleId}>
+          {section.pages.map((g) => {
+            const active = isActive(g.href);
+            return (
+              <a
+                href={g.href}
+                class:list={["sidebar-link", { active }]}
+                aria-current={active ? "page" : undefined}
+                data-sidebar-link
+              >
+                <PhosphorIcon
+                  name={g.icon}
+                  size="16"
+                  weight="duotone"
+                  aria-hidden="true"
+                />
+                <span>{g.title}</span>
+              </a>
+            );
+          })}
+        </nav>
+      </div>
+    );
+  })}
 </div>
 
 <script>
+  import "@phosphor-icons/webcomponents/PhBlueprint";
+  import "@phosphor-icons/webcomponents/PhBuildings";
   import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
+  import "@phosphor-icons/webcomponents/PhCode";
   import "@phosphor-icons/webcomponents/PhGitPullRequest";
   import "@phosphor-icons/webcomponents/PhRocketLaunch";
+  import "@phosphor-icons/webcomponents/PhSealCheck";
   import "@phosphor-icons/webcomponents/PhSlidersHorizontal";
   import "@phosphor-icons/webcomponents/PhTerminalWindow";
   import "@phosphor-icons/webcomponents/PhTreeStructure";
@@ -84,12 +110,16 @@ const isActive = (href: string): boolean => isActivePath(currentPath, href);
     gap: var(--space-1);
   }
 
+  .sidebar-section + .sidebar-section {
+    margin-top: var(--space-2);
+  }
+
   .sidebar-section-title {
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    /* Brand names are authored; uppercasing would spell "PI-SCHEMATIC". */
+    letter-spacing: 0.02em;
     padding: var(--space-2) var(--space-3);
   }
 

@@ -5,8 +5,10 @@
  * WHY: agents consume llms.txt as a table of contents and llms-full.txt when
  * they want the full docs without crawling HTML. Building both at prepare time
  * keeps them fresh with the docs and changelog. Markdown-only docs pages are
- * concatenated verbatim; .astro pages (getting-started, contributing) cannot be
- * flattened to Markdown, so they are linked from llms.txt instead.
+ * flattened to prose: presentation HTML (figures, icons, callout shells) is for
+ * the rendered site only and would duplicate facts in the agent corpus. .astro
+ * pages (getting-started, contributing) cannot be flattened to Markdown, so they
+ * are linked from llms.txt instead.
  *
  * Output goes to site/public/ so `astro build` serves it at /llms.txt and
  * /llms-full.txt. Like the generated OG PNGs, the files are gitignored.
@@ -35,12 +37,13 @@ if (typeof SITE_URL !== "string" || !SITE_URL.startsWith("https://")) {
   throw new Error(`astro.config.mjs has no valid site URL (got ${SITE_URL})`);
 }
 
-// llms-full.txt concatenates Markdown-backed docs pages verbatim. .astro pages
+// llms-full.txt concatenates Markdown-backed docs pages as prose. .astro pages
 // (getting-started, contributing) cannot be flattened to Markdown, so they are
 // linked from llms.txt instead (see header). Hrefs come from nav.ts, so this
 // is only the .md-capable subset — titles/descriptions stay in nav.ts.
 const MARKDOWN_DOCS_HREFS = [
   "/docs/configuration/",
+  "/docs/enterprise/",
   "/docs/cli-reference/",
   "/docs/changelog/",
 ];
@@ -83,6 +86,97 @@ function stripFrontmatter(md) {
   return next === undefined ? "" : md.slice(afterFence + 1).trimStart();
 }
 
+// Tags that delimit blocks of visible text. Unwrapping them restores the line
+// breaks HTML would have rendered, so unwrapped prose reads as paragraphs.
+const BLOCK_TAGS = new Set([
+  "address", "article", "aside", "blockquote", "br", "caption", "div",
+  "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+  "header", "hr", "li", "ol", "p", "pre", "section", "table", "tbody",
+  "td", "tfoot", "th", "thead", "tr", "ul",
+]);
+
+// Only these entities are decoded, so literal text such as `&foo;` survives.
+const ENTITIES = { "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&amp;": "&" };
+
+// Presentation markup is for the rendered site only. Agents get the visible
+// prose: raw SVG paths, class names, and sr-only duplicates add no facts.
+function flattenProse(prose) {
+  const unwrapped = prose
+    .replace(/^[ \t]+(?=<)/gm, "") // HTML source indentation is not prose indentation
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, "")
+    .replace(/<(\w+)\b[^>]*\bclass="[^"]*\bsr-only\b[^"]*"[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<\/?([a-zA-Z][\w-]*)\b[^>]*>/g, (_, name) =>
+      BLOCK_TAGS.has(name.toLowerCase()) ? "\n" : "",
+    );
+  return unwrapped
+    .replace(/&(?:lt|gt|quot|amp|#39);/g, (entity) => ENTITIES[entity])
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+// Length of the backtick run starting at `start`.
+function backtickRun(text, start) {
+  let length = 1;
+  while (text[start + length] === "`") length++;
+  return length;
+}
+
+// Index of the backtick run of exactly `run` backticks closing a span, or -1.
+// Bounded to the current line: an unmatched backtick must not swallow the
+// next paragraph's span.
+function closingBackticks(text, from, run) {
+  const lineEnd = text.indexOf("\n", from);
+  const limit = lineEnd === -1 ? text.length : lineEnd;
+  for (let i = from; i < limit; i++) {
+    if (text[i] !== "`") continue;
+    const length = backtickRun(text, i);
+    if (length === run) return i;
+    i += length - 1;
+  }
+  return -1;
+}
+
+// Inline code is literal Markdown content, not presentation markup: `<pid>`
+// inside a span is a placeholder, so flattenProse would corrupt it. Swap each
+// span for a collision-free sentinel, then restore it verbatim afterwards.
+function protectInlineCode(prose, spans) {
+  let out = "";
+  let cursor = 0;
+  while (cursor < prose.length) {
+    const open = prose.indexOf("`", cursor);
+    if (open === -1) break;
+    const run = backtickRun(prose, open);
+    const close = closingBackticks(prose, open + run, run);
+    if (close === -1) {
+      out += prose.slice(cursor, open + run);
+      cursor = open + run;
+      continue;
+    }
+    out += prose.slice(cursor, open);
+    out += `\u0000${spans.length}\u0000`;
+    spans.push(prose.slice(open, close + run));
+    cursor = close + run;
+  }
+  return out + prose.slice(cursor);
+}
+
+function flattenMarkdownProse(prose) {
+  const spans = [];
+  const flattened = flattenProse(protectInlineCode(prose, spans));
+  return flattened.replace(/\u0000(\d+)\u0000/g, (_, index) => spans[Number(index)]);
+}
+
+// Fenced code is opaque: an HTML sample inside a fence must stay byte-identical.
+// split() with a capturing group puts fenced segments at odd indexes.
+function flattenPresentation(md) {
+  return md
+    .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g)
+    .map((segment, index) =>
+      index % 2 === 1 ? segment : flattenMarkdownProse(segment),
+    )
+    .join("");
+}
+
 const DOCS_MD = MARKDOWN_DOCS_HREFS.map((href) => {
   const file = `${href.replace(/^\/docs\//, "").replace(/\/$/, "")}.md`;
   return { file, href };
@@ -94,7 +188,9 @@ for (const doc of DOCS_MD) {
     // changelog.md is generated by sync-changelog.mjs; the others are committed.
     throw new Error(`Docs page not found: ${path}. If it is changelog.md, run sync:changelog first.`);
   }
-  doc.content = stripFrontmatter(readFileSync(path, "utf-8")).trimEnd();
+  doc.content = flattenPresentation(
+    stripFrontmatter(readFileSync(path, "utf-8")),
+  ).trimEnd();
 }
 
 function docsEntry(href) {

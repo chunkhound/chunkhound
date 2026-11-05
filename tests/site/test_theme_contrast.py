@@ -119,6 +119,10 @@ def _is_structural_exclusion(foreground: str, background: str) -> bool:
         return True  # bright accent is decorative (icons); never a text surface
     if background == "--green-bg":
         return foreground != "--on-green-bg"  # green chip hosts only --on-green-bg
+    if background == "--code-text":
+        # --code-text is also the decorative caret fill in WorkflowDemo. No text
+        # sits on that surface, so it is not a text background.
+        return True
     if background == "--code-bg":
         # on --code-bg only code tokens are checked. Theme-adaptive tokens that a
         # permanently-dark surface re-points (the hero's --link* family) are out

@@ -321,7 +321,7 @@ This prevents a well-intentioned rule change during a `search` invocation from s
 - **Single attempt.** No retries. No client-side cache.
 - **Recoverable failures** (timeout, transport error, non-2xx response, JSON parse error, envelope validation, `min_chunkhound_version` gate) log a WARNING and the invocation proceeds against whatever is currently on disk. This is intentional — remote-config outages must not brick indexing or search.
 - **Disk-write failures during backup or persist escalate to `sys.exit(1)`** with the target path and errno on stderr. A silent write failure would leave the process running against a stale on-disk copy while advertising success.
-- **`httpx` runs with `trust_env=False`**, so `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `netrc` are ignored on the remote-config fetch. This is deliberate: a hostile `HTTPS_PROXY` could reroute the credentialed request, and a MITM proxy holding a system-trusted CA could terminate the tunnel and read the `Authorization` header. **Operational consequence** — an operator needing a private / internal CA must extend the **system** trust store (e.g. install the CA into `/etc/ssl/certs`, the OS keychain, or the process's baked-in bundle); pointing `SSL_CERT_FILE` at an internal bundle has no effect and the TLS handshake will fail. The failure looks like any other recoverable fetch WARNING ("Remote-config fetch failed"), which can be mistaken for a flaky server rather than an ignored CA bundle.
+- **`httpx` runs with `trust_env=False`**, so `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `netrc` are ignored on the remote-config fetch. This is deliberate: a hostile `HTTPS_PROXY` could reroute the credentialed request, and a MITM proxy holding a trusted CA could terminate the tunnel and read the `Authorization` header. **Operational consequence** — the fetch uses HTTPX's default CA bundle (`certifi.where()`) and exposes no CA setting. Installing a private CA only in the OS trust store may not help; add it to the CA bundle the packaged runtime actually uses, or use a certificate that chains to a public root. `SSL_CERT_FILE` and `SSL_CERT_DIR` have no effect. The failure looks like any other recoverable fetch WARNING ("Remote-config fetch failed"), which can be mistaken for a flaky server rather than an untrusted CA.
 
 ### Startup validation
 
@@ -337,6 +337,132 @@ The delta-only gate above relies on structured error codes returned by `Config.v
 | `mcp_cors_no_auth` | `mcp.cors` is enabled without `mcp.auth_token`. |
 | `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp` / `_quickresearch`. |
 | `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp`/`_quickresearch` commands hit `db_readonly_wrong_command` first.) |
+
+## Usage Analytics
+
+ChunkHound can record opt-in usage events and upload them to an S3-compatible bucket. Analytics is off by default. Recorder construction and upload failures never fail a command: a recorder that cannot start becomes a no-op, and upload failures are logged and dropped. Invalid analytics values are rejected during configuration validation like any other setting, so a bad `anonymize` value or a non-positive interval can still fail startup.
+
+For fleet rollout and the credential policy, see [Enterprise Setup](/docs/enterprise/).
+
+### What is recorded
+
+One `command_summary` event is written per analytics-wrapped CLI command or MCP tool call. CLI coverage is bounded to `index`, `search`, `research`, `websearch`, `fetchurl`, `map`, `autodoc`, and `calibrate`; the `mcp` command records its tool calls instead.
+
+| Field | Meaning |
+|---|---|
+| `type` | Always `command_summary`. |
+| `user` | OS username, salted hash, or `null`, depending on `anonymize`. |
+| `ts` | UTC ISO 8601 timestamp. |
+| `repository` | Repository name from `git remote get-url origin`, or the target directory name. |
+| `os` | Platform name (`Linux`, `Darwin`, `Windows`). |
+| `chunkhound_version` | Client version. |
+| `command` | Command or MCP tool name. |
+| `source` | `cli` or `mcp`. |
+| `duration_ms` | Command duration. |
+| `success` | Whether the command completed successfully. |
+| `action` | Command-specific fields, with sensitive values redacted by default. |
+| `providers` | Per-kind arrays of provider and model totals. |
+| `internal_error_type` | Internal error class name, recorded only when no provider call failed. |
+
+`providers` maps each kind that has calls (`embedding`, `llm`, `reranker`) to an array of entries. Each entry contains `provider`, `model`, `calls`, `fails`, `error_types`, `input_tokens`, and `output_tokens`. A token field is `null` when no call reported it.
+
+`action` carries a small allowlist, not a generic argument dump:
+
+| Command or tool | Fields |
+|---|---|
+| `search` (CLI and MCP) | `query`, `commit_range`, `commit_hash`, `last_n_commits` |
+| `research` / `code_research` | `query` |
+| `websearch` | `query` |
+| `fetchurl` | `url` |
+| `index` | `mode`, `file_count`, `total_chunks` |
+| Other commands | Empty object |
+
+`query`, `question`, and `url` are set to `null` unless `save_sensitive_data` is true. The keys stay present so consumers can see the field existed.
+
+ChunkHound does not record source content, file paths, or full stack traces. It does record repository names, OS, version, command, provider and model names, token counts, commit ranges or hashes, and query text when `save_sensitive_data` is enabled.
+
+### Settings
+
+```json
+{
+  "analytics": {
+    "enabled": false,
+    "anonymize": "full",
+    "save_sensitive_data": false,
+    "s3_endpoint_url": null,
+    "s3_bucket": null,
+    "flush_interval_seconds": 21600,
+    "flush_batch_size": 500,
+    "max_upload_retries": 10
+  }
+}
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master opt-in switch. |
+| `anonymize` | `"full"` | `full` records the OS username, `hashed` records a salted SHA-256 hash, `anonymous` omits the identity. |
+| `save_sensitive_data` | `false` | Record `query`, `question`, and `url` verbatim. Independent of `anonymize`. |
+| `s3_endpoint_url` | `null` | S3-compatible endpoint. Path-style addressing is used. |
+| `s3_bucket` | `null` | Target bucket. |
+| `s3_access_key` | `null` | Access key. Prefer the environment variable below. |
+| `s3_secret_key` | `null` | Secret key. Prefer the environment variable below. |
+| `flush_interval_seconds` | `21600` | Maximum time between flushes (6 hours). |
+| `flush_batch_size` | `500` | Buffered lines that trigger an early flush. |
+| `max_upload_retries` | `10` | Failed upload attempts before the buffer file is dropped. |
+
+There are no analytics CLI flags. Set these values in a config file, the environment, or a remote-config rule.
+
+Environment overrides use `CHUNKHOUND_ANALYTICS__<KEY>`: `CHUNKHOUND_ANALYTICS__ENABLED`, `CHUNKHOUND_ANALYTICS__ANONYMIZE`, `CHUNKHOUND_ANALYTICS__SAVE_SENSITIVE_DATA`, `CHUNKHOUND_ANALYTICS__S3_ENDPOINT_URL`, `CHUNKHOUND_ANALYTICS__S3_BUCKET`, `CHUNKHOUND_ANALYTICS__FLUSH_INTERVAL_SECONDS`, `CHUNKHOUND_ANALYTICS__FLUSH_BATCH_SIZE`, and `CHUNKHOUND_ANALYTICS__MAX_UPLOAD_RETRIES`.
+
+The S3 credentials use dedicated names and never fall back to ambient AWS variables:
+
+- `CHUNKHOUND_AWS_ACCESS_KEY_ID`
+- `CHUNKHOUND_AWS_SECRET_ACCESS_KEY`
+
+### Identity and the salt
+
+`anonymize` controls the identity only. It does not change action content. Enabling analytics without setting `anonymize` records the OS username, because `full` is the default.
+
+- `full` records the OS username.
+- `hashed` computes a SHA-256 hash of the OS username with a per-install random salt. The salt lives at `~/.config/chunkhound/analytics/salt` with `0600` permissions. It is not uploaded. Delete it and the identity changes.
+- `anonymous` records `user: null`. The S3 object key uses the shared literal `anonymous` segment, so anonymous installs are not distinguishable by key.
+
+The repository name is recorded in every mode.
+
+Only the salt is forced to `0600`. The recorder creates `~/.config/chunkhound/analytics/` and its buffer files with the process umask. Managed deployments should restrict the directory and set a restrictive umask, especially when `save_sensitive_data` is true or identity mode is `full`.
+
+### Local buffer and upload
+
+Events are appended to `~/.config/chunkhound/analytics/buffer-<pid>-<timestamp>.jsonl`.
+
+- The active buffer caps at 10 MB. This cap is fixed. Events beyond it are dropped. Total disk use is not capped: pending files can accumulate across runs.
+- A background thread checks once per second. It flushes when the buffer reaches `flush_batch_size`, or when `flush_interval_seconds` has passed with pending lines.
+- A flush uploads one object and starts a new active buffer. With no S3 target, the client keeps buffering locally and does not rotate files.
+- Shutdown performs a best-effort flush with a 3-second bound.
+- Orphaned buffer files from crashed processes are retried on later runs when an S3 target exists. A retained file is uploaded by the next recorder with a target, using that recorder's current endpoint, bucket, repository, and identity for the object key. The event body is not rewritten. Changing destination, repository, identity, or `save_sensitive_data` can therefore move old events to the new destination, produce key metadata that disagrees with the payload, or leave previously recorded text in place.
+
+The object key is:
+
+```text
+analytics/<repository>/<identity>/<YYYY>/<MM>/<DD>/<timestamp>_<hex>.jsonl
+```
+
+The endpoint URL decides the prefix: a trailing slash keeps its path
+(`https://objects.corp.internal/prefix/` lands under `prefix/`), otherwise the
+last segment is replaced. `https://objects.corp.internal/` lands at the bucket root.
+
+Uploads use one SigV4 `PutObject` per flush, `application/x-ndjson`, path-style addressing, and the fixed `us-east-1` region. Failed uploads are retried up to `max_upload_retries`, then the file is dropped. Upload errors are logged; they never fail the host command.
+
+### Failure behavior
+
+| Condition | Behavior |
+|---|---|
+| Analytics disabled | Recorder is a silent no-op. |
+| No S3 target | Local buffer only; the active file caps at 10 MB, but pending files can accumulate. |
+| Invalid S3 endpoint or bucket | Upload disabled with a warning; local buffer only. |
+| Buffer directory cannot be created | Recorder disabled; the command still runs. |
+| Upload fails | Retries, then drops the file. |
 
 ## Embedding Providers
 
@@ -760,6 +886,16 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` | LanceDB fragment count to trigger optimize |
 | `CHUNKHOUND_REMOTE_CONFIG__URL` | URL to fetch remote configuration on startup (see [Remote Configuration](#remote-configuration)) |
 | `CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER` | Authorization header for the remote-config fetch; supports `${VAR}` interpolation against the environment at fetch time |
+| `CHUNKHOUND_ANALYTICS__ENABLED` | Opt in to usage analytics (`true`/`1`/`yes`; default: false) |
+| `CHUNKHOUND_ANALYTICS__ANONYMIZE` | Identity mode: `full`, `hashed`, or `anonymous` (default: `full`) |
+| `CHUNKHOUND_ANALYTICS__SAVE_SENSITIVE_DATA` | Record query, question, and URL text verbatim (default: false) |
+| `CHUNKHOUND_ANALYTICS__S3_ENDPOINT_URL` | S3-compatible analytics endpoint |
+| `CHUNKHOUND_ANALYTICS__S3_BUCKET` | Analytics bucket |
+| `CHUNKHOUND_ANALYTICS__FLUSH_INTERVAL_SECONDS` | Maximum time between analytics flushes (default: 21600) |
+| `CHUNKHOUND_ANALYTICS__FLUSH_BATCH_SIZE` | Buffered lines that trigger an early flush (default: 500) |
+| `CHUNKHOUND_ANALYTICS__MAX_UPLOAD_RETRIES` | Failed upload attempts before a buffer file is dropped (default: 10) |
+| `CHUNKHOUND_AWS_ACCESS_KEY_ID` | Analytics S3 access key. Deliberately not `AWS_ACCESS_KEY_ID` |
+| `CHUNKHOUND_AWS_SECRET_ACCESS_KEY` | Analytics S3 secret key. Deliberately not `AWS_SECRET_ACCESS_KEY` |
 | `CHUNKHOUND_LLM_PROVIDER` | LLM provider for research |
 | `CHUNKHOUND_LLM_MODEL` | LLM model shorthand that sets both utility and synthesis roles |
 | `CHUNKHOUND_LLM_UTILITY_MODEL` | LLM model for utility tasks (fast, lower cost) |

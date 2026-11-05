@@ -1,7 +1,7 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import PhosphorIcon from '../../components/PhosphorIcon.astro';
-import { DOCS_HOME, DOCS_PAGES } from '../../lib/nav';
+import { DOCS_HOME, DOCS_SECTIONS } from '../../lib/nav';
 ---
 
 <DocsLayout
@@ -12,23 +12,45 @@ import { DOCS_HOME, DOCS_PAGES } from '../../lib/nav';
     <h1>Documentation<span class="title-dot" aria-hidden="true"></span></h1>
     <p class="lead">
         Everything you need to install, configure, operate, and understand
-        ChunkHound. Start with the guides, then go as deep as you need.
+        ChunkHound &mdash; plus pi-schematic, the layer that makes agent work
+        repeatable. Start with the guides, then go as deep as you need.
     </p>
 
-    <div class="docs-hub-grid">
-        {DOCS_PAGES.map((page) => (
-            <a href={page.href} class="docs-hub-card">
-                <PhosphorIcon name={page.icon} size="20" weight="duotone" aria-hidden="true" />
-                <div class="docs-hub-body">
-                    <h2>{page.title}</h2>
-                    <p>{page.description}</p>
-                </div>
-            </a>
-        ))}
-    </div>
+    {DOCS_SECTIONS.map((section) => (
+        <section class="docs-hub-section">
+            <h2 class="docs-hub-section-title">{section.title}</h2>
+            <div class="docs-hub-grid">
+                {section.pages.map((page) => (
+                    <a href={page.href} class="docs-hub-card">
+                        <PhosphorIcon name={page.icon} size="20" weight="duotone" aria-hidden="true" />
+                        <div class="docs-hub-body">
+                            <h3>{page.title}</h3>
+                            <p>{page.description}</p>
+                        </div>
+                    </a>
+                ))}
+            </div>
+        </section>
+    ))}
 </DocsLayout>
 
 <style>
+    .docs-hub-section + .docs-hub-section {
+        margin-top: var(--space-8);
+    }
+
+    /* Group label, not a content heading: the page h1 keeps its scale. */
+    .docs-hub-section-title {
+        margin: 0 0 var(--space-3);
+        padding: 0;
+        border-bottom: none;
+        font-size: var(--text-base);
+        line-height: var(--lh-base);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        color: var(--text-secondary);
+    }
+
     .docs-hub-grid {
         display: grid;
         gap: var(--space-5);
@@ -61,8 +83,10 @@ import { DOCS_HOME, DOCS_PAGES } from '../../lib/nav';
         min-width: 0;
     }
 
-    .docs-hub-card h2 {
+    .docs-hub-card h3 {
         margin: 0 0 var(--space-2);
+        font-size: var(--text-xl);
+        line-height: var(--lh-xl);
     }
 
     .docs-hub-card p {

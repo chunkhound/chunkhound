@@ -349,6 +349,61 @@
   color: var(--link);
 }
 
+/* Callout styling is global, not component-scoped, so Markdown pages can
+   emit the same markup as DocsCallout.astro. */
+.docs-callout {
+  margin: var(--space-5) 0;
+  padding: var(--space-4) var(--space-5);
+  border: var(--border-w-default) solid var(--border-accent);
+  border-radius: var(--radius-xl);
+  background: color-mix(in srgb, var(--primary-bg) 72%, var(--bg-surface));
+}
+
+.docs-callout-success {
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+
+.docs-callout-warning {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-surface));
+}
+
+.docs-callout-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  line-height: var(--lh-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Optional leading icon, emitted inline by Markdown pages. */
+.docs-callout-title svg {
+  width: 1.135em;
+  height: 1.135em;
+  margin-right: var(--space-2);
+  vertical-align: -0.2em;
+  color: var(--primary);
+}
+
+.docs-callout-body {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.docs-callout-body p:last-child,
+.docs-callout-body ul:last-child,
+.docs-callout-body ol:last-child {
+  margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .docs-callout {
+    padding: var(--space-4);
+  }
+}
+
 .docs-callout a {
   color: var(--link-on-primary-bg);
 }
