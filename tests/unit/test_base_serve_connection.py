@@ -99,18 +99,37 @@ async def test_serve_connection_answers_modern_per_request_envelope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_serve_connection_closes_session_on_invalid_jsonrpc_shape() -> None:
-    """A syntactically-valid dict that fails JSON-RPC shape validation (e.g.
-    missing required fields) is connection-fatal, not skipped."""
+async def test_serve_connection_skips_invalid_jsonrpc_shape_and_keeps_serving() -> None:
+    """A dict that fails JSON-RPC shape validation is skipped (as the SDK's
+    stdio_server does); the session keeps answering later requests."""
     server = StdioMCPServer(config=MagicMock())
     incoming: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+    outgoing: asyncio.Queue[dict] = asyncio.Queue()
 
     async def read_frame() -> dict[str, Any] | None:
         return await incoming.get()
 
     async def write_frame(frame: dict) -> None:
-        pass
+        await outgoing.put(frame)
 
     session_task = asyncio.create_task(server.serve_connection(read_frame, write_frame))
-    await incoming.put({"not": "a valid jsonrpc message"})
-    await asyncio.wait_for(session_task, timeout=5.0)  # must exit, not hang
+    try:
+        await incoming.put({"not": "a valid jsonrpc message"})
+        await incoming.put(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-client", "version": "0.0.0"},
+                },
+            }
+        )
+        response = await asyncio.wait_for(outgoing.get(), timeout=5.0)
+        assert response["id"] == 1 and "result" in response
+        assert not session_task.done()
+    finally:
+        await incoming.put(None)
+        await asyncio.wait_for(session_task, timeout=5.0)  # EOF ends session

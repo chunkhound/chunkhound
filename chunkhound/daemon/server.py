@@ -73,12 +73,9 @@ class ChunkHoundDaemon(MCPServerBase):
     def _register_tools(self) -> None:
         """Build the shared SDK Server so serve_connection() has a handler.
 
-        Previously a no-op because the daemon dispatched tools via its own
-        hand-rolled JSON-RPC loop (_dispatch_mcp). Now that _handle_client
-        routes every connection through the inherited serve_connection(),
-        self.server must be built here exactly like stdio/http — otherwise
-        serve_connection()'s ``assert self.server is not None`` fails on the
-        very first client connection.
+        Every client connection is served through the inherited
+        serve_connection(), so self.server must be built here exactly like
+        stdio/http.
         """
         self._register_common_tool_handlers()
 
@@ -278,11 +275,20 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # --- MCP protocol session: one serve_connection() per connection ---
             async def _read_frame() -> dict[str, Any] | None:
-                try:
-                    frame = await ipc.read_frame(reader)
-                except asyncio.IncompleteReadError:
-                    return None
-                return frame if isinstance(frame, dict) else None
+                while True:
+                    try:
+                        frame = await ipc.read_frame(reader)
+                    except asyncio.IncompleteReadError:
+                        return None
+                    except Exception as e:
+                        self.debug_log(f"IPC read error: {e!r}")
+                        return None
+                    if isinstance(frame, dict):
+                        return frame
+                    # Non-object JSON (e.g. a batch array): skip, keep serving.
+                    self.debug_log(
+                        f"Skipping non-object IPC frame: {type(frame).__name__}"
+                    )
 
             async def _write_frame(frame: dict[str, Any]) -> None:
                 ipc.write_frame(writer, frame)

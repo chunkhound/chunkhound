@@ -56,10 +56,12 @@ dependencies = [
     # chunkhound/mcp_server/base.py (single dispatch point); enforced by
     # tests/unit/test_mcp_wrapper_sdk_isolation.py.
     "mcp>=2.3.0,<3",
-    # Used directly by base.py; already a hard mcp dependency, no extra weight.
+    # Used directly by http_server.py; already a hard mcp dependency, no
+    # extra install weight.
     "starlette>=0.48.0",
     "uvicorn>=0.37.0",
-    # Used directly by base.py's serve_connection(); previously transitive only.
+    # Used directly by base.py's serve_connection() and stdio.py's writer;
+    # previously transitive only.
     "anyio>=4.5.0",
     "mcp-types>=2.3.0,<3",
     "psutil>=5.8.0",

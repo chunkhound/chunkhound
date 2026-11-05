@@ -51,9 +51,7 @@ class DaemonHarness:
         assert isinstance(ack, dict) and ack.get("type") == "registered", ack
         return reader, writer
 
-    async def send(
-        self, writer: asyncio.StreamWriter, message: dict[str, Any]
-    ) -> None:
+    async def send(self, writer: asyncio.StreamWriter, message: Any) -> None:
         ipc.write_frame(writer, message)
         await writer.drain()
 

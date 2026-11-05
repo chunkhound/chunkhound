@@ -146,6 +146,9 @@ class StdioMCPServer(MCPServerBase):
                 async with self.server_lifespan():
                     import json
 
+                    import anyio
+                    import anyio.to_thread
+
                     from chunkhound.utils import stdio_lines
 
                     lines = stdio_lines.iter_stdin_lines()
@@ -154,14 +157,19 @@ class StdioMCPServer(MCPServerBase):
                         async for line in lines:
                             try:
                                 frame = json.loads(line.decode())
-                            except json.JSONDecodeError:
-                                continue  # matches ClientProxy's existing behavior
-                            return frame if isinstance(frame, dict) else None
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                continue  # skip undecodable lines
+                            if isinstance(frame, dict):
+                                return frame
+                            # Non-object JSON (e.g. a batch array): skip it.
                         return None
 
                     async def write_frame(frame: dict[str, Any]) -> None:
-                        stdio_lines.write_stdout_line(
-                            (json.dumps(frame) + "\n").encode()
+                        # Blocking stdout write off the event loop; serve_connection's
+                        # single pump_out task keeps output ordered.
+                        await anyio.to_thread.run_sync(
+                            stdio_lines.write_stdout_line,
+                            (json.dumps(frame) + "\n").encode(),
                         )
 
                     self.debug_log("Stdio server started, awaiting requests")

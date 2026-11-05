@@ -1,9 +1,8 @@
 """Cross-platform stdin line reader / stdout line writer.
 
-Extracted from chunkhound.daemon.client_proxy.ClientProxy so the Windows-safe
-stdin handling exists in exactly one place, shared by ClientProxy (stdio<->IPC
-relay) and StdioMCPServer (--no-daemon direct SDK serving). Zero chunkhound
-domain logic, zero mcp imports — pure OS I/O.
+Shared by ClientProxy (stdio<->IPC relay) and StdioMCPServer (--no-daemon
+direct SDK serving) so the Windows-safe stdin handling exists in one place.
+Zero chunkhound domain logic, zero mcp imports — pure OS I/O.
 """
 
 from __future__ import annotations
@@ -29,10 +28,7 @@ async def iter_stdin_lines() -> AsyncIterator[bytes]:
 
 
 async def _iter_stdin_lines_unix() -> AsyncIterator[bytes]:
-    """Unix: true async I/O via connect_read_pipe.
-
-    Moved from ClientProxy._forward_stdin_async.
-    """
+    """Unix: true async I/O via connect_read_pipe."""
     loop = asyncio.get_running_loop()
     stdin = asyncio.StreamReader()
     transport, _ = await loop.connect_read_pipe(
@@ -49,8 +45,7 @@ async def _iter_stdin_lines_unix() -> AsyncIterator[bytes]:
 
 
 async def _iter_stdin_lines_windows() -> AsyncIterator[bytes]:
-    """Windows: poll the synchronous pipe so cancellation never waits for EOF
-    (moved from ClientProxy._forward_stdin_windows)."""
+    """Windows: poll the synchronous pipe so cancellation never waits for EOF."""
     fd = sys.stdin.buffer.fileno()
     handle = _windows_stdin_handle(fd)
     buffer = bytearray()
@@ -93,7 +88,12 @@ def _windows_pipe_bytes_available(handle: int) -> int | None:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     available = ctypes.c_ulong()
     ok = kernel32.PeekNamedPipe(
-        ctypes.c_void_p(handle), None, 0, None, ctypes.byref(available), None,
+        ctypes.c_void_p(handle),
+        None,
+        0,
+        None,
+        ctypes.byref(available),
+        None,
     )
     if ok:
         return int(available.value)

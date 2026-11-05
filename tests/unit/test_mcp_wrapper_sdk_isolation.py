@@ -48,3 +48,14 @@ def test_dispatch_point_file_does_import_mcp_sdk() -> None:
         f"{DISPATCH_POINT_FILE} no longer imports mcp — the single dispatch "
         "point has disappeared; something is structurally wrong"
     )
+
+
+def test_dispatch_point_uses_only_public_mcp_modules() -> None:
+    """Private SDK modules (``mcp.*._x``) may change in any minor release of
+    the ``mcp>=2.3,<3`` range we accept; base.py must not depend on them."""
+    private = [
+        m
+        for m in _mcp_imports(Path(DISPATCH_POINT_FILE))
+        if any(part.startswith("_") for part in m.split("."))
+    ]
+    assert not private, f"{DISPATCH_POINT_FILE} imports private mcp modules: {private}"

@@ -1504,9 +1504,10 @@ class MCPServerBase(ABC):
         ``read_frame``/``write_frame`` exchange plain JSON-RPC dicts; this
         method owns everything SDK-specific. Callers never see an mcp type.
 
-        A frame that is valid JSON but fails JSON-RPC shape validation is
-        connection-fatal: the session ends rather than skipping the frame
-        and continuing.
+        A frame that fails JSON-RPC shape validation is forwarded to the
+        session as an exception (mirroring the SDK's ``stdio_server``) and
+        the session keeps serving; only ``read_frame`` returning ``None``
+        ends it.
 
         Used by:
         - ChunkHoundDaemon, once per client IPC connection.
@@ -1516,7 +1517,6 @@ class MCPServerBase(ABC):
         import anyio
         from mcp.server.lowlevel import NotificationOptions
         from mcp.server.models import InitializationOptions
-        from mcp.shared._context_streams import create_context_streams
         from mcp.shared.message import SessionMessage
         from mcp_types.jsonrpc import jsonrpc_message_adapter
 
@@ -1531,8 +1531,14 @@ class MCPServerBase(ABC):
             ),
         )
 
-        read_stream_writer, read_stream = create_context_streams(0)
-        write_stream, write_stream_reader = create_context_streams(0)
+        # Plain anyio streams satisfy the SDK's public ReadStream/WriteStream
+        # protocols; avoid the SDK-private context-stream wrappers.
+        read_stream_writer, read_stream = anyio.create_memory_object_stream[
+            SessionMessage | Exception
+        ](0)
+        write_stream, write_stream_reader = anyio.create_memory_object_stream[
+            SessionMessage
+        ](0)
 
         async def pump_in() -> None:
             async with read_stream_writer:
@@ -1546,9 +1552,10 @@ class MCPServerBase(ABC):
                         )
                     except Exception as exc:
                         self.debug_log(
-                            f"serve_connection: invalid JSON-RPC frame, closing: {exc}"
+                            f"serve_connection: invalid JSON-RPC frame, skipping: {exc}"
                         )
-                        break  # connection-fatal, not skip-and-continue
+                        await read_stream_writer.send(exc)
+                        continue
                     await read_stream_writer.send(message)
 
         async def pump_out() -> None:

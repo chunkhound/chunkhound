@@ -90,3 +90,27 @@ async def test_daemon_serves_two_concurrent_requests_on_one_connection(
         (await daemon_harness.recv(reader))["id"],
     }
     assert responses == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_daemon_skips_malformed_frames_and_keeps_serving(daemon_harness) -> None:
+    """A non-object frame (batch array) or an object that is not valid
+    JSON-RPC must not end the client's session; later requests still work."""
+    reader, writer = await daemon_harness.connect_and_register()
+    await daemon_harness.send(writer, [{"jsonrpc": "2.0", "id": 9, "method": "ping"}])
+    await daemon_harness.send(writer, {"not": "a valid jsonrpc message"})
+    response = await daemon_harness.send_and_recv(
+        reader,
+        writer,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "pi", "version": "0.0.0"},
+            },
+        },
+    )
+    assert response["id"] == 1 and "result" in response
