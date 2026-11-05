@@ -60,7 +60,11 @@ def _hero_surface_tokens() -> dict[str, dict[str, str]]:
     One alias level, like theme_tokens(): a surface re-points the link family to
     code tones, and those aliases must resolve to the hex the browser paints.
     """
-    local = extract_tokens(extract_block(HERO_CSS.read_text(encoding="utf-8"), ".hero"))
+    frame_css = HERO_CSS.with_name("terminal-frame.css").read_text(encoding="utf-8")
+    local = extract_tokens(extract_block(frame_css, ".hero, .terminal-card"))
+    local.update(
+        extract_tokens(extract_block(HERO_CSS.read_text(encoding="utf-8"), ".hero"))
+    )
 
     scoped_by_theme: dict[str, dict[str, str]] = {}
     for theme, page in theme_tokens().items():

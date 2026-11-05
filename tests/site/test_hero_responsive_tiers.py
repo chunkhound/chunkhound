@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 
+from tests.site.browser_helpers import homepage_probe
 from tests.site.css_helpers import bodies, rules, rules_containing
 
 # The narrow-card threshold, in the form Astro ships it (a range container query).
@@ -59,35 +60,86 @@ def test_hero_is_one_surface_with_no_second_register() -> None:
         )
 
 
-def test_terminal_card_establishes_inline_size_container() -> None:
-    """The tiers key to the card's own inline size, so the card must be a
-    queryable container — without it every tier query silently never matches."""
-    assert any(
-        "container:hero-terminal/inline-size" in _flat(body)
-        for body in bodies(".terminal-card", media="")
-    ), "terminal card must establish the hero-terminal inline-size container"
+def test_terminal_card_establishes_inline_size_container(built_site) -> None:
+    """The tiers key to the card's own inline size, so the rendered card must be
+    a queryable container — without it every tier query silently never matches."""
+    measured = homepage_probe(
+        """
+console.log(JSON.stringify(await homepageProbe(['dark'], async page => {
+  await page.setViewportSize({ width: 990, height: 900 });
+  return page.evaluate(() => getComputedStyle(
+    document.querySelector('.terminal-card')).containerType);
+})));
+"""
+    )
+    assert "inline-size" in measured["dark"]
 
 
-def test_run_measure_is_capped_without_a_note_track() -> None:
-    """The run, the composer and the window's titlebar share one measure, and it
-    is declared on the window — never on the card, because a custom property
-    resolves its own relative units where it is used and the card IS the
-    container: it cannot read its own cqi, but its child can. With the note
-    inline there is no note track to subtract and no token to toggle: the measure
-    is simply capped so a line never runs the whole window."""
-    assert any(
-        "--hero-measure:min(100%,68ch)" in _flat(body)
-        for body in bodies(".terminal-window", media="")
-    ), "the window must declare the run's measure"
+def test_hero_desktop_spacing_and_short_viewport_keyboard_scroll(built_site) -> None:
+    measured = homepage_probe(
+        """
+console.log(JSON.stringify(await homepageProbe(['dark'], async page => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const margin = await page.locator('.terminal-card').evaluate(
+    e => getComputedStyle(e).marginBlockStart);
+  await page.setViewportSize({ width: 390, height: 600 });
+  const viewport = page.locator('.terminal-viewport');
+  await page.waitForFunction(() => {
+    const e = document.querySelector('.terminal-viewport');
+    return e.scrollHeight > e.clientHeight;
+  }, null, { timeout: 30000 });
+  const overflow = await viewport.evaluate(e => getComputedStyle(e).overflowY);
+  await viewport.focus();
+  await viewport.evaluate(e => { e.scrollTop = e.scrollHeight; });
+  const before = await viewport.evaluate(e => e.scrollTop);
+  await page.keyboard.press('Home');
+  await page.waitForFunction(
+    before => document.querySelector('.terminal-viewport').scrollTop < before, before);
+  return { margin, overflow, before, after: await viewport.evaluate(e => e.scrollTop) };
+})));
+"""
+    )["dark"]
+    assert measured["margin"] == "0px"
+    assert measured["overflow"] in ("auto", "scroll")
+    assert measured["after"] < measured["before"]
 
-    assert not any(
-        "--hero-measure" in body for body in bodies(".terminal-card", media="")
-    ), "the container cannot read its own cqi — the measure lives on its child"
 
-    assert not any(
-        "--hero-note-w" in body or "--hero-note-gutter" in body
-        for body in bodies(".terminal-viewport")
-    ), "the note track machinery must be gone"
+def test_terminal_content_never_overflows_horizontally(built_site) -> None:
+    """The run and its notes fit the card at every supported width.
+
+    This replaces the old exact `--hero-measure` assertion: the rendered
+    geometry is the contract, so a harmless measure or token restyle cannot break
+    the test while a real overflow still does.
+    """
+    measured = homepage_probe(
+        """
+console.log(JSON.stringify(await homepageProbe(['dark'], async page => {
+  const out = {};
+  for (const width of [390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(100);
+    out[width] = await page.evaluate(() => {
+      const card = document.querySelector('.terminal-card');
+      const window_ = document.querySelector('.terminal-window');
+      return {
+        cardScroll: card.scrollWidth,
+        cardClient: card.clientWidth,
+        windowScroll: window_.scrollWidth,
+        windowClient: window_.clientWidth,
+      };
+    });
+  }
+  return out;
+})));
+"""
+    )
+    for width, box in measured["dark"].items():
+        assert box["cardScroll"] <= box["cardClient"] + 1, (
+            f"card overflows at {width}px"
+        )
+        assert box["windowScroll"] <= box["windowClient"] + 1, (
+            f"terminal window overflows at {width}px"
+        )
 
 
 def test_note_names_its_source_class_at_every_tier() -> None:
@@ -471,7 +523,7 @@ def test_hero_headline_takes_the_space_beside_the_window_on_desktop() -> None:
     headline = _flat("".join(bodies(".headline-row", media="1100px")))
     assert "order:2" in headline and "flex:110" in headline, headline
 
-    card = _flat("".join(bodies(".terminal-card", media="1100px")))
+    card = _flat("".join(bodies(".hero .terminal-card", media="1100px")))
     assert "order:1" in card, card
     assert "flex:00var(--hero-col)" in card, (
         "the window needs an explicit basis: inline-size containment zeroes auto"
@@ -503,7 +555,7 @@ def test_short_viewport_turns_the_screen_into_scrollback() -> None:
     becomes a bounded, user-scrollable CLI buffer: the composer stays pinned and
     older rows scroll out above it. Only the block axis scrolls, and only under
     the short-viewport query, so the base clipping contract survives."""
-    screen = bodies(".terminal-viewport", media="780px")
+    screen = bodies(".hero .terminal-viewport", media="780px")
     assert screen, "the short-viewport screen rules must exist"
     flat = [_flat(body) for body in screen]
     assert any("max-height:" in body for body in flat), (

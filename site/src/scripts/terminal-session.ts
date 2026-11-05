@@ -68,6 +68,9 @@ export class TerminalSession {
     stopRequested = false;
     startGatePending = true;
     settledHeightLockPending = false;
+    /** True once destroy() ran; teardown guards read this. */
+    destroyed = false;
+    private cleanups: Array<() => void> = [];
 
     constructor(elements: TerminalElements, options: HeroTerminalOptions = {}) {
         this.terminal = elements.terminal;
@@ -99,16 +102,53 @@ export class TerminalSession {
         this.terminal.style.setProperty("--hero-note-beat", `${this.workingPause}ms`);
     }
 
+    /** Register a disposer that destroy() runs. A registration after destroy
+     * disposes at once, so late wiring cannot leak onto detached DOM. */
+    onCleanup(dispose: () => void): void {
+        if (this.destroyed) {
+            dispose();
+            return;
+        }
+        this.cleanups.push(dispose);
+    }
+
+    /** Bind one listener and own its removal, so destroy() detaches every
+     * terminal listener even after the card left the document. */
+    listen(target: EventTarget, type: string, handler: EventListener): void {
+        target.addEventListener(type, handler);
+        this.onCleanup(() => target.removeEventListener(type, handler));
+    }
+
+    /** Tear down every registered wiring exactly once. A frame owner calls this
+     * before removing the frame; pagehide/pageshow must NOT call it, because
+     * bfcache restore re-wires this same session. */
+    destroy(): void {
+        if (this.destroyed) {
+            return;
+        }
+        // Stop the run machine before disposal: an in-flight sleep resumes after
+        // its listeners are gone, so the render guards must see a dead session.
+        this.destroyed = true;
+        this.stopRequested = true;
+        this.isVisible = false;
+        const pending = this.cleanups;
+        this.cleanups = [];
+        for (const dispose of pending) {
+            dispose();
+        }
+    }
+
     /** Live media-query tracking. Skipped when the test hook forces the path;
      * flipping to reduced stops looping, flipping back never re-runs. */
-    trackReducedMotion(): void {
+    trackReducedMotion(onChange?: (reduced: boolean) => void): void {
         if (this.forcedReduced !== undefined) {
             return;
         }
-        onReducedMotionChange((reduced) => {
+        this.onCleanup(onReducedMotionChange((reduced) => {
             this.reducedMotion = reduced;
             this.loop = reduced ? false : this.loopDefault;
-        });
+            onChange?.(reduced);
+        }));
     }
 
     /** Drop the previous beat's markers. Runs before the next beat is raised,
@@ -253,10 +293,11 @@ export class TerminalSession {
 export function createSession(
     doc: Document,
     options: HeroTerminalOptions = {},
+    root: ParentNode = doc,
 ): TerminalSession | null {
-    const container = doc.getElementById("terminal-lines");
-    const viewport = doc.getElementById("terminal-viewport");
-    const inputText = doc.getElementById("terminal-input-text");
+    const container = root.querySelector<HTMLElement>(".terminal-lines");
+    const viewport = root.querySelector<HTMLElement>(".terminal-viewport");
+    const inputText = root.querySelector<HTMLElement>(".input-text");
     if (!container || !viewport || !inputText) {
         return null;
     }

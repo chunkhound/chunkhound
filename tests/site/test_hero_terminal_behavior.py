@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from tests.site.css_helpers import bodies
+from tests.site.css_helpers import bodies, shipped_css
 from tests.site.dom_helpers import DIST, browser_dom, dist_body, hero_noscript
 from tests.site.html_helpers import NUMERIC_LANGUAGE_CLAIM
 from tests.site.tsx_runner import ROOT, run_tsx_json
@@ -75,6 +75,12 @@ const inputText = doc.getElementById('terminal-input-text');
 // an .anchor with the note that explains them, so container.children misses them.
 const countRows = (cls) => container.querySelectorAll(`.line.${cls}`).length;
 const { initHeroTerminal } = await import('./site/src/scripts/hero-terminal.ts');
+// happy-dom aliases PageTransitionEvent to Event; true models a bfcache restore.
+const dispatchPagehide = (persisted) => {
+  const event = new window.Event('pagehide');
+  Object.defineProperty(event, 'persisted', { value: persisted });
+  window.dispatchEvent(event);
+};
 """
 
 _TICK = "await new Promise((resolve) => setTimeout(resolve, 0));\n"
@@ -338,9 +344,7 @@ console.log(JSON.stringify({
     # The shipped CSS clips the viewport and rests the transcript on the
     # composer edge (the bottom-entry contract): the first row eats the viewport's
     # free space, so the run grows upward and every append pushes the rest up.
-    css = "".join(
-        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
     assert re.search(r"\.terminal-viewport[^{]*\{[^}]*overflow:\s*hidden", css), (
         "viewport must clip the transcript at the top"
     )
@@ -360,9 +364,7 @@ def test_hero_terminal_bottom_entry_push_is_gated_on_motion(built_site) -> None:
     entrance's animation is delayed by the push's own length, so the phases never
     overlap). Both phases collapse under reduced motion, where the transcript
     renders complete instead of animating in."""
-    css = "".join(
-        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
 
     body = ""
     for match in re.finditer(r"@media\s*\(prefers-reduced-motion:reduce\)\s*\{", css):
@@ -399,9 +401,7 @@ def test_hero_terminal_prompt_caret_runs_until_submit(built_site) -> None:
     """The caret is live (blinking) from first paint and while the prompt is being
     entered, and only goes dark once the run publishes the prompt as submitted —
     never before. Reduced motion keeps its own blanket animation:none."""
-    css = "".join(
-        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
     assert re.search(
         r"\.terminal-card[^{]*data-composer=sent[^{]*\.terminal-input[^{]*\.cursor"
         r"[^{]*\{(?=[^}]*animation:\s*none)(?=[^}]*opacity:\s*0)",
@@ -421,9 +421,7 @@ def test_hero_terminal_composer_recedes_after_submit(built_site) -> None:
     the muted code shade once the prompt is submitted, so attention moves from the
     composer to the transcript. The run publishes that state as
     `data-composer="sent"`, keyed to the submit beat."""
-    css = "".join(
-        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
     # Both live surfaces carry a colour transition, so submit is a fade, not a
     # jump; the marker's live shade is the bright user colour.
     assert re.search(
@@ -551,9 +549,7 @@ def test_hero_terminal_working_label_sweep_freezes_under_reduced_motion(
 ) -> None:
     """The working label carries a live highlight sweep so the row reads as
     active; reduced motion freezes it to the flat muted color."""
-    css = "".join(
-        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
     assert "@keyframes working-sweep" in css
     assert re.search(
         r"\.call\.is-working[^{]*\.call-text[^{]*\{[^}]*working-sweep", css
@@ -642,9 +638,7 @@ def test_hero_terminal_chunkhound_dot_blinks_and_freezes_under_reduced_motion(
 ) -> None:
     """The ChunkHound row's in-flight progress is a standard terminal blinking
     dot; reduced motion freezes it to a solid dot."""
-    css = "".join(
-        path.read_text(encoding="utf-8") for path in (DIST / "_astro").glob("*.css")
-    )
+    css = shipped_css()
     assert "@keyframes blink" in css
     assert re.search(
         r"\.evidence\.is-working[^{]*\.glyph[^{]*\{[^}]*animation:[^;}]*blink",
@@ -979,7 +973,7 @@ observer.callback([{ isIntersecting: true }]);
 await new Promise((resolve) => setTimeout(resolve, 0));
 const firstRenderCount = container.children.length;
 
-window.dispatchEvent(new window.Event('pagehide'));
+dispatchPagehide(true);
 const afterPagehideCount = container.children.length;
 
 window.dispatchEvent(new window.Event('pageshow'));
@@ -1481,7 +1475,7 @@ const midRun = {
   settled: card.classList.contains('is-settled'),
 };
 
-window.dispatchEvent(new window.Event('pagehide'));
+dispatchPagehide(true);
 release();
 await waitFor(() => card.classList.contains('is-settled'));
 await new Promise((resolve) => setTimeout(resolve, 0));

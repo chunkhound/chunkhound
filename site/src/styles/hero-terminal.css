@@ -1,9 +1,4 @@
-/* Hero terminal surface — extracted from Hero.astro so the component stays
-   a template, not a stylesheet. Astro's component scoping is gone, so the
-   one generic class family `.dot` is rooted at `.hero` explicitly: another
-   component ships its own `.dot` (ElbowChart.astro). Every other selector
-   names a hero-only class, and this bundle is only linked by pages that
-   render Hero. */
+/* Hero-specific narrative and layout. */
 /* Narrative roles, mapped onto design-system tokens — no ad-hoc colors:
        the conversation speaks in neutrals (user = --text-primary, the
        brightest neutral, terminal input convention; agent = --code-text,
@@ -23,85 +18,23 @@
            leaving dead surface below it. */
         padding: var(--space-8) 0;
         text-align: start;
-        /* This surface is permanently dark, so the page-neutral token is
-           pinned to its dark value: light theme flips --text-primary to ink
-           for the page, which would render the prompt and verdict invisible
-           on this dark surface. --code-* tokens are theme-stable already. */
-        --text-primary: #f4f4f4;
         /* The permanently-dark surface re-points the link recipe to the code
            surface's highlight. DESIGN_SYSTEM (Code Surface Accent): on --code-bg
            use --code-accent, never the theme-adaptive --primary — its ink value
            in light theme would vanish here. The surface — never the CTA's lone
            class (0,1,0), which loses to the prose-link rules (0,1,1) — must own
            the family, or a visited CTA falls back to light theme's ink
-           --link-visited (#164e63 = 1.55:1 here). Same move as the
-           --text-primary pin above; the CTA stays highlighted in every state
+           --link-visited (#164e63 = 1.55:1 here). The shared frame pins
+           --text-primary and --link-focus; the CTA stays highlighted in every state
            and hover is carried by the underline alone. */
         --link: var(--code-accent);
         --link-hover: var(--code-accent);
         --link-visited: var(--code-accent);
-        --link-focus: var(--code-accent);
         /* Decorative mask fill for the hound mark: an alias of --code-text,
            kept theme-invariant with the code surface it decorates. Lives
            outside the contrast matrix (see UNRESOLVED_TOKENS in
            tests/site/test_theme_contrast.py) because no text ever sits on it. */
         --hero-hound-fill: var(--code-text);
-    }
-
-    /* The run's window column: the terminal's reading measure (68ch of
-       JetBrains Mono at its max size — 14px at 0.6em advance — plus the window's
-       inline gutter), left-anchored with the section grid so its frame edges ARE
-       its content edges and the terminal's slack never piles up on one side. The
-       headline is a sibling that spans the container (see .headline-row), so the
-       hero title aligns with every other section while the window stays narrow.
-       Restated as a length because the card IS the container: it cannot resolve
-       the terminal's own ch/cqi in its own properties. The tier tests keep the
-       two figures in step. */
-    .terminal-card {
-        display: flex;
-        flex-direction: column;
-        --hero-col: min(100%, 595px);
-        max-inline-size: var(--hero-col);
-        /* The step the window's frame leaves below the headline. */
-        margin-block-start: var(--space-3);
-        /* The tier queries below key to the card's own inline size, not the
-           viewport: the measure grammar survives any width it's given. */
-        container: hero-terminal / inline-size;
-        /* Single source for the composer's floor: the scrollback affordance
-           offsets itself by this so it never overlaps the composer. */
-        --composer-min-h: 40px;
-    }
-
-    /* The window: the titlebar, the scrollback and the composer in one bounded
-       object, so the run reads as a terminal window against the hero's
-       full-bleed surface. Its frame is the composer's own hairline one radius
-       step up (--radius-md for the container, --radius-sm for the field inside
-       it), so the boundary grammar is one thing at two scales. No luminance
-       step (an annotation already steps up off --code-bg and that step is a
-       contrast ceiling) and no shadow (flat design).
-
-       Width: the hero's one column (see .terminal-card) — the window ends where
-       its copy does, so the terminal holds no dead space beside the run, and the
-       titlebar's control lands next to the run instead of at the far edge of the
-       page. The window declares the mono font so the `68ch` in its copy measure
-       resolves in the terminal's metrics, not the page's — and so the run and
-       the composer inherit the terminal's type rather than re-declaring it. */
-    .terminal-window {
-        background: var(--code-bg);
-        /* The frame is a code token, not --border-color: the surface is
-           theme-stable (both themes render it dark), so the frame must be too,
-           and --code-muted is the family's only step that clears the 3:1
-           non-text bar on it in both themes. */
-        border: var(--border-w-default) solid var(--code-muted);
-        border-radius: var(--radius-md);
-        display: flex;
-        flex-direction: column;
-        font-family: "JetBrains Mono", monospace;
-        font-size: var(--terminal-font-size);
-        gap: var(--space-2);
-        /* Clips the scrollback mask and the run to the window's radius. */
-        overflow: hidden;
-        padding-block: var(--space-2);
     }
 
     /* The title and its trailing CTA share one inline flow, so the link lands
@@ -131,7 +64,7 @@
         /* The basis must be explicit: container-type:inline-size applies
            inline-size containment, so an auto basis cannot read the card's
            contents and collapses to 0. */
-        .terminal-card {
+        .hero .terminal-card {
             flex: 0 0 var(--hero-col);
             margin-block-start: 0;
             order: 1;
@@ -146,65 +79,6 @@
         font-size: var(--text-4xl);
         line-height: var(--lh-4xl);
         margin: 0;
-    }
-
-    /* The window's three rows: one inline gutter, so the titlebar's chrome and
-       the run share the same left and right edges. The window owns only the
-       block rhythm and the frame. */
-    .terminal-seam,
-    .terminal-viewport,
-    .terminal-composer {
-        padding-inline: var(--space-3);
-    }
-
-    /* Session control: the session's one control, pushed to the titlebar's
-       trailing edge so it reads as chrome for the run rather than for the page.
-       The titlebar is capped to the run's measure (the window's width), so that
-       edge is the run's own right edge. */
-    .terminal-control {
-        align-items: center;
-        background: none;
-        margin-inline-start: auto;
-        border: var(--border-w-default) solid
-            color-mix(in srgb, var(--code-muted) 45%, transparent);
-        border-radius: var(--radius-sm);
-        color: var(--code-muted);
-        cursor: pointer;
-        display: inline-flex;
-        flex-shrink: 0;
-        font-family: "JetBrains Mono", monospace;
-        font-size: var(--text-xs);
-        gap: var(--space-2);
-        letter-spacing: 0.04em;
-        padding: var(--space-2) var(--space-3);
-    }
-
-    .terminal-control-icon {
-        display: inline-flex;
-    }
-
-    /* The glyph tracks the control's state: pause while the run is in flight,
-       play once it has settled — the visible label carries the word. */
-    .terminal-control-icon-pause {
-        display: none;
-    }
-
-    .terminal-control[data-state="stop"] .terminal-control-icon-play {
-        display: none;
-    }
-
-    .terminal-control[data-state="stop"] .terminal-control-icon-pause {
-        display: inline-flex;
-    }
-
-    .terminal-control:hover {
-        border-color: var(--code-muted);
-        color: var(--code-text);
-    }
-
-    .terminal-control:focus-visible {
-        outline: var(--border-w-emphasis) solid var(--link-focus);
-        outline-offset: 2px;
     }
 
     /* The hero's only CTA: the cluster flows inline right after the headline's
@@ -261,22 +135,6 @@
         margin-inline-end: var(--space-2);
         vertical-align: middle;
         width: calc(1.25em * 194 / 150);
-    }
-
-    /* Decorative window controls (traffic lights): the abstract chrome marking
-       where the window begins. No function, no session title — the h1 owns that. */
-    .terminal-dots {
-        display: flex;
-        gap: var(--space-2);
-        opacity: 0.6;
-    }
-
-    /* Titlebar: the decorative "window controls", the glyph key, and the session
-       control in one row, so the window's chrome costs no vertical space. */
-    .terminal-seam {
-        align-items: center;
-        display: flex;
-        gap: var(--space-5);
     }
 
     /* Glyph key: shown exactly where the transcript's inline role column is
@@ -500,21 +358,6 @@
         line-height: var(--lh-sm);
     }
 
-    .hero .dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-    }
-    .hero .dot.red {
-        background: #ff5f56;
-    }
-    .hero .dot.yellow {
-        background: #ffbd2e;
-    }
-    .hero .dot.green {
-        background: #27c93f;
-    }
-
     /* One measure for the run and the composer — the same object's two halves,
        so a composer wider than the output it echoes is a bug, not a style.
        Declared on the window, not on the card: a custom property resolves its
@@ -541,11 +384,6 @@
            span, so the transcript moving up and the note drawing in are one
            terminal beat, not two competing motions. */
         --hero-push: var(--hero-note-stroke);
-        /* Two-phase entrance: the push (above) is phase one — existing content
-           slides up to make room; this is phase two — the new row then fades in.
-           The row's animation is delayed by --hero-push, so the phases never
-           overlap. */
-        --hero-enter: 260ms;
         /* The role column is one token: the line grid and the note's indent both
            derive from it, so the note can never drift from the copy column. */
         --hero-role-col: 10ch;
@@ -553,35 +391,6 @@
            a small indent is enough; from a 480px card up the note steps past
            the role + glyph columns to sit under the copy (set in that tier). */
         --hero-note-indent: var(--space-4);
-        /* The composer's hairline reads "live" while a prompt is being entered
-           and recedes once it is submitted, so attention follows the same submit
-           beat the caret does. Both shades are --code-muted mixes, so they stay
-           theme-stable on this theme-stable surface. */
-        --hero-composer-border: color-mix(
-            in srgb,
-            var(--code-muted) 65%,
-            transparent
-        );
-        --hero-composer-border-idle: color-mix(
-            in srgb,
-            var(--code-muted) 22%,
-            transparent
-        );
-        /* The terminal depicts a real terminal, so it is exempt from the type
-           scale: its size ramps off the card instead of stepping — ~12.5px on a
-           phone, 14px (the reading floor for monospace) from ~600px up, so the
-           desktop column renders at the floor. */
-        --terminal-font-size: clamp(12px, 0.5cqi + 11px, 14px);
-    }
-
-    /* Harness scrollback viewport: full card width, so a margin note has
-       somewhere to live, and JS locks a base height to the settled transcript so
-       the input stays pinned below the run. Clipped at the top; the transcript
-       is top-anchored so appended rows never move the rows above them. */
-    .terminal-viewport {
-        flex: 1 1 auto;
-        overflow: hidden;
-        min-height: 120px;
     }
 
     /* Short viewports (e.g. a 667px-tall phone) cannot afford the run plus its
@@ -593,7 +402,7 @@
        margin) plus the masthead, so the offset cannot drift from the layout it
        protects. */
     @media (max-height: 780px) {
-        .terminal-viewport {
+        .hero .terminal-viewport {
             max-height: clamp(160px, calc(100dvh - 406px), 320px);
             overflow-y: auto;
             overscroll-behavior: contain;
@@ -605,34 +414,6 @@
         .terminal-viewport::-webkit-scrollbar {
             display: none;
         }
-    }
-
-    /* History fade: only while rows really are hidden above the fold of the
-       screen (JS mirrors scrollability onto the card). */
-    .terminal-card[data-scrollable="true"] .terminal-viewport {
-        mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
-        -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
-    }
-
-    .terminal-lines {
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-start;
-        /* Bottom-entry glide: JS inverts the height a new row added and eases the
-           transform back to zero, so the stack rises from the composer edge
-           instead of jumping. Only the transform is animated: the append itself
-           is layout, so this stays on the compositor. */
-        transition: transform var(--hero-push) ease-out;
-        /* The run's measure: capped so a line never runs the whole container,
-           and shortened by the note track so a note can sit beside the receipt
-           it explains. The inline gutter lives on the viewport, so the
-           highlighted row's negative margin still bleeds the band to the card
-           edge. The terminal's mono is inherited from the window — declared
-           once there — so the run and the composer can never disagree. */
-        max-inline-size: var(--hero-measure);
-        min-height: 100%;
-        line-height: 1.4;
-        overflow-wrap: anywhere;
     }
 
     /* The stack rests on the composer edge: an auto margin on the first row eats
@@ -730,117 +511,6 @@
         animation: blink 1s step-end infinite;
     }
 
-    /* Fixed harness input: role label + prompt glyph + typed followup + block
-       caret, in a bordered composer that never scrolls or moves. Same label
-       column/gap and the same inline padding as .terminal-lines so the
-       composer's You/❯ align under the transcript's. */
-    /* Composer row: carried by the same measure as the run, so the field ends
-       where the run ends and the margin notes begin. Also the scrollback pill's
-       positioning context, so the pill tracks the composer's edge at every
-       width. */
-    .terminal-composer {
-        position: relative;
-    }
-
-    .terminal-input {
-        display: grid;
-        /* The copy column takes the leftover width and may shrink to nothing
-           (minmax(0, …)) so a long prompt scrolls inside it instead of
-           stretching the composer or wrapping to a second row. */
-        grid-template-columns: 10ch auto minmax(0, 1fr);
-        column-gap: var(--space-3);
-        align-items: center;
-        border: var(--border-w-default) solid var(--hero-composer-border);
-        border-radius: var(--radius-sm);
-        padding: var(--space-2) var(--space-3);
-        /* Mono + size are the window's: see .terminal-window's font contract. */
-        line-height: 1.4;
-        max-inline-size: var(--hero-measure);
-        min-height: var(--composer-min-h);
-        /* The submit beat is a colour move, never a jump: the field fades down
-           as the prompt leaves it. */
-        transition: border-color 400ms ease-out;
-    }
-
-    /* The composer starts live (first paint and the entrance beat keep the field
-       bright) and only recedes once JS publishes that the prompt was submitted
-       (`data-composer="sent"`), so the fade tracks the submit beat exactly. */
-    .terminal-card[data-composer="sent"] .terminal-input {
-        border-color: var(--hero-composer-border-idle);
-    }
-
-    /* Scrollback affordance: appears only once the reader is off the tail. The
-       offset clears the composer by its own min height, so the two never
-       collide without a hardcoded magic number here. */
-    .terminal-jump {
-        align-items: center;
-        background: var(--code-bg);
-        border: var(--border-w-default) solid
-            color-mix(in srgb, var(--code-muted) 45%, transparent);
-        border-radius: var(--radius-full);
-        bottom: calc(var(--composer-min-h) + var(--space-2));
-        color: var(--code-text);
-        cursor: pointer;
-        display: none;
-        font-family: "JetBrains Mono", monospace;
-        font-size: var(--text-xs);
-        gap: var(--space-1);
-        letter-spacing: 0.04em;
-        padding: var(--space-1) var(--space-3);
-        position: absolute;
-        right: var(--space-3);
-        z-index: 5;
-    }
-
-    /* CSS owns the affordance so the JS contract is one attribute flip. */
-    .terminal-card[data-following="false"] .terminal-jump {
-        display: inline-flex;
-    }
-
-    .terminal-jump:hover {
-        border-color: var(--code-muted);
-    }
-
-    .terminal-jump:focus-visible {
-        outline: var(--border-w-emphasis) solid var(--link-focus);
-        outline-offset: 2px;
-    }
-
-    /* Single-line composer: the typed prompt never wraps — it scrolls right so
-       the caret stays visible, exactly like a real harness prompt field. The
-       scrollbar is hidden; JS pins the scroll to the tail per character. */
-    .input-line {
-        align-items: center;
-        display: flex;
-        gap: var(--space-1);
-        min-width: 0;
-        overflow-x: auto;
-        scrollbar-width: none;
-        white-space: nowrap;
-    }
-
-    .input-line::-webkit-scrollbar {
-        display: none;
-    }
-
-    /* Typing and sent turns share the user's colour: colour tracks identity,
-       not keystroke state. */
-    .input-glyph {
-        /* Live while a prompt is being entered — the marker is the user's
-           insertion point — then it recedes with the field once submitted. */
-        color: var(--text-primary);
-        transition: color 400ms ease-out;
-    }
-
-    .terminal-card[data-composer="sent"] .input-glyph {
-        color: var(--code-muted);
-    }
-
-    .input-text {
-        color: var(--text-primary);
-        white-space: nowrap;
-    }
-
     .terminal-input .cursor {
         display: inline-block;
         width: 8px;
@@ -922,29 +592,6 @@
         to {
             opacity: 1;
         }
-    }
-
-    /* A new row enters in two phases. Phase one is the push (above): the
-       transcript slides up to open the row's space. This animation is phase two,
-       held off for the whole push, then fades the row in — opacity only, so the
-       entrance adds no second motion (and no settle/lurch) after the slide
-       stops: the run reads as one eased movement. The marker is a data-*
-       attribute, never a class, so the shipped transcript class contract stays
-       byte-stable; the base state is visible, so a row without it never fades. */
-    @keyframes hero-row-in {
-        from {
-            opacity: 0;
-        }
-    }
-
-    .terminal-lines [data-enter] {
-        animation: hero-row-in var(--hero-enter) ease-out var(--hero-push) both;
-    }
-
-    /* Nothing to make room for (the run's first row): no phase one, so enter at
-       once instead of waiting out a push that never ran. */
-    .terminal-lines [data-enter="solo"] {
-        animation-delay: 0s;
     }
 
     @media (prefers-reduced-motion: reduce) {

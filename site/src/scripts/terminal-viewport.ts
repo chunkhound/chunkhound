@@ -1,8 +1,7 @@
 import type { TerminalSession } from "./terminal-session";
-import { appendStaticStep, STEPS } from "./terminal-dom";
 
 /**
- * Viewport geometry for the hero terminal: the settled-height lock (the card
+ * Viewport geometry for a terminal: the settled-height lock (the card
  * never grows; the transcript bottom-anchors and clips at the top like a real
  * harness scrollback) plus card visibility. Operates on a TerminalSession.
  */
@@ -56,7 +55,11 @@ function styleMeasureProbe(measure: HTMLElement, width: number): void {
 /** Reserve the settled transcript height on the viewport so the card never
  * grows: the transcript is bottom-anchored and older lines clip at the
  * top, exactly like a real harness scrollback. */
-export function lockViewportHeight(session: TerminalSession): void {
+export function lockViewportHeight(session: TerminalSession, render: (measure: HTMLElement) => void): void {
+    // A late fonts.ready or queued rAF must never measure or mutate detached DOM.
+    if (session.destroyed) {
+        return;
+    }
     const measure = buildMeasureProbe(session);
     if (!measure) {
         return;
@@ -64,7 +67,7 @@ export function lockViewportHeight(session: TerminalSession): void {
     measure.style.height = "auto";
     measure.style.minHeight = "0";
     measure.setAttribute("aria-hidden", "true");
-    STEPS.forEach((step) => appendStaticStep(measure, session.doc, step));
+    render(measure);
     session.scrollViewport.appendChild(measure);
     const height = Math.ceil(measure.getBoundingClientRect().height);
     measure.remove();
@@ -72,6 +75,22 @@ export function lockViewportHeight(session: TerminalSession): void {
         session.scrollViewport.style.height = `${height}px`;
     }
     session.syncScrollable();
+}
+
+/** Re-lock the settled height whenever the card's inline size changes, so a
+ * font swap or a rotate never leaves the transcript sized for its old measure. */
+export function keepViewportHeightLocked(
+    session: TerminalSession,
+    render: (measure: HTMLElement) => void,
+): void {
+    if (typeof ResizeObserver === "undefined") {
+        return;
+    }
+    const observer = new ResizeObserver(() => {
+        lockViewportHeight(session, render);
+    });
+    observer.observe(session.card);
+    session.onCleanup(() => observer.disconnect());
 }
 
 export function runAfterLayout(callback: () => void): void {
@@ -84,19 +103,19 @@ export function runAfterLayout(callback: () => void): void {
     window.setTimeout(callback, 0);
 }
 
-export function scheduleSettledHeightLock(session: TerminalSession): void {
+export function scheduleSettledHeightLock(session: TerminalSession, render: (measure: HTMLElement) => void): void {
     if (session.settledHeightLockPending) {
         return;
     }
     session.settledHeightLockPending = true;
     runAfterLayout(() => {
         session.settledHeightLockPending = false;
-        lockViewportHeight(session);
+        lockViewportHeight(session, render);
     });
     const fonts = (session.doc as Document & {
         fonts?: { ready?: Promise<unknown> };
     }).fonts;
     void fonts?.ready?.then(() => {
-        lockViewportHeight(session);
+        lockViewportHeight(session, render);
     });
 }

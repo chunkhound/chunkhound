@@ -1,8 +1,11 @@
+import { setControl } from "./terminal-controls";
+import { bootTerminalFrame } from "./terminal-frame";
 import type { HeroSource } from "./hero-transcript";
 import type { TerminalSession } from "./terminal-session";
+import { enterRow } from "./terminal-entrance";
+import { charsPerFrame, spinGlyph, typeText } from "./terminal-typing";
 import {
     isCardVisible,
-    lockViewportHeight,
     runAfterLayout,
     scheduleSettledHeightLock,
 } from "./terminal-viewport";
@@ -80,81 +83,7 @@ function pendingPushOffset(session: TerminalSession, before: number | null): num
     return before - first.getBoundingClientRect().top + followScroll;
 }
 
-/** Phase two of a new row's entrance: after the push has made room, the row
- * fades in and lifts the last few pixels into place (CSS, held off by the
- * push's length). A data-* marker — never a class — keeps the shipped
- * transcript class contract stable; `solo` drops the delay when there was no
- * room to make (the run's first row). The marker is dropped once the fade
- * lands, and the static / reduced-motion render never gets one. */
-export function enterRow(session: TerminalSession, row: HTMLElement | null, delayed: boolean): void {
-    if (!row || session.reducedMotion || !session.shouldAnimate()) {
-        return;
-    }
-    row.dataset.enter = delayed ? "" : "solo";
-    row.addEventListener("animationend", (event) => {
-        if ((event as AnimationEvent).animationName === "hero-row-in") {
-            row.removeAttribute("data-enter");
-        }
-    });
-}
-
-// --- Typing engine ---
-
-/** Animate a running tool call: cycle the braille frames for `duration` ms,
- * splitting the wait into frame-sized sleeps so the injected `sleep` (real
- * timer in the page, fake in tests) still owns all timing. Bails as soon as
- * `abort()` flips so stop / reduced-motion / off-screen can fast-forward. */
-export async function spinGlyph(
-    session: TerminalSession,
-    glyph: HTMLElement,
-    duration: number,
-    abort: () => boolean,
-): Promise<void> {
-    let frame = 0;
-    for (let elapsed = 0; elapsed < duration; elapsed += SPINNER_TICK) {
-        glyph.textContent = `${SPINNER_FRAMES[frame % SPINNER_FRAMES.length]} `;
-        await session.sleep(Math.min(SPINNER_TICK, duration - elapsed));
-        frame += 1;
-        if (abort()) {
-            return;
-        }
-    }
-}
-
-/** The one character emitter behind every typed surface: the prompt input and
- * the agent's streamed output. Reduced motion or a stop ships the full text
- * at once; going off-screen aborts mid-way and leaves the partial text. The
- * injected `sleep` owns all timing, so reduced motion still sleeps zero
- * times. `onChar` lets a caller react per character (advance a spinner frame,
- * keep the row pinned). */
-export async function typeText(
-    session: TerminalSession,
-    target: HTMLElement,
-    text: string,
-    delay: number,
-    abort: () => boolean,
-    onChar?: () => void,
-): Promise<void> {
-    for (const ch of text) {
-        if (session.reducedMotion || session.stopRequested) {
-            target.textContent = text;
-            return;
-        }
-        if (abort()) {
-            return;
-        }
-        target.textContent += ch;
-        onChar?.();
-        await session.sleep(delay);
-    }
-}
-
-/** How many characters stream between two braille frames, so the working row
- * keeps ticking while its text types. A non-positive delay has no cadence to
- * divide by, so it falls back to a small fixed group. */
-export function charsPerFrame(delay: number): number {
-    return delay > 0 ? Math.max(1, Math.round(SPINNER_TICK / delay)) : 4;
-}
+// --- Beat composition ---
 
 /** The engine's cited return, typed after the agent's call text and before
  * the agent settles: each citation streams into the list the working row
@@ -358,6 +287,10 @@ async function renderStep(session: TerminalSession, step: HeroStep): Promise<voi
 }
 
 async function renderOnce(session: TerminalSession): Promise<void> {
+    // Never repaint a destroyed card.
+    if (session.destroyed) {
+        return;
+    }
     session.clearTerminal();
     for (const step of STEPS) {
         if (!(await runStepGuarded(session, step))) {
@@ -369,6 +302,11 @@ async function renderOnce(session: TerminalSession): Promise<void> {
 /** One guarded step: fast-forward to static on stop/reduced-motion, wipe on
  * hide, else render. Returns false when the run must not continue. */
 async function runStepGuarded(session: TerminalSession, step: HeroStep): Promise<boolean> {
+    // Before every fallback: destroy() sets stopRequested, so the stop branch
+    // below would render static markup into a dead card.
+    if (session.destroyed) {
+        return false;
+    }
     if (session.reducedMotion || session.stopRequested) {
         renderStatic(session);
         return false;
@@ -378,6 +316,9 @@ async function runStepGuarded(session: TerminalSession, step: HeroStep): Promise
         return false;
     }
     await renderStep(session, step);
+    if (session.destroyed) {
+        return false;
+    }
     if (session.reducedMotion || session.stopRequested) {
         renderStatic(session);
         return false;
@@ -403,23 +344,6 @@ async function startGate(session: TerminalSession): Promise<void> {
 }
 
 // --- Run control ---
-
-/** The chrome control is context-aware: "Stop" while a run is in flight,
- * "Replay" once it settles. It is the WCAG 2.2.2 pause/stop mechanism for
- * the auto-playing run (which exceeds five seconds). The icon swaps with the
- * label via `data-state`; the visible label is the accessible text. */
-function setControl(session: TerminalSession, mode: "stop" | "replay"): void {
-    const control = session.card.querySelector(".terminal-control");
-    if (!control) {
-        return;
-    }
-    control.setAttribute("data-state", mode);
-    const label = control.querySelector(".terminal-control-label");
-    if (label) {
-        label.textContent = mode === "stop" ? "Stop" : "Replay";
-    }
-    control.setAttribute("aria-label", mode === "stop" ? "Stop animation" : "Replay demo");
-}
 
 /** Reset per-run state and surface the stop affordance. The composer starts
  * every run live: the field is bright until its prompt is sent. */
@@ -448,6 +372,9 @@ async function animateRun(session: TerminalSession): Promise<void> {
     } while (session.shouldAnimate());
     // Completion, loop-off, and visibility abort all settle: a "Stop" control
     // must never advertise a running animation over a cleared card.
+    if (session.destroyed) {
+        return;
+    }
     markSettled(session);
 }
 
@@ -486,60 +413,18 @@ function triggerRender(session: TerminalSession): void {
 
 // --- Wiring ---
 
-/** One control, two intents: stop the in-flight run, or replay a settled one.
- * Plus the scrollback jump control that hands the tail back to the reader. */
-function wireControls(session: TerminalSession): void {
-    session.card.querySelector(".terminal-control")?.addEventListener("click", () => {
-        if (session.isRendering) {
-            session.stopRequested = true;
-            return;
-        }
-        replay(session);
-    });
-    session.card.querySelector(".terminal-jump")?.addEventListener("click", () => {
-        session.setFollowing(true);
-        session.followTail();
-    });
-}
-
-/** Scrollback follow: reading back off the tail hands the viewport to the
- * reader; the jump control hands it back. Passive — never blocks the scroll. */
-function wireScrollFollow(session: TerminalSession): void {
-    session.scrollViewport.addEventListener("scroll", () => {
-        session.setFollowing(session.atTail());
-    }, { passive: true });
-}
-
-function wireResize(session: TerminalSession): void {
-    if (typeof ResizeObserver !== "undefined") {
-        const resizeObserver = new ResizeObserver(() => {
-            lockViewportHeight(session);
-        });
-        resizeObserver.observe(session.card);
-    }
-}
-
-function wireVisibility(session: TerminalSession): void {
-    const observer = new IntersectionObserver((entries) => {
-        session.isVisible = entries[0]?.isIntersecting ?? false;
-        if (!session.isVisible) {
-            session.clearTerminal();
-            return;
-        }
-        triggerRender(session);
-    }, { threshold: 0.5 });
-    observer.observe(session.card);
-    wireDocumentVisibility(session);
+function heroTranscript(session: TerminalSession): (measure: HTMLElement) => void {
+    return (measure) => STEPS.forEach((step) => appendStaticStep(measure, session.doc, step));
 }
 
 /** Tab hide wipes the run; tab show re-locks the height and re-triggers. */
 function wireDocumentVisibility(session: TerminalSession): void {
-    session.doc.addEventListener("visibilitychange", () => {
+    session.listen(session.doc, "visibilitychange", () => {
         if (session.doc.hidden) {
             session.clearTerminal();
             return;
         }
-        scheduleSettledHeightLock(session);
+        scheduleSettledHeightLock(session, heroTranscript(session));
         runAfterLayout(() => {
             triggerRender(session);
         });
@@ -547,30 +432,37 @@ function wireDocumentVisibility(session: TerminalSession): void {
 }
 
 function wirePageLifecycle(session: TerminalSession): void {
-    window.addEventListener("pagehide", () => {
+    session.listen(window, "pagehide", () => {
         session.isVisible = false;
         session.clearTerminal();
     });
-    window.addEventListener("pageshow", () => {
+    session.listen(window, "pageshow", () => {
         session.isVisible = isCardVisible(session.card);
-        scheduleSettledHeightLock(session);
+        scheduleSettledHeightLock(session, heroTranscript(session));
         runAfterLayout(() => {
             triggerRender(session);
         });
     });
 }
 
-/** Boot one terminal instance: wire everything, lock the viewport height,
- * then kick off the first gated run. */
+/** Boot one hero terminal: shared frame wiring, page-level wiring, then the
+ * first gated run. */
 export function startTerminal(session: TerminalSession): void {
-    session.isVisible = isCardVisible(session.card);
-    wireControls(session);
-    wireScrollFollow(session);
-    lockViewportHeight(session);
-    scheduleSettledHeightLock(session);
-    session.syncFollow();
-    wireResize(session);
-    wireVisibility(session);
+    bootTerminalFrame(session, {
+        render: heroTranscript(session),
+        toggle: () => {
+            if (session.isRendering) session.stopRequested = true;
+            else replay(session);
+        },
+        onVisibility: (visible) => {
+            if (!visible) {
+                session.clearTerminal();
+                return;
+            }
+            triggerRender(session);
+        },
+    });
+    wireDocumentVisibility(session);
     wirePageLifecycle(session);
     triggerRender(session);
 }

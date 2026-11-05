@@ -1,6 +1,6 @@
 import { createSession } from "./terminal-session";
 import { startTerminal } from "./terminal-run";
-import type { HeroTerminalOptions } from "./terminal-session";
+import type { HeroTerminalOptions, TerminalSession } from "./terminal-session";
 
 /**
  * Hero terminal entry point (thin by design).
@@ -24,13 +24,13 @@ export type { HeroTerminalOptions };
 export function initHeroTerminal(
     doc: Document = document,
     options: HeroTerminalOptions = {},
-): void {
+): TerminalSession | null {
     const session = createSession(doc, options);
     if (!session) {
-        return;
+        return null;
     }
-    session.trackReducedMotion();
     startTerminal(session);
+    return session;
 }
 
 if (typeof document !== "undefined") {

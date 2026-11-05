@@ -5,7 +5,7 @@ import "../styles/hero-terminal.css";
 
 import { DEMO, callBeat } from "../scripts/hero-transcript";
 import { noteForBeat } from "../scripts/hero-narrative";
-import PhosphorIcon from "./PhosphorIcon.astro";
+import TerminalFrame from "./TerminalFrame.astro";
 ---
 
 <!-- One full-bleed terminal surface: the section IS the terminal's backdrop. The
@@ -32,22 +32,8 @@ import PhosphorIcon from "./PhosphorIcon.astro";
             ></span>
         </div>
 
-        <div class="terminal-card">
-            {/* The window: the titlebar, the scrollback and the composer in one
-                bounded object, so the run reads as a terminal window on the
-                hero's full-bleed surface. */}
-            <div class="terminal-window">
-                <div class="terminal-seam">
-                    <div class="terminal-dots" aria-hidden="true">
-                        <span class="dot red"></span>
-                        <span class="dot yellow"></span>
-                        <span class="dot green"></span>
-                    </div>
-                    {/* Glyph key: the compact cards collapse the transcript's
-                        inline role column to buy back measure, so the glyph→role
-                        mapping needs a home outside the run. It shares the seam row
-                        with the session dots, so it costs no vertical space; screen
-                        readers get the inline roles, so it is aria-hidden. */}
+        <TerminalFrame label="Example AI agent conversation powered by ChunkHound" viewportId="terminal-viewport">
+            <Fragment slot="key">
                     <ul class="terminal-key" aria-hidden="true">
                         <li class="terminal-key-item" data-key="agent">
                             <span class="terminal-key-glyph">⏺</span>
@@ -58,44 +44,7 @@ import PhosphorIcon from "./PhosphorIcon.astro";
                             <span class="terminal-key-role">ChunkHound</span>
                         </li>
                     </ul>
-                    {/* Session control: "Stop" while the auto-run is in flight (the
-                        WCAG 2.2.2 mechanism for a run longer than five seconds),
-                        "Replay" once it settles. It belongs to the window's
-                        titlebar rather than the masthead: it is the session's one
-                        control, so it sits at the titlebar's trailing edge — the
-                        run's own right edge — and on a narrow card the headline
-                        keeps its measure. */}
-                    <button
-                        type="button"
-                        class="terminal-control"
-                        data-state="replay"
-                        aria-label="Replay demo"
-                    >
-                        <span
-                            class="terminal-control-icon terminal-control-icon-play"
-                            aria-hidden="true"
-                        >
-                            <PhosphorIcon name="ph-play" size="14" weight="fill" />
-                        </span>
-                        <span
-                            class="terminal-control-icon terminal-control-icon-pause"
-                            aria-hidden="true"
-                        >
-                            <PhosphorIcon name="ph-pause" size="14" weight="fill" />
-                        </span>
-                        <span class="terminal-control-label">Replay</span>
-                    </button>
-                </div>
-
-                {/* tabindex: the short-viewport tier (max-height: 780px) makes
-                    this region overflow-y: auto — keyboard users need focus to scroll. */}
-                <div
-                    class="terminal-viewport"
-                    id="terminal-viewport"
-                    role="region"
-                    aria-label="Example AI agent conversation powered by ChunkHound"
-                    tabindex="0"
-                >
+            </Fragment>
                     <div class="terminal-lines" id="terminal-lines">
                         {/* JS-on first paint stays empty (low-luminance surface)
                         until the entrance gate fires, so the transcript never
@@ -163,35 +112,7 @@ import PhosphorIcon from "./PhosphorIcon.astro";
                             </div>
                         </noscript>
                     </div>
-                </div>
-
-                {/* Composer row: the scrollback affordance + the fixed harness
-                    input, on the same measure as the run it feeds — a composer
-                    wider than the output it echoes reads as a different object.
-                    The window's shared inline gutter keeps the pill and the input
-                    on the run's edge at every width. */}
-                <div class="terminal-composer">
-                    {/* Scrollback affordance: visible only while the reader has
-                        scrolled back off the tail; activating it resumes
-                        tail-follow. Absolute so it never joins the composer's
-                        flow. */}
-                    <button
-                        type="button"
-                        class="terminal-jump"
-                        aria-label="Jump to latest output"
-                    >
-                        <PhosphorIcon
-                            name="ph-arrow-down"
-                            size="12"
-                            weight="bold"
-                        />
-                        <span>Latest</span>
-                    </button>
-                    {/* Fixed harness input: the visual anchor. Followup prompts
-                        type here, then move up into the scrollback on send.
-                        Always present (never scrolled, never re-created) so the
-                        surface reads as a real agent TUI even before the run
-                        starts. */}
+            <Fragment slot="input">
                     <div class="terminal-input" id="terminal-input">
                         <span class="role-label"><span class="sr-only">You</span></span>
                         <span class="input-glyph" aria-hidden="true">❯</span>
@@ -200,15 +121,11 @@ import PhosphorIcon from "./PhosphorIcon.astro";
                             <span class="cursor" aria-hidden="true"></span>
                         </span>
                     </div>
-                </div>
-            </div>
-        </div>
+            </Fragment>
+        </TerminalFrame>
     </div>
 </section>
 
 <script>
-    import "@phosphor-icons/webcomponents/PhArrowDown";
-    import "@phosphor-icons/webcomponents/PhPause";
-    import "@phosphor-icons/webcomponents/PhPlay";
     import "../scripts/hero-terminal.ts";
 </script>
