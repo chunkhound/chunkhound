@@ -95,7 +95,8 @@ const toc = [
         A failed test or the iteration limit stops the workflow for human review.
         Automatic test repair could weaken the suite or add slop. Checkpoints
         also let the workflow's TUI apply cost and time targets; these are soft
-        limits, so work can continue until the next checkpoint. Passing tests and
+        limits, so work can continue until the next checkpoint. A cancel is not a
+        soft stop: it aborts the active turn at once. Passing tests and
         model-reported findings do not prove the spec is met.
     </p>
 
@@ -115,12 +116,13 @@ model-group: review
 Read the supplied spec and compare it with the code. Report concrete gaps.
 If you cannot read the spec, say so.`} />
     <p>
-        The workflow below also uses three project prompt templates: <code>/detect-tests</code>
-        finds the full test command (or returns an empty command), <code>/plan-spec-fixes</code>
-        plans from the analysis, and <code>/apply-spec-fixes</code> implements the plan.
-        Configure their frontmatter for readonly detection and planning, and writable
-        implementation. The last two should leave files unchanged when the spec
-        cannot be read or there is no actionable plan.
+        The workflow below also uses two project prompt templates: <code>/detect-tests</code>
+        finds the full test command (or returns an empty command), and
+        <code>/plan-spec-fixes</code> plans from the analysis. Implementation needs
+        no template: the workflow hands the plan to a successor context. Configure
+        the templates' frontmatter for readonly detection and planning. The planning
+        template must leave files unchanged when the spec cannot be read or there is
+        no actionable plan.
     </p>
     <p>
         Save this file as <code>.pi/workflows/implement-spec.js</code>. The agent
@@ -130,13 +132,14 @@ If you cannot read the spec, say so.`} />
         appropriate suite.
     </p>
     <DocCode lang="javascript" code={`return defineWorkflow((workflow) => {
-  // Bound the number of rounds; the argument identifies the spec to implement.
+  // The run argument names the spec. A missing argument is a caller mistake,
+  // so the workflow exits before it spends any model or shell work.
   const MAX_ROUNDS = 3;
   const spec = load("intent").trim();
   if (!spec) return workflow.exit({ reason: "spec-path-missing" });
 
-  // Prompt frontmatter sets readonly for detection; structured output supplies
-  // the command to execute rather than free-form model text.
+  // Detection answers through the output tool, so the schema turns the answer
+  // into a value the workflow can trust. Its frontmatter keeps the turn readonly.
   const detection = workflow.run(
     "/detect-tests",
     {
@@ -151,10 +154,11 @@ If you cannot read the spec, say so.`} />
     },
   );
   const command = detection.output.command.trim();
+  // No command means no round can be verified, so stop before editing anything.
   if (!command) return workflow.exit({ reason: "test-command-not-found" });
 
-  // Tests may write artifacts, so leave readonly before the baseline shell call.
-  // A failed baseline stops for a human before any edits.
+  // Tests may write artifacts, so drop the detection turn's readonly posture.
+  // A red baseline stops for a human before any round spends budget on fixes.
   workflow.readonly(false);
   const baseline = workflow.shell(command);
   if (!baseline.ok) {
@@ -164,21 +168,35 @@ If you cannot read the spec, say so.`} />
       output: baseline.output,
     });
   }
-  // Checkpoints allow the host to stop at a safe point when a target is met.
+  // A checkpoint is the only safe exit point: a pending cost or time stop lands
+  // here and salvages this phase with the resolved command.
   workflow.checkpoint({ phase: "baseline-passed", command });
 
-  // Run a bounded number of rounds; analysis stays in the conversation.
+  // Each round starts from a fresh session so earlier rounds do not bias the
+  // analysis. Cost stays cumulative, and the loop bound keeps spending finite.
   for (let round = 1; round <= MAX_ROUNDS; round++) {
-    // Each analysis selects a random available model from the review group.
+    // A fresh context keeps this round blind to the previous round's verdicts
+    // and repairs, so the analysis starts unbiased.
+    workflow.new();
+
+    // The skill's frontmatter selects a random model from the review group. The
+    // analysis stays in this fresh context for the plan turn to read.
     workflow.run("/skill:analyze-spec", { input: spec });
+    // Salvage point: a soft target that lands here reports the inspected phase.
     workflow.checkpoint({ phase: "inspected", round });
 
-    // Both turns use conversation context. Their frontmatter keeps planning
-    // readonly and enables writes for implementation and the test command.
+    // Planning frontmatter keeps this turn readonly: it writes the plan to the
+    // conversation, never to the tree, so a bad plan cannot touch files.
     workflow.run("/plan-spec-fixes");
-    workflow.run("/apply-spec-fixes");
 
-    // Run the same suite directly; do not ask the agent to repair failures.
+    // Handoff keeps the context small: the plan runs in a successor context
+    // instead of piling onto the analysis. Execution needs writes, so drop the
+    // readonly posture the planning turn left behind.
+    workflow.readonly(false);
+    workflow.handoff("apply the planned fixes");
+
+    // The handoff settles before this call, so the edits are on disk. Run the
+    // same suite directly: a model-written test could weaken the suite.
     const tests = workflow.shell(command);
     if (!tests.ok) {
       return workflow.exit({
@@ -188,9 +206,11 @@ If you cannot read the spec, say so.`} />
         output: tests.output,
       });
     }
+    // Salvage point: a soft target that lands here reports the tested phase.
     workflow.checkpoint({ phase: "tested", round, command });
   }
-  // Leave the result for human review rather than claiming completion.
+  // Stop at the cap and leave the result for human review. The workflow never
+  // claims the spec is met on its own.
   return workflow.exit({ reason: "iteration-limit", rounds: MAX_ROUNDS });
 });`} />
 
