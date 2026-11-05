@@ -3,7 +3,6 @@ import DocsLayout from "../../../layouts/DocsLayout.astro";
 import DocCode from "../../../components/DocCode.astro";
 import DocsCallout from "../../../components/DocsCallout.astro";
 import WorkflowDemo from "../../../components/WorkflowDemo.astro";
-import StopPolicyDiagram from "../../../components/diagrams/StopPolicyDiagram.astro";
 
 const toc = [
     { depth: 2 as const, slug: "capabilities", text: "Control the harness" },
@@ -99,8 +98,6 @@ const toc = [
         limits, so work can continue until the next checkpoint. Passing tests and
         model-reported findings do not prove the spec is met.
     </p>
-
-    <StopPolicyDiagram />
 
     <h2 id="code">The workflow</h2>
     <p>

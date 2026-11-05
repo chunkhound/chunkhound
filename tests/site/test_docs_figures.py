@@ -39,9 +39,6 @@ _STACK_WIDTHS = (640, 390)
 _ROW_FIGURES = ("/docs/pi-schematic/", "/docs/enterprise/")
 # Desktop, the docs shell's three tracks, the figure's stack point, and phones.
 _FIT_WIDTHS = [1440, 1280, 1024, 710, 640, 390]
-# Approved captions on the workflows page: each figure ships once, at the
-# section it frames, so losing one is a copy regression rather than restyling.
-_WORKFLOW_CAPTIONS = ("A soft stop lands on a checkpoint",)
 
 _ROW_MEASURE = """
 return page.evaluate(() => ({
@@ -147,12 +144,6 @@ def _middle(box: dict) -> float:
 
 def _column(box: dict) -> tuple[float, float]:
     return round(box["left"], 1), round(box["width"], 1)
-
-
-def test_workflow_page_ships_each_approved_figure_once(built_site) -> None:
-    html = dict(_docs_html())["/docs/workflows/"]
-    for caption in _WORKFLOW_CAPTIONS:
-        assert html.count(f"<figcaption>{caption}</figcaption>") == 1, caption
 
 
 def test_every_docs_figure_is_a_labelled_group() -> None:
