@@ -456,16 +456,21 @@ function filterProviderOptions(
   role: string,
   query: string,
 ): number {
-  let visible = 0;
+  // Count query matches, not visible rows: the checked row stays visible even
+  // when it does not match, so a visible count would announce a hit that is not.
+  let matches = 0;
   section.querySelectorAll<HTMLElement>(`[data-provider-option="${role}"]`).forEach((option) => {
-    const matches = !query || (option.dataset.searchText || "").includes(query);
-    option.hidden = !matches;
-    visible += Number(matches);
+    // The checked row owns the reranker editor and its validation error. Keep it
+    // visible so a filter can never hide the fields the user must fix.
+    const checked = option.querySelector("input:checked") !== null;
+    const hit = !query || (option.dataset.searchText || "").includes(query);
+    option.hidden = !(checked || hit);
+    matches += Number(hit);
   });
   section.querySelectorAll<HTMLElement>(`[data-provider-group="${role}"]`).forEach((group) => {
     group.hidden = !group.querySelector("[data-provider-option]:not([hidden])");
   });
-  return visible;
+  return matches;
 }
 
 function initProviderSearch(section: Element): void {
@@ -476,14 +481,14 @@ function initProviderSearch(section: Element): void {
         const role = input.dataset.providerSearch;
         if (!role) return;
         const query = input.value.toLowerCase().trim();
-        const visible = filterProviderOptions(section, role, query);
+        const matches = filterProviderOptions(section, role, query);
         const status = section.querySelector<HTMLElement>(
           `[data-search-status="${role}"]`,
         );
         if (status) {
-          const noun = visible === 1 ? "result" : "results";
-          status.textContent = visible
-            ? `${visible} ${noun}`
+          const noun = matches === 1 ? "result" : "results";
+          status.textContent = matches
+            ? `${matches} ${noun}`
             : "No providers found";
         }
       });

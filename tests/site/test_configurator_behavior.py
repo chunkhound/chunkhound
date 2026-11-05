@@ -10,6 +10,7 @@ from tests.site.tsx_runner import run_tsx_json
 # The full-mode configurator ships on the getting-started page.
 _GETTING_STARTED = "docs/getting-started/index.html"
 
+
 _INIT = "await import('./site/src/scripts/configurator.ts');\n"
 
 # Shared shorthands over the real section markup (auto-init at import time runs
@@ -546,24 +547,38 @@ const before = {
   total: options().length,
   hidden: options().filter((option) => option.hidden).length,
 };
-// The reveal is the row's own tail, so hiding a row hides its reveal with it.
-// `openRow` is the row the visitor is currently reading (the checked one), and
-// it is deliberately filtered out here: no reveal may outlive its own row.
+// The checked row stays visible: it owns the reveal (and, on retrieval, the
+// reranker editor and its error), so a filter must never hide the user's own pick.
 const openRow = () =>
   section.querySelector('[data-research]:checked').closest('[data-provider-option]');
 type('ollama');
+const visibleRows = options().filter((option) => !option.hidden);
+const checkedRow = openRow();
 const filtered = {
-  matchesOllama: options()
-    .filter((option) => !option.hidden)
+  checkedVisible: !checkedRow.hidden,
+  nonCheckedMatch: visibleRows
+    .filter((option) => option !== checkedRow)
     .every((option) => (option.dataset.searchText || '').includes('ollama')),
-  visible: options().filter((option) => !option.hidden).length,
-  groupHidden: groups().map((group) => group.hidden),
+  visible: visibleRows.length,
+  matching: options()
+    .filter((option) => (option.dataset.searchText || '').includes('ollama')).length,
+  visibleGroups: groups().filter((group) => !group.hidden).length,
+  groupsWithVisible: groups()
+    .filter((group) => group.querySelector('[data-provider-option]:not([hidden])')).length,
   status: status(),
-  openRowHidden: openRow().hidden,
-  revealTravelsWithTheRow: openRow().contains(openRow().querySelector('.option-reveal')),
+  openRowHidden: checkedRow.hidden,
+  revealTravelsWithTheRow: checkedRow.contains(checkedRow.querySelector('.option-reveal')),
   revealedRows: options().filter((option) => option.querySelector('.option-reveal')).length,
   strayReveals: [...section.querySelectorAll('[data-provider-list="research"] .option-reveal')]
     .filter((reveal) => !reveal.closest('[data-provider-option="research"]')).length,
+};
+// A query that matches nothing leaves only the checked row visible, and the
+// status must announce no matches rather than counting that forced row.
+type('no-such-provider');
+const noMatch = {
+  status: status(),
+  checkedVisible: !openRow().hidden,
+  visible: options().filter((option) => !option.hidden).length,
 };
 type('');
 const cleared = {
@@ -572,20 +587,32 @@ const cleared = {
   status: status(),
   openRowHidden: openRow().hidden,
 };
-console.log(JSON.stringify({ before, filtered, cleared }));
+console.log(JSON.stringify({ before, filtered, noMatch, cleared }));
 """
     )
     rendered = run_tsx_json(script)
 
     assert rendered["before"]["hidden"] == 0
-    assert rendered["filtered"]["matchesOllama"] is True
-    assert rendered["filtered"]["visible"] == 1
-    assert rendered["filtered"]["groupHidden"] == [True, False, True]
-    assert rendered["filtered"]["status"] == "1 result"
-    # The default research row stays the selection while filtered out, so the
-    # hidden row is the one that carries the only open reveal — filtering must
-    # hide both.
-    assert rendered["filtered"]["openRowHidden"] is True
+    assert rendered["filtered"]["checkedVisible"] is True
+    assert rendered["filtered"]["nonCheckedMatch"] is True
+    assert rendered["filtered"]["visible"] >= 2
+    assert (
+        rendered["filtered"]["visibleGroups"]
+        == rendered["filtered"]["groupsWithVisible"]
+    )
+    visible = rendered["filtered"]["visible"]
+    # The count reports query matches: the forced-visible checked row is not one.
+    matches = rendered["filtered"]["matching"]
+    assert matches <= visible
+    assert rendered["filtered"]["status"] == (
+        f"{matches} {'result' if matches == 1 else 'results'}"
+    )
+    assert rendered["noMatch"] == {
+        "status": "No providers found",
+        "checkedVisible": True,
+        "visible": 1,
+    }
+    assert rendered["filtered"]["openRowHidden"] is False
     assert rendered["filtered"]["revealTravelsWithTheRow"] is True
     assert rendered["filtered"]["revealedRows"] == rendered["before"]["total"]
     assert rendered["filtered"]["strayReveals"] == 0
@@ -593,6 +620,58 @@ console.log(JSON.stringify({ before, filtered, cleared }));
     assert rendered["cleared"]["groupHidden"] == [False, False, False]
     assert rendered["cleared"]["status"] == f"{rendered['before']['total']} results"
     assert rendered["cleared"]["openRowHidden"] is False
+
+
+def test_configurator_filter_keeps_checked_reranker_error_visible(built_site) -> None:
+    """A filter must not hide the checked row's reranker error and fields.
+
+    The checked retrieval row owns the reranker editor. If a filter hides that
+    row, the copy button stays disabled with no visible reason while the page
+    still emits the checked provider's config.
+    """
+    script = (
+        browser_dom(dist_body(_GETTING_STARTED))
+        + _INIT
+        + """
+const section = window.document.querySelector('.configurator');
+const q = (selector) => section.querySelector(selector);
+const filter = q('[data-provider-search="retrieval"]');
+const type = (value) => {
+  filter.value = value;
+  filter.dispatchEvent(new window.Event('input'));
+};
+
+q('[data-retrieval="voyageai"]').click();
+const url = q('[data-rerank-url]');
+const format = q('[data-rerank-format]');
+url.value = 'ftp://bad';
+format.value = 'tei';
+format.dispatchEvent(new window.Event('change'));
+const before = {
+  errorHidden: q('[data-rerank-url-error]').hasAttribute('hidden'),
+  copyDisabled: q('#config-copy-btn').disabled,
+};
+type('ollama');
+const checked = q('[data-retrieval]:checked').closest('.provider-option');
+const after = {
+  checkedVisible: !checked.hidden,
+  errorHidden: q('[data-rerank-url-error]').hasAttribute('hidden'),
+  errorInCheckedRow: checked.contains(q('#rerank-url-error')),
+  copyDisabled: q('#config-copy-btn').disabled,
+  configStillEmitsChecked: q('#config-output').textContent.includes('voyage'),
+};
+console.log(JSON.stringify({ before, after }));
+"""
+    )
+    rendered = run_tsx_json(script)
+
+    assert rendered["before"]["errorHidden"] is False
+    assert rendered["before"]["copyDisabled"] is True
+    assert rendered["after"]["checkedVisible"] is True
+    assert rendered["after"]["errorHidden"] is False
+    assert rendered["after"]["errorInCheckedRow"] is True
+    assert rendered["after"]["copyDisabled"] is True
+    assert rendered["after"]["configStillEmitsChecked"] is True
 
 
 def test_configurator_platform_selection_persists_and_updates_code_blocks(
