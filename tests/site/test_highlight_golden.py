@@ -34,73 +34,43 @@ const modes = {
   compact: buildCompactConfiguratorOutput,
   full: buildFullConfiguratorOutput,
 };
-// Named embedding slots make catalog reordering irrelevant. Both modes use
-// the same fixed shell assignments; the guards below fail when the catalog
-// drifts. Pair coverage is asserted by
-// test_highlight_corpus_covers_every_embedding_llm_pair in the Python tests.
-function assignments(voyageai, openai, ollama, vllm) {
-  return {
-    voyageai,
-    'openai-embed': openai,
-    'ollama-embed': ollama,
-    'vllm-embed': vllm,
-  };
+// Generated assignments keep the corpus complete without hand-picked slots:
+// the catalog is the single source of truth. Each embedding slot walks the LLM
+// catalog as the shard index moves, so one variant offset covers 18 of the 20
+// LLM ids; two offsets (0 and 2) cover all of them. Growing the catalog past
+// that window needs another offset — the `seen` guard below fails loudly.
+const VARIANTS = [0, 2];
+const embeddingIds = embeddingProviders.map(provider => provider.id);
+const llmIds = llmProviders.map(provider => provider.id);
+function assignmentsFor(variant, shardIndex) {
+  const assigned = {};
+  embeddingIds.forEach((id, slot) => {
+    assigned[id] = llmIds[(shardIndex + variant + slot) % llmIds.length];
+  });
+  return assigned;
 }
-const shellAssignments = {
-  'posix/pi': assignments('vercel', 'openrouter', 'orcarouter', 'anthropic'),
-  'posix/cursor': assignments('openrouter', 'orcarouter', 'anthropic', 'openai-llm'),
-  'posix/claude-code': assignments(
-    'orcarouter', 'anthropic', 'openai-llm', 'codex-cli'),
-  'posix/vscode': assignments(
-    'anthropic', 'openai-llm', 'codex-cli', 'claude-code-cli'),
-  'posix/opencode': assignments('openai-llm', 'codex-cli', 'claude-code-cli', 'gemini'),
-  'posix/codex': assignments('codex-cli', 'claude-code-cli', 'gemini', 'deepseek'),
-  'posix/windsurf': assignments('claude-code-cli', 'gemini', 'deepseek', 'grok'),
-  'posix/roo-code': assignments('gemini', 'deepseek', 'grok', 'ollama-llm'),
-  'posix/zed': assignments('deepseek', 'grok', 'ollama-llm', 'vllm-llm'),
-  'powershell/pi': assignments('grok', 'ollama-llm', 'vllm-llm', 'opencode-cli'),
-  'powershell/cursor': assignments('ollama-llm', 'vllm-llm', 'opencode-cli', 'vercel'),
-  'powershell/claude-code': assignments(
-    'vllm-llm', 'opencode-cli', 'vercel', 'openrouter'),
-  'powershell/vscode': assignments(
-    'opencode-cli', 'vercel', 'openrouter', 'orcarouter'),
-  // Duplicate of posix/pi, so its four pairs stay covered when all four slots
-  // switch to requesty: this closes the catalog-coverage gap with one shard.
-  'powershell/opencode': assignments('requesty', 'requesty', 'requesty', 'requesty'),
-  'powershell/codex': assignments(
-    'openrouter', 'orcarouter', 'anthropic', 'openai-llm'),
-  'powershell/windsurf': assignments(
-    'orcarouter', 'anthropic', 'openai-llm', 'codex-cli'),
-  'powershell/roo-code': assignments(
-    'anthropic', 'openai-llm', 'codex-cli', 'claude-code-cli'),
-  'powershell/zed': assignments('openai-llm', 'codex-cli', 'claude-code-cli', 'gemini'),
-};
-function requireAssignedProviders(providers, assigned, kind) {
-  const catalog = providers.map(provider => provider.id).sort();
-  const expected = [...new Set(assigned)].sort();
-  if (JSON.stringify(catalog) !== JSON.stringify(expected)) {
-    throw new Error(`Update golden ${kind} assignments: ${catalog} != ${expected}`);
-  }
-}
-const samples = Object.values(shellAssignments);
-requireAssignedProviders(embeddingProviders, samples.flatMap(Object.keys), 'embedding');
-requireAssignedProviders(llmProviders, samples.flatMap(Object.values), 'LLM');
-function renderShard(mode, build, platform, editor) {
-  const assigned = shellAssignments[`${platform.id}/${editor.id}`];
-  if (!assigned) {
-    throw new Error(`Missing golden assignments: ${platform.id}/${editor.id}`);
-  }
-  for (const embedding of embeddingProviders) {
-    const llm = llmProviders.find(provider => provider.id === assigned[embedding.id]);
-    if (!llm) throw new Error(`Missing golden LLM assignment: ${embedding.id}`);
-    const key = `${mode}/${platform.id}/${editor.id}/${embedding.id}/${llm.id}`;
-    out[key] = build(embedding, llm, editor.id, platform.id);
-  }
-}
+const shells = PLATFORM_OPTIONS.flatMap(platform =>
+  editors.map(editor => ({ platform: platform.id, editor: editor.id })));
 for (const [mode, build] of Object.entries(modes)) {
-  for (const platform of PLATFORM_OPTIONS) {
-    for (const editor of editors) renderShard(mode, build, platform, editor);
+  for (const variant of VARIANTS) {
+    shells.forEach((shell, shardIndex) => {
+      const assigned = assignmentsFor(variant, shardIndex);
+      for (const embedding of embeddingProviders) {
+        const llmId = assigned[embedding.id];
+        const llm = llmProviders.find(provider => provider.id === llmId);
+        if (!llm) throw new Error(`Missing golden LLM assignment: ${llmId}`);
+        const key = `${mode}/${shell.platform}/${shell.editor}/${embedding.id}`
+          + `/${llm.id}/${variant}`;
+        out[key] = build(embedding, llm, shell.editor, shell.platform);
+      }
+    });
   }
+}
+// Same guard as the Python catalog pin: the corpus must exercise every row.
+const seen = new Set(Object.keys(out).map(key => key.split('/')[4]));
+if (seen.size !== llmIds.length) {
+  throw new Error(
+    `golden corpus misses LLMs: ${[...llmIds].filter(id => !seen.has(id))}`);
 }
 console.log(JSON.stringify(out));
 """
@@ -167,8 +137,9 @@ def test_highlight_corpus_covers_every_embedding_llm_pair() -> None:
         f"{len(pairs)} for {len(embeddings)}x{len(llms)} providers"
     )
     # The square check above stays green when a provider disappears from the
-    # corpus and the catalog together, so pin the catalog itself. Mirrors the
-    # TS `requireAssignedProviders` guard; drift here means lost rendering paths.
+    # corpus and the catalog together, so pin the catalog itself. The TS script
+    # enforces the same set through its inline `seen` guard; drift here means
+    # lost rendering paths.
     llm_catalog = {
         "anthropic",
         "claude-code-cli",
@@ -184,6 +155,12 @@ def test_highlight_corpus_covers_every_embedding_llm_pair() -> None:
         "requesty",
         "vercel",
         "vllm-llm",
+        "api-route",
+        "opper",
+        "obscurify-ai",
+        "atlascloud",
+        "runcrate",
+        "cheapaimodel",
     }
     assert llms == llm_catalog, (
         "golden corpus LLM set diverged from the catalog: "

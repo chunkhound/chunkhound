@@ -646,10 +646,16 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
 | Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Requesty API. Registry providers require explicit `model`. |
+| API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly (configurator defaults to `gemini-3.5-flash`) | API Route API. Registry providers require explicit `model`. |
+| Opper | `opper` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `claude-sonnet-5`) | Must be set explicitly (configurator defaults to `claude-sonnet-5`) | Opper API. Registry providers require explicit `model`. |
+| Obscurify.ai | `obscurify-ai` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4-flash`) | Obscurify.ai API. Registry providers require explicit `model`. |
+| Atlas Cloud | `atlascloud` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-ai/deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-ai/deepseek-v4-flash`) | Atlas Cloud API. Registry providers require explicit `model`. |
+| Runcrate | `runcrate` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-ai/DeepSeek-V4.1-Flash`) | Must be set explicitly (configurator defaults to `deepseek-ai/DeepSeek-V4.1-Flash`) | Runcrate API. Registry providers require explicit `model`. |
+| cheapaimodel | `cheapaimodel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | cheapaimodel API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Vercel, and Requesty) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, and cheapaimodel) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
 ### OpenRouter structured reasoning negotiation
 
@@ -701,7 +707,7 @@ The environment variables are `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` and `
 | `output_limits_enabled` | `boolean` | `false` | Restore the exact legacy numeric output limits for research synthesis instead of provider-managed limits. |
 | `output_limit_fallback` | `number` | `64000` | Positive output-token fallback used when a synthesis provider cannot authoritatively omit a limit or declare one. |
 | `claude_append_system_prompt` | `string` | `file` | `file` or `inline`. One mode cannot fit every machine: `file` stays off `cmd.exe` and beside a wrapper's `--append-system-prompt`; `inline` is for a file-flag wrapper or Claude Code older than 2.0.34. |
-| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file and MCP config file, such as Docker or a limited user. |
+| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file, MCP config file and settings file, such as Docker or a limited user. |
 | `codex_reasoning_effort` | `string` | `null` | Default reasoning effort for Codex/OpenAI: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex_reasoning_effort_utility` | `string` | `null` | Reasoning effort override for utility stage |
 | `codex_reasoning_effort_synthesis` | `string` | `null` | Reasoning effort override for synthesis stage |
@@ -1046,9 +1052,9 @@ MongoDB Atlas exposes a native Voyage-compatible rerank endpoint. Use `rerank_fo
 
 In the configurator, select **Retrieval → VoyageAI** and open **Customize reranker** to set the Atlas URL, `voyage` format, and rerank model.
 
-### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, Requesty)
+### LLM via proxy (Anthropic, OpenAI, and OpenAI-compatible providers)
 
-The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, and Requesty LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, and cheapaimodel LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {

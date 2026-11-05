@@ -592,6 +592,14 @@ def test_vllm_generated_config_passes_research_validation(
         # opencode-cli's backend validation requires a provider/model-formatted
         # model, so the preset must carry one (main's catalog omits it).
         ("opencode-cli", "opencode-cli", "opencode/deepseek-v4.1-flash"),
+        # Cloud presets must emit the model their registry entry serves; the
+        # backend does not validate model IDs, so a stale label stays silent.
+        ("api-route", "api-route", "gemini-3.5-flash"),
+        ("opper", "opper", "claude-sonnet-5"),
+        ("obscurify-ai", "obscurify-ai", "deepseek/deepseek-v4-flash"),
+        ("atlascloud", "atlascloud", "deepseek-ai/deepseek-v4-flash"),
+        ("runcrate", "runcrate", "deepseek-ai/DeepSeek-V4.1-Flash"),
+        ("cheapaimodel", "cheapaimodel", "deepseek-v4-1-flash"),
     ],
 )
 def test_every_supported_llm_preset_parses_through_backend_config(
@@ -712,6 +720,15 @@ def test_voyage_4_lite_config_passes_cli_validation(
     tmp_path, clean_environment
 ) -> None:
     errors = _validated_config_errors(tmp_path, "index", "voyageai", "openrouter")
+
+    assert errors == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_api_route_config_passes_research_validation(
+    tmp_path, clean_environment
+) -> None:
+    errors = _validated_config_errors(tmp_path, "research", "voyageai", "api-route")
 
     assert errors == []
 
@@ -928,6 +945,12 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
         "grok": "grok-4.3",
         "deepseek": "deepseek-v4-flash",
         "requesty": "deepseek/deepseek-v4.1-flash",
+        "api-route": "gemini-3.5-flash",
+        "opper": "claude-sonnet-5",
+        "obscurify-ai": "deepseek/deepseek-v4-flash",
+        "atlascloud": "deepseek-ai/deepseek-v4-flash",
+        "runcrate": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "cheapaimodel": "deepseek-v4-1-flash",
         "ollama-llm": "qwen3-coder:30b",
         "vllm-llm": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         "opencode-cli": "opencode/deepseek-v4.1-flash",

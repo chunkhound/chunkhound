@@ -258,7 +258,7 @@ pub(crate) fn default_retry<T>(
 /// Whether a 400 response body reports a per-request context/token-length
 /// overflow, i.e. the one failure `embed_with_split` can actually recover from.
 ///
-/// Mirrors the three conjunctive predicates in Python's
+/// Mirrors the five conjunctive predicates in Python's
 /// `openai_provider._embed_batch_internal`. Deliberately *not* a bare
 /// "context" or "token"+"limit" match: those also fire on quota and
 /// malformed-request 400s, which splitting cannot fix. Misclassifying one
@@ -272,8 +272,8 @@ pub(crate) fn default_retry<T>(
 /// bodies that differ from the known wording by capitalisation and it errs
 /// toward the recoverable path.
 ///
-/// Shared by both providers on purpose: this classifier has needed three
-/// upstream revisions (most recently #404), and a per-provider copy is the
+/// Shared by both providers on purpose: this classifier has needed repeated
+/// upstream revisions (#404 among them), and a per-provider copy is the
 /// likeliest way a future fix lands in one file only.
 pub(crate) fn is_context_length_error(body_lower: &str) -> bool {
     (body_lower.contains("maximum context length") && body_lower.contains("tokens"))
@@ -281,6 +281,12 @@ pub(crate) fn is_context_length_error(body_lower: &str) -> bool {
             && body_lower.contains("max")
             && body_lower.contains("per request"))
         || (body_lower.contains("input length exceeds") && body_lower.contains("context length"))
+        // llama.cpp: https://github.com/ggml-org/llama.cpp/blob/ac8e1694d837b11ed0aab944a6a2eee34b9c4d80/tools/server/server-context.cpp#L4083
+        || (body_lower.contains("exceeds the available context size")
+            && body_lower.contains("tokens"))
+        // llama.cpp: https://github.com/ggml-org/llama.cpp/blob/ac8e1694d837b11ed0aab944a6a2eee34b9c4d80/tools/server/server-context.cpp#L4074
+        || (body_lower.contains("is larger than the max context size")
+            && body_lower.contains("tokens"))
 }
 
 // ── Error sanitisation ──────────────────────────────────────────────────────
@@ -311,7 +317,7 @@ pub(crate) fn sanitize(value: String, secret: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// The three phrasings Python recognises, lowercased as `parse_response`
+    /// The five phrasings Python recognises, lowercased as `parse_response`
     /// hands them over. Each must reach the recoverable split path.
     #[test]
     fn recognizes_every_python_context_length_phrasing() {
@@ -324,6 +330,18 @@ mod tests {
         ));
         assert!(is_context_length_error(
             "input length exceeds context length limit of 8192"
+        ));
+        // llama.cpp: https://github.com/ggml-org/llama.cpp/blob/ac8e1694d837b11ed0aab944a6a2eee34b9c4d80/tools/server/server-context.cpp#L4083
+        assert!(is_context_length_error(
+            "{\"error\":{\"code\":400,\"message\":\"request (17066 tokens) exceeds the \
+             available context size (8192 tokens), try increasing it\",\
+             \"type\":\"exceed_context_size_error\"}}"
+        ));
+        // llama.cpp: https://github.com/ggml-org/llama.cpp/blob/ac8e1694d837b11ed0aab944a6a2eee34b9c4d80/tools/server/server-context.cpp#L4074
+        assert!(is_context_length_error(
+            "{\"error\":{\"code\":400,\"message\":\"input (9000 tokens) is larger than \
+             the max context size (8192 tokens). skipping\",\
+             \"type\":\"exceed_context_size_error\"}}"
         ));
     }
 

@@ -280,6 +280,13 @@ class DuckDBConnectionManager:
                 pass  # If VSS unavailable, ATTACH may still work for non-HNSW DBs
             escaped = str(self.db_path).replace("'", "''")
             test_conn.execute(f"ATTACH '{escaped}' AS validation_db")
+            # ATTACH just replayed the WAL. Checkpoint explicitly, now: on
+            # DuckDB 1.4-1.5 the implicit checkpoint DETACH would run instead
+            # persists secondary ART indexes WITHOUT the replayed rows, and a
+            # later delete of those rows fails "Failed to delete all rows from
+            # index" (duckdb/duckdb#26106). An explicit CHECKPOINT straight
+            # after replay persists them correctly.
+            test_conn.execute("CHECKPOINT validation_db")
             test_conn.execute("SELECT 1").fetchone()
             test_conn.execute("DETACH validation_db")
             logger.debug("WAL file validation passed")
