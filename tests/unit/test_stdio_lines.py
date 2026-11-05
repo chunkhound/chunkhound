@@ -1,10 +1,6 @@
 """Tests for chunkhound.utils.stdio_lines.
 
-The Windows-polling tests below were moved here (unmodified in behavior,
-adapted to the new module boundary) from tests/unit/test_client_proxy.py
-when `_forward_stdin_windows`/`_windows_stdin_handle`/
-`_windows_pipe_bytes_available` were extracted out of `ClientProxy` into this
-module (mcp-daemon-option-b plan, Task 3). They exercise the same contract:
+The Windows-polling tests below exercise this contract:
 `iter_stdin_lines()`'s Windows branch yields complete lines and cancels
 promptly without waiting for stdin EOF.
 """

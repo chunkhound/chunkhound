@@ -43,7 +43,7 @@ class _StreamableHttpEndpoint:
     Wrapping it in a plain callable object keeps Route's raw-ASGI dispatch.
     Also: unlike ``Mount``, which only matches ``/mcp/*`` and 307-redirects
     a bare ``/mcp`` to ``/mcp/``, ``Route`` matches the exact ``/mcp`` path
-    that MCP clients (and the issue's own curl example) are configured with.
+    that MCP clients are configured with.
 
     Session teardown: this class is a plain callable (not a function/method),
     so Starlette's ``Route`` never restricts it to specific HTTP methods —

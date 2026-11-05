@@ -75,7 +75,7 @@ async def test_daemon_serves_two_concurrent_requests_on_one_connection(
     daemon_harness,
 ) -> None:
     """Two in-flight requests on the same connection may complete out of
-    request order post-Option-B (each dispatched as its own async task);
+    request order (each is dispatched as its own async task);
     clients must correlate by id, not arrival order — both must still
     arrive correctly."""
     reader, writer = await daemon_harness.connect_and_register()
