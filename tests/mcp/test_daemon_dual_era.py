@@ -1,6 +1,6 @@
 """Contract test: the daemon serves both the legacy handshake era and the
 modern 2026-07-28 per-request-envelope era on the same IPC socket, per
-client connection — Option B's core requirement.
+client connection.
 
 Uses ``daemon_harness`` (tests/mcp/conftest.py): a real ``ChunkHoundDaemon``
 bound to a real IPC socket, with only DB/embedding/realtime startup stubbed

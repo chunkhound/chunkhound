@@ -34,10 +34,9 @@ class ChunkHoundDaemon(MCPServerBase):
 
     MCP protocol handling is delegated to MCPServerBase.serve_connection()
     (one call per client connection) over this module's length-prefixed IPC
-    frames; this module itself never imports the mcp SDK directly — see
-    docs/mcp-single-dispatch-design.html. The IPC registration handshake
-    (register/registered) stays hand-rolled since it is proxy-to-daemon
-    authentication, not MCP protocol.
+    frames; this module itself never imports the mcp SDK directly. The IPC
+    registration handshake (register/registered) stays hand-rolled since it
+    is proxy-to-daemon authentication, not MCP protocol.
     """
 
     def __init__(

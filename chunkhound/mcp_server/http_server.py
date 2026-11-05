@@ -1,15 +1,14 @@
 """HTTP MCP server implementation using the base class pattern.
 
-This module implements the Streamable HTTP transport for MCP, built on top
-of the official MCP SDK's ``StreamableHTTPSessionManager``. It shares tool
-dispatch and service lifecycle management with the stdio transport via
-``MCPServerBase``.
+Implements the Streamable HTTP transport for MCP. Gets a fully wired
+``StreamableHTTPSessionManager`` from ``MCPServerBase.build_streamable_http_app()``,
+sharing tool dispatch and service lifecycle with the other transports. This module just adds the
+Starlette app, health endpoint, bearer auth, and CORS -- no direct ``mcp``
+import needed.
 
-NOTE: Unlike stdio.py, this module intentionally does NOT silence Python
-logging or loguru. Stdio needs silence because log output on stdout would
-corrupt the JSON-RPC stream; HTTP responses are framed by the ASGI
-transport, so normal logging is safe here. Do not "helpfully" re-add
-logging.disable()/loguru silencing to this module.
+NOTE: Unlike stdio.py, this module does NOT silence logging/loguru. Stdio
+needs silence to keep stdout clean for JSON-RPC; HTTP is ASGI-framed, so
+normal logging is safe. Don't re-add silencing here.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from chunkhound.core.config.config import Config
 from .base import _MCP_AVAILABLE, MCPServerBase
 from .status import derive_daemon_status
 
-if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
+if TYPE_CHECKING:  # avoid hard runtime deps
     from starlette.applications import Starlette
     from starlette.types import Receive, Scope, Send
 
@@ -37,26 +36,15 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
 class _StreamableHttpEndpoint:
     """Adapts the session manager's ``handle_request`` as a raw ASGI app.
 
-    Starlette's ``Route`` treats a bound method as a request/response
-    function (via ``inspect.ismethod``), which would break SSE streaming.
-    Wrapping it in a plain callable object keeps Route's raw-ASGI dispatch.
-    Also: unlike ``Mount``, which only matches ``/mcp/*`` and 307-redirects
-    a bare ``/mcp`` to ``/mcp/``, ``Route`` matches the exact ``/mcp`` path
-    that MCP clients (and the issue's own curl example) are configured with.
+    A plain callable object, not a bound method, so Starlette's ``Route``
+    keeps raw-ASGI dispatch (needed for SSE) and doesn't restrict it to
+    specific HTTP methods. ``Route`` (not ``Mount``) is used so ``/mcp``
+    matches exactly, no ``/mcp/`` redirect.
 
-    Session teardown: this class is a plain callable (not a function/method),
-    so Starlette's ``Route`` never restricts it to specific HTTP methods —
-    ``DELETE /mcp`` reaches ``handle_request`` exactly like ``GET``/``POST``.
-    The MCP SDK's stateful ``StreamableHTTPSessionManager`` already handles
-    ``DELETE`` itself: given a valid ``Mcp-Session-Id`` header, it closes that
-    session's streams and marks it terminated, so subsequent requests with
-    the same session ID get 404 instead of resuming it. No extra routing is
-    needed here for a client to explicitly tear down its session. Note the
-    SDK keeps the terminated transport's dict entry (not just its streams)
-    for the life of the process — a server that serves many short-lived
-    stateful clients will accumulate small terminated-session entries over
-    time; this is an upstream SDK characteristic, not something this module
-    works around.
+    ``DELETE /mcp`` reaches ``handle_request`` like any other method, and the
+    SDK's session manager already handles session teardown for it. Note: the
+    SDK keeps terminated sessions' dict entries for the process lifetime
+    (upstream characteristic, not handled here).
     """
 
     def __init__(self, session_manager: Any):
@@ -69,20 +57,13 @@ class _StreamableHttpEndpoint:
 class _BearerAuthMiddleware:
     """Raw ASGI middleware enforcing bearer-token auth on the HTTP transport.
 
-    Deliberately NOT Starlette's ``BaseHTTPMiddleware``, which buffers the
-    entire response body and would break SSE streaming. ``/health`` is
-    always exempt, and every request passes through unchecked when no token
-    is configured.
+    Not Starlette's ``BaseHTTPMiddleware`` (buffers the body, breaks SSE).
+    ``/health`` is always exempt; requests pass through unchecked when no
+    token is configured.
 
-    Registered as a Starlette ``Middleware`` entry (see ``_build_app``)
-    ordered AFTER ``CORSMiddleware`` rather than wrapped outside the whole
-    app: browsers send CORS preflight ``OPTIONS`` requests without an
-    ``Authorization`` header, so if this ran before ``CORSMiddleware`` it
-    would 401 every preflight (with no CORS headers on the response) and
-    break browser-based clients whenever both ``--cors`` and
-    ``--auth-token`` are set. ``CORSMiddleware`` answers preflight requests
-    itself and never forwards them further in, so this middleware only ever
-    sees real requests.
+    Registered after ``CORSMiddleware`` so CORS preflight ``OPTIONS``
+    requests (sent without an ``Authorization`` header) get answered before
+    reaching auth -- otherwise browser clients would get 401'd on preflight.
     """
 
     def __init__(self, app: Any, token: str | None):
@@ -147,11 +128,8 @@ class HttpMCPServer(MCPServerBase):
         from starlette.routing import Route
 
         async def health(request: Any) -> JSONResponse:
-            # Deliberately unauthenticated (see _BearerAuthMiddleware) so
-            # load balancers/readiness probes can reach it without a token.
-            # derive_daemon_status can include scan_error/last_error text
-            # (e.g. file paths from a failed scan) — an accepted tradeoff
-            # for operational visibility, not an oversight.
+            # Unauthenticated so probes/load balancers can reach it (see
+            # _BearerAuthMiddleware). May include scan_error/last_error text.
             return JSONResponse(derive_daemon_status(self._current_scan_progress()))
 
         from starlette.middleware import Middleware
@@ -161,20 +139,14 @@ class HttpMCPServer(MCPServerBase):
             Route("/mcp", _StreamableHttpEndpoint(self._session_manager)),
         ]
 
-        # Order matters: CORSMiddleware must be OUTERMOST (listed first) so it
-        # can answer preflight OPTIONS requests directly, before they ever
-        # reach the bearer-auth middleware. See _BearerAuthMiddleware's
-        # docstring for why the reverse order breaks browser clients.
+        # CORSMiddleware must come first/outermost so it answers preflight
+        # OPTIONS before bearer-auth sees it (see _BearerAuthMiddleware).
         middleware = []
         if self.cors:
             from starlette.middleware.cors import CORSMiddleware
 
-            # allow_credentials is deliberately omitted: this transport uses
-            # bearer-token auth (sent explicitly via the Authorization header
-            # by the client code), never cookies, so there is nothing for
-            # "credentials" to carry. Wildcard allow_origins is also mutually
-            # exclusive with allow_credentials=True per the CORS spec — do
-            # not "helpfully" add it alongside allow_origins=["*"].
+            # allow_credentials omitted: auth is a bearer header, not
+            # cookies, and it's mutually exclusive with allow_origins=["*"].
             middleware.append(
                 Middleware(
                     CORSMiddleware,
@@ -199,10 +171,8 @@ class HttpMCPServer(MCPServerBase):
             self._initialization_complete.set()
             self.debug_log("HTTP server initialization complete")
 
-            # self._session_manager is only None when _MCP_AVAILABLE is False,
-            # in which case run() raises before _lifespan is ever entered (see
-            # HttpMCPServer.run() below) — narrower than mypy can infer from the
-            # ternary assignment in __init__.
+            # Only None when _MCP_AVAILABLE is False, in which case run()
+            # raises before _lifespan is reached (see run() below).
             async with self._session_manager.run():  # type: ignore[union-attr]
                 yield
         finally:
@@ -223,10 +193,8 @@ class HttpMCPServer(MCPServerBase):
             log_level="info" if self.debug_mode else "warning",
         )
         server = uvicorn.Server(uvicorn_config)
-        # await server.serve() (not server.run()) — server.run() would try to
-        # start a second event loop nested inside the one we're already
-        # running under asyncio.run(). Uvicorn installs its own
-        # SIGINT/SIGTERM/SIGBREAK handlers when run on the main thread.
+        # serve(), not run() — run() would nest a second event loop inside
+        # the one started by asyncio.run().
         await server.serve()
 
 
@@ -246,7 +214,7 @@ async def main(args: Any = None, config: Config | None = None) -> None:
     from chunkhound.mcp_server.common import add_common_mcp_arguments
 
     if args is None:
-        # Direct invocation - parse arguments
+        # parse CLI args
         parser = argparse.ArgumentParser(
             description="ChunkHound MCP HTTP server",
             formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -1,5 +1,5 @@
-"""Enforces the single-dispatch-point design (docs/mcp-single-dispatch-design.html):
-exactly chunkhound/mcp_server/base.py imports the mcp SDK — no more, no less."""
+"""Enforces the single-dispatch-point design: exactly
+chunkhound/mcp_server/base.py imports the mcp SDK — no more, no less."""
 
 import ast
 from pathlib import Path

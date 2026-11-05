@@ -1786,8 +1786,7 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                             "params": {"name": name, "arguments": arguments},
                         }
                         # ClientProxy._write_stdin_line() was folded directly
-                        # into _forward_stdin_to_socket() during the stdio_lines
-                        # extraction (Task 3); replicate its parse-and-forward
+                        # into _forward_stdin_to_socket(). replicate its parse-and-forward
                         # logic here to drive one request at a time.
                         ipc.write_frame(writer, request)
                         await writer.drain()
@@ -1801,8 +1800,7 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                     # The daemon now dispatches tools/call through the real
                     # SDK session (serve_connection()), which gates every
                     # non-exempt method behind a completed initialize
-                    # handshake -- unlike the old hand-rolled dispatcher this
-                    # replaced, which had no such lifecycle requirement.
+                    # handshake.
                     init_request = {
                         "jsonrpc": "2.0",
                         "id": "daemon-initialize",
