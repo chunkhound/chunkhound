@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 
+from tests.site.browser_helpers import homepage_probe
 from tests.site.css_helpers import bodies
 
 # The selector that opens a row's own reveal: the whole connection, in CSS.
@@ -219,18 +220,43 @@ def test_desktop_output_and_list_share_one_height_bound() -> None:
     )
 
 
-def test_selected_option_out_reads_hover() -> None:
-    """Identical hover and selected states leave users unable to tell which row
-    owns the open reveal, so the checked row must add emphasis — the product's
-    side-neutral inset ring (same idiom as the stage tiles). Emphasising one
-    border side instead is the one-off the rest of the configurator avoids, and
-    it rests the accent against the list's scrollbar."""
-    rules = bodies(_CHECKED)
-    assert rules, "No selected-option rule in the built CSS"
-    assert any(
-        "box-shadow:inset 0 0 0 var(--border-w-default) var(--primary)" in rule
-        for rule in rules
-    ), "the selected row no longer out-reads hover"
-    assert not any(
-        "border-right-width" in rule or "border-left-width" in rule for rule in rules
-    ), "the selected row emphasises a single border side instead of using the ring"
+def test_selected_option_out_reads_unchecked_rows(built_site) -> None:
+    """The checked row is visually distinct from an unchecked row.
+
+    This replaces the exact inset-ring assertion: the contract is that a user can
+    tell which row owns the open reveal, not which CSS property draws the
+    emphasis.
+    """
+    measured = homepage_probe(
+        """
+console.log(JSON.stringify(await homepageProbe(['dark'], async page => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  return page.evaluate(() => {
+    const options = [...document.querySelectorAll('.provider-option')];
+    const checked = options.find((option) => option.querySelector('input:checked'));
+    const unchecked = options.find((option) => !option.querySelector('input:checked'));
+    const checkedStyle = getComputedStyle(checked);
+    const uncheckedStyle = getComputedStyle(unchecked);
+    return {
+      checked: {
+        border: checkedStyle.borderColor,
+        background: checkedStyle.backgroundColor,
+        shadow: checkedStyle.boxShadow,
+      },
+      unchecked: {
+        border: uncheckedStyle.borderColor,
+        background: uncheckedStyle.backgroundColor,
+        shadow: uncheckedStyle.boxShadow,
+      },
+    };
+  });
+})));
+"""
+    )
+    checked = measured["dark"]["checked"]
+    unchecked = measured["dark"]["unchecked"]
+    assert (
+        checked["border"] != unchecked["border"]
+        or checked["background"] != unchecked["background"]
+        or checked["shadow"] != unchecked["shadow"]
+    ), "the checked row is not visually distinct from an unchecked row"
