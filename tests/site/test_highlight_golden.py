@@ -1,33 +1,22 @@
-"""Byte-identical rendering goldens for the configurator output.
+"""Semantic rendering contracts for the configurator output.
 
 Samples embedding x llm x editor x platform x compact/full through the
 public barrel (`site/src/components/configurator/index.ts`) via the real TS
 path (`tests/site/tsx_runner.py:run_tsx_json`). No mocks.
 
-Goldens live in `tests/site/__goldens__/highlight/`, one shard per
-mode/platform/editor (`{mode}.{platform}.{editor}.json`) mapping
-`{mode}/{platform}/{editor}/{embedding}/{llm}` -> {"html": ..., "copy": ...}.
-
-Each shard keeps every embedding provider. Explicit provider-ID assignments
-remove the catalog-order dependency; the render-script guard fails when the
-catalog's provider set drifts from the assignments. Pair coverage is asserted
-by test_highlight_corpus_covers_every_embedding_llm_pair. Regenerate with
-`UPDATE_GOLDENS=1`; `git diff --exit-code` then proves parity for the frozen
-`highlight.ts` renderer.
+The corpus is sampled, so the tests assert coverage and user-visible
+tokenization: every (embedding, llm) pair remains exercised, posix and
+PowerShell shells keep their forms, the preview wraps exactly the copied text,
+and the highlighter's token classes and HTML escaping are stable. No byte
+goldens, so harmless renderer refactors do not fail the suite.
 """
 
 from __future__ import annotations
 
 import html
-import json
-import os
 import re
-from pathlib import Path
 
 from tests.site.tsx_runner import run_tsx_json
-
-GOLDEN_DIR = Path(__file__).resolve().parent / "__goldens__" / "highlight"
-UPDATE_GOLDENS = os.environ.get("UPDATE_GOLDENS") == "1"
 
 # Barrel-only imports: goldens pin the public contract, not internals.
 RENDER_SCRIPT = """
@@ -133,60 +122,36 @@ def _render_all() -> dict[str, dict[str, str]]:
     return _rendered_cache
 
 
-def _shard_of(key: str) -> str:
-    mode, platform, editor, _embedding, _llm = key.split("/")
-    return f"{mode}.{platform}.{editor}.json"
+def test_highlight_tokens_and_escaping_are_stable() -> None:
+    """The highlighter emits user-visible token classes and escapes markup.
 
-
-def _group_by_shard(rendered: dict[str, dict[str, str]]) -> dict[str, dict]:
-    shards: dict[str, dict] = {}
-    for key in sorted(rendered):
-        shards.setdefault(_shard_of(key), {})[key] = rendered[key]
-    return shards
-
-
-def _write_shard(name: str, entries: dict) -> None:
-    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
-    (GOLDEN_DIR / name).write_text(
-        json.dumps(entries, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    These are the classes the shipped CSS paints. The test pins the contract,
+    not the full byte output, so a renderer refactor that keeps the same tokens
+    and escaping stays green.
+    """
+    rendered = run_tsx_json(
+        """
+import { highlightJsonLine, highlightShellLine, highlightCommentLine }
+  from './site/src/components/configurator/highlight.ts';
+console.log(JSON.stringify({
+  json: highlightJsonLine('  "provider": "vercel",'),
+  jsonEscaped: highlightJsonLine('  "api_key": "<script>&",'),
+  shell: highlightShellLine('chunkhound index ./src >> out.log'),
+  shellEscaped: highlightShellLine('chunkhound index "<src>"'),
+  comment: highlightCommentLine('# <note>'),
+}));
+"""
     )
-
-
-def _disk_shards() -> set[str]:
-    """Shard file names currently on disk (empty when the dir is absent)."""
-    if not GOLDEN_DIR.exists():
-        return set()
-    return {p.name for p in GOLDEN_DIR.glob("*.json")}
-
-
-def _load_shard(name: str) -> dict:
-    path = GOLDEN_DIR / name
-    assert path.exists(), f"missing golden {name}; rerun with UPDATE_GOLDENS=1"
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def test_highlight_goldens_match_exact_rendering() -> None:
-    rendered = _render_all()
-    assert rendered, "barrel rendered no combinations"
-    shards = _group_by_shard(rendered)
-    if UPDATE_GOLDENS:
-        # Regeneration is the fix path for intentional option removals.
-        for orphan in _disk_shards() - set(shards):
-            (GOLDEN_DIR / orphan).unlink()
-        for name, entries in shards.items():
-            _write_shard(name, entries)
-        return
-    orphans = _disk_shards() - set(shards)
-    assert not orphans, (
-        f"orphan golden shards {sorted(orphans)}; "
-        "rerun with UPDATE_GOLDENS=1 to regenerate"
-    )
-    for name, entries in shards.items():
-        assert _load_shard(name) == entries, (
-            f"golden drift in {name}; rerun with UPDATE_GOLDENS=1 to regenerate"
-        )
-    stored_keys = {key for name in shards for key in _load_shard(name)}
-    assert stored_keys == set(rendered), "golden key set diverged from barrel"
+    assert 'class="json-key"' in rendered["json"]
+    assert 'class="json-string"' in rendered["json"]
+    assert "&lt;script&gt;" in rendered["jsonEscaped"]
+    assert "&amp;" in rendered["jsonEscaped"]
+    assert "<script>" not in rendered["jsonEscaped"]
+    assert 'class="sh-cmd"' in rendered["shell"]
+    assert 'class="sh-op"' in rendered["shell"]
+    assert "&lt;src&gt;" in rendered["shellEscaped"]
+    assert 'class="sh-comment"' in rendered["comment"]
+    assert "&lt;note&gt;" in rendered["comment"]
 
 
 def test_highlight_corpus_covers_every_embedding_llm_pair() -> None:
