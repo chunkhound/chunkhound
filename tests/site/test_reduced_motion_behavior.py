@@ -98,7 +98,11 @@ console.log(JSON.stringify({ seen }));
 # fail, not just the source declaration.
 def test_docs_sidebar_drawer_honors_reduced_motion() -> None:
     """The docs drawer must disable its slide under prefers-reduced-motion."""
-    still = bodies(".docs-sidebar", media="prefers-reduced-motion")
+    still = bodies(
+        ".docs-sidebar",
+        media="prefers-reduced-motion",
+        page="docs/configuration/index.html",
+    )
     assert any("transition:none" in body for body in still), (
         ".docs-sidebar is not zeroed under prefers-reduced-motion"
     )

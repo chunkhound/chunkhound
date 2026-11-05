@@ -33,7 +33,10 @@ _HEADING = re.compile(r"<h([1-6])\b")
 
 
 def _max_width_bodies(selector: str) -> list[str]:
-    return [body for body in bodies(selector, media="") if "max-width" in body]
+    page = _DOCS_PAGE if selector == ".docs-shell" else _MARKETING_PAGE
+    return [
+        body for body in bodies(selector, media="", page=page) if "max-width" in body
+    ]
 
 
 def test_page_shells_share_one_width_token() -> None:

@@ -4,14 +4,14 @@ import html as html_module
 import re
 from pathlib import Path
 
+from tests.site.dom_helpers import DIST
 from tests.site.html_helpers import (
     canonical_href,
     meta_tag_content,
     visible_text,
 )
+from tests.site.tsx_runner import ROOT
 
-ROOT = Path(__file__).resolve().parents[2]
-DIST = ROOT / "site" / "dist"
 EXPLANATION_ROUTE = DIST / "docs" / "architecture" / "index.html"
 CANONICAL_URL = "https://chunkhound.ai/docs/architecture/"
 

@@ -9,9 +9,11 @@ const dist = resolve(fileURLToPath(new URL('../../site/dist/', import.meta.url))
 const types = { '.css': 'text/css', '.js': 'text/javascript', '.html': 'text/html', '.svg': 'image/svg+xml' };
 
 async function serve(request, response) {
-  const path = resolve(dist, `.${decodeURIComponent(new URL(request.url, 'http://local').pathname)}`);
+  const pathname = decodeURIComponent(new URL(request.url, 'http://local').pathname);
+  const path = resolve(dist, `.${pathname}`);
   if (!path.startsWith(dist + sep) && path !== dist) return response.writeHead(403).end();
-  const file = path.endsWith(sep) || path === dist ? resolve(path, 'index.html') : path;
+  // resolve() drops the trailing slash, so the URL decides whether this is a directory.
+  const file = pathname.endsWith('/') || path === dist ? resolve(path, 'index.html') : path;
   try {
     const body = await readFile(file);
     const extension = file.slice(file.lastIndexOf('.'));
@@ -35,33 +37,89 @@ async function withServer(probe) {
   }
 }
 
-async function withContext(browser, origin, setting, probe) {
-  const context = await browser.newContext({ colorScheme: 'dark', reducedMotion: 'reduce', serviceWorkers: 'block' });
+// Opt-in production-font mode: Base.astro is the only font authority, so the
+// fixture stylesheet is generated from its request. Inter maps to the brand's
+// vendored face; other families map to latin-subset WOFF2 fixtures. External
+// requests stay aborted.
+const FONT_BASE = 'https://fonts.gstatic.com/';
+// Families whose local file is not the default latin WOFF2 subset.
+const FONT_FILES = {
+  inter: { file: '../../brand/fonts/inter-variable.ttf', format: 'truetype', type: 'font/ttf' },
+};
+let fontFixtures;
+
+async function fixtureFonts() {
+  if (fontFixtures) return fontFixtures;
+  const href = (await readFile(new URL('../../site/src/layouts/Base.astro', import.meta.url), 'utf8'))
+    .match(/fonts\.googleapis\.com\/css2\?[^"\s]+/)?.[0];
+  if (!href) throw new Error('Base.astro no longer links the Google Fonts stylesheet the font fixtures mirror');
+  const files = new Map();
+  const css = new URL('https://' + href).searchParams.getAll('family').flatMap(entry => {
+    const [family, wght] = entry.split(':wght@');
+    const slug = family.toLowerCase().replaceAll(' ', '-');
+    const local = FONT_FILES[slug] ?? { file: `fixtures/fonts/${slug}-latin.woff2`, format: 'woff2', type: 'font/woff2' };
+    const name = `${slug}.${local.format === 'truetype' ? 'ttf' : 'woff2'}`;
+    files.set(name, local);
+    return (wght ? wght.split(';') : ['400']).map(weight =>
+      `@font-face { font-family: '${family}'; font-style: normal; font-weight: ${weight}; font-display: swap; src: url(${FONT_BASE}${name}) format('${local.format}'); }`);
+  });
+  return (fontFixtures = { css: css.join('\n'), files });
+}
+
+async function fixtureFont(url) {
+  const fixtures = await fixtureFonts();
+  if (url.host === 'fonts.googleapis.com') return { contentType: 'text/css', body: fixtures.css };
+  const local = url.host === 'fonts.gstatic.com' && fixtures.files.get(url.pathname.slice(1));
+  if (!local) return null; // other gstatic URLs fall through to the abort
+  return { contentType: local.type, body: await readFile(new URL(local.file, import.meta.url)) };
+}
+
+async function withPage(browser, origin, options, probe) {
+  const context = await browser.newContext({
+    colorScheme: options.dark ? 'dark' : 'light', reducedMotion: 'reduce', serviceWorkers: 'block',
+    ...(options.width ? { viewport: { width: options.width, height: 1000 } } : {}),
+  });
   try {
-    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-    await context.addInitScript(value => localStorage.setItem('theme', value), setting);
+    await context.route('**/*', async route => {
+      const url = new URL(route.request().url());
+      const fixture = options.fonts && await fixtureFont(url);
+      if (fixture) return route.fulfill({ status: 200, headers: { 'access-control-allow-origin': '*' }, ...fixture });
+      // Return the action so the route is settled before the callback resolves.
+      if (url.origin === origin) return route.continue();
+      return route.abort();
+    });
+    if (options.setting) await context.addInitScript(value => localStorage.setItem('theme', value), options.setting);
     const page = await context.newPage();
-    await page.goto(origin, { waitUntil: 'networkidle' });
-    assert.equal(await page.locator('html').getAttribute('data-theme-setting'), setting);
+    await page.goto(origin + (options.path ?? ''), { waitUntil: 'networkidle' });
+    if (options.setting) assert.equal(await page.locator('html').getAttribute('data-theme-setting'), options.setting);
+    if (options.width) await page.evaluate(() => document.fonts.ready);
     return await probe(page);
   } finally {
     await context.close();
   }
 }
 
-// Each setting gets real shipped scripts/styles and private storage, never synthetic CSS.
-export async function homepageProbe(settings, probe) {
+async function probePages(keys, fonts, options, probe) {
   return withServer(async origin => {
     const browser = await chromium.launch();
     try {
       const result = {};
-      for (const setting of settings) result[setting] = await withContext(browser, origin, setting, probe);
+      for (const key of keys) result[key] = await withPage(browser, origin, { ...options(key), fonts }, probe);
       return result;
     } finally {
       await browser.close();
     }
   });
 }
+
+// Each setting gets real shipped scripts/styles and private storage, never synthetic CSS.
+export const homepageProbe = (settings, probe, fonts = false) =>
+  probePages(settings, fonts, setting => ({ dark: true, setting }), probe);
+
+// Layout contracts for any built page: one fresh light-theme page per width, so
+// geometry is measured against real shipped CSS and never a mocked rule.
+export const pageProbe = (pagePath, widths, probe, fonts = false) =>
+  probePages(widths, fonts, width => ({ path: pagePath, width }), probe);
 
 export function paintedColors(element) {
   const style = getComputedStyle(element);
