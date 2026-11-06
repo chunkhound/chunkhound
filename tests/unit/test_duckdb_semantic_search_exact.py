@@ -1,9 +1,9 @@
 """DuckDB semantic search returns the exact ranking, scoped like the old query.
 
-The query scores embeddings before joining chunks/files. These tests pin what
-that must not change: the ranking equals a brute-force cosine ranking, an
-embedding whose chunk no longer exists is never returned and never shortens a
-page, and the path filter, threshold and offset still apply.
+The query keeps vectors out of the chunk/file joins. These tests pin what that
+must not change: the ranking equals a brute-force cosine ranking, an embedding
+whose chunk no longer exists is never returned and never shortens a page or
+fails the search, and the path filter, threshold and offset still apply.
 """
 
 import asyncio
@@ -133,3 +133,32 @@ def test_path_filter_and_threshold_still_apply(indexed) -> None:
     floor = _expected(vectors, query)[4][1]
     above, _ = _search(provider, query, page_size=50, threshold=floor)
     _assert_same(above, [e for e in _expected(vectors, query) if e[1] >= floor - 1e-6])
+
+
+def test_malformed_vector_outside_the_scope_does_not_empty_the_search(indexed) -> None:
+    """A NaN vector is stored with NULL elements, on which cosine raises. One left
+    behind by a deleted chunk, mid-way through the id range, must not fail an
+    unscoped search or one scoped to another directory."""
+    provider, paths, vectors, query, _ = indexed
+    alpha = sorted(cid for cid, sub in paths.items() if sub == "alpha")
+    gone = alpha[len(alpha) // 2]
+    provider.delete_chunk(gone)
+    provider.insert_embeddings_batch(
+        [
+            {
+                "chunk_id": gone,
+                "provider": "test",
+                "model": "mini",
+                "embedding": [float("nan")] * _DIMS,
+                "dims": _DIMS,
+            }
+        ]
+    )
+    del vectors[gone]
+
+    everything, pagination = _search(provider, query, page_size=50)
+    in_beta, _ = _search(provider, query, page_size=50, path_filter="beta")
+
+    _assert_same(everything, _expected(vectors, query))
+    assert pagination["total"] == len(vectors)
+    _assert_same(in_beta, _expected(vectors, query, lambda c: paths[c] == "beta"))
