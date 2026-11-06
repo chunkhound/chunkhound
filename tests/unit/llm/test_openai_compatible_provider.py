@@ -101,7 +101,7 @@ SPECS = [
     pytest.param(
         {
             "provider": "vercel",
-            "model": "poolside/laguna-s-2.1",
+            "model": "deepseek/deepseek-v4.1-flash",
             "expected_name": "vercel",
             "expected_base_url": "https://ai-gateway.vercel.sh/v1",
             "expected_sso": False,
@@ -772,13 +772,17 @@ class TestStructuredOutputContract:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("structured", [False, True], ids=["text", "structured"])
-async def test_vercel_default_synthesis_wire_contract(structured):
+async def test_vercel_default_synthesis_wire_contract(
+    structured, monkeypatch, tmp_path
+):
     marker = "vercel-default-synthesis"
     script = ChatCompletionScript(
         name=marker, marker=marker, content='{"answer": "42"}'
     )
     with OpenAICompatibleTestServer([script]) as server:
-        async with _vercel_synthesis_provider(server) as provider:
+        async with _vercel_synthesis_provider(
+            server, monkeypatch, tmp_path
+        ) as provider:
             await _complete_vercel(provider, marker, structured)
         _assert_vercel_wire_contract(server, structured)
 
@@ -801,7 +805,7 @@ async def _complete_vercel(provider, marker, structured):
 def _vercel_synthesis_config() -> LLMConfig:
     return LLMConfig(
         provider="vercel",
-        model="poolside/laguna-s-2.1",
+        model="deepseek/deepseek-v4.1-flash",
         api_key="sk-local-fixture-not-a-real-credential",
         max_retries=0,
     )
@@ -811,20 +815,27 @@ def _assert_vercel_wire_contract(server, structured):
     server.assert_all_scripts_consumed()
     assert len(server.requests) == 1
     body = server.requests[0]["json"]
-    assert body["model"] == "poolside/laguna-s-2.1"
-    # Derive the expected cap from the config default, not a copied literal.
-    assert body["max_tokens"] == _vercel_synthesis_config().output_limit_fallback
+    assert body["model"] == "deepseek/deepseek-v4.1-flash"
+    # Vercel omission matches OpenRouter: no client cap reaches the gateway,
+    # so no per-model cap needs tuning.
+    assert "max_tokens" not in body
     assert "max_completion_tokens" not in body
     if structured:
         assert body["response_format"] == {"type": "json_object"}
+        assert body["reasoning"] == {"enabled": False}
         system = body["messages"][0]
         assert system["role"] == "system"
         assert '"answer"' in system["content"]
         assert '"required"' in system["content"]
+    else:
+        assert "reasoning" not in body
 
 
 @asynccontextmanager
-async def _vercel_synthesis_provider(server):
+async def _vercel_synthesis_provider(server, monkeypatch, tmp_path):
+    # The structured branch negotiates and caches a capability; keep it off the
+    # user's cache so runs stay deterministic and side-effect free.
+    monkeypatch.setenv("CHUNKHOUND_LLM_CAPABILITY_CACHE", str(tmp_path / "caps.json"))
     config = _vercel_synthesis_config()
     manager = LLMManager(*config.get_provider_configs())
     provider = manager.get_synthesis_provider()

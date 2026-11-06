@@ -44,6 +44,7 @@ def _manager_provider(
         ("grok", "max_completion_tokens", OutputLimitCapability.SUPPORTED),
         ("openrouter", "max_tokens", OutputLimitCapability.SUPPORTED),
         ("orcarouter", "max_tokens", OutputLimitCapability.SUPPORTED),
+        ("vercel", "max_tokens", OutputLimitCapability.SUPPORTED),
         ("requesty", "max_tokens", OutputLimitCapability.SUPPORTED),
         ("api-route", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("obscurify-ai", "max_tokens", OutputLimitCapability.UNKNOWN),

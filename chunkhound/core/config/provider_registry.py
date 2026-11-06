@@ -115,9 +115,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         supports_structured_outputs=False,
         max_tokens_param_name="max_tokens",
         synthesis_concurrency=10,
-        # Omission is not yet documented as authoritative for the gateway;
-        # UNKNOWN keeps the conservative fallback cap (see output-limit docs).
-        output_limit_omission=OutputLimitCapability.UNKNOWN,
+        # Gateway docs list max_tokens as optional, so omission is authoritative
+        # like OpenRouter. Omitting avoids a single fallback cap that smaller
+        # upstream models would reject.
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
+        # Gateway extension: reasoning.enabled=false disables reasoning for
+        # structured calls; probed and cached per model like OpenRouter.
+        structured_reasoning_disable_extra_body={"reasoning": {"enabled": False}},
         docs_url="https://vercel.com/docs/ai-gateway",
         auth_url="https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
     ),

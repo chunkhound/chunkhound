@@ -65,28 +65,27 @@ def test_cli_provider_choices_cover_all_live_literals():
 
 def test_canonical_registry_specs_support_output_cap_omission():
     """Canonical built-ins carry provider/API omission capability metadata."""
-    for name in ("deepseek", "grok", "openrouter", "orcarouter", "requesty"):
+    for name in ("deepseek", "grok", "openrouter", "orcarouter", "requesty", "vercel"):
         assert (
             OPENAI_COMPATIBLE_PROVIDERS[name].output_limit_omission
             is OutputLimitCapability.SUPPORTED
         )
 
 
-def test_structured_reasoning_disable_payload_is_openrouter_only():
-    """Only canonical OpenRouter declares its structured-call payload."""
+def test_structured_reasoning_disable_payload_is_owned_by_gateway_specs():
+    """Only OpenRouter and Vercel declare the structured-call reasoning-disable
+    payload; a missing entry silently skips the probe and leaves reasoning
+    enabled on structured calls.
+
+    Every other spec must stay ``None``. Scanning the whole registry is a
+    review gate: a new owner fails this test until it is added to ``owners``.
+    """
+    owners = {"openrouter", "vercel"}
     expected = {"reasoning": {"enabled": False}}
 
-    assert (
-        OPENAI_COMPATIBLE_PROVIDERS[
-            "openrouter"
-        ].structured_reasoning_disable_extra_body
-        == expected
-    )
-    for name in ("deepseek", "grok", "orcarouter"):
-        assert (
-            OPENAI_COMPATIBLE_PROVIDERS[name].structured_reasoning_disable_extra_body
-            is None
-        )
+    for name, spec in OPENAI_COMPATIBLE_PROVIDERS.items():
+        expected_body = expected if name in owners else None
+        assert spec.structured_reasoning_disable_extra_body == expected_body, name
 
     default_spec = OpenAICompatibleSpec(
         name="compatible",
