@@ -103,12 +103,29 @@ class RealtimePathFilter:
             or self._include_degraded
         )
 
-    def should_index(self, file_path: Path) -> bool:
-        """Return whether a path should enter the realtime indexing pipeline."""
+    def excludes_directory(self, dir_path: Path) -> bool:
+        """Return whether an ignore rule excludes this directory where it sits.
+
+        Pass the directory's path in the tree, before resolving links: a link
+        under ``node_modules/`` is excluded by its place there, not by its
+        target. Returns False when the ignore policy cannot be evaluated; each
+        file under the directory is then still checked, and rejected, by
+        ``should_index``.
+        """
+        if not self._ensure_engine() or self._ignore_engine_degraded:
+            return False
+        if self._engine is None:
+            return False
+        try:
+            return self._engine.matches(dir_path, is_dir=True) is not None
+        except Exception:
+            return False
+
+    def _ensure_engine(self) -> bool:
+        """Build the ignore engine once; False if it could not be built."""
         settings = self._settings
         if settings is None:
-            return self._language_fallback(file_path)
-
+            return False
         if not self._engine_initialized and not self._engine_initialization_failed:
             try:
                 from chunkhound.utils.ignore_engine import (
@@ -136,7 +153,15 @@ class RealtimePathFilter:
                 )
                 return False
 
-        if self._engine_initialization_failed:
+        return not self._engine_initialization_failed
+
+    def should_index(self, file_path: Path) -> bool:
+        """Return whether a path should enter the realtime indexing pipeline."""
+        settings = self._settings
+        if settings is None:
+            return self._language_fallback(file_path)
+
+        if not self._ensure_engine():
             return False
 
         if not self._ignore_engine_degraded:
