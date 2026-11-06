@@ -24,8 +24,14 @@ export const RECOMMENDED_VOYAGE_RERANK_MODEL = "rerank-3-lite";
 // setup ease; Ollama and vLLM remain explicit choices for a local data boundary.
 export const DEFAULT_RETRIEVAL = "voyageai";
 // Default research route is Vercel AI Gateway — a first-class serving path
-// for the same Poolside Laguna S 2.1 model the OpenRouter preset offers.
+// for the recommended research model.
 export const DEFAULT_RESEARCH = "vercel";
+// Research-route facts with one owner: providers.ts interpolates them, and
+// configuration.md plus CHANGELOG.md hold guarded copies. Both gateway
+// catalogs list this model without an expiration date, unlike launch models.
+export const RESEARCH_MODEL = "deepseek/deepseek-v4.1-flash";
+// Month the LLM model IDs were last verified against live provider catalogs.
+export const CATALOG_VERIFIED = "2026-11";
 export const DEFAULT_PLATFORM: ConfiguratorPlatform = "posix";
 export const PLATFORM_STORAGE_KEY = "chunkhound:platform";
 export const PLATFORM_OPTIONS: PlatformOption[] = [

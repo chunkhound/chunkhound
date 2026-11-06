@@ -200,7 +200,10 @@ console.log(JSON.stringify({ initialHidden, afterEmbed, afterExternalConfig, aft
     assert '"rerank_format": "tei"' in rendered["afterExternalConfig"]["configCopy"]
     assert rendered["afterExternalConfig"]["errorHidden"] is True
     assert rendered["afterEditor"]["researchChecked"] is False
-    assert '"model": "poolside/laguna-s-2.1"' in rendered["afterEditor"]["configCopy"]
+    assert (
+        '"model": "deepseek/deepseek-v4.1-flash"'
+        in rendered["afterEditor"]["configCopy"]
+    )
     vllm_callout = rendered["afterVllm"]["calloutCopy"]
     assert "Qwen/Qwen3-Coder-30B-A3B-Instruct --port 8002" in vllm_callout
     vllm_config = rendered["afterVllm"]["configCopy"]
@@ -850,7 +853,7 @@ def test_a_pick_lands_in_the_terminal_and_the_copy_at_once(
 // already-checked radio fires no `change`.
 const picksFor = (retrieval, research, agent) => [
   ['retrieval', retrieval[0], retrieval[1], 'voyage-4-lite'],
-  ['research', research[0], research[1], 'poolside/laguna-s-2.1'],
+  ['research', research[0], research[1], 'deepseek/deepseek-v4.1-flash'],
   ['agent', agent[0], agent[1], '.pi/mcp.json'],
 ];
 const snapshot = (role) => ({

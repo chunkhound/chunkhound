@@ -115,7 +115,7 @@ def test_full_mode_output_is_copy_pasteable_without_json_comments() -> None:
         "console.log(JSON.stringify(RECOMMENDED_VOYAGE_RERANK_MODEL));"
     )
     assert f'"rerank_model": "{recommended_rerank}"' in rendered["copy"]
-    assert '"model": "poolside/laguna-s-2.1"' in rendered["copy"]
+    assert '"model": "deepseek/deepseek-v4.1-flash"' in rendered["copy"]
 
     assert "json-comment" not in rendered["html"]
     stripped = re.sub(r"<[^>]+>", "", rendered["html"])

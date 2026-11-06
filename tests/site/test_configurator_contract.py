@@ -662,7 +662,7 @@ def test_recommended_route_emits_voyage_4_lite_and_vercel() -> None:
     }
     assert config["llm"] == {
         "provider": "vercel",
-        "model": "poolside/laguna-s-2.1",
+        "model": "deepseek/deepseek-v4.1-flash",
         "api_key": "<YOUR_VERCEL_API_KEY>",
     }
 
@@ -689,7 +689,7 @@ def test_recommended_route_config_round_trips_through_backend_config(
     )
     assert config.embedding.rerank_model == recommended_rerank
     assert config.llm is not None
-    assert config.llm.model == "poolside/laguna-s-2.1"
+    assert config.llm.model == "deepseek/deepseek-v4.1-flash"
     assert config.llm.provider == "vercel"
 
 
@@ -938,8 +938,8 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
     by_id = {row["id"]: row for row in rendered}
 
     expected_models = {
-        "vercel": "poolside/laguna-s-2.1",
-        "openrouter": "poolside/laguna-s-2.1",
+        "vercel": "deepseek/deepseek-v4.1-flash",
+        "openrouter": "deepseek/deepseek-v4.1-flash",
         "orcarouter": "qwen/qwen3.7-flash",
         "gemini": "gemini-3.5-flash",
         "grok": "grok-4.3",
@@ -976,6 +976,19 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
 
     # The default route's rationale must state the default is not a compromise.
     assert "not a compromise" in by_id["vercel"]["recommendation"]
+
+    # The rationale must not claim unverified cost or latency wins: catalog
+    # prices show cheaper text routes and no catalog publishes latency.
+    banned = re.compile(r"\b(cheap|cost|fast|stronger|strongest|better|best)")
+    for pid in ("vercel", "openrouter"):
+        assert not banned.search(by_id[pid]["recommendation"].lower()), pid
+
+    # Both gateway presets must name the model they pin, so a reader sees the
+    # exact ID without opening the emitted config block.
+    for provider_id in ("vercel", "openrouter"):
+        assert by_id[provider_id]["model"] in by_id[provider_id]["recommendation"], (
+            provider_id
+        )
 
 
 def test_rerank_format_parity_between_ts_and_python() -> None:

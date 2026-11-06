@@ -29,6 +29,7 @@ import {
   PROVIDER_GROUP_ORDER,
   RECOMMENDED_VOYAGE_EMBEDDING_MODEL,
   RECOMMENDED_VOYAGE_RERANK_MODEL,
+  RESEARCH_MODEL,
 } from "./constants.ts";
 import { requirements } from "./requirements.ts";
 
@@ -251,8 +252,9 @@ vllm serve Qwen/Qwen3-Reranker-0.6B --task score --hf-overrides '{"architectures
   },
 ];
 
-// Model IDs verified against live catalogs (2026-10): OpenRouter's API
-// (openrouter.ai/api/v1/models), Vercel AI Gateway (ai-gateway.vercel.sh/v1/models),
+// Model IDs verified against live catalogs; CATALOG_VERIFIED in constants.ts
+// owns the date, and configuration.md plus CHANGELOG.md hold guarded copies.
+// OpenRouter's API (openrouter.ai/api/v1/models), Vercel AI Gateway (ai-gateway.vercel.sh/v1/models),
 // models.dev (orcarouter, opencode), and provider docs (ai.google.dev,
 // api-docs.deepseek.com, docs.x.ai). The backend does not validate LLM model IDs —
 // a typo surfaces only as a provider API error.
@@ -261,31 +263,29 @@ export const llmProviders: ConfiguratorProviderOption[] = [
     id: "vercel",
     name: "Vercel AI Gateway",
     svg: VERCEL_SVG,
-    description: "Recommended model: Poolside Laguna S 2.1",
+    description: "Recommended model: DeepSeek V4.1 Flash",
     config: {
       provider: "vercel",
-      model: "poolside/laguna-s-2.1",
+      model: RESEARCH_MODEL,
     },
     apiKeyPlaceholder: "<YOUR_VERCEL_API_KEY>",
     group: "cloud",
     requirements: [requirements.vercelApiKey],
-    recommendation:
-      "<strong>Laguna S 2.1</strong> — Poolside's open-weight model for agentic coding and long-horizon work, served through Vercel AI Gateway. It is the default because it serves the same model through a first-class provider — the best balance, not a compromise.",
+    recommendation: `<strong>DeepSeek V4.1 Flash</strong> (<code>${RESEARCH_MODEL}</code>) — DeepSeek's open-weights model for coding and agentic work, served through Vercel AI Gateway. It is the default research route, not a compromise.`,
   },
   {
     id: "openrouter",
     name: "OpenRouter",
     svg: OPENROUTER_SVG,
-    description: "Recommended model: Poolside Laguna S 2.1",
+    description: "Recommended model: DeepSeek V4.1 Flash",
     config: {
       provider: "openrouter",
-      model: "poolside/laguna-s-2.1",
+      model: RESEARCH_MODEL,
     },
     apiKeyPlaceholder: "<YOUR_OPENROUTER_API_KEY>",
     group: "cloud",
     requirements: [requirements.openrouterApiKey],
-    recommendation:
-      "<strong>Laguna S 2.1</strong> — Poolside's open-weight model for agentic coding and long-horizon work, routed through OpenRouter.",
+    recommendation: `<strong>DeepSeek V4.1 Flash</strong> — the OpenRouter preset for research workloads, pinned to <code>${RESEARCH_MODEL}</code>.`,
   },
   {
     id: "orcarouter",
