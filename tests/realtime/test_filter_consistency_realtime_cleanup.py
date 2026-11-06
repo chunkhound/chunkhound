@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -312,6 +313,72 @@ async def test_dir_index_expansion_does_not_enqueue_gitignored_worktree_children
         await service._index_directory(ignored_file.parent)
 
         assert queued_children == []
+    finally:
+        services.provider.disconnect()
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """A directory link as package managers make them: a junction on Windows."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+@pytest.mark.asyncio
+async def test_linked_package_under_node_modules_is_never_indexed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`npm install` links a local `file:` dependency into node_modules/. Its files
+    live outside the root, but the default node_modules exclude still applies to
+    them: realtime neither queues the link's directory event nor, when it walks a
+    new directory above the link, any file behind it."""
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    package = tmp_path / "outside" / "pkg"
+    package.mkdir(parents=True)
+    (package / "build.py").write_text("def build():\n    return 1\n", encoding="utf-8")
+    scope = root / "node_modules" / "@scope"
+    scope.mkdir(parents=True)
+    _link_directory(scope / "pkg", package)
+
+    db_path = tmp_path / "linked.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchdog"},
+    )
+
+    event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+    handler = SimpleEventHandler(
+        event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
+    )
+    handler.on_any_event(
+        SimpleNamespace(
+            event_type="created", is_directory=True, src_path=str(scope / "pkg")
+        )
+    )
+    await asyncio.sleep(0)
+    assert event_queue.empty()
+
+    services = create_services(db_path, config)
+    services.provider.connect()
+    try:
+        service = RealtimeIndexingService(services, config)
+        service.watch_path = root
+        queued: list[Path] = []
+
+        async def fake_add_file(file_path: Path, priority: str = "change") -> bool:
+            queued.append(file_path)
+            return True
+
+        monkeypatch.setattr(service, "add_file", fake_add_file)
+        await service._index_directory(scope)
+
+        assert queued == []
     finally:
         services.provider.disconnect()
 
