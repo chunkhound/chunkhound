@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import re
 
-from chunkhound.core.config.provider_registry import OPENAI_COMPATIBLE_PROVIDERS
+from chunkhound.core.config.provider_registry import (
+    OPENAI_COMPATIBLE_PROVIDERS,
+    OutputLimitCapability,
+)
 from chunkhound.core.constants import (
     VOYAGE_DEFAULT_MODEL,
     VOYAGE_DEFAULT_RERANK_MODEL,
@@ -64,8 +67,34 @@ console.log(JSON.stringify({
 """
 
 
+_RESEARCH_ROUTE_SCRIPT = """
+import {
+  CATALOG_VERIFIED,
+  RESEARCH_MODEL,
+  llmProviders,
+} from './site/src/components/configurator/index.ts';
+const preset = (id) => {
+  const provider = llmProviders.find((entry) => entry.id === id);
+  if (!provider) throw new Error(`missing ${id} preset`);
+  return provider;
+};
+console.log(JSON.stringify({
+  model: RESEARCH_MODEL,
+  verified: CATALOG_VERIFIED,
+  vercelModel: preset('vercel').config.model,
+  openrouterModel: preset('openrouter').config.model,
+  vercel: preset('vercel').recommendation,
+  openrouter: preset('openrouter').recommendation,
+}));
+"""
+
+
 def _recommended_voyage_models() -> dict[str, str]:
     return run_tsx_json(_RECOMMENDED_VOYAGE_SCRIPT)
+
+
+def _changelog() -> str:
+    return (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
 def _configuration_docs() -> str:
@@ -140,6 +169,35 @@ def test_configuration_docs_promise_the_voyageai_recommendation() -> None:
     )
 
 
+def test_configuration_docs_list_every_omission_capable_provider() -> None:
+    """configuration.md names the providers whose canonical endpoints omit the
+    output cap. The registry owns that fact, so a new SUPPORTED entry must not
+    leave the prose list stale (Vercel and Requesty had drifted)."""
+    supported = {
+        name
+        for name, spec in OPENAI_COMPATIBLE_PROVIDERS.items()
+        if spec.output_limit_omission is OutputLimitCapability.SUPPORTED
+    }
+    sentence = next(
+        line
+        for line in _configuration_docs().splitlines()
+        if "authoritatively support omission" in line
+    ).lower()
+    missing = [name for name in sorted(supported) if name.lower() not in sentence]
+    assert not missing, f"docs omission list misses providers: {missing}"
+
+
+def test_every_registry_provider_has_a_configurator_preset() -> None:
+    """Every OpenAI-compatible provider the backend registers must be
+    selectable in the configurator; otherwise a provider ships with no way to
+    pick it, and the two catalogs drift silently."""
+    catalog_providers = set(run_tsx_json(_PROVIDER_IDS_SCRIPT))
+    missing = set(OPENAI_COMPATIBLE_PROVIDERS) - catalog_providers
+    assert not missing, (
+        f"configurator has no preset for registered providers: {sorted(missing)}"
+    )
+
+
 def test_configuration_docs_match_configurator_llm_defaults() -> None:
     """configuration.md's 'configurator defaults to X' claims must equal the
     presets the configurator emits for that provider."""
@@ -157,12 +215,30 @@ def test_configuration_docs_match_configurator_llm_defaults() -> None:
         )
 
 
-def test_every_registry_provider_has_a_configurator_preset() -> None:
-    """Every OpenAI-compatible provider the backend registers must be
-    selectable in the configurator; otherwise a provider ships with no way to
-    pick it, and the two catalogs drift silently."""
-    catalog_providers = set(run_tsx_json(_PROVIDER_IDS_SCRIPT))
-    missing = set(OPENAI_COMPATIBLE_PROVIDERS) - catalog_providers
-    assert not missing, (
-        f"configurator has no preset for registered providers: {sorted(missing)}"
+def test_research_route_facts_stay_in_sync_across_docs_and_changelog() -> None:
+    """The research-model pin lives in four files. constants.ts owns the ID and
+    the verification month; both gateway presets interpolate them, and
+    configuration.md plus CHANGELOG.md carry guarded copies. Anchored patterns
+    keep an unrelated row from satisfying the promise, so a later model change
+    cannot leave the docs silently stale."""
+    facts = run_tsx_json(_RESEARCH_ROUTE_SCRIPT)
+    model = facts["model"]
+    verified = facts["verified"]
+
+    for provider_id in ("vercel", "openrouter"):
+        assert facts[f"{provider_id}Model"] == model, provider_id
+        assert model in facts[provider_id], provider_id
+
+    section = (
+        _configuration_docs()
+        .split("Vercel AI Gateway is a first-class", 1)[1]
+        .split("### Local OpenAI-compatible servers", 1)[0]
     )
+    assert f"`{model}`" in section
+    assert f"catalogs checked {verified}" in section
+    # The per-model cap workaround must not return: the gateway omits the cap.
+    assert "output_limit_fallback" not in section
+
+    changelog = _changelog()
+    assert f"`{model}`" in changelog
+    assert f"re-verified against live catalogs in {verified}" in changelog

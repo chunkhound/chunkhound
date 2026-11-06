@@ -917,13 +917,21 @@ def test_built_configuration_docs_render_markdown_tables() -> None:
 
 def test_built_configuration_docs_document_default_research_route() -> None:
     """The default research route (Vercel AI Gateway) is documented with the
-    config the configurator emits."""
+    config the configurator emits, and with the model it pins. Scoped to the
+    route's own prose: the same model ID also appears in other table rows, so a
+    whole-page assertion would stay green after the promise was deleted."""
     configuration = (DIST / "docs" / "configuration" / "index.html").read_text(
         encoding="utf-8"
     )
+    start = configuration.index("Vercel AI Gateway is a first-class")
+    end = configuration.index("Local OpenAI-compatible servers", start)
+    route = configuration[start:end]
 
-    assert "poolside/laguna-s-2.1" in configuration
-    assert "Vercel AI Gateway API key" in configuration
+    assert "deepseek/deepseek-v4.1-flash" in route
+    assert "inception/mercury-3" not in route
+    # The gateway omits the cap, so no per-model fallback guidance belongs here.
+    assert "output_limit_fallback" not in route
+    assert "Vercel AI Gateway API key" in route
 
 
 def test_built_configuration_docs_state_provider_independence() -> None:
@@ -934,7 +942,7 @@ def test_built_configuration_docs_state_provider_independence() -> None:
     )
 
     assert "configured independently of" in configuration
-    assert "poolside/laguna-s-2.1" in configuration
+    assert "deepseek/deepseek-v4.1-flash" in configuration
     assert "qwen/qwen3.7-flash" in configuration
     assert "grok-4.3" in configuration
     assert "gemini-3.5-flash" in configuration

@@ -642,8 +642,8 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Google Gemini API. Migration: `CHUNKHOUND_GEMINI_MODEL` was removed in v4.x — rename to `CHUNKHOUND_LLM_MODEL`. |
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
-| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | OpenRouter API. Registry providers require explicit `model`. |
-| Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Must be set explicitly (configurator defaults to `poolside/laguna-s-2.1`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
+| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | OpenRouter API. Registry providers require explicit `model`. |
+| Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
 | OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
 | Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Requesty API. Registry providers require explicit `model`. |
 | API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly (configurator defaults to `gemini-3.5-flash`) | API Route API. Registry providers require explicit `model`. |
@@ -657,15 +657,15 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 
 When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, and cheapaimodel) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
-### OpenRouter structured reasoning negotiation
+### Gateway structured reasoning negotiation
 
-OpenRouter can reject requests that disable reasoning for structured (`response_format` with `json_schema`) calls. ChunkHound probes this once per provider/model and caches the outcome:
+OpenRouter and Vercel AI Gateway can reject requests that disable reasoning for structured (`response_format` with `json_schema`) calls. ChunkHound probes this once per provider/model and caches the outcome:
 
 - **Accepted** (30-day lease): the reasoning-disable payload stays attached to every structured call for that provider/model, so reasoning is disabled there for the lease duration. Non-structured calls (`complete()`), including research synthesis, are unaffected.
 - **Rejected** (24-hour lease): structured calls omit the payload and re-probe once the lease expires. A long-running process enforces the lease in memory, so it re-probes without a restart.
 - **Unknown**: the first structured call optimistically sends the payload; a 400/422 response triggers one unflagged replay.
 
-Negotiation only happens for the built-in canonical OpenRouter endpoint. Setting `llm.base_url` — even to the canonical URL — routes through a generic backend and disables the probe and payload entirely, exactly like a proxy.
+Negotiation only happens for the built-in canonical OpenRouter and Vercel AI Gateway endpoints. Setting `llm.base_url` — even to the canonical URL — routes through a generic backend and disables the probe and payload entirely, exactly like a proxy.
 
 Some models require reasoning and can still return empty `content` after the payload is dropped, so a `rejected` cache entry records only the HTTP outcome. When that happens, ChunkHound raises an error naming the provider, model, and capability state, and research results carry a caller-visible note (a `> **Note:**` blockquote advising a switch of `llm.utility_model`) plus a `metadata.warnings` entry.
 
@@ -724,7 +724,7 @@ For each provider-managed synthesis request, ChunkHound uses this precedence wit
 
 `UNKNOWN` omission capability is handled conservatively: ChunkHound does not assume omission is safe, so it uses a valid sourced declaration or the scalar fallback. This is intentionally not a per-model lookup table.
 
-Built-in DeepSeek, Grok, OpenRouter, and OrcaRouter configurations at their canonical endpoints authoritatively support omission. Provider-managed DeepSeek, OpenRouter, and OrcaRouter requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on any of these built-ins downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
+Built-in DeepSeek, Grok, OpenRouter, OrcaRouter, Requesty, and Vercel AI Gateway configurations at their canonical endpoints authoritatively support omission. Provider-managed DeepSeek, OpenRouter, OrcaRouter, Requesty, and Vercel AI Gateway requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on any of these built-ins downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
 
 At research startup, the progress display reports the resolved synthesis request-limit policy using one of these forms (runtime cap values are comma-formatted):
 
@@ -1076,11 +1076,13 @@ Vercel AI Gateway is a first-class provider, and the configurator's default rese
 {
   "llm": {
     "provider": "vercel",
-    "model": "poolside/laguna-s-2.1",
+    "model": "deepseek/deepseek-v4.1-flash",
     "api_key": "<YOUR_VERCEL_API_KEY>"
   }
 }
 ```
+
+Both gateway presets pin `deepseek/deepseek-v4.1-flash`, so switching between them needs no model change. The catalogs list no expiration date for this model, and the gateway documents `max_tokens` as optional, so provider-managed synthesis sends no output cap (catalogs checked 2026-11).
 
 ### Local OpenAI-compatible servers (Ollama, vLLM)
 
