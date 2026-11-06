@@ -12,6 +12,11 @@ To add a new OpenAI-compatible provider you must also touch:
   - ``CLI_PROVIDER_CHOICES`` in ``llm_config.py``
   - test ``SPECS`` in ``test_openai_compatible_provider.py``
   - ``REASONING_EFFORT_PROVIDERS`` in ``llm_config.py`` (if applicable)
+  - site configurator presets in ``site/src/components/configurator/``
+    (``providers.ts``, ``requirements.ts``, ``constants.ts``, ``icons.ts``)
+  - the configurator tests and highlight goldens in ``tests/site/``
+  - ``site/src/pages/docs/configuration.md``
+  - ``CHANGELOG.md``
 """
 
 from __future__ import annotations
@@ -59,7 +64,8 @@ class OpenAICompatibleSpec:
 
 # ── Provider specs ─────────────────────────────────────────────────────────
 # Append one entry here, then update LLMProviderLiteral, CLI_PROVIDER_CHOICES,
-# and test SPECS — see module docstring above.
+# test SPECS, and the site configurator/docs/changelog touch points — see the
+# module docstring above.
 OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
     "deepseek": OpenAICompatibleSpec(
         name="deepseek",
@@ -100,6 +106,24 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         output_limit_omission=OutputLimitCapability.SUPPORTED,
         docs_url="https://docs.orcarouter.ai",
         auth_url="https://www.orcarouter.ai",
+    ),
+    "vercel": OpenAICompatibleSpec(
+        name="vercel",
+        default_base_url="https://ai-gateway.vercel.sh/v1",
+        # Router: structured-output and reasoning support is per upstream
+        # model, so stay on the prompt-injection fallback like OpenRouter.
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        # Gateway docs list max_tokens as optional, so omission is authoritative
+        # like OpenRouter. Omitting avoids a single fallback cap that smaller
+        # upstream models would reject.
+        output_limit_omission=OutputLimitCapability.SUPPORTED,
+        # Gateway extension: reasoning.enabled=false disables reasoning for
+        # structured calls; probed and cached per model like OpenRouter.
+        structured_reasoning_disable_extra_body={"reasoning": {"enabled": False}},
+        docs_url="https://vercel.com/docs/ai-gateway",
+        auth_url="https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
     ),
     "requesty": OpenAICompatibleSpec(
         name="requesty",

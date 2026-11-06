@@ -46,10 +46,14 @@ async def test_timeout_prompt_adds_exclusions(
     monkeypatch.delenv("CHUNKHOUND_NO_PROMPTS", raising=False)
     monkeypatch.setattr("builtins.input", lambda *_: "y")
 
-    # Create minimal config file in the target directory
+    # A BOM-prefixed config is common from Windows tools. The accepted prompt
+    # must preserve existing exclusions while adding the timed-out file.
     proj_dir = tmp_path
     config_path = proj_dir / ".chunkhound.json"
-    config_path.write_text(json.dumps({}, indent=2))
+    config_path.write_text(
+        json.dumps({"indexing": {"exclude": ["already-excluded.py"]}}),
+        encoding="utf-8-sig",
+    )
 
     # Build args and config
     args = Namespace(
@@ -84,10 +88,11 @@ async def test_timeout_prompt_adds_exclusions(
     out = buf.getvalue()
     assert "Skipped Due to Timeout" in out
 
-    # Verify that the exclusion was appended
-    data = json.loads(config_path.read_text())
-    assert "indexing" in data and "exclude" in data["indexing"]
-    assert "big.bin" in data["indexing"]["exclude"]
+    # The observable update preserves the BOM file's existing exclusion.
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert data["indexing"]["exclude"] == ["already-excluded.py", "big.bin"]
+    # Rewrite normalizes the BOM file to plain UTF-8.
+    assert config_path.read_bytes()[:3] != b"\xef\xbb\xbf"
 
 
 @pytest.mark.asyncio

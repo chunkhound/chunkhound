@@ -1,0 +1,184 @@
+---
+import DiagramFigure from "./DiagramFigure.astro";
+import DiagramNode from "./DiagramNode.astro";
+import { SYSTEM_LAYERS } from "../../lib/architecture";
+
+/**
+ * The "where does this sit" view: clients call the local engine, the engine
+ * calls providers, sources feed it. The bands and the labelled links between
+ * them make the stacked layering explicit. Rendered from SYSTEM_LAYERS so the
+ * band order and contents can never drift from the shared model.
+ *
+ * Restraint applies to the interior — no node tiles, icons, or badges. The
+ * band container is grouping structure; only the ChunkHound band carries a mark.
+ */
+
+// Captions for the space between bands, in order (one per gap). The arrow shows
+// the direction of exchange; the engine↔providers boundary is the one
+// load-bearing line, so it alone takes the accent.
+const LINKS = [
+  { arrow: "↓", label: "requests" },
+  { arrow: "↕", label: "only request content crosses this line", accent: true },
+  { arrow: "↑", label: "the engine reads from" },
+];
+
+// LINKS is a parallel array to SYSTEM_LAYERS. Fail the build if a layer is
+// added or removed, so a dropped connector can never ship silently.
+if (LINKS.length !== SYSTEM_LAYERS.length - 1) {
+  throw new Error(
+    `SystemContextDiagram needs ${SYSTEM_LAYERS.length - 1} gap links ` +
+      `for ${SYSTEM_LAYERS.length} layers, got ${LINKS.length}.`,
+  );
+}
+
+---
+
+<DiagramFigure
+  caption="Clients, the local engine, providers, and sources"
+  label="System context: clients, local engine, providers, and sources"
+  description="Clients call the local engine. The engine reads from sources. The engine calls model providers. The index stays local while request content may go to remote providers."
+>
+  <div class="layers">
+    {SYSTEM_LAYERS.map((layer, index) => {
+      const link = index > 0 ? LINKS[index - 1] : undefined;
+      return (
+        <>
+          {link && (
+            <div class="d-connector layer-link" data-tone={link.accent ? "accent" : "default"}>
+              <span class="layer-link-flow">
+                <span class="layer-link-arrow" aria-hidden="true">{link.arrow}</span>
+                {link.label}
+              </span>
+            </div>
+          )}
+          <section class="layer d-band" data-layer={layer.id}>
+            <header class="layer-head d-band-head">
+              <span class="layer-label d-band-label">
+                {layer.id === "engine" && (
+                  <span class="layer-mark" aria-hidden="true">
+                    <img src="/logo.svg" alt="" class="layer-mark-light" />
+                    <img src="/logo-light.svg" alt="" class="layer-mark-dark" />
+                  </span>
+                )}
+                {layer.label}
+              </span>
+              <span class="layer-caption d-band-caption">{layer.caption}</span>
+            </header>
+            <ul class="nodes">
+              {layer.nodes.map((node) => (
+                <li>
+                  <DiagramNode title={node.title} />
+                </li>
+              ))}
+            </ul>
+          </section>
+        </>
+      );
+    })}
+  </div>
+</DiagramFigure>
+
+<style>
+  .layers {
+    display: grid;
+    gap: 0;
+  }
+
+  /* The engine is the local process that owns the index — the figure's center. */
+  .layer[data-layer="engine"] {
+    border-color: var(--primary);
+  }
+
+  /* This stack is tighter than the flow bands: the link rule supplies the gap. */
+  .layer-head {
+    margin-bottom: var(--space-1);
+  }
+
+  /* The band label leads a mark only on the engine band, so it carries the glyph. */
+  .layer-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* Only the product's own band carries a mark; every other band is text.
+     Height is em-based on the label so it scales with the type. */
+  .layer-mark {
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    height: 1.6em;
+    width: calc(1.6em * 302 / 234);
+  }
+
+  .layer-mark img {
+    grid-area: 1 / 1;
+    width: 100%;
+    height: 100%;
+  }
+
+  .layer-mark-dark {
+    display: none;
+  }
+
+  :global([data-theme="dark"]) .layer-mark-light {
+    display: none;
+  }
+
+  :global([data-theme="dark"]) .layer-mark-dark {
+    display: block;
+  }
+
+  /* Each band distributes its OWN nodes across the full width, so a band with
+     fewer nodes (Clients 2, Engine 3, Sources 3) stays balanced instead of
+     leaning left against the widest band's grid. The widest band (providers,
+     4) is unchanged. Because 2, 3, and 4 all divide 12, every band's node edges
+     still land on the same 1/12 boundaries — balanced rows on one column grid. */
+  .nodes {
+    display: flex;
+    gap: 2px var(--space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  /* An equal share per node, so every band fills its width whatever its count. */
+  .nodes li {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+  }
+
+  /* Layer link: a full-width rule with the relationship and its direction.
+     Kept tight so the stack stays compact. */
+  .layer-link {
+    margin: var(--space-1) 0;
+  }
+  .layer-link-flow {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    white-space: nowrap;
+  }
+
+  .layer-link-arrow {
+    font-size: var(--text-sm);
+    line-height: 1;
+  }
+
+  @media (max-width: 720px) {
+    .nodes {
+      flex-wrap: wrap;
+    }
+
+    .nodes li {
+      flex: 1 1 calc(50% - var(--space-2));
+    }
+  }
+
+  @media (max-width: 460px) {
+    .nodes li {
+      flex-basis: 100%;
+    }
+  }
+</style>

@@ -1,0 +1,65 @@
+---
+import PhosphorIcon from "./PhosphorIcon.astro";
+import positioning from "../lib/positioning.json";
+
+const promises = [
+  {
+    icon: "ph-laptop",
+    title: "Keep the whole codebase in scope",
+    detail: "Give agents relevant code, call paths, and history across tens of millions of lines—without manually assembling context.",
+  },
+  {
+    icon: "ph-database",
+    title: "Own the deployment and index",
+    detail: "Run the research process and project database on infrastructure you control. MIT software adds no mandatory ChunkHound license, seat, query, or index fee.",
+  },
+  {
+    icon: "ph-sliders-horizontal",
+    title: "Choose the model boundary",
+    detail: "Use local endpoints to keep model processing local, or remote embedding, reranking, and LLM providers when their data boundary and API cost fit. Remote providers receive request content.",
+  },
+];
+
+---
+
+<script>
+  import "@phosphor-icons/webcomponents/PhDatabase";
+  import "@phosphor-icons/webcomponents/PhLaptop";
+  import "@phosphor-icons/webcomponents/PhSlidersHorizontal";
+</script>
+
+<section id="enterprise" class="enterprise" aria-labelledby="enterprise-heading">
+  <div class="container">
+    <header class="intro" data-reveal>
+      <p class="eyebrow">FROM LAPTOP TO COMPANY NETWORK</p>
+      <h2 id="enterprise-heading">Same hound, same house rules.</h2>
+      <p>{positioning.enterprise}</p>
+    </header>
+
+    <div class="card-grid promise-grid">
+      {promises.map((promise) => (
+        <article class="card-tile" data-reveal>
+          <span class="icon-chip" aria-hidden="true">
+            <PhosphorIcon name={promise.icon} size="24" weight="duotone" />
+          </span>
+          <h3>{promise.title}</h3>
+          <p>{promise.detail}</p>
+        </article>
+      ))}
+    </div>
+
+  </div>
+</section>
+
+<script>
+  import "../scripts/count-reveal.ts";
+</script>
+
+<style>
+  .enterprise { padding: var(--space-10) 0; }
+
+  /* Promise peers share the .card-grid row + entrance rhythm (global.css);
+     the shared .card-tile recipe owns their type, so only the heading gap is
+     declared here. */
+  .promise-grid h3 { margin: var(--space-4) 0 var(--space-2); }
+</style>

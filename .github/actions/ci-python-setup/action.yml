@@ -1,0 +1,45 @@
+name: Set up CI Python tests
+description: Install Python test dependencies and optional site test dependencies
+inputs:
+  python-version:
+    description: Python version to install
+    required: true
+  site:
+    description: Install site test dependencies and download the site artifact
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+    - name: Resolve docs version
+      shell: bash
+      run: bash scripts/resolve_docs_version.sh
+    - uses: actions/setup-node@v6
+      if: inputs.site == 'true'
+      with:
+        node-version: "22"
+        cache: npm
+        cache-dependency-path: site/package-lock.json
+    - if: inputs.site == 'true'
+      shell: bash
+      run: npm ci --prefix site
+    - name: Install Chromium for site browser contracts
+      if: inputs.site == 'true'
+      shell: bash
+      run: npm exec --prefix site -- playwright install --with-deps chromium
+    - name: Install dependencies
+      shell: bash
+      run: uv sync --locked
+    - name: Download built site artifact
+      if: inputs.site == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: site-dist
+        path: site/dist
+    - name: Build Rust extension
+      uses: ./.github/actions/build-rust-extension

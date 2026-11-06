@@ -1,4 +1,7 @@
 ---
+import positioning from "../lib/positioning.json";
+import '../styles/global.css';
+
 interface Props {
   title?: string;
   description?: string;
@@ -8,8 +11,8 @@ interface Props {
 }
 
 const {
-  title = "ChunkHound — Your engineering context, deeply understood",
-  description = "ChunkHound gives AI agents cited context across current code, git history, and technical web research — for safer edits, clearer reviews, and release-ready summaries. Local-first. MIT licensed.",
+  title = positioning.title,
+  description = positioning.description,
   socialImage = "/og-image-dark.png",
   socialImageType = "image/png",
   type = "website",
@@ -17,7 +20,6 @@ const {
 const canonicalUrl = new URL(Astro.url.pathname, Astro.site);
 const socialImageUrl = new URL(socialImage, Astro.site);
 
-import '../styles/global.css';
 ---
 
 <!doctype html>

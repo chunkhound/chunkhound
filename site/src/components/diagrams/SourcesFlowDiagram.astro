@@ -1,0 +1,49 @@
+---
+import DiagramFigure from "./DiagramFigure.astro";
+import { RESEARCH_PHASES } from "../../lib/architecture";
+
+/**
+ * Deep research as two decoupled phases, rendered from RESEARCH_PHASES.
+ * Exploration searches and narrows any corpus the same way; synthesis turns the
+ * converged result set into one cited answer. The sources are shown in the
+ * context diagram above, so this figure starts where they all enter.
+ *
+ * The accent is spent on the one load-bearing element: the boundary between the
+ * phases — the stable "converged results" seam that keeps the engine
+ * corpus-agnostic. All else is type, weight, and whitespace.
+ */
+---
+
+<DiagramFigure
+  caption="One pipeline, every source"
+  label="Two-phase research path: exploration, then synthesis"
+  description="Every source enters the same path. Exploration searches by meaning and by pattern, then interleaves reranking with a utility model's follow-ups, imports, and gaps until results plateau. Synthesis then map-reduces the converged results, extracts exact constants from chunk metadata, reconciles facts in a ledger, and writes one cited answer."
+>
+  <div class="d-connector">every source enters the same path</div>
+
+  {RESEARCH_PHASES.map((phase, index) => (
+    <>
+      {index > 0 && (
+        <div class="d-connector" data-tone="accent">
+          only the converged results cross this line
+        </div>
+      )}
+      <section class="phase d-band" data-phase={phase.id}>
+        <header class="phase-head d-band-head">
+          <span class="phase-label d-band-label">{phase.label}</span>
+          <span class="phase-caption d-band-caption">{phase.caption}</span>
+        </header>
+        <dl class="mechanisms d-term-list">
+          {phase.mechanisms.map((mechanism) => (
+            <div class="mechanism d-term">
+              <dt>{mechanism.title}</dt>
+              <dd>{mechanism.detail}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+    </>
+  ))}
+
+  <p class="result">One question <span aria-hidden="true">→</span> one cited answer</p>
+</DiagramFigure>
