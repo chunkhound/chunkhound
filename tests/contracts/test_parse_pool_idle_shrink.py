@@ -31,24 +31,22 @@ def _reset_pool() -> None:
         pb._parse_pool = None
 
 
-def _wait_for_no_pool(seconds: float) -> None:
-    deadline = time.monotonic() + seconds
-    while pb._parse_pool is not None and time.monotonic() < deadline:
-        time.sleep(0.05)
-
-
 def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
     _reset_pool()
-    monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 0.3, raising=False)
+    # Long enough that the lease-free reads below cannot race the timer.
+    monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 2.0, raising=False)
     src = tmp_path / "a.py"
     src.write_text("def f():\n    return 1\n", encoding="utf-8")
     try:
         first = pb.parse_batch_callback([str(src)], _CFG)
         pool = pb._parse_pool
+        assert pool is not None
         workers = list(pool._processes.values())
         assert workers
 
-        _wait_for_no_pool(15)
+        deadline = time.monotonic() + 30
+        while pb._parse_pool is not None and time.monotonic() < deadline:
+            time.sleep(0.05)
         assert pb._parse_pool is None, "idle parse pool was never shut down"
         for worker in workers:
             worker.join(10)
@@ -60,28 +58,29 @@ def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
         _reset_pool()
 
 
-def test_parse_pool_is_never_shut_down_while_leased(monkeypatch):
-    """Overlapping batches (a scan and a resync) keep the pool alive past the
-    idle time, and an idle-timer callback that runs after a newer batch
-    started (the timer firing as a batch arrives) leaves the pool alone."""
+def test_parse_pool_is_never_shut_down_while_leased():
+    """Overlapping batches (a scan and a resync) share one pool, an idle-timer
+    callback that runs after a newer batch started (the timer firing as a batch
+    arrives) leaves the pool alone, and only the current timer shuts it down.
+    Timer callbacks are invoked directly, so no real timer decides the outcome
+    (the default 60 s idle time never elapses during the test)."""
     _reset_pool()
-    monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 0.3)
     try:
         with pb._leased_parse_pool(1) as pool:
             with pb._leased_parse_pool(1) as resync_pool:
                 assert resync_pool is pool
                 pid = resync_pool.submit(os.getpid).result()
-            time.sleep(1.0)  # well past the idle time, outer lease still held
-            assert pb._parse_pool is pool
+            assert pb._parse_pool_idle_token is None  # a lease is still held
             assert pool.submit(os.getpid).result() == pid
 
         stale = pb._parse_pool_idle_token  # the timer started by that release
+        assert stale is not None
         with pb._leased_parse_pool(1):
             pass
         pb._shut_down_idle_parse_pool(stale)  # as if that timer fired late
         assert pb._parse_pool is pool
 
-        _wait_for_no_pool(15)
+        pb._shut_down_idle_parse_pool(pb._parse_pool_idle_token)
         assert pb._parse_pool is None
     finally:
         _reset_pool()

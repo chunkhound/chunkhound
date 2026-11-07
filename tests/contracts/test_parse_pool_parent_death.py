@@ -23,10 +23,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PARENT_SCRIPT = """
 import json, os, sys, time
 import chunkhound.pipeline_bridge as pb
-pool = pb._get_parse_pool(1)
-worker_pid = pool.submit(os.getpid).result(timeout=120)
-print(json.dumps({"worker": worker_pid}), flush=True)
-time.sleep(600)
+with pb._leased_parse_pool(1) as pool:
+    worker_pid = pool.submit(os.getpid).result(timeout=120)
+    print(json.dumps({"worker": worker_pid}), flush=True)
+    time.sleep(600)
 """
 
 

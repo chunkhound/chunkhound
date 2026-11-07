@@ -148,7 +148,7 @@ class _ParsePoolConfig:
     process, and a Rust #[pyclass] instance (what parse_batch_callback()
     actually receives) has no pickle support — so parse_batch_callback()
     copies the fields it needs out of whatever parse_config it's given
-    (real or absent) into one of these before it ever reaches _get_parse_pool()
+    (real or absent) into one of these before it ever reaches _leased_parse_pool()
     or _parse_one_file(). Also doubles as the default used when
     parse_batch_callback()/_parse_one_file() are called directly (tests, or
     any caller that bypasses the Rust pipeline) without a parse_config.
@@ -189,32 +189,6 @@ class _ParsePoolConfig:
 _DEFAULT_PARSE_CONFIG = _ParsePoolConfig()
 
 
-def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
-    """Lazily create the module-level parse worker pool.
-
-    Reused across every parse_batch_callback() call — i.e. across every
-    parse batch within one IndexingPipeline.run(), and across runs that
-    start before it has sat idle for _PARSE_POOL_IDLE_SECONDS (see
-    _leased_parse_pool()) — instead of being spawned and torn down per
-    batch. parse_batch_callback() goes through _leased_parse_pool(), which
-    shares this pool; this direct accessor takes no lease. Sizing
-    is fixed at first use, from whichever call happens to win the creation
-    race below — later calls' max_workers values are ignored once the pool
-    already exists, same as before this took an explicit parameter.
-
-    A lock guards creation because multiple concurrent IndexingPipeline.run()
-    calls (e.g. two simultaneous indexing operations in one long-lived MCP
-    process) each spawn their own dedicated parse thread, so a first-use race
-    across threads is a real scenario here, not a hypothetical one.
-    """
-    global _parse_pool
-    if _parse_pool is None:
-        with _parse_pool_lock:
-            if _parse_pool is None:
-                _parse_pool = _new_parse_pool_locked(max_workers)
-    return _parse_pool
-
-
 def _new_parse_pool_locked(max_workers: int) -> ProcessPoolExecutor:
     """Create the parse pool. Caller holds _parse_pool_lock."""
     global _parse_pool_atexit_registered
@@ -230,6 +204,19 @@ def _new_parse_pool_locked(max_workers: int) -> ProcessPoolExecutor:
 @contextlib.contextmanager
 def _leased_parse_pool(max_workers: int) -> Iterator[ProcessPoolExecutor]:
     """Use the shared parse pool for one batch, keeping it alive meanwhile.
+
+    The only way to reach the pool. It is created lazily and reused across
+    every parse_batch_callback() call — every batch within one
+    IndexingPipeline.run(), and runs that start before it has sat idle for
+    _PARSE_POOL_IDLE_SECONDS — instead of being spawned and torn down per
+    batch. Sizing is fixed when the pool is created, by whichever lease
+    creates it; later max_workers values are ignored while it exists. The
+    lock matters for creation too: concurrent IndexingPipeline.run() calls
+    (e.g. two indexing operations in one long-lived MCP process) each run
+    their own parse thread, so a first-use race across threads is real.
+
+    There is deliberately no unleased accessor: a caller that submits work
+    without a lease could have the pool shut down under it by the idle timer.
 
     While any lease is held the pool cannot be shut down: the lease count and
     the idle timer change only under _parse_pool_lock, and the timer callback
@@ -648,7 +635,7 @@ def parse_batch_callback(
     hands over one whole batch per call (one call per parse_batch_size chunk
     of files) and this function fans it out across subprocesses for true CPU
     parallelism (tree-sitter holds the GIL, so Python threads wouldn't help).
-    The worker pool (see _get_parse_pool()) is a process-wide singleton,
+    The worker pool (see _leased_parse_pool()) is a process-wide singleton,
     reused for every call within one IndexingPipeline.run() and across runs,
     until it has had no batch in flight for _PARSE_POOL_IDLE_SECONDS; the
     next call then creates a new one (see _leased_parse_pool()).

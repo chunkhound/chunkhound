@@ -399,7 +399,7 @@ async def run_rust_indexing_phase(
     # Safe to close here: the parse_batch_callback's
     # ProcessPoolExecutor (whose fork'd children inherit
     # whatever DuckDB state is live at fork time) is a lazy,
-    # process-wide singleton (see pipeline_bridge._get_parse_pool)
+    # process-wide singleton (see pipeline_bridge._leased_parse_pool)
     # — it's created only from a call in Rust's parse phase, which
     # starts only after this call returns. A run that starts within
     # the pool's idle window reuses the existing workers; after an
