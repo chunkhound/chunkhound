@@ -34,6 +34,7 @@ export {
   findLlmProvider,
   groupProviders,
 } from "./providers.ts";
+export { catalogDrift } from "./catalog.ts";
 export { highlightInlineShellLine } from "./highlight.ts";
 export {
   RERANK_URL_ERROR_ID,

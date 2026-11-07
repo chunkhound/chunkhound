@@ -32,11 +32,6 @@ console.log(JSON.stringify(Object.fromEntries(
 )));
 """
 
-_PROVIDER_IDS_SCRIPT = """
-import { llmProviders } from './site/src/components/configurator/index.ts';
-console.log(JSON.stringify(llmProviders.map((provider) => provider.config.provider)));
-"""
-
 # '| Name | `provider` | ... (configurator defaults to `model`) ...' rows in the
 # LLM provider table; group 1 is the config value, group 2 the preset model.
 _CONFIGURATOR_DEFAULT = re.compile(
@@ -185,17 +180,6 @@ def test_configuration_docs_list_every_omission_capable_provider() -> None:
     ).lower()
     missing = [name for name in sorted(supported) if name.lower() not in sentence]
     assert not missing, f"docs omission list misses providers: {missing}"
-
-
-def test_every_registry_provider_has_a_configurator_preset() -> None:
-    """Every OpenAI-compatible provider the backend registers must be
-    selectable in the configurator; otherwise a provider ships with no way to
-    pick it, and the two catalogs drift silently."""
-    catalog_providers = set(run_tsx_json(_PROVIDER_IDS_SCRIPT))
-    missing = set(OPENAI_COMPATIBLE_PROVIDERS) - catalog_providers
-    assert not missing, (
-        f"configurator has no preset for registered providers: {sorted(missing)}"
-    )
 
 
 def test_configuration_docs_match_configurator_llm_defaults() -> None:

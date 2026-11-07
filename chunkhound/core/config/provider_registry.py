@@ -12,9 +12,12 @@ To add a new OpenAI-compatible provider you must also touch:
   - ``CLI_PROVIDER_CHOICES`` in ``llm_config.py``
   - test ``SPECS`` in ``test_openai_compatible_provider.py``
   - ``REASONING_EFFORT_PROVIDERS`` in ``llm_config.py`` (if applicable)
-  - site configurator presets in ``site/src/components/configurator/``
-    (``providers.ts``, ``requirements.ts``, ``constants.ts``, ``icons.ts``)
-  - the configurator tests and highlight goldens in ``tests/site/``
+  - the preset itself (model pin, copy) in
+    ``site/src/components/configurator/providers.ts``
+  - its SVG in ``site/src/components/configurator/icons.ts``
+  - then regenerate the derived site catalog and run the drift guard:
+    ``uv run python scripts/generate_site_provider_catalog.py``
+    ``uv run pytest tests/site/test_configurator_catalog_drift.py``
   - ``site/src/pages/docs/configuration.md``
   - ``CHANGELOG.md``
 """
