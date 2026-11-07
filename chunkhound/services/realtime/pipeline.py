@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import random
+import threading
 import time
 from collections.abc import Awaitable
 from dataclasses import replace
@@ -59,7 +60,50 @@ class RealtimePipelineMixin:
             event_type=event_type,
             scope="excluded",
         )
+        self._emit_filtered_status_update()
+
+    def _emit_filtered_status_update(self) -> None:
+        """Publish status for a filtered event at most once per interval.
+
+        A filtered event changes only counters, and filtered events arrive in
+        bursts of thousands (an npm install, a junction to node_modules), where
+        building and publishing a full snapshot per event cost more than
+        filtering the event did. The first event after a quiet interval
+        publishes at once; the rest of the interval schedules one trailing
+        publish, so the counters the burst's last event left still reach the
+        status consumer when the burst ends. Any other status update in the
+        meantime publishes the same counters.
+        """
+        now = time.monotonic()
+        with self._filtered_status_lock:
+            wait = (
+                self._filtered_status_last_emit
+                + self._FILTERED_STATUS_INTERVAL_SECONDS
+                - now
+            )
+            if wait > 0:
+                if self._filtered_status_flush is None:
+                    flush = threading.Timer(wait, self._flush_filtered_status_update)
+                    flush.daemon = True
+                    self._filtered_status_flush = flush
+                    flush.start()
+                return
+            self._filtered_status_last_emit = now
         self._emit_status_update()
+
+    def _flush_filtered_status_update(self) -> None:
+        with self._filtered_status_lock:
+            self._filtered_status_flush = None
+            self._filtered_status_last_emit = time.monotonic()
+        self._emit_status_update()
+
+    def _cancel_filtered_status_flush(self) -> None:
+        with self._filtered_status_lock:
+            flush = self._filtered_status_flush
+            self._filtered_status_flush = None
+        if flush is not None:
+            flush.cancel()
+
     def _should_admit_realtime_event(
         self,
         event_type: str,

@@ -641,6 +641,8 @@ class RealtimeStartupMixin:
 
         self._service_state = "stopped"
         self._monitor_adapter = None
+        # This final update carries every counter a pending throttled one would.
+        self._cancel_filtered_status_flush()
         self._emit_status_update()
 
     async def _setup_watchdog_with_timeout(
