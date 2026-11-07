@@ -400,12 +400,13 @@ async def run_rust_indexing_phase(
     # ProcessPoolExecutor (whose fork'd children inherit
     # whatever DuckDB state is live at fork time) is a lazy,
     # process-wide singleton (see pipeline_bridge._get_parse_pool)
-    # — it's created only once, on the first call from Rust's
-    # parse phase, which starts only after this call returns on
-    # this very first run. Every later run reuses the
-    # already-created workers, so no new fork ever happens after
-    # this point — there's nothing later to inherit a live
-    # connection. Must use the provider's full disconnect(),
+    # — it's created only from a call in Rust's parse phase, which
+    # starts only after this call returns. A run that starts within
+    # the pool's idle window reuses the existing workers; after an
+    # idle shutdown (pipeline_bridge._leased_parse_pool) the next
+    # run's parse phase creates a new pool, again only after this
+    # release, so a new worker never inherits a live connection.
+    # Must use the provider's full disconnect(),
     # not just closing _connection_manager.connection: the
     # SerialExecutor holds its own separate thread-local DuckDB
     # connection (created lazily on its worker thread), which a

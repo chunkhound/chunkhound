@@ -6,10 +6,11 @@ by Rust.
 """
 
 import atexit
+import contextlib
 import functools
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,6 +114,20 @@ def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
 _parse_pool: ProcessPoolExecutor | None = None
 _parse_pool_lock = threading.Lock()
 
+# The parse pool is only used by bulk parsing (start-up scans, resyncs, `index`);
+# a long-lived MCP server otherwise holds max_workers idle processes for its whole
+# session. Once no parse batch has been in flight for this long, the pool is shut
+# down; the next batch creates a new one. All four names below are guarded by
+# _parse_pool_lock.
+_PARSE_POOL_IDLE_SECONDS = 60.0
+_parse_pool_leases = 0
+_parse_pool_idle_timer: threading.Timer | None = None
+# Identifies the one idle timer allowed to shut the pool down. Cleared whenever a
+# lease starts, so a timer whose callback is already running when a batch arrives
+# finds a stale token and leaves the pool alone.
+_parse_pool_idle_token: object | None = None
+_parse_pool_atexit_registered = False
+
 
 def _default_parse_pool_workers() -> int:
     """Single source of truth for the parse pool's default worker count.
@@ -175,11 +190,14 @@ _DEFAULT_PARSE_CONFIG = _ParsePoolConfig()
 
 
 def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
-    """Lazily create the module-level parse worker pool, once per process.
+    """Lazily create the module-level parse worker pool.
 
     Reused across every parse_batch_callback() call — i.e. across every
-    parse batch within one IndexingPipeline.run(), and across every run in
-    this process — instead of being spawned and torn down per batch. Sizing
+    parse batch within one IndexingPipeline.run(), and across runs that
+    start before it has sat idle for _PARSE_POOL_IDLE_SECONDS (see
+    _leased_parse_pool()) — instead of being spawned and torn down per
+    batch. parse_batch_callback() goes through _leased_parse_pool(), which
+    shares this pool; this direct accessor takes no lease. Sizing
     is fixed at first use, from whichever call happens to win the creation
     race below — later calls' max_workers values are ignored once the pool
     already exists, same as before this took an explicit parameter.
@@ -193,13 +211,86 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
     if _parse_pool is None:
         with _parse_pool_lock:
             if _parse_pool is None:
-                pool = ProcessPoolExecutor(
-                    max_workers=max(1, max_workers),
-                    initializer=exit_when_parent_dies,
-                )
-                atexit.register(pool.shutdown, cancel_futures=True)
-                _parse_pool = pool
+                _parse_pool = _new_parse_pool_locked(max_workers)
     return _parse_pool
+
+
+def _new_parse_pool_locked(max_workers: int) -> ProcessPoolExecutor:
+    """Create the parse pool. Caller holds _parse_pool_lock."""
+    global _parse_pool_atexit_registered
+    if not _parse_pool_atexit_registered:
+        atexit.register(_shut_down_parse_pool_at_exit)
+        _parse_pool_atexit_registered = True
+    return ProcessPoolExecutor(
+        max_workers=max(1, max_workers),
+        initializer=exit_when_parent_dies,
+    )
+
+
+@contextlib.contextmanager
+def _leased_parse_pool(max_workers: int) -> Iterator[ProcessPoolExecutor]:
+    """Use the shared parse pool for one batch, keeping it alive meanwhile.
+
+    While any lease is held the pool cannot be shut down: the lease count and
+    the idle timer change only under _parse_pool_lock, and the timer callback
+    re-checks both under that lock. Overlapping callers (a start-up scan and a
+    resync in one process) each hold their own lease, so the pool outlives the
+    last of them. When the last lease ends, an idle timer starts; a lease that
+    begins before it fires cancels it and clears its token.
+    """
+    global _parse_pool, _parse_pool_leases, _parse_pool_idle_timer
+    global _parse_pool_idle_token
+    with _parse_pool_lock:
+        if _parse_pool_idle_timer is not None:
+            _parse_pool_idle_timer.cancel()
+            _parse_pool_idle_timer = None
+        _parse_pool_idle_token = None
+        if _parse_pool is None:
+            _parse_pool = _new_parse_pool_locked(max_workers)
+        pool = _parse_pool
+        _parse_pool_leases += 1
+    try:
+        yield pool
+    finally:
+        with _parse_pool_lock:
+            _parse_pool_leases -= 1
+            if _parse_pool_leases == 0 and _parse_pool is pool:
+                token = object()
+                timer = threading.Timer(
+                    _PARSE_POOL_IDLE_SECONDS, _shut_down_idle_parse_pool, args=(token,)
+                )
+                timer.daemon = True
+                _parse_pool_idle_token = token
+                _parse_pool_idle_timer = timer
+                timer.start()
+
+
+def _shut_down_idle_parse_pool(token: object) -> None:
+    """Idle-timer callback: shut the pool down if nothing has used it since."""
+    global _parse_pool, _parse_pool_idle_timer, _parse_pool_idle_token
+    with _parse_pool_lock:
+        if token is not _parse_pool_idle_token or _parse_pool_leases:
+            return
+        pool = _parse_pool
+        _parse_pool = None
+        _parse_pool_idle_timer = None
+        _parse_pool_idle_token = None
+    if pool is not None:
+        # No lease is held, so no task is in flight on this pool.
+        pool.shutdown(wait=True)
+
+
+def _shut_down_parse_pool_at_exit() -> None:
+    global _parse_pool, _parse_pool_idle_timer, _parse_pool_idle_token
+    with _parse_pool_lock:
+        if _parse_pool_idle_timer is not None:
+            _parse_pool_idle_timer.cancel()
+        pool = _parse_pool
+        _parse_pool = None
+        _parse_pool_idle_timer = None
+        _parse_pool_idle_token = None
+    if pool is not None:
+        pool.shutdown(cancel_futures=True)
 
 
 def parse_file_callback(
@@ -557,9 +648,10 @@ def parse_batch_callback(
     hands over one whole batch per call (one call per parse_batch_size chunk
     of files) and this function fans it out across subprocesses for true CPU
     parallelism (tree-sitter holds the GIL, so Python threads wouldn't help).
-    The worker pool (see _get_parse_pool()) is a process-wide singleton —
-    created once and reused for every call, both within one
-    IndexingPipeline.run() and across multiple runs in this process.
+    The worker pool (see _get_parse_pool()) is a process-wide singleton,
+    reused for every call within one IndexingPipeline.run() and across runs,
+    until it has had no batch in flight for _PARSE_POOL_IDLE_SECONDS; the
+    next call then creates a new one (see _leased_parse_pool()).
 
     Args:
         parse_config: The chunkhound_native.ParseCallConfig Rust constructs
@@ -581,8 +673,8 @@ def parse_batch_callback(
         parse_config, index_unknown_files=index_unknown_files
     )
     args_list = [(p, cfg) for p in file_paths]
-    pool = _get_parse_pool(cfg.parse_thread_pool_size)
-    return list(pool.map(_parse_one_file, args_list))
+    with _leased_parse_pool(cfg.parse_thread_pool_size) as pool:
+        return list(pool.map(_parse_one_file, args_list))
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:
