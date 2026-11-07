@@ -712,7 +712,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         count_event: bool = False,
         count_coalesced: bool = False,
     ) -> None:
-        normalized_path = str(self._normalize_mutation_path(file_path))
+        normalized_path = str(
+            self._normalize_mutation_path(file_path, keep_in_tree_spelling=True)
+        )
         now_monotonic = time.monotonic()
         entry = self._event_pressure_by_path.get(normalized_path)
         if entry is None:

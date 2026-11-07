@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -15,6 +16,11 @@ from chunkhound.services.realtime_path_filter import RealtimePathFilter
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
+
+
+def _in_tree_path(path: Path | str) -> Path:
+    """Absolute path as the event spelled it, links unresolved, for admission."""
+    return Path(os.path.abspath(path))
 
 
 QueueResultCallback = Callable[[str, Path, bool, str | None], None]
@@ -153,16 +159,17 @@ class SimpleEventHandler:
         """Handle filesystem events - simple queue operation."""
         # Handle directory creation
         if event.event_type == "created" and event.is_directory:
-            # An excluded directory is never walked. Judge it where it sits in
-            # the tree: resolving first would turn a link under node_modules/
-            # into its target outside the root, which no exclude rule matches.
-            file_path = Path(normalize_file_path(event.src_path))
-            self._record_source_event("dir_created", file_path)
-            if self._path_filter.excludes_directory(Path(event.src_path)):
-                self._record_filtered_event("dir_created", file_path)
+            # An excluded directory is never resolved or walked. Judge it where
+            # it sits in the tree: resolving first would turn a link under
+            # node_modules/ into its target outside the root, which no exclude
+            # rule matches.
+            in_tree = _in_tree_path(event.src_path)
+            self._record_source_event("dir_created", in_tree)
+            if self._path_filter.excludes_directory(in_tree):
+                self._record_filtered_event("dir_created", in_tree)
                 return
             # Queue directory creation for processing
-            self._queue_event("dir_created", file_path)
+            self._queue_admitted("dir_created", in_tree)
             return
 
         # Handle directory deletion
@@ -182,17 +189,20 @@ class SimpleEventHandler:
             self._handle_move_event(event.src_path, event.dest_path)
             return
 
-        # Resolve path to canonical form to avoid /var vs /private/var issues
-        file_path = Path(normalize_file_path(event.src_path))
-        self._record_source_event(event.event_type, file_path)
+        # Admission judges the file where it sits in the tree, not at the
+        # resolved target of a link above it (e.g. under node_modules/), and a
+        # rejected event is never resolved: a burst of excluded events must not
+        # pay for path resolution.
+        in_tree = _in_tree_path(event.src_path)
+        self._record_source_event(event.event_type, in_tree)
 
         # Simple filtering for supported file types, with a shared
         # previously-indexed delete exception for cleanup correctness.
-        if not self._should_admit_event(event.event_type, file_path):
-            self._record_filtered_event(event.event_type, file_path)
+        if not self._should_admit_event(event.event_type, in_tree):
+            self._record_filtered_event(event.event_type, in_tree)
             return
 
-        self._queue_event(event.event_type, file_path)
+        self._queue_admitted(event.event_type, in_tree)
 
     def _should_index(self, file_path: Path) -> bool:
         """Check if file should be indexed based on config patterns.
@@ -206,8 +216,8 @@ class SimpleEventHandler:
 
     def _handle_move_event(self, src_path: str, dest_path: str) -> None:
         """Handle atomic file moves (temp -> final file)."""
-        src_file = Path(normalize_file_path(src_path))
-        dest_file = Path(normalize_file_path(dest_path))
+        src_file = _in_tree_path(src_path)
+        dest_file = _in_tree_path(dest_path)
         src_should_index = self._should_index(src_file)
         dest_should_index = self._should_index(dest_file)
         src_should_admit_delete = self._should_admit_event(
@@ -220,21 +230,21 @@ class SimpleEventHandler:
         if not src_should_index and dest_should_index:
             logger.debug(f"Atomic write detected: {src_path} -> {dest_path}")
             self._record_source_event("created", dest_file)
-            self._queue_event("created", dest_file)
+            self._queue_admitted("created", dest_file)
 
         # If moving FROM supported file -> handle as deletion + creation
         elif src_should_admit_delete and dest_should_index:
             logger.debug(f"File rename: {src_path} -> {dest_path}")
             self._record_source_event("deleted", src_file)
-            self._queue_event("deleted", src_file)
+            self._queue_admitted("deleted", src_file)
             self._record_source_event("created", dest_file)
-            self._queue_event("created", dest_file)
+            self._queue_admitted("created", dest_file)
 
         # If moving FROM supported file TO temp/unsupported -> deletion
         elif src_should_admit_delete and not dest_should_index:
             logger.debug(f"File moved to temp/unsupported: {src_path}")
             self._record_source_event("deleted", src_file)
-            self._queue_event("deleted", src_file)
+            self._queue_admitted("deleted", src_file)
 
     def _should_admit_event(
         self,
@@ -249,6 +259,19 @@ class SimpleEventHandler:
         if self._admission_callback is None:
             return path_allowed
         return self._admission_callback(event_type, file_path, path_allowed)
+
+    def _queue_admitted(self, event_type: str, in_tree: Path) -> None:
+        """Queue an admitted path by its resolved form, unless that leaves the root.
+
+        A path that resolves outside the root (a linked directory whose target
+        is elsewhere) cannot be stored under it, and the default startup scan,
+        which does not follow directory links, never indexes it either.
+        """
+        file_path = Path(normalize_file_path(in_tree))
+        if not file_path.is_relative_to(self._root):
+            self._record_filtered_event(event_type, in_tree)
+            return
+        self._queue_event(event_type, file_path)
 
     def _queue_event(self, event_type: str, file_path: Path) -> None:
         """Queue an event for async processing."""

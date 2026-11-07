@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
 import random
+import stat
+import sys
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Generator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,45 @@ from chunkhound.providers.database.serial_executor import (
 from .events import RealtimeMutation, SimpleEventHandler, normalize_file_path
 
 
+def _is_junction(path: Path) -> bool:
+    """Return whether ``path`` is a Windows directory junction.
+
+    Only the junction reparse tag is matched: OneDrive and deduplication
+    placeholders are reparse points too, and they are ordinary directories.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        # Gone or unreadable: os.walk skips it on its own.
+        return False
+    return st.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+
+
+def _walk_files(top: Path, handler: SimpleEventHandler) -> Generator[Path, None, None]:
+    """Yield the paths of entries under ``top``, pruning excluded and linked dirs.
+
+    This keeps parity with the default startup scan (the Rust scanner), which
+    follows neither directory symlinks nor junctions and prunes excluded
+    directories. A directory is judged where it sits in the tree, so a link
+    under ``node_modules/`` is pruned by that rule rather than walked to its
+    target. ``os.walk`` does not descend symlinks by default but does descend
+    junctions, so junctions are pruned explicitly. Unreadable directories are
+    skipped, as ``os.walk`` does by default.
+    """
+    for dirpath, dirnames, filenames in os.walk(top):
+        parent = Path(dirpath)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not _is_junction(parent / name)
+            and not handler._path_filter.excludes_directory(parent / name)
+        ]
+        for name in filenames:
+            yield parent / name
+
+
 class RealtimePipelineMixin:
     def _emit_status_update(self) -> None:
         try:
@@ -30,7 +72,9 @@ class RealtimePipelineMixin:
             # Status plumbing must never affect runtime behavior.
             pass
     def _record_source_event(self, event_type: str, file_path: Path | str) -> None:
-        normalized_path = str(self._normalize_mutation_path(file_path))
+        normalized_path = str(
+            self._normalize_mutation_path(file_path, keep_in_tree_spelling=True)
+        )
         self._last_source_event_at = self._utc_now()
         self._last_source_event_type = event_type
         self._last_source_event_path = normalized_path
@@ -109,9 +153,28 @@ class RealtimePipelineMixin:
         self, awaitable: Awaitable[Any]
     ) -> asyncio.Task[Any]:
         return self._transient_tasks.create_task(awaitable)
-    def _normalize_mutation_path(self, file_path: Path | str) -> Path:
+    def _normalize_mutation_path(
+        self, file_path: Path | str, *, keep_in_tree_spelling: bool = False
+    ) -> Path:
+        """Return the logical path realtime state is keyed by.
+
+        With ``keep_in_tree_spelling``, a path already spelled under the root is
+        returned as is, without resolving it. Event bookkeeping uses this so a
+        burst of rejected events does not pay for path resolution; it differs
+        from full normalization only for a path that passes through a link whose
+        target is also in the tree, or that the filesystem spells differently
+        (8.3 short names, letter case).
+        """
         path_obj = Path(file_path)
         base_dir = self.watch_path or getattr(self.config, "target_dir", None)
+        if keep_in_tree_spelling and isinstance(base_dir, Path):
+            path_str = str(path_obj)
+            if (
+                path_obj.is_absolute()
+                and path_str.startswith(str(base_dir) + os.sep)
+                and os.path.normpath(path_str) == path_str
+            ):
+                return path_obj
         return normalize_realtime_path(
             path_obj, base_dir if isinstance(base_dir, Path) else None
         )
@@ -761,9 +824,9 @@ class RealtimePipelineMixin:
             None, self.config, None, root_path=watch_path
         )
 
-        rglob_gen = watch_path.rglob("*")
+        walk = _walk_files(watch_path, simple_handler)
         try:
-            for file_path in rglob_gen:
+            for file_path in walk:
                 try:
                     if not file_path.is_file():
                         continue
@@ -786,14 +849,9 @@ class RealtimePipelineMixin:
                 except (OSError, PermissionError):
                     continue
         finally:
-            # Guard only the Python 3.14+ Windows case where rglob() can return a
-            # map object with no .close() (older Pythons returned a generator
-            # supporting explicit close for fd hygiene). Any actual error from
-            # calling close() when the attr exists is allowed to propagate so it
-            # is handled (and logged) by the existing monitor error loop, exactly
-            # as before the 3.14 regression.
-            if hasattr(rglob_gen, "close"):
-                rglob_gen.close()
+            # Close the walk on an early break so its open directory handles are
+            # released now, not at garbage collection.
+            walk.close()
 
         return current_files, files_checked, truncated
     def _collect_supported_files(self, dir_path: Path) -> list[Path]:
@@ -806,7 +864,7 @@ class RealtimePipelineMixin:
         )
         supported_files: list[Path] = []
 
-        for file_path in dir_path.rglob("*"):
+        for file_path in _walk_files(dir_path, simple_handler):
             try:
                 if file_path.is_file() and simple_handler._should_index(file_path):
                     supported_files.append(file_path)

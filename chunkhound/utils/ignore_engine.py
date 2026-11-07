@@ -67,9 +67,12 @@ class IgnoreEngine:
             rel = located
         rel_str = rel.as_posix()
 
+        # A directory is matched in its "dir/" form only, as git does. Testing the
+        # bare name too lets "/*" exclude src/ even after "!/src/" re-includes it.
+        candidate = rel_str + "/" if is_dir else rel_str
         # Evaluate specs in precedence order; first match wins
         for src, spec in self._compiled_specs:
-            if spec.match_file(rel_str) or (is_dir and spec.match_file(rel_str + "/")):
+            if spec.match_file(candidate):
                 return MatchInfo(matched=True, source=src, pattern=None)
         return None
 
@@ -767,9 +770,8 @@ class RepoAwareLibgit2Evaluator:
     def _cfg_excluded(self, rel: str, is_dir: bool) -> bool:
         if self._cfg_spec is None:
             return False
-        return self._cfg_spec.match_file(rel) or (
-            is_dir and self._cfg_spec.match_file(rel + "/")
-        )
+        # Directories in their "dir/" form only, as in IgnoreEngine.matches.
+        return self._cfg_spec.match_file(rel + "/" if is_dir else rel)
 
     def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         # Hard exclude via config_exclude first

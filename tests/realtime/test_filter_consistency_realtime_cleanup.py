@@ -383,6 +383,132 @@ async def test_linked_package_under_node_modules_is_never_indexed(
         services.provider.disconnect()
 
 
+def _linked_package_layout(tmp_path: Path) -> tuple[Path, Path, Config]:
+    """A root whose node_modules/@scope/pkg (excluded) and vendor/pkg (included)
+    link to packages outside it."""
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    package = tmp_path / "outside" / "pkg"
+    package.mkdir(parents=True)
+    (package / "build.py").write_text("def build():\n    return 1\n", encoding="utf-8")
+    scope = root / "node_modules" / "@scope"
+    scope.mkdir(parents=True)
+    _link_directory(scope / "pkg", package)
+    vendored = tmp_path / "outside" / "vendored"
+    vendored.mkdir()
+    (vendored / "lib.py").write_text("def lib():\n    return 1\n", encoding="utf-8")
+    (root / "vendor").mkdir()
+    _link_directory(root / "vendor" / "pkg", vendored)
+    config = Config(
+        target_dir=root,
+        database={"path": str(tmp_path / "linked.duckdb"), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchdog"},
+    )
+    return root, scope / "pkg", config
+
+
+@pytest.mark.asyncio
+async def test_file_event_behind_linked_package_is_not_queued(tmp_path: Path) -> None:
+    """A file event is judged where the file sits in the tree, not at the link's
+    target outside the root, so node_modules/ still excludes it."""
+    root, linked_pkg, config = _linked_package_layout(tmp_path)
+    event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+    handler = SimpleEventHandler(
+        event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
+    )
+
+    handler.on_any_event(
+        SimpleNamespace(
+            event_type="created",
+            is_directory=False,
+            src_path=str(linked_pkg / "build.py"),
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_file_event_behind_included_link_leaving_root_is_not_queued(
+    tmp_path: Path,
+) -> None:
+    """A file reached through an included link whose target is outside the root
+    cannot be stored under the root, and the startup scan, which does not follow
+    directory links, never indexes it, so realtime does not queue it either."""
+    root, _linked_pkg, config = _linked_package_layout(tmp_path)
+    event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+    handler = SimpleEventHandler(
+        event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
+    )
+
+    handler.on_any_event(
+        SimpleNamespace(
+            event_type="created",
+            is_directory=False,
+            src_path=str(root / "vendor" / "pkg" / "lib.py"),
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert event_queue.empty()
+
+
+def test_polling_snapshot_skips_files_behind_linked_package(tmp_path: Path) -> None:
+    """The polling walk prunes an excluded link by its place in the tree instead
+    of walking into its target, and, like the startup scan, does not follow an
+    included directory link either."""
+    root, _linked_pkg, config = _linked_package_layout(tmp_path)
+    services = create_services(tmp_path / "linked.duckdb", config)
+    services.provider.connect()
+    try:
+        service = RealtimeIndexingService(services, config)
+
+        current_files, files_checked, truncated = service._polling_snapshot(root)
+
+        assert list(current_files) == [root / "src" / "app.py"]
+        assert files_checked == 1
+        assert truncated is False
+    finally:
+        services.provider.disconnect()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_polling_snapshot_keeps_directory_reincluded_by_gitignore_whitelist(
+    tmp_path: Path,
+) -> None:
+    """Git's whitelist idiom ("/*" then "!/src/") ignores everything but src/.
+    Pruning the walk by directory must honour the re-include, as git does, or
+    polling would never see a file under src/."""
+    root = tmp_path / "repo"
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (root / "src" / "pkg" / "b.py").write_text("B = 1\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "c.py").write_text("C = 1\n", encoding="utf-8")
+    (root / ".gitignore").write_text("/*\n!/src/\n!.gitignore\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    config = Config(
+        target_dir=root,
+        database={"path": str(tmp_path / "whitelist.duckdb"), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchdog"},
+    )
+    services = create_services(tmp_path / "whitelist.duckdb", config)
+    services.provider.connect()
+    try:
+        service = RealtimeIndexingService(services, config)
+
+        current_files, _files_checked, _truncated = service._polling_snapshot(root)
+
+        assert sorted(current_files) == [
+            root / "src" / "a.py",
+            root / "src" / "pkg" / "b.py",
+        ]
+    finally:
+        services.provider.disconnect()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
