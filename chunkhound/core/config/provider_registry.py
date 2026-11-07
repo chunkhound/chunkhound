@@ -78,7 +78,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         synthesis_concurrency=10,
         output_limit_omission=OutputLimitCapability.SUPPORTED,
         docs_url="https://platform.deepseek.com/api-docs",
-        auth_url="https://platform.deepseek.com",
+        auth_url="https://platform.deepseek.com/api_keys",
     ),
     "grok": OpenAICompatibleSpec(
         name="grok",
@@ -87,7 +87,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         synthesis_concurrency=5,
         output_limit_omission=OutputLimitCapability.SUPPORTED,
         docs_url="https://docs.x.ai/docs/models",
-        auth_url="https://console.x.ai",
+        auth_url="https://console.x.ai/team/default/api-keys",
     ),
     "openrouter": OpenAICompatibleSpec(
         name="openrouter",
@@ -98,7 +98,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         output_limit_omission=OutputLimitCapability.SUPPORTED,
         structured_reasoning_disable_extra_body={"reasoning": {"enabled": False}},
         docs_url="https://openrouter.ai/docs",
-        auth_url="https://openrouter.ai",
+        auth_url="https://openrouter.ai/keys",
     ),
     "orcarouter": OpenAICompatibleSpec(
         name="orcarouter",

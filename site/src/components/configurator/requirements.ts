@@ -1,4 +1,5 @@
 import type { ConfiguratorRequirement } from "./types.ts";
+import { backendAuthUrl } from "./catalog.ts";
 import {
   ANTHROPIC_SVG,
   API_ROUTE_SVG,
@@ -26,6 +27,35 @@ import {
   WINDSURF_SVG,
   ZED_SVG,
 } from "./icons.ts";
+
+/**
+ * API-key prerequisite whose URL derives from the registry's `auth_url`, so a
+ * new provider never means retyping its key portal. `url` is only for providers
+ * the registry does not name (native SDK providers); overriding a registry URL
+ * is rejected so the backend stays the single owner.
+ */
+function apiKeyRequirement(input: {
+  id: string;
+  label: string;
+  svg: string;
+  provider: string;
+  url?: string;
+}): ConfiguratorRequirement {
+  const registryUrl = backendAuthUrl(input.provider);
+  if (input.url && registryUrl) {
+    throw new Error(
+      `Requirement '${input.id}' overrides '${input.provider}' auth_url; ` +
+        "update the backend registry instead.",
+    );
+  }
+  const url = input.url ?? registryUrl;
+  if (!url) {
+    throw new Error(
+      `Requirement '${input.id}' has no url and '${input.provider}' has no registry auth_url.`,
+    );
+  }
+  return { id: input.id, label: input.label, url, svg: input.svg };
+}
 
 export const requirements = {
   pi: {
@@ -95,12 +125,13 @@ export const requirements = {
     svg: VOYAGEAI_SVG,
     optional: true,
   },
-  openaiApiKey: {
+  openaiApiKey: apiKeyRequirement({
     id: "openai-api-key",
     label: "OpenAI API key",
+    provider: "openai",
     url: "https://platform.openai.com/api-keys",
     svg: OPENAI_SVG,
-  },
+  }),
   ollama: {
     id: "ollama",
     label: "Ollama",
@@ -125,30 +156,32 @@ export const requirements = {
     url: "https://docs.vllm.ai/en/latest/",
     svg: VLLM_SVG,
   },
-  anthropicApiKey: {
+  anthropicApiKey: apiKeyRequirement({
     id: "anthropic-api-key",
     label: "Anthropic API key",
+    provider: "anthropic",
     url: "https://console.anthropic.com/settings/keys",
     svg: ANTHROPIC_SVG,
-  },
-  geminiApiKey: {
+  }),
+  geminiApiKey: apiKeyRequirement({
     id: "gemini-api-key",
     label: "Gemini API key",
+    provider: "gemini",
     url: "https://aistudio.google.com/api-keys",
     svg: GEMINI_SVG,
-  },
-  deepseekApiKey: {
+  }),
+  deepseekApiKey: apiKeyRequirement({
     id: "deepseek-api-key",
     label: "DeepSeek API key",
-    url: "https://platform.deepseek.com/api_keys",
+    provider: "deepseek",
     svg: DEEPSEEK_SVG,
-  },
-  grokApiKey: {
+  }),
+  grokApiKey: apiKeyRequirement({
     id: "grok-api-key",
     label: "xAI API key",
-    url: "https://console.x.ai/team/default/api-keys",
+    provider: "grok",
     svg: GROK_SVG,
-  },
+  }),
   ollamaLlmModel: {
     id: "ollama-llm-model",
     label: "qwen3-coder:30b model",
@@ -161,64 +194,64 @@ export const requirements = {
     url: "https://docs.vllm.ai/en/latest/",
     svg: VLLM_SVG,
   },
-  openrouterApiKey: {
+  openrouterApiKey: apiKeyRequirement({
     id: "openrouter-api-key",
     label: "OpenRouter API key",
-    url: "https://openrouter.ai/keys",
+    provider: "openrouter",
     svg: OPENROUTER_SVG,
-  },
-  vercelApiKey: {
+  }),
+  vercelApiKey: apiKeyRequirement({
     id: "vercel-api-key",
     label: "Vercel AI Gateway API key",
-    url: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
+    provider: "vercel",
     svg: VERCEL_SVG,
-  },
-  orcarouterApiKey: {
+  }),
+  orcarouterApiKey: apiKeyRequirement({
     id: "orcarouter-api-key",
     label: "OrcaRouter API key",
-    url: "https://www.orcarouter.ai",
+    provider: "orcarouter",
     svg: ORCAROUTER_SVG,
-  },
-  requestyApiKey: {
+  }),
+  requestyApiKey: apiKeyRequirement({
     id: "requesty-api-key",
     label: "Requesty API key",
-    url: "https://app.requesty.ai/api-keys",
+    provider: "requesty",
     svg: REQUESTY_SVG,
-  },
-  apiRouteApiKey: {
+  }),
+  apiRouteApiKey: apiKeyRequirement({
     id: "api-route-api-key",
     label: "API Route API key",
-    url: "https://www.api-route.com/api-keys",
+    provider: "api-route",
     svg: API_ROUTE_SVG,
-  },
-  opperApiKey: {
+  }),
+  opperApiKey: apiKeyRequirement({
     id: "opper-api-key",
     label: "Opper API key",
-    url: "https://platform.opper.ai",
+    provider: "opper",
     svg: OPPER_SVG,
-  },
-  obscurifyApiKey: {
+  }),
+  obscurifyApiKey: apiKeyRequirement({
     id: "obscurify-api-key",
     label: "Obscurify.ai API key",
-    url: "https://obscurify.ai/account",
+    provider: "obscurify-ai",
     svg: OBSCURIFY_SVG,
-  },
-  atlascloudApiKey: {
+  }),
+  atlascloudApiKey: apiKeyRequirement({
     id: "atlascloud-api-key",
     label: "Atlas Cloud API key",
-    url: "https://console.atlascloud.ai/api-keys",
+    provider: "atlascloud",
     svg: ATLASCLOUD_SVG,
-  },
-  runcrateApiKey: {
+  }),
+  runcrateApiKey: apiKeyRequirement({
     id: "runcrate-api-key",
     label: "Runcrate API key",
-    url: "https://www.runcrate.ai/dashboard/api-keys",
+    provider: "runcrate",
     svg: RUNCRATE_SVG,
-  },
-  cheapaimodelApiKey: {
+  }),
+  cheapaimodelApiKey: apiKeyRequirement({
     id: "cheapaimodel-api-key",
     label: "cheapaimodel API key",
-    url: "https://console.cheapaimodel.ai/keys",
+    provider: "cheapaimodel",
     svg: CHEAPAIMODEL_SVG,
-  },
+  }),
 } satisfies Record<string, ConfiguratorRequirement>;
