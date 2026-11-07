@@ -26,8 +26,13 @@ from chunkhound.version import __version__
 from . import ipc
 from .client_manager import ClientManager
 from .discovery import DaemonDiscovery
+from .process import pid_alive
 
 _DEFAULT_SHUTDOWN_DELAY = 0.0
+# How often a serving daemon verifies its lock file and registry entry still
+# exist. The lock is the only way a proxy finds the daemon (it carries the
+# auth token); without it every new proxy starts a second daemon.
+_PUBLICATION_CHECK_INTERVAL = 5.0
 
 
 class ChunkHoundDaemon(MCPServerBase):
@@ -51,6 +56,7 @@ class ChunkHoundDaemon(MCPServerBase):
         self._shutdown_event = asyncio.Event()
         self._initialization_complete = asyncio.Event()
         self._pid_poll_task: asyncio.Task | None = None
+        self._publication_task: asyncio.Task[None] | None = None
         self._delayed_shutdown_task: asyncio.Task[None] | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
         # True only after we successfully bound the socket and published our lock.
@@ -182,6 +188,7 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Start PID poll background task
             self._pid_poll_task = asyncio.create_task(self._client_manager.poll_pids())
+            self._publication_task = asyncio.create_task(self._watch_publication())
 
             self.debug_log(f"Listening on {self._socket_path}")
 
@@ -212,6 +219,45 @@ class ChunkHoundDaemon(MCPServerBase):
         task = asyncio.create_task(self._delayed_shutdown())
         self._delayed_shutdown_task = task
         task.add_done_callback(self._clear_delayed_shutdown_task)
+
+    async def _watch_publication(self) -> None:
+        """Re-publish the lock and registry entry if they vanish while serving."""
+        while True:
+            await asyncio.sleep(_PUBLICATION_CHECK_INTERVAL)
+            try:
+                self._republish_if_missing()
+            except Exception as e:
+                self.debug_log(f"Publication check failed (non-fatal): {e}")
+
+    def _republish_if_missing(self) -> None:
+        pid = os.getpid()
+        lock = self._discovery.read_lock()
+        owner = lock.get("pid") if lock is not None else None
+        if owner != pid:
+            if isinstance(owner, int) and pid_alive(owner):
+                # Another live daemon holds the lock: something else is wrong.
+                # Do not fight it.
+                print(
+                    f"WARNING: daemon lock names another live daemon "
+                    f"(pid={owner}); not re-publishing (own pid={pid})",
+                    file=sys.stderr,
+                )
+                return
+            print(
+                f"WARNING: daemon lock missing while serving; re-publishing "
+                f"(pid={pid}, address={self._socket_path})",
+                file=sys.stderr,
+            )
+            self._discovery.write_lock(
+                pid, self._socket_path, auth_token=self._auth_token
+            )
+        if not self._discovery.get_registry_entry_path().exists():
+            print(
+                f"WARNING: daemon registry entry missing while serving; "
+                f"re-publishing (pid={pid})",
+                file=sys.stderr,
+            )
+            self._discovery.write_registry_entry(pid, self._socket_path)
 
     def _clear_delayed_shutdown_task(self, task: asyncio.Task[None]) -> None:
         if self._delayed_shutdown_task is task:
@@ -413,6 +459,15 @@ class ChunkHoundDaemon(MCPServerBase):
         Only the daemon that won publication may remove shared artifacts. Race
         losers must not delete the winner's lock, socket path, or registry entry.
         """
+        # Stop the publication check first, so it can never re-publish the
+        # lock after shutdown removes it below.
+        if self._publication_task is not None and not self._publication_task.done():
+            self._publication_task.cancel()
+            try:
+                await self._publication_task
+            except asyncio.CancelledError:
+                pass
+
         # Close active client connections immediately so proxies get EOF and
         # exit rather than deadlocking until the daemon process fully exits.
         try:
