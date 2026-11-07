@@ -19,6 +19,7 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
@@ -266,9 +267,12 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     def _discover_nested_linux_mount_roots(watch_path: Path) -> tuple[Path, ...]:
         return discover_nested_linux_mount_roots(watch_path)
 
-    @staticmethod
-    def _discover_nested_windows_junction_scopes(watch_path: Path) -> Any:
-        return discover_nested_windows_junction_scopes(watch_path)
+    def _discover_nested_windows_junction_scopes(self, watch_path: Path) -> Any:
+        # Judged by the same filter the root scope's events go through.
+        path_filter = RealtimePathFilter(config=self.config, root_path=watch_path)
+        return discover_nested_windows_junction_scopes(
+            watch_path, excludes_directory=path_filter.excludes_directory
+        )
 
     @staticmethod
     def _build_watchman_scope_plan(
