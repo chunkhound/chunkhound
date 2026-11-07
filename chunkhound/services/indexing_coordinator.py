@@ -572,8 +572,20 @@ class IndexingCoordinator(BaseService):
                     )
                 self._root_identity_validated = True
 
-            # Use batch processor with single file for consistency
-            single_file: list[tuple[Path, str | None]] = [(file_path, None)]
+            # Use batch processor with single file for consistency. Pass the
+            # content hash: a None here is stored as content_hash = NULL, which
+            # stops the next directory scan's hash-confirm from skipping this
+            # file when only its mtime moves (checkout, branch switch, copied
+            # index), so the whole file is re-parsed and re-embedded. A path
+            # that is gone (realtime delete race) keeps None, so the batch
+            # processor reports it as before instead of compute_file_hash
+            # raising ValueError here.
+            content_hash = (
+                self._compute_hash_with_fallback(file_path)
+                if Path(file_path).is_file()
+                else None
+            )
+            single_file: list[tuple[Path, str | None]] = [(file_path, content_hash)]
             parsed_results = await self._process_files_in_batches(single_file)
 
             if not parsed_results:
