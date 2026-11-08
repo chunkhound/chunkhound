@@ -24,3 +24,9 @@ def invalid_chunk_type_worker(content: bytes, connection: Connection) -> None:
         b'["ok",[["symbol",1,1,"code","not-a-real-type",null]],false]'
     )
     connection.close()
+
+
+def exiting_pdf_worker(content: bytes, connection: Connection) -> None:
+    """Exit without sending any result."""
+    del content
+    connection.close()

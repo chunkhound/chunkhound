@@ -149,3 +149,34 @@ async def test_caller_cancel_cancels_research(monkeypatch) -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_no_pages_fetched_error_carries_fetch_failure_reasons(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries",
+        AsyncMock(return_value=["q"]),
+    )
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi",
+        AsyncMock(return_value=[("T", "https://example.invalid/p", "s")]),
+    )
+
+    async def failing(urls, progress, warn):
+        warn("Failed to fetch https://example.invalid/p: blocked by SSRF guard")
+        if False:
+            yield
+
+    monkeypatch.setattr("chunkhound.utils.websearch_core.fetch_pages", failing)
+
+    with pytest.raises(NoPagesFetchedError, match="blocked by SSRF guard"):
+        await run_websearch(
+            "q",
+            limit=1,
+            config=None,
+            embedding_manager=None,
+            llm_manager=None,
+            timeout_s=30,
+        )

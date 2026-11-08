@@ -289,14 +289,7 @@ class TransientSearchService:
         query_vector = self._normalise(query_result.embeddings[0])
         cache_ns = self._cache_namespace(query_result)
         path_prefix = normalize_path_filter(path_filter)
-        effective_limit = (
-            limit
-            if limit is not None
-            else max(offset + page_size, _candidate_pool_size(page_size))
-        )
-        assert effective_limit >= offset + page_size, (
-            "candidate pool must cover the requested offset+page_size slice"
-        )
+        effective_limit = self._retained_pool_size(limit, page_size, offset)
         heap: list[tuple[float, int, dict[str, Any]]] = []
         qualifying_count = 0
 
@@ -320,7 +313,7 @@ class TransientSearchService:
             entry[2] for entry in sorted(heap, key=lambda item: (-item[0], -item[1]))
         ]
         return ranked[offset : offset + page_size], self._pagination(
-            page_size, offset, qualifying_count
+            page_size, offset, qualifying_count, retained=len(ranked)
         )
 
     async def _search_transient_many(
@@ -382,11 +375,7 @@ class TransientSearchService:
         )
         cache_ns = self._cache_namespace(query_result)
         path_prefix = normalize_path_filter(path_filter)
-        effective_limit = (
-            limit
-            if limit is not None
-            else max(offset + page_size, _candidate_pool_size(page_size))
-        )
+        effective_limit = self._retained_pool_size(limit, page_size, offset)
         heaps: list[list[tuple[float, int, dict[str, Any]]]] = [
             [] for _ in queries
         ]
@@ -422,10 +411,20 @@ class TransientSearchService:
             outputs.append(
                 (
                     ranked[offset : offset + page_size],
-                    self._pagination(page_size, offset, total),
+                    self._pagination(
+                        page_size, offset, total, retained=len(ranked)
+                    ),
                 )
             )
         return outputs
+
+    @staticmethod
+    def _retained_pool_size(limit: int | None, page_size: int, offset: int) -> int:
+        """Pool size to retain; never smaller than the requested page slice."""
+        needed = offset + page_size
+        if limit is not None:
+            return max(limit, needed)
+        return max(needed, _candidate_pool_size(page_size))
 
     @staticmethod
     def _pagination(
@@ -433,10 +432,14 @@ class TransientSearchService:
         offset: int,
         total: int,
         window: int = _MAX_RESULT_WINDOW,
+        retained: int | None = None,
     ) -> dict[str, Any]:
         # Only advertise a next page the same call would accept: the next
         # request must keep offset + page_size inside the supported window.
-        has_more = offset + page_size < total and offset + 2 * page_size <= window
+        # ``retained`` caps paging at the results actually kept, so a small
+        # result limit never advertises a next page that would be empty.
+        pageable = total if retained is None else min(total, retained)
+        has_more = offset + page_size < pageable and offset + 2 * page_size <= window
         return {
             "offset": offset,
             "page_size": page_size,

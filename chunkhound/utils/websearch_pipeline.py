@@ -121,7 +121,10 @@ async def run_websearch(
         try:
             first_page = await anext(fetched_pages, None)
             if first_page is None:
-                raise NoPagesFetchedError(f"No pages could be fetched for {query!r}")
+                detail = "".join(f"\n  - {w}" for w in warnings)
+                raise NoPagesFetchedError(
+                    f"No pages could be fetched for {query!r}{detail}"
+                )
 
             async def pages() -> AsyncIterator[Page]:
                 yield first_page
@@ -139,6 +142,15 @@ async def run_websearch(
                 previous_query=previous_query,
             )
             return result, warnings
+        except (
+            NoPagesFetchedError,
+            WebSearchTimeoutError,
+            asyncio.CancelledError,
+        ):
+            raise
+        except Exception as exc:
+            exc.websearch_warnings = list(warnings)  # type: ignore[attr-defined]
+            raise
         finally:
             await fetched_pages.aclose()
 

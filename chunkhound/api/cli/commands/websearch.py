@@ -75,6 +75,8 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(str(e))
         sys.exit(1)
     except Exception as exc:
+        for warning in getattr(exc, "websearch_warnings", []):
+            _warning_to_stderr(warning)
         formatter.error(f"Research failed: {exc}")
         sys.exit(1)
     for warning in warnings:

@@ -1459,3 +1459,31 @@ async def test_partial_cache_hits_preserve_ranking_and_tie_order() -> None:
     baseline = await pages(None)
     assert await pages(3) == baseline
     assert await pages(1) == baseline
+
+
+@pytest.mark.asyncio
+async def test_small_result_limit_never_truncates_or_advertises_empty_page() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(100)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, pagination = await service.search_semantic(
+        "query", page_size=10, offset=20, result_limit=5
+    )
+    assert len(results) == 10
+    assert pagination["has_more"] is False
+    assert pagination["next_offset"] is None
+
+    many = await service.search_semantic_many(
+        ["query"], page_size=10, offset=20, result_limit=5
+    )
+    assert len(many[0][0]) == 10
+    assert many[0][1]["has_more"] is False

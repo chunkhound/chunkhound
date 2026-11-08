@@ -32,6 +32,7 @@ from chunkhound.services.web_research_service import (
 )
 from tests.helpers.pdf_worker_fixture import (
     blocking_pdf_worker,
+    exiting_pdf_worker,
     invalid_chunk_type_worker,
     malformed_pdf_worker,
 )
@@ -170,9 +171,7 @@ async def test_web_embeddings_keep_full_batches_with_safe_text_and_pdf_chunks(
 
     async def parse_pdf(content: bytes, source_url: str) -> list[Chunk]:
         bounded, _ = web._bounded_pdf_chunks([parsed])
-        return [
-            web.replace(chunk, file_path=source_url) for chunk in bounded
-        ]
+        return [web.replace(chunk, file_path=source_url) for chunk in bounded]
 
     monkeypatch.setattr(web, "_parse_pdf_isolated", parse_pdf)
     batches: list[list[str]] = []
@@ -212,9 +211,9 @@ async def test_web_embeddings_keep_full_batches_with_safe_text_and_pdf_chunks(
         ],
         MagicMock(),
         MagicMock(
-                embed_texts=AsyncMock(side_effect=embed),
-                embed_query_texts=AsyncMock(side_effect=embed),
-            ),
+            embed_texts=AsyncMock(side_effect=embed),
+            embed_query_texts=AsyncMock(side_effect=embed),
+        ),
         MagicMock(),
     )
     assert len(batches) >= 2
@@ -235,15 +234,25 @@ async def test_isolated_pdf_parser_enforces_hard_timeout(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_isolated_pdf_parser_reports_worker_exit_without_result(
+    monkeypatch,
+) -> None:
+    from chunkhound.services import web_research_service as web
+
+    monkeypatch.setattr(web, "_pdf_parse_worker", exiting_pdf_worker)
+
+    with pytest.raises(RuntimeError, match="exited without a result"):
+        await web._parse_pdf_isolated(b"%PDF", "https://example.invalid/dead.pdf")
+
+
+@pytest.mark.asyncio
 async def test_isolated_pdf_parser_rejects_malformed_payload(monkeypatch) -> None:
     from chunkhound.services import web_research_service as web
 
     monkeypatch.setattr(web, "_pdf_parse_worker", malformed_pdf_worker)
 
     with pytest.raises(RuntimeError, match="invalid chunk"):
-        await web._parse_pdf_isolated(
-            b"%PDF", "https://example.invalid/malformed.pdf"
-        )
+        await web._parse_pdf_isolated(b"%PDF", "https://example.invalid/malformed.pdf")
 
 
 @pytest.mark.asyncio
@@ -292,8 +301,7 @@ async def test_isolated_pdf_parser_extracts_fixture_without_disk_writes() -> Non
 
     assert chunks
     assert all(
-        chunk.file_path == "https://example.invalid/test_simple.pdf"
-        for chunk in chunks
+        chunk.file_path == "https://example.invalid/test_simple.pdf" for chunk in chunks
     )
     assert all(len(chunk.code) <= 1_200 for chunk in chunks)
 

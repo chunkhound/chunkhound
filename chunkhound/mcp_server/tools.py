@@ -916,7 +916,8 @@ async def websearch_impl(
     except NoPagesFetchedError as e:
         raise MCPError(str(e)) from e
     except Exception as exc:
-        raise MCPError(f"Web research failed: {exc}") from exc
+        extra = _format_fetch_warnings(getattr(exc, "websearch_warnings", []))
+        raise MCPError(f"Web research failed: {exc}{extra}") from exc
     answer = str(research_result.get("answer", "")).rstrip()
     return f"{answer}{_format_fetch_warnings(warnings)}"
 

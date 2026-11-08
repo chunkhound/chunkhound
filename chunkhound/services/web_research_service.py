@@ -335,6 +335,17 @@ def _stop_pdf_process(process: Any) -> None:
     process.close()
 
 
+def _recv_pdf_result(parent: Any, process: Any) -> bytes:
+    try:
+        return bytes(parent.recv_bytes(_PDF_MAX_IPC_BYTES))
+    except EOFError as error:
+        raise RuntimeError(
+            f"PDF parser exited without a result (exit {process.exitcode})"
+        ) from error
+    except OSError as error:
+        raise RuntimeError("PDF parser result exceeds the IPC safety limit") from error
+
+
 def _run_pdf_parser_process(
     content: bytes,
     stop: threading.Event,
@@ -355,20 +366,10 @@ def _run_pdf_parser_process(
         expires = time.monotonic() + _PDF_PARSE_TIMEOUT_SECONDS
         while not stop.is_set() and time.monotonic() < expires:
             if parent.poll(0.01):
-                try:
-                    return parent.recv_bytes(_PDF_MAX_IPC_BYTES)
-                except OSError as error:
-                    raise RuntimeError(
-                        "PDF parser result exceeds the IPC safety limit"
-                    ) from error
+                return _recv_pdf_result(parent, process)
             if not process.is_alive():
                 if parent.poll():
-                    try:
-                        return parent.recv_bytes(_PDF_MAX_IPC_BYTES)
-                    except OSError as error:
-                        raise RuntimeError(
-                            "PDF parser result exceeds the IPC safety limit"
-                        ) from error
+                    return _recv_pdf_result(parent, process)
                 raise RuntimeError(
                     f"PDF parser exited without a result (exit {process.exitcode})"
                 )
@@ -605,8 +606,7 @@ class _BoundedPageStream:
                 )
             if warned or (descriptor.usable and not chunks):
                 raise _SourceUnavailableError(
-                    f"Unable to replay previously usable web source: "
-                    f"{descriptor.url}"
+                    f"Unable to replay previously usable web source: {descriptor.url}"
                 )
             self._provider._store(page, text, chunks)
             return text, chunks
@@ -648,9 +648,7 @@ class _BoundedPageStream:
                     page, self._warning_callback
                 )
                 is_pdf = page[1] == ".pdf" and isinstance(page[2], bytes)
-                descriptor = _PageDescriptor(
-                    page[0], fingerprint, bool(chunks), is_pdf
-                )
+                descriptor = _PageDescriptor(page[0], fingerprint, bool(chunks), is_pdf)
                 previous = self._by_url.get(page[0])
                 if (
                     previous is not None
