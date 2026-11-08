@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from chunkhound.core.utils.rerank_url import rerank_url_for_log
+from chunkhound.core.utils.url_redaction import url_for_log
 
 from .embedding_config import EmbeddingConfig
 
@@ -185,7 +185,7 @@ class EmbeddingProviderFactory:
             f"Creating VoyageAI provider: model={model}, "
             f"base_url={base_url}, api_key={'***' if api_key else None}, "
             f"rerank_model={rerank_model}, "
-            f"rerank_url={rerank_url_for_log(rerank_url) if rerank_url else None}, "
+            f"rerank_url={url_for_log(rerank_url) if rerank_url else None}, "
             f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
         )
 
