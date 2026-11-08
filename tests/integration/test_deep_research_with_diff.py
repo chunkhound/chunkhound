@@ -93,7 +93,6 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
 
     em.embed_texts = _embed_texts  # type: ignore[method-assign]
     em.embed_query_texts = _embed_texts  # type: ignore[method-assign]
-    em.embed_query_texts = _embed_texts  # type: ignore[method-assign]
     return em
 
 
