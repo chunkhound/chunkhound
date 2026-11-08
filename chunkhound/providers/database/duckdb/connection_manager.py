@@ -185,6 +185,25 @@ class DuckDBConnectionManager:
 
         return any(indicator in error_msg for indicator in corruption_indicators)
 
+    @staticmethod
+    def _is_db_held_error(error_msg: str) -> bool:
+        """Check if an ATTACH error means another connection holds the file.
+
+        In-process: "already attached" / "Unique file handle conflict".
+        POSIX file lock: "Could not set lock on file ... Conflicting lock is
+        held". Windows: "Cannot open file ...: The process cannot access the
+        file because it is being used by another process. File is already
+        open in <exe> (PID n)".
+        """
+        held_indicators = [
+            "already attached",
+            "Unique file handle conflict",
+            "Conflicting lock is held",
+            "being used by another process",
+            "File is already open in",
+        ]
+        return any(indicator in error_msg for indicator in held_indicators)
+
     def _recover_interrupted_compaction(self) -> None:
         """Restore a live DB if a prior compaction crashed mid-swap."""
         if self.is_memory_db:
@@ -291,15 +310,9 @@ class DuckDBConnectionManager:
             test_conn.execute("DETACH validation_db")
             logger.debug("WAL file validation passed")
         except Exception as e:
-            # If the database is already open by another connection, ATTACH raises
-            # "Unique file handle conflict" or, in newer DuckDB versions, "Could not
-            # set lock on file ... Conflicting lock is held" — either means the file
-            # is healthy and in active use, so validation is not needed.
-            if (
-                "already attached" in str(e)
-                or "Unique file handle conflict" in str(e)
-                or "Conflicting lock is held" in str(e)
-            ):
+            # If the database is already open by another connection, the file is
+            # healthy and in active use, so validation is not needed.
+            if self._is_db_held_error(str(e)):
                 logger.debug("WAL file validation skipped (database already open)")
                 return
             logger.warning(f"WAL validation failed ({e}), cleaning up WAL file")
@@ -359,6 +372,15 @@ class DuckDBConnectionManager:
             return
 
         except Exception as recovery_error:
+            # A database held open by another process is in use, not corrupt.
+            # Its WAL belongs to that process: never copy or remove it. This
+            # also covers the stale-WAL path, which reaches here unvalidated.
+            if self._is_db_held_error(str(recovery_error)):
+                logger.warning(
+                    f"Database is held by another process; leaving WAL in "
+                    f"place: {recovery_error}"
+                )
+                return
             logger.warning(f"Recovery with VSS preloading failed: {recovery_error}")
 
             # Second attempt: Conservative recovery - remove WAL but create backup first
