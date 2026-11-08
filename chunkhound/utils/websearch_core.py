@@ -13,6 +13,7 @@ import base64
 import html
 import html.parser
 import itertools
+import math
 import os
 import re
 import subprocess
@@ -305,9 +306,11 @@ def websearch_timeout() -> float:
     if raw is None:
         return 600.0
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         return 600.0
+    # Reject 0/negative (instant timeout) and nan/inf (no effective budget).
+    return value if math.isfinite(value) and value > 0 else 600.0
 
 
 class _NextFormParser(html.parser.HTMLParser):
