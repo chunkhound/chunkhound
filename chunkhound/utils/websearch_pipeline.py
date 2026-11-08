@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import urllib.error
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Any
 
 from chunkhound.utils.websearch_core import websearch_timeout
@@ -60,6 +60,19 @@ async def _cancel_and_wait(task: asyncio.Task[Any], *, deadline: float) -> None:
             _consume_task_result(task)
         else:
             task.add_done_callback(_consume_task_result)
+
+
+async def _close_pages_by_deadline(
+    pages: AsyncGenerator[Any, None], *, deadline: float
+) -> None:
+    """Close a page stream without delaying a timeout response past its deadline."""
+    close_task = asyncio.create_task(pages.aclose())
+    remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+    done, _pending = await asyncio.wait({close_task}, timeout=remaining)
+    if close_task in done:
+        close_task.result()
+    else:
+        close_task.add_done_callback(_consume_task_result)
 
 
 async def run_websearch(
@@ -160,7 +173,7 @@ async def run_websearch(
             exc.websearch_warnings = list(warnings)  # type: ignore[attr-defined]
             raise
         finally:
-            await fetched_pages.aclose()
+            await _close_pages_by_deadline(fetched_pages, deadline=deadline)
 
     try:
         return await asyncio.wait_for(_run(), timeout=total)

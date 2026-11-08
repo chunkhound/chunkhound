@@ -106,6 +106,54 @@ async def test_research_timeout_uses_remaining_budget(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_timeout_does_not_wait_for_slow_page_cleanup(monkeypatch) -> None:
+    close_started = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries",
+        AsyncMock(return_value=["q"]),
+    )
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi",
+        AsyncMock(return_value=[("T", "https://example.invalid/p", "s")]),
+    )
+
+    async def pages(*args, **kwargs):
+        try:
+            yield "https://example.invalid/p", ".md", "# p"
+            await asyncio.Event().wait()
+        finally:
+            close_started.set()
+            await asyncio.sleep(0.2)
+            close_finished.set()
+
+    async def blocked(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("chunkhound.utils.websearch_core.fetch_pages", pages)
+    monkeypatch.setattr(
+        "chunkhound.services.web_research_service.research_web_pages", blocked
+    )
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(TimeoutError, match="websearch timed out after 0s"):
+        await run_websearch(
+            "q",
+            limit=1,
+            config=None,
+            embedding_manager=None,
+            llm_manager=None,
+            timeout_s=0.05,
+        )
+
+    assert loop.time() - started < 0.15
+    assert close_started.is_set()
+    await asyncio.wait_for(close_finished.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_caller_cancel_cancels_research(monkeypatch) -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
