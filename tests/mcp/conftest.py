@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -92,7 +94,14 @@ async def daemon_harness(tmp_path: Path) -> AsyncIterator[DaemonHarness]:
         database={"path": str(db_path), "provider": "duckdb"},
         indexing={},
     )
-    socket_path = str(project_dir / f"daemon-{uuid.uuid4().hex}.sock")
+    # AF_UNIX binds a fixed-size sun_path (108 bytes on Linux, 107 usable).
+    # tmp_path nests dirs by test name (pytest-of-<user>/pytest-N/<test_name><idx>/),
+    # and this suite's test names are long enough that project_dir-based paths
+    # routinely exceed that limit, failing bind() with "AF_UNIX path too long"
+    # on ordinary usernames/CI prefixes. Use a short, independent socket dir
+    # instead of nesting under the (test-name-derived) project_dir.
+    socket_dir = tempfile.mkdtemp(prefix="ch-")
+    socket_path = os.path.join(socket_dir, f"{uuid.uuid4().hex[:8]}.sock")
 
     daemon = ChunkHoundDaemon(
         config,
@@ -117,3 +126,4 @@ async def daemon_harness(tmp_path: Path) -> AsyncIterator[DaemonHarness]:
             await server.wait_closed()
         except Exception:
             pass
+        shutil.rmtree(socket_dir, ignore_errors=True)
