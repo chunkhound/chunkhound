@@ -154,9 +154,15 @@ async def run_websearch(
         finally:
             await fetched_pages.aclose()
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + total
     try:
         return await asyncio.wait_for(_run(), timeout=total)
     except WebSearchTimeoutError:
         raise
-    except asyncio.TimeoutError:
-        raise _timeout("research", total) from None
+    except (asyncio.TimeoutError, TimeoutError):
+        # On 3.11+ asyncio.TimeoutError is the builtin, so provider/socket
+        # timeouts are indistinguishable by type. Only the budget decides.
+        if loop.time() >= deadline:
+            raise _timeout("research", total) from None
+        raise

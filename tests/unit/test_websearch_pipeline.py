@@ -180,3 +180,41 @@ async def test_no_pages_fetched_error_carries_fetch_failure_reasons(
             llm_manager=None,
             timeout_s=30,
         )
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_is_not_reported_as_budget_timeout(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries",
+        AsyncMock(return_value=["q"]),
+    )
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi",
+        AsyncMock(return_value=[("T", "https://example.invalid/p", "s")]),
+    )
+
+    async def pages(*args, **kwargs):
+        yield "https://example.invalid/p", ".md", "# p"
+
+    async def provider_timeout(*args, **kwargs):
+        raise TimeoutError("provider read timed out")
+
+    monkeypatch.setattr("chunkhound.utils.websearch_core.fetch_pages", pages)
+    monkeypatch.setattr(
+        "chunkhound.services.web_research_service.research_web_pages",
+        provider_timeout,
+    )
+
+    with pytest.raises(TimeoutError, match="provider read timed out") as info:
+        await run_websearch(
+            "q",
+            limit=1,
+            config=None,
+            embedding_manager=None,
+            llm_manager=None,
+            timeout_s=30,
+        )
+
+    assert hasattr(info.value, "websearch_warnings")
