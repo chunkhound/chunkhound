@@ -44,7 +44,10 @@ def _decode_git_patch_path(raw_path: str) -> str:
     while index < len(raw_path):
         char = raw_path[index]
         if char == '"':
-            return decoded.decode("utf-8", errors="replace")
+            # Match Python's filesystem convention for arbitrary Unix path
+            # bytes. Surrogate escapes preserve distinct invalid UTF-8 bytes
+            # instead of collapsing them to the replacement character.
+            return decoded.decode("utf-8", errors="surrogateescape")
         if char != "\\":
             decoded.extend(char.encode("utf-8"))
             index += 1

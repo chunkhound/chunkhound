@@ -168,7 +168,7 @@ async def stream_git_diff_fragments(
         proc = await asyncio.create_subprocess_exec(
             "git",
             "-c",
-            "core.quotePath=false",
+            "core.quotePath=true",
             "diff",
             *_GIT_DIFF_ARGS,
             "--src-prefix=a/",
