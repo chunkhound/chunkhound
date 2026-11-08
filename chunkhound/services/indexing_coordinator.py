@@ -59,6 +59,7 @@ from chunkhound.utils.file_patterns import (
 )
 from chunkhound.utils.hashing import compute_file_hash
 from chunkhound.utils.logging_guard import log_if_not_mcp
+from chunkhound.utils.parent_watch import exit_when_parent_dies
 
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
@@ -823,7 +824,9 @@ class IndexingCoordinator(BaseService):
         # Process batches in parallel using ProcessPoolExecutor
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers, initializer=exit_when_parent_dies
+        ) as executor:
             # Submit all batches for concurrent processing
             # Pass config for structured file size filtering (JSON/YAML/TOML)
             timeout_s = timeout_s_probe
@@ -2520,7 +2523,9 @@ class IndexingCoordinator(BaseService):
         # Process subtrees in parallel
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers, initializer=exit_when_parent_dies
+        ) as executor:
             futures = []
             for subtree in top_level_items:
                 # Filter precomputed repo roots to those under this subtree
