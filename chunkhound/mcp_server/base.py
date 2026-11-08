@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -31,9 +31,6 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.interfaces.embedding_provider import (
-    EmbeddingProvider as EmbeddingProviderProtocol,
-)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
@@ -53,8 +50,8 @@ from chunkhound.watchman_runtime.loader import (
 # hard-fails in environments without the SDK installed.
 _MCP_AVAILABLE = True
 try:  # runtime path
-    import mcp.types as types  # type: ignore  # noqa: F401
-    from mcp.server import Server  # type: ignore
+    import mcp.types as types  # noqa: F401
+    from mcp.server import Server
 except ImportError:  # pragma: no cover - optional dependency path
     _MCP_AVAILABLE = False
 
@@ -441,11 +438,8 @@ class MCPServerBase(ABC):
                 # Setup embedding provider (optional - continue if it fails)
                 try:
                     if self.config.embedding:
-                        provider = cast(
-                            EmbeddingProviderProtocol,
-                            EmbeddingProviderFactory.create_provider(
-                                self.config.embedding
-                            ),
+                        provider = EmbeddingProviderFactory.create_provider(
+                            self.config.embedding
                         )
                         self.embedding_manager.register_provider(
                             provider,
@@ -1336,6 +1330,7 @@ class MCPServerBase(ABC):
         run_rust_indexing_phase() restore the connection when the
         respective owner finishes.
         """
+        assert self.services is not None
         if self.services.provider.is_connected:
             return
         async with self._connect_lock:
@@ -1346,8 +1341,8 @@ class MCPServerBase(ABC):
                 except DatabaseCompactionInProgressError:
                     log_if_not_mcp(
                         "info",
-                        "Database compaction in progress \u2014 DB-backed MCP tools will be "
-                        "unavailable until compaction finishes. "
+                        "Database compaction in progress \u2014 DB-backed MCP tools "
+                        "will be unavailable until compaction finishes. "
                         "Non-DB tools (daemon_status, websearch) are unaffected.",
                     )
                     raise
