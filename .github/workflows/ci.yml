@@ -410,6 +410,10 @@ jobs:
     timeout-minutes: 30
     env:
       CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION: "1"
+      # The packaged Watchman runtime is fetched from GitHub release assets at test
+      # time; the 2 x 30s default fails on transient 502/504 and slow responses.
+      CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES: "5"
+      CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS: "90"
 
     steps:
       - name: Checkout code
