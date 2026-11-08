@@ -81,7 +81,10 @@ async def _research_results(pages, warnings: list[str] | None = None) -> list[di
             "query",
             pages,
             MagicMock(),
-            MagicMock(embed_texts=AsyncMock(side_effect=_embed)),
+            MagicMock(
+                embed_texts=AsyncMock(side_effect=_embed),
+                embed_query_texts=AsyncMock(side_effect=_embed),
+            ),
             MagicMock(),
             warning_callback=None if warnings is None else warnings.append,
         )
@@ -208,7 +211,10 @@ async def test_web_embeddings_keep_full_batches_with_safe_text_and_pdf_chunks(
             ("https://example.invalid/docs.pdf", ".pdf", b"%PDF"),
         ],
         MagicMock(),
-        MagicMock(embed_texts=AsyncMock(side_effect=embed)),
+        MagicMock(
+                embed_texts=AsyncMock(side_effect=embed),
+                embed_query_texts=AsyncMock(side_effect=embed),
+            ),
         MagicMock(),
     )
     assert len(batches) >= 2
@@ -480,6 +486,7 @@ async def test_research_rejects_pages_without_usable_content() -> None:
             embedding_space_identity="test-space",
         )
     )
+    manager.embed_query_texts = manager.embed_texts
     captured: dict = {}
     research = MagicMock()
 
@@ -606,6 +613,7 @@ async def test_research_cancellation_finalizes_page_producer() -> None:
             embedding_space_identity="test-space",
         )
     )
+    manager.embed_query_texts = manager.embed_texts
     captured: dict = {}
     research = MagicMock()
 

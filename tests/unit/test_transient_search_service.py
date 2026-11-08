@@ -349,6 +349,7 @@ async def test_bulk_search_empty_query_embeddings_match_scalar_empty_results() -
             embedding_space_identity="test-space",
         )
     )
+    manager.embed_query_texts = manager.embed_texts
     service = TransientSearchService(
         make_original(),
         stream_chunks([make_chunk("one")]),
