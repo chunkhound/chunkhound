@@ -641,6 +641,7 @@ async def _inject_diff_service(
         vector_source=vector_source,
         embedding_manager=embedding_manager,
         vector_cache=_TRANSIENT_VECTOR_CACHE,
+        source_revision=effective_commit_range,
     )
     return services._replace(
         provider=_DiffResearchProvider(services.provider),

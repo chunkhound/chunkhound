@@ -115,7 +115,32 @@ class CitationManager:
         # Assign sequential numbers (1-indexed)
         return {file_path: idx + 1 for idx, file_path in enumerate(sorted_files)}
 
-    def format_reference_table(self, file_reference_map: dict[str, int]) -> str:
+    @staticmethod
+    def _source_annotation(
+        file_path: str, chunks: list[dict[str, Any]]
+    ) -> str:
+        """Describe historical revisions represented by one citation path."""
+        matching = [chunk for chunk in chunks if chunk.get("file_path") == file_path]
+        revisions = sorted(
+            {
+                str(chunk["source_revision"])
+                for chunk in matching
+                if chunk.get("source_revision")
+            }
+        )
+        if not revisions:
+            return ""
+        has_current = any(
+            chunk.get("source_provenance") != "transient" for chunk in matching
+        )
+        source_type = "current + historical" if has_current else "historical"
+        return f" — {source_type}: {', '.join(revisions)}"
+
+    def format_reference_table(
+        self,
+        file_reference_map: dict[str, int],
+        chunks: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Format file reference mapping as markdown table for LLM prompt.
 
         Args:
@@ -150,7 +175,8 @@ class CitationManager:
         ]
 
         for file_path, ref_num in sorted_refs:
-            lines.append(f"[{ref_num}] {file_path}")
+            annotation = self._source_annotation(file_path, chunks or [])
+            lines.append(f"[{ref_num}] {file_path}{annotation}")
 
         return "\n".join(lines)
 
@@ -375,6 +401,9 @@ class CitationManager:
 
                 # Add chunk info for files
                 if node.is_file:
+                    line += self._source_annotation(
+                        node.full_path, chunks_by_file.get(node.full_path, [])
+                    )
                     if node.full_path in chunks_by_file:
                         file_chunks = chunks_by_file[node.full_path]
                         chunk_count = len(file_chunks)

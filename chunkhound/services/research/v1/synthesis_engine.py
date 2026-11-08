@@ -254,7 +254,7 @@ class SynthesisEngine:
             budgeted_chunks, files
         )
         reference_table = self._parent._citation_manager.format_reference_table(
-            file_reference_map
+            file_reference_map, budgeted_chunks
         )
 
         # Build constants context section
@@ -424,7 +424,7 @@ class SynthesisEngine:
             cluster_chunks, cluster_files
         )
         reference_table = self._parent._citation_manager.format_reference_table(
-            file_reference_map
+            file_reference_map, cluster_chunks
         )
 
         # Build cluster-specific synthesis prompt
@@ -578,7 +578,7 @@ Provide a comprehensive analysis focusing on the query."""
             budgeted_chunks, all_files
         )
         reference_table = self._parent._citation_manager.format_reference_table(
-            file_reference_map
+            file_reference_map, budgeted_chunks
         )
 
         # Remap cluster-local citations to global reference numbers

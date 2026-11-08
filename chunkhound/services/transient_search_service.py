@@ -89,6 +89,7 @@ class TransientSearchService:
         vector_source: str,
         embedding_manager: Any,
         vector_cache: VectorCache | None = None,
+        source_revision: str | None = None,
     ) -> None:
         if vector_source not in {"db", "diff", "both"}:
             raise ValueError(f"Unsupported vector_source: {vector_source}")
@@ -97,10 +98,10 @@ class TransientSearchService:
         self._vector_source = vector_source
         self._embedding_manager = embedding_manager
         self._vector_cache = vector_cache if vector_cache is not None else VectorCache()
+        self._source_revision = source_revision
         self.peak_live_vectors = 0
 
-    @staticmethod
-    def _chunk_to_dict(chunk: Any, score: float) -> dict[str, Any]:
+    def _chunk_to_dict(self, chunk: Any, score: float) -> dict[str, Any]:
         return {
             "chunk_id": f"diff:{chunk.file_path}:{chunk.start_line}:{chunk.symbol}",
             "file_path": chunk.file_path,
@@ -122,6 +123,7 @@ class TransientSearchService:
             # mode. Keep provenance on each row so historical diff evidence is
             # not confused with source that can safely be read from disk.
             "source_provenance": "transient",
+            "source_revision": self._source_revision,
             "similarity": score,
             "score": score,
         }
