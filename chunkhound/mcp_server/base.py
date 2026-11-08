@@ -72,6 +72,26 @@ from .common import handle_tool_call, tool_call_failed  # noqa: E402
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
 
+def _validate_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """Validate tool arguments against the registered input schema.
+
+    The MCP SDK 2.x no longer validates ``tools/call`` arguments, so do it here.
+    Unknown tools are left to the tool handler's own error path.
+    """
+    from jsonschema import ValidationError, validate
+
+    from .tools import TOOL_REGISTRY
+
+    tool = TOOL_REGISTRY.get(tool_name)
+    if tool is None:
+        return None
+    try:
+        validate(instance=arguments, schema=tool.parameters)
+    except ValidationError as e:
+        return e.message
+    return None
+
+
 class MCPServerBase(ABC):
     """Base class for MCP server implementations.
 
@@ -1440,9 +1460,21 @@ class MCPServerBase(ABC):
             params: "types.CallToolRequestParams",
         ) -> "types.CallToolResult":
             """Universal tool handler that routes to the unified handler."""
+            arguments = params.arguments or {}
+            validation_error = _validate_tool_arguments(params.name, arguments)
+            if validation_error is not None:
+                return types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text",
+                            text=f"Input validation error: {validation_error}",
+                        )
+                    ],
+                    is_error=True,
+                )
             text_contents = await handle_tool_call(
                 tool_name=params.name,
-                arguments=params.arguments or {},
+                arguments=arguments,
                 services=self.services,
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,

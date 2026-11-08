@@ -133,3 +133,44 @@ async def test_serve_connection_skips_invalid_jsonrpc_shape_and_keeps_serving() 
     finally:
         await incoming.put(None)
         await asyncio.wait_for(session_task, timeout=5.0)  # EOF ends session
+
+
+@pytest.mark.asyncio
+async def test_tools_call_rejects_arguments_violating_input_schema() -> None:
+    server = StdioMCPServer(config=MagicMock())
+    init = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0.0.0"},
+        },
+    }
+    responses = await _drive(
+        server,
+        [
+            init,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {"type": "regex"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {"type": "bogus", "query": "x"},
+                },
+            },
+        ],
+    )
+    by_id = {r["id"]: r for r in responses}
+    for call_id in (2, 3):
+        result = by_id[call_id]["result"]
+        assert result["isError"] is True
+        assert result["content"][0]["text"].startswith("Input validation error:")
