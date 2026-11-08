@@ -944,6 +944,7 @@ class OpenAIEmbeddingProvider:
             self._azure_deployment or "",
             self._api_version or "",
             self._api_key or "",
+            str(self._client_side_truncation),
         )
 
     @property

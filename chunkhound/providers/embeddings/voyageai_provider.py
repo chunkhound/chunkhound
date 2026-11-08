@@ -415,6 +415,7 @@ class VoyageAIEmbeddingProvider:
             str(self._embedding_space_generation),
             self.base_url,
             self._api_key or "",
+            str(self._client_side_truncation),
         )
 
     @staticmethod
