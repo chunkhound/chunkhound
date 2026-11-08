@@ -858,15 +858,18 @@ class TransientSearchService:
                 f"offset+page_size ({offset + page_size}) exceeds the maximum "
                 f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
             )
-        expression = re.compile(pattern)
+        try:
+            expression = re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex pattern {pattern!r}: {exc}") from exc
         path_prefix = normalize_path_filter(path_filter)
         effective_limit = limit if limit is not None else offset + page_size
         matches: list[dict[str, Any]] = []
         total = 0
 
         async def scan() -> None:
-            nonlocal total
-            async for chunks in self._chunk_stream():
+            def scan_batch(chunks: Sequence[Any]) -> None:
+                nonlocal total
                 for chunk in chunks:
                     path = str(chunk.file_path).replace("\\", "/")
                     if path_prefix and not path_matches_filter(path, path_prefix):
@@ -876,6 +879,10 @@ class TransientSearchService:
                     total += 1
                     if len(matches) < effective_limit:
                         matches.append(self._chunk_to_dict(chunk, 0.0))
+
+            async for chunks in self._chunk_stream():
+                # Off the event loop so the wall-clock timeout can fire.
+                await asyncio.to_thread(scan_batch, chunks)
 
         try:
             await asyncio.wait_for(scan(), timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS)

@@ -1487,3 +1487,17 @@ async def test_small_result_limit_never_truncates_or_advertises_empty_page() -> 
     )
     assert len(many[0][0]) == 10
     assert many[0][1]["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_transient_regex_raises_value_error() -> None:
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks([make_chunk("diff", code="x")]),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    with pytest.raises(ValueError, match="Invalid regex pattern"):
+        await service.search_regex_async("(unclosed")
