@@ -1,5 +1,6 @@
 """Embedding providers for ChunkHound - pluggable vector embedding generation."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -110,53 +111,69 @@ class EmbeddingManager:
             Embedding result with vectors and metadata
         """
         provider = self.get_provider(provider_name)
-        if not isinstance(provider, EmbeddingSpaceIdentityProvider):
-            raise ValueError(
-                f"Embedding provider {provider.name!r} must expose a non-empty "
-                "embedding_space_identity"
-            )
-        identity_before = provider.embedding_space_identity
-        if not identity_before:
-            raise ValueError(
-                f"Embedding provider {provider.name!r} must expose a non-empty "
-                "embedding_space_identity"
-            )
-        metadata_before = (
-            provider.name,
-            provider.model,
-            identity_before,
-        )
+        return await _embed_checked(provider, texts, provider.embed)
 
-        embeddings = await provider.embed(texts)
+    async def embed_query_texts(
+        self,
+        texts: list[str],
+        provider_name: str | None = None,
+    ) -> LocalEmbeddingResult:
+        """Like ``embed_texts``, for search queries compared against indexed chunks.
 
-        metadata_after = (
-            provider.name,
-            provider.model,
-            provider.embedding_space_identity,
+        Uses the provider's ``embed_query``.
+        """
+        provider = self.get_provider(provider_name)
+        return await _embed_checked(provider, texts, provider.embed_query)
+
+
+async def _embed_checked(
+    provider: EmbeddingProvider,
+    texts: list[str],
+    embed: Callable[[list[str]], Awaitable[list[list[float]]]],
+) -> LocalEmbeddingResult:
+    if not isinstance(provider, EmbeddingSpaceIdentityProvider):
+        raise ValueError(
+            f"Embedding provider {provider.name!r} must expose a non-empty "
+            "embedding_space_identity"
         )
-        if metadata_after != metadata_before:
-            raise RuntimeError(
-                f"Embedding provider {provider.name!r} changed embedding space "
-                "during a request"
-            )
-        name, model, identity = metadata_before
-        if len(embeddings) != len(texts):
-            raise RuntimeError(
-                f"Embedding provider {name!r} returned {len(embeddings)} vectors "
-                f"for {len(texts)} texts"
-            )
-        dims = len(embeddings[0]) if embeddings else provider.dims
-        if any(len(vector) != dims for vector in embeddings):
-            raise RuntimeError(
-                f"Embedding provider {name!r} returned inconsistent vector dimensions"
-            )
-        return LocalEmbeddingResult(
-            embeddings=embeddings,
-            model=model,
-            provider=name,
-            dims=dims,
-            embedding_space_identity=identity,
+    identity_before = provider.embedding_space_identity
+    if not identity_before:
+        raise ValueError(
+            f"Embedding provider {provider.name!r} must expose a non-empty "
+            "embedding_space_identity"
         )
+    metadata_before = (provider.name, provider.model, identity_before)
+
+    embeddings = await embed(texts)
+
+    metadata_after = (
+        provider.name,
+        provider.model,
+        provider.embedding_space_identity,
+    )
+    if metadata_after != metadata_before:
+        raise RuntimeError(
+            f"Embedding provider {provider.name!r} changed embedding space "
+            "during a request"
+        )
+    name, model, identity = metadata_before
+    if len(embeddings) != len(texts):
+        raise RuntimeError(
+            f"Embedding provider {name!r} returned {len(embeddings)} vectors "
+            f"for {len(texts)} texts"
+        )
+    dims = len(embeddings[0]) if embeddings else provider.dims
+    if any(len(vector) != dims for vector in embeddings):
+        raise RuntimeError(
+            f"Embedding provider {name!r} returned inconsistent vector dimensions"
+        )
+    return LocalEmbeddingResult(
+        embeddings=embeddings,
+        model=model,
+        provider=name,
+        dims=dims,
+        embedding_space_identity=identity,
+    )
 
 
 def create_openai_provider(

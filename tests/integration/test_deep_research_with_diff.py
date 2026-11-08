@@ -73,6 +73,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
         )
 
     provider.embed = _embed
+    provider.embed_query = _embed
     em.register_provider(provider, set_default=True)
 
     # Also wire embed_texts on the manager itself so the injection block works
@@ -91,6 +92,8 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
         )
 
     em.embed_texts = _embed_texts  # type: ignore[method-assign]
+    em.embed_query_texts = _embed_texts  # type: ignore[method-assign]
+    em.embed_query_texts = _embed_texts  # type: ignore[method-assign]
     return em
 
 

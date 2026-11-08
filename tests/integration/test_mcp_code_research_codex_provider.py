@@ -22,6 +22,9 @@ class _DummyEmbeddingProvider:
     async def embed(self, texts):  # pragma: no cover - trivial
         return [[0.0] for _ in texts]
 
+    async def embed_query(self, texts):  # pragma: no cover - trivial
+        return await self.embed(texts)
+
 
 @pytest.mark.asyncio
 async def test_code_research_uses_codex_cli_for_synthesis(monkeypatch, tmp_path: Path):

@@ -43,6 +43,7 @@ def embedding_manager() -> MagicMock:
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     return manager
 
 
@@ -175,6 +176,7 @@ async def test_shared_cache_isolates_embedding_provider_instances(
             )
 
         embedding_manager.embed_texts = AsyncMock(side_effect=embed)
+        embedding_manager.embed_query_texts = embedding_manager.embed_texts
         return embedding_manager
 
     first_manager = manager(
@@ -216,6 +218,7 @@ async def test_embedding_space_change_between_query_and_chunks_fails() -> None:
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     service = TransientSearchService(
         make_original(), stream_chunks(chunks), "diff", manager, VectorCache(10)
     )
@@ -254,6 +257,7 @@ async def test_shared_cache_isolates_real_azure_provider_endpoints() -> None:
             )
 
         embedding_manager.embed_texts = AsyncMock(side_effect=embed)
+        embedding_manager.embed_query_texts = embedding_manager.embed_texts
         return embedding_manager
 
     first_manager = manager("https://one.openai.azure.com", [1.0, 0.0])
@@ -319,6 +323,7 @@ async def test_bulk_search_scans_source_once_and_matches_scalar_ranking() -> Non
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     service = TransientSearchService(
         make_original(), counted_stream, "diff", manager, VectorCache(max_entries=0)
     )
@@ -434,6 +439,7 @@ async def test_concurrent_searches_do_not_cross_results() -> None:
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     service = TransientSearchService(
         make_original(),
         stream_chunks(chunks, batch_size=1),
@@ -569,6 +575,7 @@ async def test_equal_scores_prefer_earlier_ordinal() -> None:
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     service = TransientSearchService(
         make_original(),
         stream_chunks(chunks),
@@ -618,6 +625,7 @@ async def test_cache_does_not_reuse_vectors_across_embedding_spaces() -> None:
             )
 
         manager.embed_texts = AsyncMock(side_effect=embed)
+        manager.embed_query_texts = manager.embed_texts
         return manager
 
     first = await manager_for("alpha", 2, [1.0, 0.0])
@@ -797,6 +805,7 @@ async def test_lower_scoring_diff_wins_same_file_line() -> None:
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     service = TransientSearchService(
         original, stream_chunks(chunks), "both", manager, VectorCache(max_entries=0)
     )
@@ -1355,6 +1364,7 @@ def _spying_embedding_manager(
         max_documents
     )
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     return manager, requests
 
 

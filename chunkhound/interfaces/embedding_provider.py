@@ -130,6 +130,28 @@ class EmbeddingProvider(EmbeddingSpaceIdentityProvider, Protocol):
         """
         ...
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for search queries.
+
+        Every place that embeds a search query to compare against indexed chunk
+        vectors calls this, never ``embed``. Some models embed queries and
+        documents asymmetrically (Voyage's ``input_type``): chunks are indexed
+        as documents, and a query embedded as a document ranks as a
+        document-vs-document match, which can push the right chunk far down
+        the list. A provider whose model makes no such distinction delegates
+        to ``embed``.
+
+        Args:
+            texts: List of query strings to embed
+
+        Returns:
+            List of embedding vectors (one per input query)
+
+        Raises:
+            EmbeddingError: If embedding generation fails
+        """
+        ...
+
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text.
 

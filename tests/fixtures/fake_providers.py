@@ -379,6 +379,9 @@ class FakeEmbeddingProvider:
 
         return embeddings
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        return await self.embed(texts)
+
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
         embeddings = await self.embed([text])

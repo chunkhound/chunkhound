@@ -612,7 +612,7 @@ class UnifiedSearch:
         if query:
             try:
                 embedding_provider = self._embedding_manager.get_provider()
-                query_vec = (await embedding_provider.embed([query]))[0]
+                query_vec = (await embedding_provider.embed_query([query]))[0]
             except Exception as e:
                 logger.warning(f"Failed to embed query for regex scoring: {e}")
 

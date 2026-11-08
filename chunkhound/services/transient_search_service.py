@@ -134,10 +134,17 @@ class TransientSearchService:
             result = result / norm
         return result
 
-    async def _embed_texts(self, texts: list[str], provider: str | None) -> Any:
+    async def _embed_texts(
+        self, texts: list[str], provider: str | None, *, query: bool = False
+    ) -> Any:
+        embed = (
+            self._embedding_manager.embed_query_texts
+            if query
+            else self._embedding_manager.embed_texts
+        )
         if provider is None:
-            return await self._embedding_manager.embed_texts(texts)
-        return await self._embedding_manager.embed_texts(texts, provider_name=provider)
+            return await embed(texts)
+        return await embed(texts, provider_name=provider)
 
     def _embed_batch_target(self, provider: str | None) -> int:
         """Return min(_EMBED_BATCH_TARGET, provider document limit)."""
@@ -276,7 +283,7 @@ class TransientSearchService:
         limit: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         self.peak_live_vectors = 0
-        query_result = await self._embed_texts([query], provider)
+        query_result = await self._embed_texts([query], provider, query=True)
         if not query_result.embeddings:
             return [], self._pagination(page_size, offset, 0)
         query_vector = self._normalise(query_result.embeddings[0])
@@ -362,7 +369,7 @@ class TransientSearchService:
     ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
         if not queries:
             return []
-        query_result = await self._embed_texts(queries, provider)
+        query_result = await self._embed_texts(queries, provider, query=True)
         if not query_result.embeddings:
             empty_page = self._pagination(page_size, offset, 0)
             return [([], dict(empty_page)) for _ in queries]

@@ -34,6 +34,7 @@ def _embedding_manager():
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     return manager
 
 

@@ -99,4 +99,5 @@ def keyed_embedding_manager(
 
     manager = MagicMock()
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     return manager

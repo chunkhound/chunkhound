@@ -322,6 +322,7 @@ async def test_research_factory_receives_transient_search_service() -> None:
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     research = MagicMock()
     captured: dict = {}
 
@@ -424,6 +425,7 @@ async def test_research_consumes_pages_incrementally_and_stores_full_text() -> N
         )
 
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     captured: dict = {}
     research = MagicMock()
 
@@ -532,6 +534,7 @@ async def test_research_propagates_error_after_partial_page_stream() -> None:
 
     manager = MagicMock()
     manager.embed_texts = AsyncMock(side_effect=embed)
+    manager.embed_query_texts = manager.embed_texts
     captured: dict = {}
     observed: list[BaseException] = []
     research = MagicMock()
@@ -691,6 +694,7 @@ async def test_large_pdf_research_evidence_is_the_matched_chunk_text() -> None:
 
     embedding_manager = MagicMock()
     embedding_manager.embed_texts = AsyncMock(side_effect=embed)
+    embedding_manager.embed_query_texts = embedding_manager.embed_texts
     llm_manager = MagicMock()
     llm_manager.get_utility_provider.return_value.estimate_tokens = len
     captured: dict = {}
