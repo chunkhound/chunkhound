@@ -858,7 +858,7 @@ class TestEmbedSubBatching:
         p = _make_provider(api_key="test-key", batch_size=2)
         call_sizes: list[int] = []
 
-        async def fake_single_batch(texts):
+        async def fake_single_batch(texts, input_type):
             call_sizes.append(len(texts))
             return [[float(i)] for i in range(len(texts))]
 
@@ -873,7 +873,7 @@ class TestEmbedSubBatching:
     async def test_sub_batching_preserves_order(self):
         p = _make_provider(api_key="test-key", batch_size=2)
 
-        async def fake_single_batch(texts):
+        async def fake_single_batch(texts, input_type):
             return [[float(ord(t[0]))] for t in texts]
 
         p._embed_single_batch = fake_single_batch
@@ -965,7 +965,7 @@ class TestUpstreamTimeoutRetry:
                 new_callable=AsyncMock,
             ) as mock_sleep:
                 with pytest.raises(RuntimeError):
-                    await p._embed_single_batch_locked(["text"])
+                    await p._embed_single_batch_locked(["text"], "document")
 
         assert call_count == 2
         # Upstream timeout backoff: base_delay=10.0, attempt=0 → 10.0 * 2^0 = 10.0
@@ -990,7 +990,7 @@ class TestUpstreamTimeoutRetry:
                 new_callable=AsyncMock,
             ):
                 with pytest.raises(RuntimeError):
-                    await p._embed_single_batch_locked(["text"])
+                    await p._embed_single_batch_locked(["text"], "document")
 
         assert call_count == 2
 
@@ -1009,7 +1009,7 @@ class TestUpstreamTimeoutRetry:
             side_effect=fake_to_thread,
         ):
             with pytest.raises(RuntimeError, match="Embedding generation failed"):
-                await p._embed_single_batch_locked(["text"])
+                await p._embed_single_batch_locked(["text"], "document")
 
         assert call_count == 1
 
@@ -1443,3 +1443,66 @@ class TestVoyage4SeriesLimits:
             EmbeddingConfigurationError, match="not in supported dimensions"
         ):
             _make_provider(api_key="test-key", model=model, output_dims=768)
+
+
+# ===========================================================================
+# Query vs document input_type
+# ===========================================================================
+
+
+class TestVoyageQueryInputType:
+    """voyage-code-* models embed queries and documents asymmetrically.
+
+    Indexed chunks must be embedded as documents and search queries as queries;
+    embedding a query as a document ranks it as a document-vs-document match,
+    which on a real 14k-chunk index left 10 of 15 known targets outside the top
+    90 (median rank 355 vs 1 with input_type="query").
+    """
+
+    @pytest.mark.asyncio
+    async def test_embed_sends_document_input_type(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3")
+        p._client.embed = MagicMock(return_value=_FakeEmbedResult([[0.1] * 1024]))
+
+        await p.embed(["def f(): pass"])
+
+        _, kwargs = p._client.embed.call_args
+        assert kwargs["input_type"] == "document"
+
+    @pytest.mark.asyncio
+    async def test_embed_query_sends_query_input_type(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3")
+        p._client.embed = MagicMock(
+            return_value=_FakeEmbedResult([[0.1] * 1024, [0.2] * 1024])
+        )
+
+        result = await p.embed_query(["find the retry loop", "parse config"])
+
+        assert len(result) == 2
+        _, kwargs = p._client.embed.call_args
+        assert kwargs["input_type"] == "query"
+        assert kwargs["texts"] == ["find the retry loop", "parse config"]
+
+    @pytest.mark.asyncio
+    async def test_embed_query_sub_batches_like_embed(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3", batch_size=2)
+        p._client.embed = MagicMock(
+            side_effect=lambda **kw: _FakeEmbedResult([[0.1] * 1024] * len(kw["texts"]))
+        )
+
+        result = await p.embed_query(["a", "b", "c"])
+
+        assert len(result) == 3
+        assert p._client.embed.call_count == 2
+        assert all(
+            call.kwargs["input_type"] == "query"
+            for call in p._client.embed.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_embed_query_empty_returns_empty_without_a_call(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3")
+        p._client.embed = MagicMock()
+
+        assert await p.embed_query([]) == []
+        p._client.embed.assert_not_called()

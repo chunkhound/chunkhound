@@ -41,7 +41,8 @@ def make_chunk(
 
 
 def make_embedding_manager(embeddings: list[list[float]]) -> MagicMock:
-    """Return a mock EmbeddingManager whose embed_texts returns controlled embeddings."""
+    """Return a mock EmbeddingManager whose embed_texts / embed_query_texts
+    return controlled embeddings."""
     manager = MagicMock()
 
     async def _embed(texts):
@@ -53,6 +54,7 @@ def make_embedding_manager(embeddings: list[list[float]]) -> MagicMock:
         )
 
     manager.embed_texts = _embed
+    manager.embed_query_texts = _embed
     return manager
 
 

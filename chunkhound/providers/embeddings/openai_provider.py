@@ -1062,6 +1062,14 @@ class OpenAIEmbeddingProvider:
 
             raise
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for search queries.
+
+        OpenAI-compatible embedding APIs take no query/document input type, so
+        queries are embedded exactly like documents.
+        """
+        return await self.embed(texts)
+
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
         embeddings = await self.embed([text])
