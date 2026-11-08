@@ -175,9 +175,6 @@ class MCPServerBase(ABC):
             ),
         }
 
-        # Set MCP mode to suppress stderr output that interferes with JSON-RPC
-        os.environ["CHUNKHOUND_MCP_MODE"] = "1"
-
         # Register tools with the underlying MCP server
         self._register_tools()
 
