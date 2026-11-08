@@ -21,6 +21,7 @@ from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
+from chunkhound.providers.database.serial_executor import _executor_local
 from chunkhound.utils.chunk_hashing import generate_chunk_id
 
 # Type hinting only
@@ -258,7 +259,15 @@ class LanceDBProvider(SerialDatabaseProvider):
         Returns:
             LanceDB connection object
         """
+        owned = self._ensure_database_ownership()
         import lancedb
+
+        from chunkhound.core.index_format import require_supported
+        from chunkhound.providers.database.index_format import read_format
+
+        inspection_path = Path(self._db_path)
+        if inspection_path.exists():
+            require_supported(read_format(inspection_path, "lancedb", ownership=owned))
 
         abs_db_path = self._db_path
 
@@ -285,6 +294,11 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Store connection reference for backward compatibility
             self.connection = conn
 
+            from chunkhound.providers.database.index_format import stamp_lancedb
+
+            # Stamp only after nonmutating inspection, before schema migrations.
+            stamp_lancedb(conn)
+
             # Create schema and indexes in executor thread
             self._executor_create_schema(conn, state)
             self._executor_create_indexes(conn, state)
@@ -297,18 +311,13 @@ class LanceDBProvider(SerialDatabaseProvider):
     def _executor_disconnect(
         self, conn: Any, state: dict[str, Any], skip_checkpoint: bool
     ) -> None:
-        """Executor method for disconnect - runs in DB thread."""
-        try:
-            # Clear connection and table references
-            self.connection = None
-            self._files_table = None
-            self._chunks_table = None
-
-            # Connection will be closed by base class
-            logger.info("Disconnected from LanceDB")
-        except Exception as e:
-            logger.error(f"Error in LanceDB disconnect: {e}")
-            raise
+        """Drop all LanceDB references on their owning worker thread."""
+        self.connection = None
+        self._files_table = None
+        self._chunks_table = None
+        if hasattr(_executor_local, "connection"):
+            delattr(_executor_local, "connection")
+        state.clear()
 
     def _get_embedding_dimensions_safe(self) -> int | None:
         """Safely retrieve embedding dimensions from embedding manager.
@@ -1182,6 +1191,17 @@ class LanceDBProvider(SerialDatabaseProvider):
                 self._chunks_table.delete(f"id = {chunk_id}")
             except Exception as e:
                 logger.error(f"Error deleting chunk {chunk_id}: {e}")
+
+    def _executor_delete_chunks_batch(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> None:
+        """Delete selected chunk rows and their inline embeddings in one batch."""
+        chunks_table: Any = self._chunks_table
+        if not chunk_ids or chunks_table is None:
+            return
+
+        ids = ", ".join(str(chunk_id) for chunk_id in chunk_ids)
+        chunks_table.delete(f"id IN ({ids})")
 
     def update_chunk(self, chunk_id: int, **kwargs) -> None:
         """Update chunk record with new values."""

@@ -67,14 +67,16 @@ const DIFF_TICK_INTERVAL: usize = 200;
 /// produced by a prior stat pass (e.g. the TZ-offset pass in `compute_diff_blocking`).
 /// When present, `compute_diff` reuses those values instead of calling `stat` again.
 /// `on_tick`, if provided, is called periodically with `(files_scanned, total)`.
-pub(crate) fn compute_diff(
+pub(crate) fn compute_diff_cancellable(
     db_file_entries: &[DbFileEntry],
     files_on_disk: &[PathBuf],
     rel_keys: &HashMap<PathBuf, String>,
     mtime_epsilon: f64,
     precomputed_stats: Option<&HashMap<PathBuf, (u64, f64)>>,
     mut on_tick: Option<&mut dyn FnMut(usize, usize)>,
-) -> DiffResult {
+    stop: &crate::cancellation::StopToken,
+) -> Result<DiffResult, crate::error::DbError> {
+    stop.check().map_err(|_| crate::error::DbError::Cancelled)?;
     // Build a lookup: DB path → stored mtime (None if the column is NULL).
     let db_map: HashMap<&str, Option<f64>> = db_file_entries
         .iter()
@@ -116,11 +118,13 @@ pub(crate) fn compute_diff(
     let mut disk_stats: HashMap<PathBuf, (u64, f64)> = HashMap::new();
 
     for abs_path in files_on_disk {
+        stop.check().map_err(|_| crate::error::DbError::Cancelled)?;
         files_scanned += 1;
 
         if let Some(tick) = on_tick.as_deref_mut() {
             if files_scanned % DIFF_TICK_INTERVAL == 0 {
                 tick(files_scanned, files_on_disk.len());
+                stop.check().map_err(|_| crate::error::DbError::Cancelled)?;
             }
         }
 
@@ -321,19 +325,42 @@ pub(crate) fn compute_diff(
     }
 
     // Files in DB but NOT on disk → need removal
+    stop.check().map_err(|_| crate::error::DbError::Cancelled)?;
     let removed: Vec<String> = db_paths
         .difference(&disk_paths)
         .map(|s| (*s).to_string())
         .collect();
+    stop.check().map_err(|_| crate::error::DbError::Cancelled)?;
 
-    DiffResult {
+    Ok(DiffResult {
         changed,
         removed,
         skipped_by_hash,
         new_hashes,
         existing_ids,
         disk_stats,
-    }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn compute_diff(
+    db_file_entries: &[DbFileEntry],
+    files_on_disk: &[PathBuf],
+    rel_keys: &HashMap<PathBuf, String>,
+    mtime_epsilon: f64,
+    precomputed_stats: Option<&HashMap<PathBuf, (u64, f64)>>,
+    on_tick: Option<&mut dyn FnMut(usize, usize)>,
+) -> DiffResult {
+    compute_diff_cancellable(
+        db_file_entries,
+        files_on_disk,
+        rel_keys,
+        mtime_epsilon,
+        precomputed_stats,
+        on_tick,
+        &crate::cancellation::StopToken::default(),
+    )
+    .expect("fresh token cannot cancel")
 }
 
 /// Read the mtime of a file as a Unix timestamp (seconds).

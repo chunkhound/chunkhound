@@ -33,6 +33,18 @@ impl EmbedBatchResult {
 pub(crate) trait EmbedBatchFn: Send + Sync {
     /// Return exactly one slot, in input order, for each supplied text.
     fn embed_batch(&self, texts: &[String]) -> Result<EmbedBatchResult, String>;
+    fn embed_batch_cancellable(
+        &self,
+        texts: &[String],
+        stop: &crate::cancellation::StopToken,
+    ) -> Result<EmbedBatchResult, crate::error::PipelineError> {
+        stop.check()?;
+        let result = self
+            .embed_batch(texts)
+            .map_err(crate::error::PipelineError::ProviderError);
+        stop.check()?;
+        result
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]

@@ -172,8 +172,7 @@ class Database:
                 unsuccessful shutdown for a durable one.
         """
         with self._connection_lock:
-            if self._provider.is_connected:
-                self._provider.disconnect()
+            self._provider.disconnect()
 
     def is_connected(self) -> bool:
         """Check if database is connected."""
@@ -436,54 +435,6 @@ class Database:
         results = self._provider.get_chunks_by_file_id(file_id, as_model=False)
         # Ensure we return Dict objects, not Chunk models
         return [result for result in results if isinstance(result, dict)]
-
-    # =============================================================================
-    # Process Coordination Methods - Legacy Support
-    # PATTERN: Connection management for multi-process scenarios
-    # USE_CASE: Allow database detach/reattach for child processes
-    # CRITICAL: Must use connection_lock to prevent race conditions
-    # =============================================================================
-
-    def detach_database(self) -> bool:
-        """Detach database for coordination."""
-        with self._connection_lock:
-            try:
-                self._provider.disconnect()
-                return True
-            except Exception as e:
-                logger.error(f"Failed to detach database: {e}")
-                return False
-
-    def reattach_database(self) -> bool:
-        """Reattach database after coordination."""
-        with self._connection_lock:
-            try:
-                # Reconnect
-                self._provider.connect()
-                return True
-            except Exception as e:
-                logger.error(f"Failed to reattach database: {e}")
-                return False
-
-    def disconnect(self) -> bool:
-        """Disconnect database for coordination."""
-        with self._connection_lock:
-            try:
-                self._provider.disconnect()
-                return True
-            except Exception as e:
-                logger.error(f"Failed to disconnect database: {e}")
-                return False
-
-    def reconnect(self) -> bool:
-        """Reconnect database after coordination."""
-        with self._connection_lock:
-            try:
-                self._provider.connect()
-                return True
-            except Exception as e:
-                logger.error(f"Failed to reconnect database: {e}")
-                return False
 
     # =============================================================================
     # Health Check

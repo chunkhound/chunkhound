@@ -42,6 +42,7 @@ class TestRealtimeFailures:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
+            embeddings_disabled=True,
             indexing={
                 "include": ["*.py", "*.js"],
                 "exclude": ["*.log"],

@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 pyo3       = { version = "0.22", features = ["extension-module", "abi3-py310"] }
 rayon      = "1"
 ignore     = "0.4"
+fs4        = { version = "=1.1.0", default-features = false, features = ["sync"] }
 # duckdb build mode is controlled by env vars, not Cargo features (duckdb default = []).
 # DUCKDB_DOWNLOAD_LIB=1 downloads the precompiled shared lib from GitHub; it's
 # linked dynamically and resolved via a self-relative RPATH/DLL search set up

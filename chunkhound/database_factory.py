@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from loguru import logger
 
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.registry import configure_registry, get_registry
+from chunkhound.registry import ProviderRegistry
 
 if TYPE_CHECKING:
     from chunkhound.database import Database
@@ -83,6 +83,9 @@ def create_services(
     db_path: Path | str,
     config: dict[str, Any] | Any,
     embedding_manager: EmbeddingManager | None = None,
+    *,
+    connect_database: bool = True,
+    registry: ProviderRegistry | None = None,
 ) -> DatabaseServices:
     """Create clean service bundle for modern internal architecture.
 
@@ -90,16 +93,21 @@ def create_services(
         db_path: Path to database file
         config: Registry configuration (dict or Config object)
         embedding_manager: Optional embedding manager
+        connect_database: Connect eagerly by default. If False, the provider
+            retains its owner's graph and completes setup on the next database action.
+        registry: Optional caller-owned composition root; defaults to a new local
+            registry retained by the provider, including deferred completion.
 
     Returns:
         DatabaseServices bundle with all components
     """
-    registry = get_registry()
+    # This factory owns registry initialization; callers must not configure it
+    # first. It does not provide simultaneous-provider ownership/reuse.
+    if registry is None:
+        registry = ProviderRegistry()
 
-    # Always (re)configure the registry with an effective per-call config so that
-    # tests using distinct temporary directories get an IndexingCoordinator whose
-    # base_directory matches the current tmp_path. This avoids cross-test leakage
-    # from the global registry's previous target_dir.
+    # Normalize the effective per-call config without replacing a supplied Config.
+    # Model-drift pinning intentionally updates that owner's configuration.
     effective_config: dict[str, Any] | Any = config
     try:
         if isinstance(config, dict):
@@ -123,17 +131,18 @@ def create_services(
         logger.debug(f"Config path normalization failed, using raw config: {exc}")
         effective_config = config
 
-    configure_registry(effective_config)
+    from chunkhound.core.config.config import Config
 
-    # If embedding_manager is provided, register its provider with the global registry
-    # so services use the same instance, held to the index like the registry's own
-    if embedding_manager:
-        try:
-            provider = embedding_manager.get_default_provider()
-            if provider:
-                registry.register_embedding_provider(provider)
-        except Exception as exc:
-            logger.opt(exception=True).warning("Provider registration failed: {}", exc)
+    registry_config = (
+        Config(**effective_config)
+        if isinstance(effective_config, dict)
+        else effective_config
+    )
+    registry.configure(
+        registry_config,
+        connect_database=connect_database,
+        embedding_manager=embedding_manager,
+    )
 
     return DatabaseServices(
         provider=registry.get_provider("database"),

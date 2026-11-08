@@ -14,12 +14,14 @@ contracts the pipeline (and reviewers) depend on directly are locked here.
 from __future__ import annotations
 
 import typing
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
+from chunkhound.core.config.hub_config import ArchiveLimits
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.core.config.mcp_config import MCPConfig
 from chunkhound.core.config.remote.rules import (
@@ -69,57 +71,53 @@ class TestParsePath:
 
 
 class TestPredicateMatches:
-    def test_none_predicates_match(self) -> None:
-        assert _predicate_matches(None, Config()) == (True, None)
+    def test_none_predicates_match(self, tmp_path: Path) -> None:
+        assert _predicate_matches(None, Config(target_dir=tmp_path)) == (True, None)
 
-    def test_unknown_key_returns_schema_error(self) -> None:
+    def test_unknown_key_returns_schema_error(self, tmp_path: Path) -> None:
         # Typo like "wehn" or "existng" must produce an operator-visible
         # signal, not a silent skip — see module docstring rationale.
-        matches, err = _predicate_matches({"wehn": "linux"}, Config())
+        matches, err = _predicate_matches(
+            {"wehn": "linux"}, Config(target_dir=tmp_path)
+        )
         assert matches is False
         assert err is not None
         assert "wehn" in err
 
-    def test_os_mismatch_is_silent_miss(self) -> None:
+    def test_os_mismatch_is_silent_miss(self, tmp_path: Path) -> None:
         matches, err = _predicate_matches(
-            {"os": "definitely-not-a-real-platform"}, Config()
+            {"os": "definitely-not-a-real-platform"}, Config(target_dir=tmp_path)
         )
         assert (matches, err) == (False, None)
 
 
-def test_config_tree_is_depth_2() -> None:
-    """Tripwire for the depth-2 assumption in ``apply_rule``'s payload check.
+def test_nested_config_models_have_reviewed_remote_rule_coverage() -> None:
+    """New nested shapes require schema-path and public pipeline review.
 
-    ``apply_rule`` validates ``segments[1]`` against the sub-model's fields
-    and ``_check_payload_keys`` walks payload dicts one level via
-    ``_unwrap_optional_basemodel``. Every sub-config in the real tree
-    stops at scalar leaves today, so the walk only ever reaches depth 2
-    through real config.
-
-    If a sub-config gains a nested ``BaseModel`` field this test fails.
-    Before relaxing the assertion:
-    1. Extend the walker in ``apply_rule`` / ``_check_payload_keys`` to
-       validate segments at the new depth — an unknown key beyond depth 2
-       would otherwise be silently absorbed by ``extra="ignore"``.
-    2. Add a pipeline_e2e test exercising a rule like
-       ``id=<sub>.<nested>.<leaf>`` end-to-end.
+    hub.archive_limits is covered for valid updates, unknown paths/payloads,
+    strict limits and per-rule rollback in test_pipeline_e2e.py. Do not
+    automatically allow arbitrary new nested models or deeper descendants.
     """
-    violations: list[str] = []
+    nested_models: dict[str, type[BaseModel]] = {}
+
+    def walk(model: type[BaseModel], prefix: str) -> None:
+        for name, info in model.model_fields.items():
+            nested = _unwrap_optional_basemodel(info.annotation)
+            if nested is None:
+                continue
+            path = f"{prefix}.{name}"
+            nested_models[path] = nested
+            walk(nested, path)
+
     for top_name, top_info in Config.model_fields.items():
         top_model = _unwrap_optional_basemodel(top_info.annotation)
-        if top_model is None:
-            continue  # scalar top-level field — no sub-tree
-        for nested_name, nested_info in top_model.model_fields.items():
-            nested_model = _unwrap_optional_basemodel(nested_info.annotation)
-            if nested_model is not None:
-                violations.append(
-                    f"{top_name}.{nested_name} → nested {nested_model.__name__}"
-                )
+        if top_model is not None:
+            walk(top_model, top_name)
 
-    assert not violations, (
-        "Config tree gained BaseModel-typed fields under a sub-config — "
-        f"the depth-2 walker in remote/rules.py must be extended: "
-        f"{violations}. See test docstring for the checklist."
+    assert nested_models == {"hub.archive_limits": ArchiveLimits}, (
+        "Nested Config shape changed; review schema path/payload handling "
+        "and add public remote-config integration coverage before updating "
+        f"this exact allowlist: {nested_models}"
     )
 
 

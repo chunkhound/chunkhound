@@ -134,6 +134,196 @@ Settings are resolved in this order (highest priority first):
 
 Global defaults let you maintain shared settings (e.g. embedding provider + API key, common exclude patterns, LLM roles) in a single file so you do not need to copy `.chunkhound.json` into every project. Any project-local `.chunkhound.json` (or explicit config/CLI) overrides values from the global layer. Nested objects (embedding, llm, research, database, ...) are deep-merged: specify only the keys you want to change and siblings from global survive. Lists such as `indexing.exclude` / `include` from a higher layer fully replace lower ones (built-in defaults are still applied on top; see Global Defaults above for details and examples).
 
+## Central Indexing Hub
+
+Configure a full manifest URL in `hub.url` or `CHUNKHOUND_HUB__URL` to use a
+trusted organization-operated base index. `chunkhound pull [path] --version
+latest|-1|-2` explicitly downloads, verifies and installs the selected compatible
+base; it installs only. A subsequent `chunkhound index [path]` overlays changed,
+new and deleted local files while retaining unchanged base content. Both DuckDB
+and LanceDB support this workflow. DuckDB is recommended; LanceDB remains
+experimental and uses the Python indexing pipeline even when Rust is enabled.
+
+With a hub configured and a usable embedding identity, normal `chunkhound index`
+may automatically download and replace an absent or embedding-misaligned local
+index before ordinary indexing. An aligned index makes no hub request. MCP,
+search, simulation, ignore checking and no-embeddings indexing never initiate
+pulls. Configuring a URL does not itself perform a download, but it **enables
+this automatic replacement on a later normal index command**.
+
+**Replacement can discard local index work and require re-indexing.** Format
+and checksum validation do not establish publisher content freshness. Pull
+alone does not reconcile a base with your checkout or repair arbitrary stale
+publisher rows; ordinary indexing performs the local overlay.
+
+```json
+{
+  "hub": {
+    "url": "https://hub.internal/catalogue?branch=main",
+    "download_timeout_seconds": 3600,
+    "archive_limits": {
+      "max_members": 100000,
+      "max_path_depth": 32,
+      "max_path_bytes": 4096,
+      "max_total_path_bytes": 33554432,
+      "max_extracted_bytes": 34359738368,
+      "max_decompressed_bytes": 42949672960
+    }
+  }
+}
+```
+
+`hub.download_timeout_seconds` defaults to **3600 seconds**: one cooperative
+artifact-download deadline across all three attempts, not per retry. Set a
+positive finite number (fractions allowed); booleans, zero, negatives, infinity,
+NaN, `null`, strings and unlimited sentinels are rejected. Environment override:
+
+```bash
+CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS=7200 chunkhound pull .
+```
+
+Environment text is decoded as a JSON number and validated through the normal
+configuration layers. Existing precedence is unchanged: defaults, environment,
+global configuration (including persisted remote-config rules), project
+`.chunkhound.json`, explicit `--config`, then applicable CLI/direct overrides.
+There is no download-timeout CLI flag. Remote rules may set
+`hub.download_timeout_seconds`; project/explicit configuration still overrides
+that persisted global value.
+
+This budget differs from HTTP's 60-second inactivity limit, manifest's
+10-second request budget, and archive extraction limits. Size/hash checks remain
+required. The cooperative deadline cannot forcibly interrupt synchronous disk
+work and is not an extraction time limit. Timeout cleans staging under normal
+cleanup rules, never installing an unverified candidate. Automatic pull may
+continue local indexing; explicit pull fails. Diagnostics name the effective
+duration/setting, never URLs/credentials. Resume applies only within this
+invocation, not across invocations.
+
+The shown archive limits are defaults, not measured production thresholds.
+Each value must be a positive finite integer; booleans, fractions, zero,
+negative values, `null` and unlimited sentinels are rejected. `max_members`
+bounds physical tar headers (including extension headers) and separately
+retained paths (including implicit parents). Path depth includes the database
+root; path bytes use UTF-8. The aggregate path budget charges original and
+casefolded unique prefixes. The 32 GiB payload limit counts effective regular
+file sizes; the 40 GiB decompressed limit counts all gzip output, including
+metadata, padding, read-ahead and trailing/concatenated output. Larger legitimate
+indexes require larger explicit limits. Metadata guards and the fixed maximum
+of 32 consecutive extension headers still apply.
+
+Environment names are `CHUNKHOUND_HUB__ARCHIVE_LIMITS__` plus the uppercase field,
+for example `CHUNKHOUND_HUB__ARCHIVE_LIMITS__MAX_MEMBERS=200000`. Usual config
+precedence applies: explicit/project/global config can override environment
+values. Limits are client configuration, not administrator-enforced policy;
+there are no archive-limit CLI flags. Exceeding a limit refuses activation and
+preserves the installed database. Live free-space and CRC checks remain active.
+
+Publish gzip-compressed USTAR, GNU or PAX tar archives with one backend root:
+regular file `chunks.db` or directory `lancedb.lancedb`. Ordinary `0755`
+directories and `0644` regular files work; special permission bits, executable
+regular files, links, sparse members and unsafe/conflicting paths are refused.
+Implicit parents and high compression are supported within the limits, without
+a compression-ratio heuristic. Publisher ownership/modes/timestamps are not
+applied. Package a consistent, closed database without WAL or publisher sidecars.
+Manifest v2 is unchanged; extraction budgets do not add a separate compressed
+transfer ceiling.
+
+Organizations choose **HTTP or HTTPS in the URL**, with no extra opt-in setting
+or hub authentication configuration. HTTP supports non-loopback hosts as well
+as `localhost`. The same policy applies independently to each full `artifact.url`
+supplied by a v2 manifest. ChunkHound does not append `/manifest.json` or
+construct artifact URLs relative to the manifest.
+
+HTTPS certificate and hostname verification stay enabled. HTTP-to-HTTP,
+HTTP-to-HTTPS and HTTPS-to-HTTPS redirects are allowed; HTTPS-to-HTTP redirects
+are rejected before the downgraded request, including after an earlier
+HTTP-to-HTTPS upgrade. Malformed URLs, userinfo (`user:password@host`) and
+non-HTTP(S) schemes are rejected. Bounded retries, byte-count and checksum
+verification, and disk-space checks apply to both schemes.
+
+Hub and remote config share at most five redirects after the initial request,
+not security policies. Hub bans all HTTPS-to-HTTP redirects. Remote allows
+HTTPS or HTTP to loopback and strips `Authorization` on scheme/host/effective
+port changes (equivalent default ports stay same-origin). Its HTTPS-to-HTTP
+loopback exception does not permit arbitrary HTTP hosts. Shared mechanics do
+not buffer hub artifacts.
+
+**HTTP provides no protection against network interception or tampering.** A
+checksum delivered through the same untrusted connection does not authenticate
+an artifact. Use HTTPS when that protection is required. Hub URLs may be
+committed in project configuration, unlike the operator-owned
+[remote configuration](#remote-configuration) settings; the remote-config
+transport and scrub policies are unchanged. Do not commit secrets in URLs.
+
+Ordinary encoded paths and query strings are preserved, but standard HTTP
+client path normalization still applies (including literal dot segments).
+Hub-owned errors omit URLs, response bodies and raw transport exception text.
+Default httpx/httpcore diagnostics are suppressed, but explicitly enabling DEBUG
+on their child loggers may expose response headers or redirect URLs; complete
+secret exclusion from third-party debug logs is not guaranteed.
+
+If installation is interrupted, ordinary opens and automatic indexing refuse
+mixed state. Stop database users, then use explicit `chunkhound pull [path]` to
+download and verify a fresh recovery candidate; local work may need re-indexing.
+Do not delete coordination files or restore arbitrary quarantine contents.
+There is no atomic multi-file or power-loss rollback guarantee.
+
+### WAL provisioning and recovery
+
+Unknown/uninspectable DuckDB WALs fail closed for both read-only and writable
+opens. WAL inspection disables automatic extension installation/loading and
+requires locally compatible VSS support with HNSW persistence configured before
+attaching the database read-only. A missing extension is a provisioning failure,
+not evidence of corruption. Provision for the actual DuckDB engine version,
+platform and service account; Python and native runtimes each need matching
+support.
+
+For the Python DuckDB runtime, the following explicit in-memory setup may
+**download extension code** from DuckDB's configured repository. Run it only
+with operator authorization for that download and the runtime/account being
+provisioned:
+
+```bash
+uv run python - <<'PY'
+import duckdb
+
+with duckdb.connect(":memory:") as connection:
+    connection.execute("INSTALL vss")
+    connection.execute("LOAD vss")
+    connection.execute("SET hnsw_enable_experimental_persistence = true")
+PY
+```
+
+This opens no production database and is **not WAL recovery**. It does not
+provision every native runtime; matching native and offline extension
+provisioning is owned by your deployment tooling.
+
+A healthy WAL may still require writes to replay and be uninspectable read-only.
+Writable reopen does not bypass the compatibility check. Stop database users;
+preserve the original database plus every WAL/recovery file and their names.
+Recover a separate copy with compatible DuckDB/VSS tooling, or restore a
+known-good complete compatible index. Validate the recovered or restored copy
+before deliberately replacing live state. Incompatible recognized backups can
+block opening a healthy live file: have an operator identify and preserve them
+and select a compatible recovery set, rather than deleting or blindly restoring
+them. Never attach an old WAL to a new base or discard a WAL just to force an open.
+
+### Coordination and filesystem requirements
+
+Read-only database use still requires coordination. Preprovision a usable
+adjacent `<database-path>.chunkhound.lock` file and its parent locations with
+appropriate permissions, or allow ChunkHound to create them. An existing lock file can be
+opened read-only; initial lock or parent creation can require writes. There is
+no unlocked fallback if coordination fails. Do not delete stable lock files as
+"stale": their presence does not show whether an owner is alive.
+
+Use trusted, stable database and parent paths on local filesystems with reliable
+advisory locks and same-filesystem rename. Static path aliases do not protect
+against hostile concurrent pathname or symlink mutation. Hard-link aliases and
+unvalidated NFS/SMB or cross-host behavior are outside the guarantee. Stop older
+ChunkHound and third-party database clients that do not participate in
+coordination before pulling.
+
 ## Remote Configuration
 
 For fleet-wide deployments, ChunkHound can fetch a configuration envelope from an operator-controlled HTTPS endpoint (or `http://` to a loopback host for local development) at the start of every invocation, apply a list of rules to the on-disk global config, and seed the discovery-layer `remote_config.url` / `auth_header` into the global config file on the first successful fetch so subsequent runs continue fetching without needing the CLI flag or environment variable that triggered the initial run.
@@ -265,7 +455,7 @@ Some settings describe the local install and are protected against server overri
 - `embeddings_disabled` — operator kill-switch.
 - `local_config_file`, `global_config_file`, `config_file` — discovery inputs to the loader (allowing remote to override them would recurse).
 
-`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused wholesale — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable. One narrow guard applies: a rule-set `remote_config.url` that fails the fetcher's scheme rule (cleartext `http://` to a non-loopback host) is reverted to the pre-rules on-disk value — or removed if there is none — with a WARNING. Persisting such a URL would brick the next fetch, since the fetcher refuses to send credentials over cleartext to a non-loopback host. Every `https://` URL passes, so rotation to a new HTTPS origin is unrestricted; `remote_config.auth_header` has no scheme concept and is accepted verbatim.
+`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused wholesale — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable. One narrow guard applies: a rule-set `remote_config.url` that fails the fetcher's scheme rule (cleartext `http://` to a non-loopback host) is reverted to the pre-rules on-disk value — or removed if there is none — with a WARNING. Persisting such a URL would brick the next fetch, since the fetcher refuses to send credentials over cleartext to a non-loopback host. HTTPS URLs with a valid host and port pass, so rotation to a new HTTPS origin is unrestricted; `remote_config.auth_header` has no scheme concept and is accepted verbatim.
 
 ### Self-registration
 
@@ -454,7 +644,7 @@ path for older installations. If no path is configured, the default is
 |---|---|---|---|
 | `max_disk_usage_mb` | `number` | `null` | Max DB size in MB before indexing stops (CLI flag uses GB) |
 | `fragmentation_threshold_pct` | `number` | `30` | Background/auto-compaction trigger: file-size overhead above the provider's estimated live DB size (%). 30 = compact when the DB is ~30% larger than live data. 0 = always, null = never. This does not disable the fixed `chunkhound index` compaction boundaries. CLI: `--fragmentation-threshold-pct`. |
-| `execute_timeout_seconds` | `number` | `null` | Timeout for **synchronous** serial DB executor waits (`execute_sync` / `_execute_in_db_thread_sync`) in seconds. `null` = built-in defaults (30s normal ops, 660s compaction). When set, replaces both defaults for every sync operation including compaction, HNSW rebuild, and queries. Does **not** apply to async dispatch (`execute_async`), which remains unbounded. CLI: `--db-execute-timeout`. Env: `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` (or legacy `CHUNKHOUND_DB_EXECUTE_TIMEOUT`). |
+| `execute_timeout_seconds` | `number` | `null` | Timeout in seconds for ordinary **synchronous** serial DB executor caller waits, including compaction, HNSW rebuild, and queries. `null` = built-in defaults (30s normal ops, 660s compaction); setting a value replaces both defaults. Async dispatch remains unbounded. Safe disconnect and trusted Rust reconnect/preparation drain required work without a fixed timeout. A caller timeout does not stop submitted work or release its handles. CLI: `--db-execute-timeout`. Env: `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` (or legacy `CHUNKHOUND_DB_EXECUTE_TIMEOUT`). |
 | `lancedb_index_type` | `string` | `null` | LanceDB vector index type: `auto`, `ivf_hnsw_sq`, or `ivf_rq` |
 | `lancedb_optimize_fragment_threshold` | `number` | `100` | Fragment count to trigger LanceDB compaction |
 
@@ -481,6 +671,31 @@ DuckDB compaction rebuilds a fresh canonical ChunkHound database file and swaps 
 | `per_file_timeout_min_size_kb` | `number` | `128` | Only apply per-file timeout to files at least this large (KB) |
 
 By default, ChunkHound excludes common noise directories (`node_modules`, `dist`, `__pycache__`, `.git`, lock files, build artifacts). Set `exclude_mode: "config_only"` and `exclude: []` to start with a clean slate.
+
+### Worker start method and cancellation
+
+ChunkHound parser pools explicitly use multiprocessing `spawn`, without
+changing the process-global start method. `CHUNKHOUND_MP_START_METHOD` is no
+longer honored; remove it from deployment configuration. A `fork` override is
+not supported because inherited database ownership descriptors can outlive the
+parent and block installation. Embedded applications must use a spawn-safe
+entry point, including the usual `if __name__ == "__main__":` startup guard.
+
+Cancellation is cooperative and may wait for safe cleanup. Blocking handoff
+and reconnect work are offloaded; all native pipeline stages must join and
+their database-use handles close before reconnection and release of
+ownership/guards. This is not proof that every idle OS worker has exited or
+every safely retained old handle has finalized. An admitted replacement write
+window finishes its required writes; cancellation is not transactional rollback
+and completed writes may remain visible. Repeated cancellation does not skip
+drainage. Cleanup failure leaves the database explicitly unavailable rather
+than claiming recovery.
+
+There is no hard completion deadline for already-running database/network/file
+operations or Python callbacks. Python embedding callbacks already entered may
+drain internal retries, and an arbitrary callback monopolizing the GIL can delay
+the event loop despite offloading. There is no forced worker termination or
+prompt return with detached background cleanup.
 
 ### Exclude Modes
 
@@ -744,7 +959,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__PROVIDER` | Database backend (`duckdb` or `lancedb`) |
 | `CHUNKHOUND_DATABASE__PATH` | Database storage path |
 | `CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB` | Max database size in GB |
-| `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` | Sync serial DB executor timeout in seconds (overrides 30s/660s defaults when set; async dispatch unbounded) |
+| `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` | Ordinary synchronous DB caller-wait timeout in seconds; overrides 30s/660s defaults. Async dispatch and safe disconnect/trusted Rust reconnect drainage remain unbounded. See [Database Options](#database-options). |
 | `CHUNKHOUND_DATABASE__FRAGMENTATION_THRESHOLD_PCT` | Auto-compaction fragmentation threshold (%) |
 | `CHUNKHOUND_DATABASE__READ_ONLY` | Open DB read-only (`true`/`1`/`yes`) |
 | `CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE` | LanceDB vector index type |

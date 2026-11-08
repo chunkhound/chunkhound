@@ -5,8 +5,12 @@ Uses real DuckDB in-memory, real tree-sitter parsing, and real regex search —
 no subprocesses, no network calls, no mocks.
 """
 
+import argparse
+from pathlib import Path
+
 import pytest
 
+from chunkhound.api.cli.commands.search import search_command
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
@@ -82,6 +86,64 @@ async def indexed_project(tmp_path):
     await indexing_service.process_directory(tmp_path, no_embeddings=True)
 
     yield tmp_path, services
+
+
+@pytest.mark.asyncio
+async def test_file_backed_search_command_uses_factory_initialization(
+    tmp_path, monkeypatch, clean_environment, capsys
+):
+    import chunkhound.api.cli.commands.search as search_module
+
+    # Capture services built by the real factory inside search_command.
+    created: list = []
+    real_create_services = search_module.create_services
+
+    def _capturing_create_services(*a, **kw):
+        svc = real_create_services(*a, **kw)
+        created.append(svc)
+        return svc
+
+    monkeypatch.setattr(search_module, "create_services", _capturing_create_services)
+    (tmp_path / "calculator.py").write_text(CALCULATOR_PY)
+    config = Config(
+        database=DatabaseConfig(
+            path=tmp_path / ".chunkhound" / "db", provider="duckdb"
+        ),
+        indexing=IndexingConfig(include=["*.py"]),
+        target_dir=tmp_path,
+        embedding=None,
+        embeddings_disabled=True,
+    )
+    assert config.hub.url is None
+    db_path = config.database.get_db_path()
+    services = create_services(db_path, config)
+    try:
+        assert Path(services.provider.db_path) == db_path
+        assert services.provider.get_base_directory() == tmp_path
+        indexing = DirectoryIndexingService(
+            indexing_coordinator=services.indexing_coordinator, config=config
+        )
+        await indexing.process_directory(tmp_path, no_embeddings=True)
+    finally:
+        services.provider.disconnect()
+    capsys.readouterr()
+
+    args = argparse.Namespace(
+        verbose=False, regex=True, query="calculate_tax", page_size=10,
+        offset=0, path_filter=None, single_hop=False, multi_hop=False,
+    )
+    try:
+        await search_command(args, config)
+        output = capsys.readouterr().out
+        assert "Regex Search Results" in output
+        assert "calculator.py" in output
+        assert "calculate_tax" in output
+        assert config.database.get_db_path() == db_path
+        assert len(created) == 1
+        assert created[0].provider.get_base_directory() == tmp_path
+    finally:
+        for svc in created:
+            svc.provider.disconnect()
 
 
 async def _regex_search(services, query, **kwargs):

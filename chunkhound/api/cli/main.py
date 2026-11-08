@@ -59,6 +59,8 @@ def _analytics_action_fields(command: str, args: argparse.Namespace) -> dict:
 # Required for PyInstaller multiprocessing support
 multiprocessing.freeze_support()
 
+_retired_mp_setting_warned = False
+
 
 def _daemon_startup_breadcrumb(args: argparse.Namespace, message: str) -> None:
     """Emit pre-server daemon startup breadcrumbs to the daemon stderr log."""
@@ -175,6 +177,7 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.daemon_parser import add_daemon_subparser
     from .parsers.fetchurl_parser import add_fetchurl_subparser
     from .parsers.mcp_parser import add_mcp_subparser
+    from .parsers.pull_parser import add_pull_subparser
     from .parsers.quickresearch_parser import add_quickresearch_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
@@ -186,6 +189,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Add command subparsers
     add_run_subparser(subparsers)
+    add_pull_subparser(subparsers)
     add_mcp_subparser(subparsers)
     add_search_subparser(subparsers)
     add_websearch_subparser(subparsers)
@@ -328,6 +332,10 @@ async def async_main() -> None:
             from .commands.run import run_command
 
             await run_command(args, config)
+        elif args.command == "pull":
+            from .commands.pull import pull_command
+
+            await pull_command(args, config)
         elif args.command == "mcp":
             # Dynamic import to avoid early chunkhound module loading
             from .commands.mcp import mcp_command
@@ -430,6 +438,18 @@ def main() -> None:
             sys.stdout.reconfigure(errors="backslashreplace")
         if hasattr(sys.stderr, "reconfigure"):
             sys.stderr.reconfigure(errors="backslashreplace")
+    global _retired_mp_setting_warned
+    if (
+        "CHUNKHOUND_MP_START_METHOD" in os.environ
+        and not _retired_mp_setting_warned
+    ):
+        _retired_mp_setting_warned = True
+        sys.stderr.write(
+            "Warning: CHUNKHOUND_MP_START_METHOD is no longer supported "
+            "and is ignored; ChunkHound parser workers always use spawn. "
+            "Remove this setting.\n"
+        )
+        sys.stderr.flush()
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:

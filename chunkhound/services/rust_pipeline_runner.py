@@ -15,17 +15,26 @@ Used by:
   when the Rust pipeline decision (_use_rust) is True.
 """
 
+import asyncio
+import contextvars
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from rich.progress import Progress, TaskID
 
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
-from chunkhound.pipeline_bridge import run_rust_pipeline
+from chunkhound.pipeline_bridge import (
+    RustPipelineCleanupError,
+    RustRunResources,
+    _shutdown_embed_thread_resources,
+    run_rust_pipeline,
+)
+from chunkhound.providers.database.lifecycle import Failure
+from chunkhound.providers.database.serial_executor import _rust_reconnect_scope
 from chunkhound.services.progress_utils import _update_speed_field, format_bytes
 
 
@@ -301,6 +310,61 @@ class RustPhaseResult:
     compact_reduction_pct: float | None
 
 
+class RustRecoveryProvider(Protocol):
+    """Lifecycle surface needed to recover the same retained provider."""
+
+    def connect(self) -> None: ...
+
+    def set_rust_pipeline_in_progress(self, active: bool) -> None: ...
+
+
+def _reconnect_after_rust(db: RustRecoveryProvider) -> None:
+    with _rust_reconnect_scope(getattr(db, "_executor")):
+        db.connect()
+
+
+def _reconnect_outcome(db: RustRecoveryProvider) -> Failure | None:
+    # A callback's CancelledError must not look like cancellation of the caller
+    # awaiting its future. Deliver detached data, leaving WorkerDrain to observe
+    # only externally requested cancellation (also on Python 3.10).
+    try:
+        _reconnect_after_rust(db)
+    except BaseException as error:
+        return Failure.capture(error)
+    return None
+
+
+def recover_rust_resources(
+    db: RustRecoveryProvider, resources: RustRunResources,
+) -> None:
+    if not resources.recovery_required:
+        raise RuntimeError("Rust operation is still active; recovery refused")
+    try:
+        resources.assert_native_drained()
+        resources.forget_completed_futures()
+        if not resources.cache_closed:
+            resources.failure_stage = "embedding client/cache close"
+            _shutdown_embed_thread_resources(resources.cache)
+            resources.cache_closed = True
+        if not resources.safe_to_reconnect:
+            raise RuntimeError("Rust cleanup does not permit reconnect")
+        resources.failure_stage = "trusted database reconnect and configuration"
+        _reconnect_after_rust(db)
+    except BaseException as error:
+        resources.cleanup_failure = Failure.capture(error)
+    else:
+        resources.recovery_required = False
+        setattr(db, "_rust_pipeline_cleanup", None)
+        db.set_rust_pipeline_in_progress(False)
+        return
+    # Raise outside the handler so detached delivery has no raw context.
+    failure = resources.cleanup_failure
+    if failure.kind in (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        control = failure.exception()
+        raise control from control.__cause__
+    raise RustPipelineCleanupError(resources) from None
+
+
 async def run_rust_indexing_phase(
     *,
     db: DatabaseProvider,
@@ -396,25 +460,12 @@ async def run_rust_indexing_phase(
     # that only surfaces later as a deserialization error when
     # some other process reopens the DB.
     #
-    # Safe to close here: the parse_batch_callback's
-    # ProcessPoolExecutor (whose fork'd children inherit
-    # whatever DuckDB state is live at fork time) is a lazy,
-    # process-wide singleton (see pipeline_bridge._get_parse_pool)
-    # — it's created only once, on the first call from Rust's
-    # parse phase, which starts only after this call returns on
-    # this very first run. Every later run reuses the
-    # already-created workers, so no new fork ever happens after
-    # this point — there's nothing later to inherit a live
-    # connection. Must use the provider's full disconnect(),
-    # not just closing _connection_manager.connection: the
-    # SerialExecutor holds its own separate thread-local DuckDB
-    # connection (created lazily on its worker thread), which a
-    # bare connection_manager close would leave dangling.
-    # `released_for_rust` tracks whether we *attempted* release, not
-    # whether it succeeded — release_for_rust_pipeline() can raise after
-    # only partially closing its two connections (see its docstring), and
-    # the reconnect in `finally` below must still run in that case, or a
-    # long-lived server process is left permanently disconnected.
+    # The provider retains native shared ownership while its backend handles are
+    # closed. Native work independently owns a shared lease for its entire run.
+    # Parser pools use spawn, so children cannot inherit either database state or
+    # lease descriptors. Keep the guard and per-run resources through native joins,
+    # embed-cache cleanup and trusted reconnect. A failed release must never start
+    # native work; a failed cleanup/reconnect retains unavailable ownership.
     #
     # Deliberately NOT gated on `db.is_connected`: that property only
     # reflects the connection manager's connection, not the executor's
@@ -425,57 +476,93 @@ async def run_rust_indexing_phase(
     # still ran below, producing a second native writer on the same file
     # with no guard at all. release_for_rust_pipeline() is idempotent (it
     # tolerates already-closed connections), so it's always safe to call.
-    released_for_rust = False
-    release_error: Exception | None = None
-    if db is not None:
-        released_for_rust = True
-        # Publish "Rust owns the file" *before* release starts, not after it
-        # returns: release_for_rust_pipeline() runs a CHECKPOINT that can take
-        # seconds, and the fast-fail guard on new submissions only helps if
-        # it's live for that whole window. Setting the flag only after release
-        # completes left a gap where a concurrent op could pass the stale
-        # guard, queue behind the disconnect, and open a fresh connection just
-        # as Rust starts — a single-writer lock error.
-        db.set_rust_pipeline_in_progress(True)
-        try:
-            db.release_for_rust_pipeline()
-        except Exception as e:
-            release_error = e
-            # Release failed, so Rust never takes ownership (see the `raise
-            # release_error` below) — don't leave other callers fast-failing
-            # against a database Python still owns.
-            db.set_rust_pipeline_in_progress(False)
-
+    resources = RustRunResources()
+    error: BaseException | None = None
+    rust_stats: dict[str, Any] = {}
+    # If guard publication fails, this scope owns nothing and clears nothing.
+    db.set_rust_pipeline_in_progress(True)
+    setattr(db, "_rust_pipeline_cleanup", resources)
     try:
-        if release_error is not None:
-            # Don't hand write ownership to Rust on an ambiguously-closed
-            # connection — release_for_rust_pipeline()'s docstring requires
-            # this. Still falls through to the reconnect attempt below.
-            raise release_error
-        rust_stats = await run_rust_pipeline(
-            files_to_process,
-            db_path=db_path,
-            project_root=directory,
-            force_reindex=force_reindex,
-            skip_embeddings=skip_embeddings,
-            do_cleanup=do_cleanup,
-            config=config,
-            progress_callback=progress_cb,
+        release = asyncio.get_running_loop().run_in_executor(
+            None, contextvars.copy_context().run, db.release_for_rust_pipeline,
         )
+        resources.release_future = release
+        await resources.drain.wait(release)
+        if not resources.token.is_cancelled():
+            rust_stats = await run_rust_pipeline(
+                files_to_process, db_path=db_path, project_root=directory,
+                force_reindex=force_reindex, skip_embeddings=skip_embeddings,
+                do_cleanup=do_cleanup, config=config, progress_callback=progress_cb,
+                _resources=resources,
+            )
+    except BaseException as caught:
+        error = caught
+        resources.remember_original(caught)
     finally:
-        # Reopen the Python-side DuckDB connection whether or not
-        # the Rust pipeline succeeded — release_for_rust_pipeline()
-        # kept the executor alive; connect() creates a fresh
-        # thread-local connection inside that executor. Without
-        # this in a finally, a raised exception (embed/DB-write
-        # failure, Rust panic surfaced as PyErr, release_for_rust_pipeline()
-        # itself failing, etc.) leaves db permanently disconnected for the
-        # rest of the process's life.
-        if released_for_rust and db is not None:
-            # Clear before connect(): connect()'s own defense-in-depth
-            # check would otherwise reject this trusted reconnect.
-            db.set_rust_pipeline_in_progress(False)
-            db.connect()
+        if not resources.native_started and resources.cleanup_future is None:
+            resources.cache_closed = (
+                not resources.cache.providers and not resources.cache.loops
+            )
+        if resources.safe_to_reconnect:
+            reconnect: asyncio.Future[Failure | None] | None = None
+            try:
+                reconnect = asyncio.get_running_loop().run_in_executor(
+                    None, contextvars.copy_context().run, _reconnect_outcome, db,
+                )
+                resources.reconnect_future = reconnect
+                reconnect_failure = await resources.drain.wait(reconnect)
+            except BaseException as cleanup_error:
+                resources.remember_cleanup(
+                    "trusted database reconnect and configuration", cleanup_error
+                )
+                error = RustPipelineCleanupError(resources)
+            else:
+                if reconnect_failure is not None:
+                    resources.failure_stage = (
+                        "trusted database reconnect and configuration"
+                    )
+                    resources.cleanup_failure = reconnect_failure
+                    error = RustPipelineCleanupError(resources)
+                else:
+                    setattr(db, "_rust_pipeline_cleanup", None)
+                    db.set_rust_pipeline_in_progress(False)
+            finally:
+                # Delivered tracebacks need no completed transport future.
+                reconnect = None
+        else:
+            error = RustPipelineCleanupError(resources)
+        if (
+            resources.drain.cancellation is not None
+            and resources.original_failure is None
+        ):
+            resources.original_failure = Failure(
+                asyncio.CancelledError, "indexing request cancelled"
+            )
+        if getattr(db, "_rust_pipeline_cleanup", None) is resources:
+            error = RustPipelineCleanupError(resources)
+        resources.forget_completed_futures()
+        # Freeze this caller's detached outcome before another thread can recover
+        # and replace the retained resources' diagnostics. Delivery is attempt-local.
+        failure = resources.cleanup_failure
+        cancellation = resources.drain.cancellation is not None
+        resources.drain.cancellation = None
+        if getattr(db, "_rust_pipeline_cleanup", None) is resources:
+            # No await after publication: original owner has drained every
+            # admitted worker and will not touch handles again.
+            resources.recovery_required = True
+        # Ordinary readiness observes the completed backend on the next action.
+        # Publishing success here, after guard release, could overwrite a newer
+        # caller's failed completion.
+    if cancellation:
+        # Explicit caller cancellation dominates callback-generated control flow.
+        raise asyncio.CancelledError()
+    if failure is not None and failure.kind in (
+        asyncio.CancelledError, KeyboardInterrupt, SystemExit,
+    ):
+        control = failure.exception()
+        raise control from control.__cause__
+    if error is not None:
+        raise error
 
     diff_elapsed = 0.0
     compact_ran = False
