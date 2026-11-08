@@ -37,23 +37,29 @@ def _timeout(phase: str, seconds: float) -> WebSearchTimeoutError:
     return WebSearchTimeoutError(f"websearch timed out after {seconds:.0f}s")
 
 
-async def _cancel_and_wait(task: asyncio.Task[Any]) -> None:
-    """Cancel a sibling task without awaiting it from this task's stack."""
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    """Retrieve a detached task's result so late failures stay quiet."""
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+async def _cancel_and_wait(task: asyncio.Task[Any], *, deadline: float) -> None:
+    """Cancel a sibling task, detaching it when the total budget is spent."""
     if task.done():
+        _consume_task_result(task)
         return
     loop = asyncio.get_running_loop()
-    waiter: asyncio.Future[None] = loop.create_future()
-
-    def _on_done(_: asyncio.Future[Any]) -> None:
-        if not waiter.done():
-            waiter.set_result(None)
-
-    task.add_done_callback(_on_done)
     task.cancel()
+    remaining = max(0.0, deadline - loop.time())
     try:
-        await waiter
+        await asyncio.wait({task}, timeout=remaining)
     finally:
-        task.remove_done_callback(_on_done)
+        if task.done():
+            _consume_task_result(task)
+        else:
+            task.add_done_callback(_consume_task_result)
 
 
 async def run_websearch(
@@ -81,6 +87,8 @@ async def run_websearch(
     from chunkhound.utils.websearch_expansion import expand_web_queries
 
     total = websearch_timeout() if timeout_s is None else timeout_s
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + total
 
     async def _run() -> tuple[dict[str, Any], list[str]]:
         discovery_s = websearch_discovery_timeout(total)
@@ -103,7 +111,7 @@ async def run_websearch(
                 raise _timeout("discovery", discovery_s)
             results = discovery_task.result()
         finally:
-            await _cancel_and_wait(discovery_task)
+            await _cancel_and_wait(discovery_task, deadline=deadline)
 
         if not results:
             raise EmptyWebSearchError(
@@ -154,8 +162,6 @@ async def run_websearch(
         finally:
             await fetched_pages.aclose()
 
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + total
     try:
         return await asyncio.wait_for(_run(), timeout=total)
     except WebSearchTimeoutError:
