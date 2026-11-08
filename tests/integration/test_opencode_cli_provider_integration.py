@@ -5,7 +5,8 @@ loopback OpenAI-compatible stub server instead of a live provider. The test is
 deterministic, reproducible, and offline while still covering the production
 path: CLI invocation -> ``--format json`` NDJSON -> provider parsing.
 
-Skipped automatically when the ``opencode`` CLI is not installed.
+Skipped automatically when the ``opencode`` CLI is not installed. CI sets
+``CHUNKHOUND_REQUIRE_OPENCODE=1`` so a missing binary fails the job.
 """
 
 import json
@@ -18,6 +19,7 @@ from tests.fixtures.openai_compatible_server import (
     ChatCompletionScript,
     OpenAICompatibleTestServer,
 )
+from tests.helpers.required_tool import skip_or_fail
 
 STUB_MODEL = "stub/test-model"
 STUB_REPLY = "HELLO_FROM_STUB"
@@ -26,13 +28,17 @@ STUB_REPLY = "HELLO_FROM_STUB"
 # this cap gets a 400; assert_no_unmatched_requests turns an over-budget flake
 # into a hard failure. Raise the cap if a new opencode version needs more.
 _STUB_CALL_BUDGET = 8
+_REQUIRE_OPENCODE_ENV = "CHUNKHOUND_REQUIRE_OPENCODE"
 
 
 @pytest.fixture
 def opencode_stub(tmp_path, monkeypatch, request):
     """Start a loopback stub server and point the opencode CLI's config at it."""
     if not shutil.which("opencode"):
-        pytest.skip("opencode CLI not installed")
+        skip_or_fail(
+            "opencode CLI not installed",
+            require_env=_REQUIRE_OPENCODE_ENV,
+        )
     server = OpenAICompatibleTestServer(
         [
             ChatCompletionScript(

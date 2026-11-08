@@ -7,6 +7,9 @@ inputs:
   site:
     description: Install site test dependencies and download the site artifact
     default: "false"
+  opencode:
+    description: Install the pinned opencode CLI for integration tests
+    default: "false"
 runs:
   using: composite
   steps:
@@ -25,6 +28,16 @@ runs:
         node-version: "22"
         cache: npm
         cache-dependency-path: site/package-lock.json
+    - uses: actions/setup-node@v6
+      if: inputs.opencode == 'true'
+      with:
+        node-version: "22"
+    - name: Install opencode CLI
+      if: inputs.opencode == 'true'
+      shell: bash
+      run: |
+        npm install -g opencode-ai@1.19.5
+        opencode --version
     - if: inputs.site == 'true'
       shell: bash
       run: npm ci --prefix site

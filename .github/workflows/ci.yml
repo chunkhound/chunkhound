@@ -101,6 +101,7 @@ jobs:
       - uses: ./.github/actions/ci-python-setup
         with:
           python-version: ${{ matrix.python }}
+          opencode: "true"
 
       - name: Test collection check
         run: uv run pytest tests/ --ignore=tests/site --collect-only -q --tb=no
@@ -123,6 +124,8 @@ jobs:
         # continue-on-error: a persistent failure doesn't fail the job by itself — the
         # "Check flaky annotations" step below is the real gate, so the job stays green
         # when every failure is annotated '# flaky: reason'.
+        env:
+          CHUNKHOUND_REQUIRE_OPENCODE: "1"
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}

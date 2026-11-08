@@ -1,14 +1,12 @@
 """Run Chromium contracts through the site's locked JavaScript dependency."""
 
-import os
 import shutil
 import subprocess
 from functools import lru_cache
 from pathlib import Path
 from typing import NoReturn
 
-import pytest
-
+from tests.helpers.required_tool import skip_or_fail as _skip_or_fail
 from tests.site.tsx_runner import ROOT, run_tsx_json, run_tsx_raw
 
 _PLAYWRIGHT = ROOT / "site" / "node_modules" / "playwright" / "index.mjs"
@@ -20,9 +18,7 @@ SITE_INSTALL_COMMAND = (
 
 def skip_or_fail(reason: str) -> NoReturn:
     """Skip locally; fail where CI requires the toolchain to be present."""
-    if os.environ.get(_REQUIRE_SITE_ENV) == "1":
-        pytest.fail(reason)
-    pytest.skip(reason)
+    _skip_or_fail(reason, require_env=_REQUIRE_SITE_ENV)
 
 
 @lru_cache(maxsize=1)
