@@ -66,6 +66,7 @@ from .chunk_cache_service import ChunkCacheService
 from .progress_utils import _update_speed_field
 from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
 
+
 def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
     return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
 
@@ -526,6 +527,9 @@ class IndexingCoordinator(BaseService):
         Returns:
             Dictionary with processing results including status, chunks, and embeddings
         """
+        ready = getattr(self._db, "ensure_ready_async", None)
+        if callable(ready):
+            await ready()
         # CRITICAL: File-level locking prevents concurrent async processing
         # PATTERN: All processing happens inside the lock
         # PREVENTS: Race conditions in read-modify-write operations
@@ -1283,6 +1287,9 @@ class IndexingCoordinator(BaseService):
         Returns:
             Dictionary with processing statistics
         """
+        ready = getattr(self._db, "ensure_ready_async", None)
+        if callable(ready):
+            await ready()
         # Fail-closed indexed-root identity guard BEFORE any discovery or
         # cleanup. Wrong-root reopens must not do any destructive work.
         # Validate against the provider's authoritative base_directory so the

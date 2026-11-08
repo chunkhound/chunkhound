@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,7 +136,7 @@ def stale_wal_db_path(tmp_path):
         """
     )
     result = subprocess.run(
-        ["uv", "run", "python", "-c", script],
+        [sys.executable, "-c", script],
         cwd=str(Path(__file__).resolve().parents[1]),
         env={**os.environ, "UV_NO_SYNC": "1"},
         capture_output=True,
@@ -187,7 +188,7 @@ def test_uninspectable_wal_blocks_recovery_with_preservation_guidance(
         """
     )
     result = subprocess.run(
-        ["uv", "run", "python", "-c", script, str(stale_wal_db_path), str(read_only)],
+        [sys.executable, "-c", script, str(stale_wal_db_path), str(read_only)],
         cwd=Path(__file__).resolve().parents[1],
         env={**os.environ, "UV_NO_SYNC": "1"},
         capture_output=True,

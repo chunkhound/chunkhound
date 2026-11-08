@@ -17,7 +17,7 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
 from chunkhound.api.cli.parsers.common_arguments import add_remote_config_arguments
 from chunkhound.core import analytics as ch_analytics
 
-from .tools import TOOL_REGISTRY, execute_tool
+from .tools import TOOL_REGISTRY, _resolve_commit_range, execute_tool
 
 if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices
@@ -267,11 +267,28 @@ async def handle_tool_call(
         # Parse arguments (handles both string and typed values)
         parsed_args = parse_mcp_arguments(arguments)
 
+        # Diff-only semantic search needs the retained bundle for Git context,
+        # but does not access the DB. Reuse execution's selector validation;
+        # malformed selectors must not qualify as a DB-independent request.
+        diff_only = False
+        if (
+            tool_name == "search"
+            and parsed_args.get("type") == "semantic"
+            and parsed_args.get("vector_source", "diff") == "diff"
+        ):
+            diff_only = _resolve_commit_range(
+                parsed_args.get("commit_range"),
+                parsed_args.get("commit_hash"),
+                parsed_args.get("last_n_commits"),
+            ) is not None
+
         resolved_services = services
         if tool.requires_db:
-            if ensure_services is not None:
+            if ensure_services is not None and (
+                not diff_only or resolved_services is None
+            ):
                 resolved_services = await ensure_services(tool_name)
-            elif resolved_services is None:
+            if resolved_services is None:
                 raise ServiceNotInitializedError(
                     "Services not initialized. Call initialize() first."
                 )
@@ -363,6 +380,8 @@ def parse_mcp_arguments(args: dict[str, Any]) -> dict[str, Any]:
     parsed = args.copy()
 
     # Handle common search parameters
+    if isinstance(parsed.get("last_n_commits"), str):
+        parsed["last_n_commits"] = int(parsed["last_n_commits"])
     if "page_size" in parsed:
         if not isinstance(parsed["page_size"], int):
             parsed["page_size"] = int(parsed["page_size"])

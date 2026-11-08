@@ -319,3 +319,70 @@ async def test_fetch_aborts_on_redirect_loop(
     # 7th hop would be the one that trips the abort. The loop dispatches
     # _MAX_REDIRECTS + 1 = 6 requests in total before raising.
     assert len(seen) == 6
+
+
+@pytest.mark.parametrize("redirect", [False, True])
+@pytest.mark.parametrize("bad_url", [
+    "https://[broken/?secret=url-secret",
+    "https://example.com:bad/config?secret=url-secret",
+    "https://example.com:65536/config?secret=url-secret",
+    "https:///missing-host?secret=url-secret",
+])
+async def test_remote_invalid_destinations_are_soft_and_sanitized(
+    monkeypatch, redirect, bad_url
+):
+    from loguru import logger
+
+    def handler(request):
+        return httpx.Response(302, headers={"Location": bad_url})
+
+    seen = _install_mock_transport(monkeypatch, handler)
+    messages = []
+    sink = logger.add(lambda message: messages.append(str(message)))
+    try:
+        result = await fetch(
+            "https://source.test/start" if redirect else bad_url,
+            auth_header="Bearer header-secret",
+        )
+    finally:
+        logger.remove(sink)
+    assert result is None
+    assert len(seen) <= (1 if redirect else 0)
+    assert "url-secret" not in "\n".join(messages)
+    assert "header-secret" not in "\n".join(messages)
+
+
+async def test_remote_relative_redirect_preserves_same_origin_authorization(
+    monkeypatch,
+):
+    def handler(request):
+        if request.url.path == "/dir/start":
+            return httpx.Response(307, headers={"Location": "../final"})
+        return httpx.Response(200, json={"ok": True})
+
+    seen = _install_mock_transport(monkeypatch, handler)
+    assert await fetch("https://source.test/dir/start", "Bearer token") == {"ok": True}
+    assert [request.url.path for request in seen] == ["/dir/start", "/final"]
+    assert all(request.headers["Authorization"] == "Bearer token" for request in seen)
+
+
+async def test_remote_loopback_redirect_is_allowed_but_drops_cross_origin_auth(
+    monkeypatch,
+):
+    def handler(request):
+        if request.url.host == "source.test":
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1/final"})
+        return httpx.Response(200, json={"ok": True})
+
+    seen = _install_mock_transport(monkeypatch, handler)
+    assert await fetch("https://source.test/start", "Bearer token") == {"ok": True}
+    assert len(seen) == 2
+    assert "Authorization" not in seen[1].headers
+
+
+async def test_remote_missing_location_retains_terminal_response_behavior(monkeypatch):
+    seen = _install_mock_transport(
+        monkeypatch, lambda request: httpx.Response(302, json={"ok": True})
+    )
+    assert await fetch("https://source.test/start", None) == {"ok": True}
+    assert len(seen) == 1

@@ -137,6 +137,21 @@ def _rust_reconnect_scope(executor: object) -> Iterator[None]:
         _rust_reconnect_owner.reset(token)
 
 
+_readiness_executor: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "readiness_executor", default=None
+)
+
+
+@contextmanager
+def _readiness_scope(executor: object) -> Iterator[None]:
+    """Drain readiness operations; only its synchronous caller has a deadline."""
+    token = _readiness_executor.set(executor)
+    try:
+        yield
+    finally:
+        _readiness_executor.reset(token)
+
+
 class SerialDatabaseExecutor:
     """Thread-safe executor for single-threaded database operations.
 
@@ -317,6 +332,7 @@ class SerialDatabaseExecutor:
                 (
                     None
                     if self._is_rust_reconnect_owner()
+                    or _readiness_executor.get() is self
                     else self.resolve_timeout("connect")
                 ),
             )
@@ -377,7 +393,9 @@ class SerialDatabaseExecutor:
                 future,
                 operation_name,
                 None
-                if operation_name == "disconnect" or self._is_rust_reconnect_owner()
+                if operation_name == "disconnect"
+                or self._is_rust_reconnect_owner()
+                or _readiness_executor.get() is self
                 else timeout_s,
             )
         except DatabaseOperationTimeoutError:
@@ -449,6 +467,20 @@ class SerialDatabaseExecutor:
             log_if_not_mcp(
                 "warning", f"Sampled auto-compaction skipped after failure: {error}"
             )
+
+    def rollback_provider(self, provider: Any) -> None:
+        """Drain prior work and close handles without finalizing the executor."""
+        def rollback() -> None:
+            conn = getattr(_executor_local, "connection", None)
+            state = get_thread_local_state()
+            try:
+                provider._executor_disconnect(conn, state, True)
+            finally:
+                conn = None
+                self.handles_closed = not hasattr(_executor_local, "connection")
+                if self.handles_closed:
+                    self.clear_thread_local()
+        self._submit(rollback).result()
 
     def disconnect_provider(self, provider: Any, skip_checkpoint: bool) -> None:
         """Drain queued work and close provider handles before joining the worker."""

@@ -59,6 +59,8 @@ def _analytics_action_fields(command: str, args: argparse.Namespace) -> dict:
 # Required for PyInstaller multiprocessing support
 multiprocessing.freeze_support()
 
+_retired_mp_setting_warned = False
+
 
 def _daemon_startup_breadcrumb(args: argparse.Namespace, message: str) -> None:
     """Emit pre-server daemon startup breadcrumbs to the daemon stderr log."""
@@ -436,6 +438,18 @@ def main() -> None:
             sys.stdout.reconfigure(errors="backslashreplace")
         if hasattr(sys.stderr, "reconfigure"):
             sys.stderr.reconfigure(errors="backslashreplace")
+    global _retired_mp_setting_warned
+    if (
+        "CHUNKHOUND_MP_START_METHOD" in os.environ
+        and not _retired_mp_setting_warned
+    ):
+        _retired_mp_setting_warned = True
+        sys.stderr.write(
+            "Warning: CHUNKHOUND_MP_START_METHOD is no longer supported "
+            "and is ignored; ChunkHound parser workers always use spawn. "
+            "Remove this setting.\n"
+        )
+        sys.stderr.flush()
     try:
         asyncio.run(async_main())
     except KeyboardInterrupt:

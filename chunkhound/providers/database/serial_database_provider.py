@@ -1,8 +1,11 @@
 """Base class for database providers requiring single-threaded execution."""
 
+from __future__ import annotations
+
 import asyncio
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -12,11 +15,20 @@ from chunkhound.core.exceptions import DatabaseError
 from chunkhound.core.models import Chunk, File
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
+from chunkhound.providers.database.lifecycle import (
+    DatabaseRecoveryRequiredError,
+    Failure,
+    LifecycleFailure,
+    Readiness,
+    owns_readiness,
+    readiness_owner,
+)
 from chunkhound.providers.database.ownership import DatabaseOwnership
 from chunkhound.providers.database.serial_executor import (
     DatabaseOperationTimeoutError,
     DatabaseRustPipelineInProgressError,
     SerialDatabaseExecutor,
+    _readiness_scope,
 )
 from chunkhound.utils.async_worker import await_worker_completion
 from chunkhound.utils.logging_guard import log_if_not_mcp
@@ -48,7 +60,7 @@ class SerialDatabaseProvider(ABC):
         db_path: Path | str,
         base_directory: Path,
         embedding_manager: EmbeddingManager | None = None,
-        config: "DatabaseConfig | None" = None,
+        config: DatabaseConfig | None = None,
     ):
         """Initialize serial database provider.
 
@@ -70,6 +82,12 @@ class SerialDatabaseProvider(ABC):
         self._closed = False
         self._closing = False
         self._rust_pipeline_cleanup: object | None = None
+        self._readiness = Readiness()
+        self._backend_connected = False
+        self._completion_pending = False
+        self._open_cleanup_required = False
+        self._open_failure: Failure | None = None
+        self._after_connect: Callable[[], None] | None = None
 
         # Create serial executor for all database operations.
         # Timeout comes from DatabaseConfig (JSON/env/CLI); None keeps the
@@ -147,8 +165,7 @@ class SerialDatabaseProvider(ABC):
     @property
     def is_connected(self) -> bool:
         """Check if database connection is active."""
-        # For serial providers, we consider it connected if executor exists
-        return not self._closed and self._executor is not None
+        return not self._closing and not self._closed and self._backend_connected
 
     @property
     def last_activity_time(self) -> float | None:
@@ -162,28 +179,156 @@ class SerialDatabaseProvider(ABC):
         return None
 
     def connect(self) -> None:
-        """Establish database connection and initialize schema."""
-        try:
-            # Execute connection in DB thread to ensure proper initialization
-            self._execute_in_db_thread_sync("connect")
-
-            # Initialize shared service instances for performance
+        """Establish readiness, or reconnect under the trusted Rust owner."""
+        if self._executor._is_rust_reconnect_owner():
+            self._connect_backend()
+            self._backend_connected = True
+            self._completion_pending = True
             self._initialize_shared_instances()
+            if self._after_connect is not None:
+                self._after_connect()
+                self._completion_pending = False
+            return
+        self._ensure_ready(force=True)
 
-            logger.info(f"{self.__class__.__name__} initialization complete")
-
+    def _connect_backend(self) -> None:
+        try:
+            self._execute_in_db_thread_sync("connect")
         except DatabaseOperationTimeoutError:
-            # The worker is still owned. Only explicit final close may drain it
-            # and release the lease after a caller-side deadline.
+            # The running worker still owns its handles after a caller deadline.
             raise
-        except Exception as e:
-            logger.error(f"{self.__class__.__name__} connection failed: {e}")
-            if self._executor._is_rust_reconnect_owner():
-                # Retain partial handles/lease under unavailable guard;
-                # do not finalize executor.
-                raise
-            self.disconnect(skip_checkpoint=True)
+        except Exception as error:
+            if not self._executor._is_rust_reconnect_owner():
+                self._rollback_failed_open(error)
             raise
+
+    def _check_readiness_admission(self) -> None:
+        if self._closing or self._closed:
+            raise RuntimeError("Database provider is closing or closed")
+        self._executor._raise_if_db_unavailable_before_submit(
+            "readiness",
+            _bypass_rust_pipeline_guard=(
+                self._rust_pipeline_cleanup is not None
+                and getattr(self._rust_pipeline_cleanup, "recovery_required", False)
+            ),
+        )
+
+    def ensure_ready(self) -> None:
+        self._ensure_ready(force=False)
+
+    def _ensure_ready(self, *, force: bool) -> None:
+        if owns_readiness(self) or self._executor._is_rust_reconnect_owner():
+            return
+        self._check_readiness_admission()
+        claim = self._readiness.claim(
+            force
+            or self._rust_pipeline_cleanup is not None
+            or self._open_cleanup_required
+        )
+        if claim is not None:
+            self._readiness.wait(
+                claim, lambda: self._readiness_transition(force),
+                timeout=self._executor.resolve_timeout("connect"),
+            )
+
+    async def ensure_ready_async(self) -> None:
+        if owns_readiness(self) or self._executor._is_rust_reconnect_owner():
+            return
+        self._check_readiness_admission()
+        # Claim BEFORE dispatching a worker so concurrent callers join one attempt.
+        claim = self._readiness.claim(
+            self._rust_pipeline_cleanup is not None or self._open_cleanup_required
+        )
+        if claim is not None:
+            await self._readiness.wait_async(
+                claim, lambda: self._readiness_transition(False)
+            )
+
+    def _readiness_transition(self, force: bool) -> None:
+        with self._close_lock, readiness_owner(self), _readiness_scope(self._executor):
+            if self._closing or self._closed:
+                raise RuntimeError("Database provider is closing or closed")
+            resources = self._rust_pipeline_cleanup
+            if resources is not None:
+                from chunkhound.pipeline_bridge import RustRunResources
+                from chunkhound.services.rust_pipeline_runner import (
+                    recover_rust_resources,
+                )
+
+                if not isinstance(resources, RustRunResources):
+                    raise RuntimeError(
+                        "Unrecognized retained Rust resources; restart required"
+                    )
+                recover_rust_resources(self, resources)
+                return
+            if self._open_cleanup_required:
+                try:
+                    self._rollback_open_handles()
+                except BaseException as error:
+                    raise DatabaseRecoveryRequiredError(
+                        LifecycleFailure(
+                            "failed-open cleanup",
+                            self._open_failure,
+                            Failure.capture(error),
+                        )
+                    ) from None
+            if force or not self._backend_connected:
+                self._connect_backend()
+                self._backend_connected = True
+                # A refused reconnect may retain an already-completed session.
+                # Only successful backend establishment creates completion work.
+                self._completion_pending = True
+            self._initialize_shared_instances()
+            if self._completion_pending and self._after_connect is not None:
+                try:
+                    self._after_connect()
+                except Exception as error:
+                    raise DatabaseRecoveryRequiredError(
+                        LifecycleFailure(
+                            "post-connect configuration/model resolution",
+                            self._open_failure,
+                            Failure.capture(error),
+                        )
+                    ) from None
+                self._completion_pending = False
+            self._open_failure = None
+
+    def _rollback_open_handles(self) -> None:
+        self._backend_connected = False
+        self._executor.rollback_provider(self)
+        self._close_additional_connections()
+        if (
+            not self._executor.handles_closed
+            or not self._additional_connections_closed()
+        ):
+            raise RuntimeError("Failed-open backend handles remain open")
+        with self._ownership_lock:
+            if self._database_ownership is not None:
+                self._database_ownership.close()
+                self._database_ownership = None
+        self._open_cleanup_required = False
+
+    def _rollback_failed_open(self, original: BaseException) -> None:
+        self._open_failure = (
+            original.failure.original or original.failure.cleanup
+            if isinstance(original, DatabaseRecoveryRequiredError)
+            else Failure.capture(original)
+        )
+        self._open_cleanup_required = True
+        try:
+            self._rollback_open_handles()
+        except BaseException as error:
+            cleanup = Failure.capture(error)
+            if isinstance(original, DatabaseRecoveryRequiredError):
+                # Retain earlier cursor/manager cleanup branches as well as this
+                # rollback failure; the setup role was captured at its boundary.
+                cleanup = Failure(
+                    cleanup.kind, cleanup.message,
+                    cleanup.cause + (original.failure.cleanup,),
+                )
+            raise DatabaseRecoveryRequiredError(
+                LifecycleFailure("failed-open cleanup", self._open_failure, cleanup)
+            ) from None
 
     def close(self) -> None:
         """Close database connection and cleanup resources.
@@ -201,11 +346,32 @@ class SerialDatabaseProvider(ABC):
             with self._ownership_lock:
                 if self._closed:
                     return
-                if self.is_rust_pipeline_in_progress():
+                resources = self._rust_pipeline_cleanup
+                recovery_required = resources is not None and getattr(
+                    resources, "recovery_required", False
+                )
+                if self.is_rust_pipeline_in_progress() and not recovery_required:
                     raise DatabaseRustPipelineInProgressError(
                         "Wait for the Rust indexing operation to finish before closing"
                     )
                 self._closing = True
+            if recovery_required:
+                from chunkhound.pipeline_bridge import (
+                    RustRunResources,
+                    _shutdown_embed_thread_resources,
+                )
+
+                if not isinstance(resources, RustRunResources):
+                    raise RuntimeError(
+                        "Unrecognized retained Rust resources; restart required"
+                    )
+                resources.assert_native_drained()
+                if not resources.cache_closed:
+                    _shutdown_embed_thread_resources(resources.cache)
+                    resources.cache_closed = True
+                resources.forget_completed_futures()
+                self._rust_pipeline_cleanup = None
+                self._executor.set_rust_pipeline_in_progress(False)
             try:
                 self._executor.disconnect_provider(self, skip_checkpoint)
             finally:
@@ -267,6 +433,10 @@ class SerialDatabaseProvider(ABC):
                 raise DatabaseRustPipelineInProgressError(
                     "Rust indexing operation already owns this provider"
                 )
+            if active:
+                self._backend_connected = False
+                with self._readiness.lock:
+                    self._readiness.ready = False
             self._executor.set_rust_pipeline_in_progress(active)
 
     def is_rust_pipeline_in_progress(self) -> bool:
@@ -275,61 +445,67 @@ class SerialDatabaseProvider(ABC):
 
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
+        if operation_name not in {"connect", "disconnect"}:
+            self.ensure_ready()
         return self._executor.execute_sync(self, operation_name, *args, **kwargs)
 
     async def _execute_in_db_thread(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation asynchronously in DB thread."""
+        if operation_name not in {"connect", "disconnect"}:
+            await self.ensure_ready_async()
         return await self._executor.execute_async(self, operation_name, *args, **kwargs)
 
     def get_base_directory(self) -> Path:
         """Get the current base directory for path normalization."""
         return self._base_directory
 
-    def _initialize_shared_instances(self):
-        """Initialize service layer components and legacy compatibility objects."""
-        logger.debug("Initializing service layer components")
-
-        try:
-            # Lazy import from registry to avoid circular dependency
-            import importlib
-
-            registry_module = importlib.import_module("chunkhound.registry")
-            get_registry = getattr(registry_module, "get_registry")
-            create_indexing_coordinator = getattr(
-                registry_module, "create_indexing_coordinator"
-            )
-            create_search_service = getattr(registry_module, "create_search_service")
-            create_embedding_service = getattr(
-                registry_module, "create_embedding_service"
-            )
-
-            # Get registry and register self as database provider
-            # NOTE: ProviderRegistry.register_provider expects an instance, not a factory.
-            # Using a lambda here caused the registry to hold a function object, leading
-            # to AttributeError when services attempted to call provider.connect().
-            # Register the instance directly to maintain correct type semantics.
-            registry = get_registry()
-            registry.register_provider("database", self, singleton=True)
-
-            # Initialize service layer components from registry
+    def bind_services(
+        self,
+        indexing_coordinator: IndexingCoordinator,
+        search_service: SearchService,
+        embedding_service: EmbeddingService,
+        after_connect: Callable[[], None],
+    ) -> None:
+        """Bind this provider to exactly one owner-retained service graph."""
+        if self._services_initialized:
             if (
-                not hasattr(self, "_indexing_coordinator")
-                or self._indexing_coordinator is None
+                self._indexing_coordinator is not indexing_coordinator
+                or self._search_service is not search_service
+                or self._embedding_service is not embedding_service
             ):
-                self._indexing_coordinator = create_indexing_coordinator()
-            if not hasattr(self, "_search_service") or self._search_service is None:
-                self._search_service = create_search_service()
-            if (
-                not hasattr(self, "_embedding_service")
-                or self._embedding_service is None
-            ):
-                self._embedding_service = create_embedding_service()
+                raise RuntimeError("Provider already belongs to a service graph")
+            return
+        self._indexing_coordinator = indexing_coordinator
+        self._search_service = search_service
+        self._embedding_service = embedding_service
+        self._after_connect = after_connect
+        self._services_initialized = True
 
-            logger.debug("Service layer components initialized successfully")
+    def _initialize_shared_instances(self) -> None:
+        """Compose directly constructed providers locally, without reopening them."""
+        if self._services_initialized:
+            return
+        from chunkhound.core.config.config import Config
+        from chunkhound.core.config.database_config import DatabaseConfig
+        from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+        from chunkhound.registry import ProviderRegistry
 
-        except Exception as e:
-            logger.error(f"Failed to initialize service layer components: {e}")
-            # Don't raise the exception, just log it - allows test initialization to continue
+        registry = ProviderRegistry()
+        config = Config(
+            target_dir=self._base_directory,
+            database=self.config or DatabaseConfig(
+                path=(
+                    Path(self._db_path).parent
+                    if isinstance(self, LanceDBProvider)
+                    else Path(self._db_path)
+                ),
+                provider="lancedb" if isinstance(self, LanceDBProvider) else "duckdb",
+            ),
+            embeddings_disabled=self.embedding_manager is None,
+            analytics={"enabled": False},
+            skip_layers={"env", "global", "local_config", "config_file", "cli"},
+        )
+        registry.configure_existing(self, config, self.embedding_manager)
 
     # Default _executor_* methods that subclasses can override
 
@@ -641,6 +817,7 @@ class SerialDatabaseProvider(ABC):
 
         Delegates to IndexingCoordinator for actual processing.
         """
+        await self.ensure_ready_async()
         try:
             logger.info(f"Processing file: {file_path}")
 
@@ -667,6 +844,7 @@ class SerialDatabaseProvider(ABC):
         exclude_patterns: list[str] | None = None,
     ) -> dict[str, Any]:
         """Process all supported files in a directory."""
+        await self.ensure_ready_async()
         try:
             if patterns is None:
                 patterns = [

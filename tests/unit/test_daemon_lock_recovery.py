@@ -121,7 +121,7 @@ async def test_index_command_recognizes_real_preflight_lock_and_checks_daemon(
     # A real external writer holds the lock; stdin gives deterministic release.
     proc = subprocess.Popen(
         [
-            "uv", "run", "python", "-u", "-c",
+            sys.executable, "-u", "-c",
             "import duckdb, sys; c=duckdb.connect(sys.argv[1]); "
             "print('ready', flush=True); sys.stdin.readline(); c.close()", str(path),
         ],

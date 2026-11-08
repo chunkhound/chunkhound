@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -392,7 +393,7 @@ def test_case_variant_supported_metadata_is_read_not_restamped(tmp_path):
 def run_python(script: str, *args: object) -> None:
     """Contain native WAL replay in a process, without installing dependencies."""
     result = subprocess.run(
-        ["uv", "run", "python", "-c", textwrap.dedent(script), *map(str, args)],
+        [sys.executable, "-c", textwrap.dedent(script), *map(str, args)],
         cwd=Path(__file__).resolve().parents[2],
         env={**os.environ, "UV_NO_SYNC": "1"},
         capture_output=True,

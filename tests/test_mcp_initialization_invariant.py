@@ -627,6 +627,7 @@ def test_real_factory_defers_database_ownership_only_when_requested(
         target,
         config if config_shape == "object" else {
             **config.model_dump(),
+            "target_dir": config.target_dir,
             "skip_layers": {"global", "env", "local_config", "config_file", "cli"},
         },
         connect_database=False,
@@ -634,6 +635,8 @@ def test_real_factory_defers_database_ownership_only_when_requested(
     )
     provider = services.provider
     try:
+        assert provider.get_base_directory() == config.target_dir
+        assert services.indexing_coordinator.config.target_dir == config.target_dir
         assert not provider.is_connected
         assert not target.exists()
         # A real exclusive lease proves construction acquired no hidden DB owner.
@@ -741,3 +744,262 @@ async def test_lancedb_mcp_search_reads_seeded_index_and_pins_before_indexing(
         assert database_provider._executor is executor
     finally:
         await server.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_mcp_and_regex_services_support_provider_without_readiness(tmp_path):
+    from chunkhound.services.search_service import SearchService
+
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": tmp_path / "database"},
+        embeddings_disabled=True,
+        analytics={"enabled": False},
+        skip_layers={"env", "global", "local_config", "config_file", "cli"},
+    )
+    registry = ProviderRegistry()
+    services = create_services(
+        config.database.get_db_path(), config,
+        connect_database=False, registry=registry,
+    )
+
+    class LegacyProvider:
+        # Emulate the optional third-party interface, retaining real DB behavior.
+        def __getattr__(self, name):
+            if name in {"ensure_ready", "ensure_ready_async"}:
+                raise AttributeError(name)
+            return getattr(services.provider, name)
+
+    legacy = LegacyProvider()
+    server = ConcreteMCPServer(config)
+    server.services = services._replace(provider=legacy)
+    server._service_registry = registry
+    try:
+        for name in ("daemon_status", "websearch"):
+            assert await server.ensure_tool_services(name) is server.services
+        assert not services.provider.is_connected
+        native.acquire_install_lease(str(services.provider.db_path), "duckdb").close()
+        await server.ensure_tool_services("search")
+        assert services.provider.is_connected
+        search = SearchService(legacy)
+        assert search.search_regex("never_matches")[0] == []
+        assert (await search.search_regex_async("never_matches"))[0] == []
+    finally:
+        await server.cleanup()
+    native.acquire_install_lease(str(services.provider.db_path), "duckdb").close()
+
+
+@pytest.mark.asyncio
+async def test_next_mcp_search_recovers_same_provider_after_backend_open_error(
+    tmp_path, monkeypatch
+):
+    directory = tmp_path / "database"
+    directory.mkdir()
+    target = directory / "chunks.db"
+    seed = DuckDBProvider(target, base_directory=tmp_path)
+    seed.connect()
+    seed.close()
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": directory, "read_only": True},
+        analytics={"enabled": False},
+        skip_layers={"env", "global", "local_config", "config_file", "cli"},
+    )
+    real_connect = duckdb.connect
+    fail = True
+
+    def connect(database, *args, **kwargs):
+        if fail and str(database) == str(target):
+            raise OSError("temporary MCP database open failure")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(duckdb, "connect", connect)
+    server = ConcreteMCPServer(config)
+    try:
+        await server.initialize()
+        server._initialization_complete.set()
+        assert server.services is not None
+        provider = server.services.provider
+        assert server._deferred_start_task is not None
+        await server._deferred_start_task
+        assert not provider.is_connected
+        fail = False
+        contents = await handle_tool_call(
+            tool_name="search", arguments={"type": "regex", "query": "never_matches"},
+            services=server.services, embedding_manager=server.embedding_manager,
+            initialization_complete=server._initialization_complete,
+            config=config, ensure_services=server.ensure_tool_services,
+        )
+        assert contents[0].text == "No results found."
+        assert server.services.provider is provider
+        assert provider.is_connected
+    finally:
+        fail = False
+        await server.cleanup()
+    native.acquire_install_lease(str(target), "duckdb").close()
+
+
+@pytest.fixture
+async def refused_diff_mcp(tmp_path, monkeypatch, embedding_http):
+    """Real retained MCP graph with local Git/HTTP and a refused DuckDB open."""
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    git("init")
+    git("config", "user.name", "MCP Contract")
+    git("config", "user.email", "mcp@example.invalid")
+    source = tmp_path / "changed.py"
+    source.write_text("def original(): return 0\n", encoding="utf-8")
+    git("add", "changed.py")
+    git("commit", "-m", "base")
+    source.write_text(
+        "def original(): return 0\n\ndef changed_code_marker(): return 42\n",
+        encoding="utf-8",
+    )
+    git("add", "changed.py")
+    git("commit", "-m", "changed code")
+    commit = git("rev-parse", "HEAD")
+    directory = tmp_path / "database"
+    directory.mkdir()
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": directory},
+        embedding={
+            "provider": "openai", "model": "hub-test", "output_dims": 8,
+            "api_key": "local-test-key", "base_url": embedding_http.url,
+        },
+        analytics={"enabled": False},
+        skip_layers={"env", "global", "local_config", "config_file", "cli"},
+    )
+    target = config.database.get_db_path()
+    real_connect = duckdb.connect
+    open_attempts = []
+
+    def refuse_open(database, *args, **kwargs):
+        if str(database) == str(target):
+            open_attempts.append(str(database))
+            raise OSError("diff contract database open refused")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(duckdb, "connect", refuse_open)
+    server = ConcreteMCPServer(config)
+    try:
+        await server.initialize()
+        task = server._deferred_start_task
+        assert task is not None
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        server._initialization_complete.set()
+        services = server.services
+        assert services is not None
+        provider = services.provider
+
+        async def search(arguments, *, missing_services=False, resolve_services=True):
+            contents = await handle_tool_call(
+                tool_name="search",
+                arguments={
+                    "type": "semantic", "query": "changed_code_marker", **arguments,
+                },
+                services=None if missing_services else services,
+                embedding_manager=server.embedding_manager,
+                initialization_complete=server._initialization_complete,
+                config=config,
+                ensure_services=(
+                    server.ensure_tool_services if resolve_services else None
+                ),
+            )
+            return contents[0].text
+
+        # Establish real DB refusal before testing the retained failed graph.
+        refused = json.loads(await search({"type": "regex"}))
+        assert "diff contract database open refused" in refused["error"]["message"]
+        assert open_attempts
+        open_attempts.clear()
+        assert not provider.is_connected
+        yield SimpleNamespace(
+            search=search, commit=commit, open_attempts=open_attempts,
+            embeddings=embedding_http,
+        )
+        assert server.services is services
+        assert server.services.provider is provider
+        assert not provider.is_connected
+    finally:
+        await server.cleanup()
+
+
+@pytest.mark.parametrize("selector", ["range", "hash", "last-n", "string-last-n"])
+async def test_mcp_diff_only_search_returns_changed_code_without_database_recovery(
+    refused_diff_mcp, selector
+):
+    case = refused_diff_mcp
+    arguments = {
+        "range": {"commit_range": "HEAD~1..HEAD"},
+        "hash": {"commit_hash": case.commit, "vector_source": "diff"},
+        "last-n": {"last_n_commits": 1},
+        "string-last-n": {"last_n_commits": "1", "vector_source": "diff"},
+    }[selector]
+    result = await case.search(arguments)
+    assert "def changed_code_marker(): return 42" in result, result
+    assert "changed.py" in result
+    assert not case.open_attempts
+    assert case.embeddings.requests
+    assert all(r["model"] == "hub-test" for r in case.embeddings.requests)
+
+
+@pytest.mark.parametrize("arguments", [
+    {},
+    {"vector_source": "diff"},
+    {"type": "regex", "commit_range": "HEAD~1..HEAD"},
+    {"commit_range": "HEAD~1..HEAD", "vector_source": "db"},
+    {"commit_range": "HEAD~1..HEAD", "vector_source": "both"},
+])
+async def test_mcp_db_backed_search_retains_database_refusal(
+    refused_diff_mcp, arguments
+):
+    case = refused_diff_mcp
+    result = json.loads(await case.search(arguments))
+    assert "diff contract database open refused" in result["error"]["message"]
+    assert case.open_attempts
+    assert not case.embeddings.requests
+
+
+@pytest.mark.parametrize(("arguments", "message"), [
+    ({"commit_hash": ""}, "commit_hash must not be empty"),
+    ({"commit_hash": "   "}, "commit_hash must not be empty"),
+    ({"last_n_commits": 0}, "last_n_commits must be a positive integer"),
+    ({"last_n_commits": "-1"}, "last_n_commits must be a positive integer"),
+    ({"commit_range": "HEAD~1..HEAD", "commit_hash": "HEAD"}, "at most one"),
+    ({"commit_range": "HEAD~1..HEAD", "last_n_commits": 1}, "at most one"),
+    ({"commit_hash": "HEAD", "last_n_commits": 1}, "at most one"),
+])
+async def test_mcp_diff_only_search_rejects_invalid_selectors(
+    refused_diff_mcp, arguments, message
+):
+    case = refused_diff_mcp
+    result = json.loads(await case.search(arguments))
+    assert result["error"]["type"] == "ValueError", result
+    assert message in result["error"]["message"]
+    assert not case.open_attempts
+    assert not case.embeddings.requests
+
+
+@pytest.mark.parametrize("resolve_services", [False, True])
+async def test_mcp_diff_only_search_requires_services_bundle(
+    refused_diff_mcp, resolve_services
+):
+    case = refused_diff_mcp
+    result = json.loads(await case.search(
+        {"commit_hash": case.commit}, missing_services=True,
+        resolve_services=resolve_services,
+    ))
+    if resolve_services:
+        assert "diff contract database open refused" in result["error"]["message"]
+        assert case.open_attempts
+    else:
+        assert result["error"]["type"] == "ServiceNotInitializedError"
+        assert not case.open_attempts
+    assert not case.embeddings.requests

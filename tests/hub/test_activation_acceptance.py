@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shutil
+import sys
 
 import pytest
 
@@ -46,7 +47,9 @@ def test_moved_checkout_overlays_unchanged_new_changed_and_deleted_files(
     assert pulled.returncode == 0, pulled.stdout + pulled.stderr
     before = cli(checkout, "search", "UNCHANGED_BASE", checkout, "--regex", rust=rust)
     assert before.returncode == 0 and "unchanged.py" in before.stdout + before.stderr
-    (checkout / "changed.py").write_text(source_text("NEW_CHANGED_LOCAL"), encoding="utf-8")
+    (checkout / "changed.py").write_text(
+        source_text("NEW_CHANGED_LOCAL"), encoding="utf-8"
+    )
     (checkout / "new.py").write_text(source_text("NEW_LOCAL_FILE"), encoding="utf-8")
     (checkout / "deleted.py").unlink()
     embedding_http.requests.clear()
@@ -100,7 +103,8 @@ async def test_mcp_and_search_do_not_pull_even_when_configured_model_differs(
     assert searched.returncode == 0, searched.stdout + searched.stderr
     assert hub_http.requests == []
     process = await asyncio.create_subprocess_exec(
-        "uv", "run", "chunkhound", "mcp", str(project), "--no-daemon",
+        sys.executable, "-m", "chunkhound.api.cli.main",
+        "mcp", str(project), "--no-daemon",
         cwd=project, env=cli_env(project), stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from chunkhound.core.config.config import Config
@@ -72,7 +73,7 @@ def cli_env(project, rust="0"):
 
 def cli(project, *args, rust="0"):
     return subprocess.run(
-        ["uv", "run", "chunkhound", *map(str, args)],
+        [sys.executable, "-m", "chunkhound.api.cli.main", *map(str, args)],
         cwd=project,
         env=cli_env(project, rust),
         text=True,

@@ -1,5 +1,6 @@
-"""Opaque manifest URL and configurable client-side archive resource limits."""
+"""Opaque manifest URL and configurable client-side transfer/archive limits."""
 
+import json
 import os
 from typing import Any
 
@@ -22,6 +23,9 @@ class ArchiveLimits(BaseModel):
 class HubConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
     url: str | None = Field(default=None, repr=False)
+    download_timeout_seconds: float = Field(
+        default=3600.0, strict=True, gt=0, allow_inf_nan=False
+    )
     archive_limits: ArchiveLimits = Field(default_factory=ArchiveLimits)
 
     @field_validator("url", mode="before")
@@ -34,6 +38,14 @@ class HubConfig(BaseModel):
         result: dict[str, Any] = {}
         if "CHUNKHOUND_HUB__URL" in os.environ:
             result["url"] = os.environ["CHUNKHOUND_HUB__URL"] or None
+        timeout_key = "CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS"
+        if timeout_key in os.environ:
+            raw_timeout = os.environ[timeout_key]
+            try:
+                result["download_timeout_seconds"] = json.loads(raw_timeout)
+            except ValueError:
+                # Preserve invalid text until the normal layered validation.
+                result["download_timeout_seconds"] = raw_timeout
         limits: dict[str, int | str] = {}
         for name in ArchiveLimits.model_fields:
             key = f"CHUNKHOUND_HUB__ARCHIVE_LIMITS__{name.upper()}"

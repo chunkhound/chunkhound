@@ -367,6 +367,7 @@ async def prepare(
     *,
     state: PreparationState | None = None,
     limits: ArchiveLimits | None = None,
+    download_timeout_seconds: float = 3600.0,
 ) -> AsyncIterator[Path]:
     """Yield a verified candidate; defer cleanup if its reader cannot close.
 
@@ -384,7 +385,9 @@ async def prepare(
         try:
             directory = Path(workspace.name)
             archive = await download(
-                selected.version.artifact, directory / "artifact.part"
+                selected.version.artifact,
+                directory / "artifact.part",
+                timeout_seconds=download_timeout_seconds,
             )
             stage = directory / "stage"
             stage.mkdir()

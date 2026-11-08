@@ -48,6 +48,13 @@ class HubReaderCloseError(RuntimeError):
             self._cleanup()
 
 
+FATAL_HUB_ERRORS: tuple[type[Exception], ...] = (
+    HubDatabaseMismatch,
+    HubInstallationInterrupted,
+    HubReaderCloseError,
+)
+
+
 def safe_label(value: object) -> str:
     text = json.dumps(value, ensure_ascii=True, default=str)
     return (

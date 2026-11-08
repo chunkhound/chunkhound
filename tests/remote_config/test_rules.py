@@ -14,6 +14,7 @@ contracts the pipeline (and reviewers) depend on directly are locked here.
 from __future__ import annotations
 
 import typing
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -70,20 +71,22 @@ class TestParsePath:
 
 
 class TestPredicateMatches:
-    def test_none_predicates_match(self) -> None:
-        assert _predicate_matches(None, Config()) == (True, None)
+    def test_none_predicates_match(self, tmp_path: Path) -> None:
+        assert _predicate_matches(None, Config(target_dir=tmp_path)) == (True, None)
 
-    def test_unknown_key_returns_schema_error(self) -> None:
+    def test_unknown_key_returns_schema_error(self, tmp_path: Path) -> None:
         # Typo like "wehn" or "existng" must produce an operator-visible
         # signal, not a silent skip — see module docstring rationale.
-        matches, err = _predicate_matches({"wehn": "linux"}, Config())
+        matches, err = _predicate_matches(
+            {"wehn": "linux"}, Config(target_dir=tmp_path)
+        )
         assert matches is False
         assert err is not None
         assert "wehn" in err
 
-    def test_os_mismatch_is_silent_miss(self) -> None:
+    def test_os_mismatch_is_silent_miss(self, tmp_path: Path) -> None:
         matches, err = _predicate_matches(
-            {"os": "definitely-not-a-real-platform"}, Config()
+            {"os": "definitely-not-a-real-platform"}, Config(target_dir=tmp_path)
         )
         assert (matches, err) == (False, None)
 

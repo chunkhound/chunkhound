@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +102,12 @@ class DuckDBConnectionManager:
         """Include failed-close temporary cursors before releasing ownership."""
         return self.connection is None and not self._retained_connections
 
-    def connect(self, *, ownership: DatabaseOwnership | None = None) -> None:
+    def connect(
+        self,
+        *,
+        ownership: DatabaseOwnership | None = None,
+        on_open_failure: Callable[[BaseException], None] | None = None,
+    ) -> None:
         """Preflight under ownership before opening or recovering the database."""
         if self.connection is not None:
             if ownership is not None:
@@ -125,24 +131,31 @@ class DuckDBConnectionManager:
                 read_only=self._read_only,
                 retained_connections=self._retained_connections,
             ) as live:
-                preflight_duckdb(
-                    self.db_path, live_connection=live, ownership=self._ownership
-                )
-                self.joined_live_database = live is not None
-                if live is None and not self._read_only:
-                    self._recover_interrupted_compaction()
-                    self._preemptive_wal_cleanup()
-                if live is None:
-                    self._connect_with_wal_validation()
-                else:
-                    # Pin the same-mode live instance; never recover another user's DB.
-                    self.connection = duckdb.connect(
-                        str(self.db_path), read_only=self._read_only
+                try:
+                    preflight_duckdb(
+                        self.db_path, live_connection=live, ownership=self._ownership
                     )
-                register_duckdb_connection(
-                    self.db_path, self._read_only, self.connection
-                )
-                self._load_extensions()
+                    self.joined_live_database = live is not None
+                    if live is None and not self._read_only:
+                        self._recover_interrupted_compaction()
+                        self._preemptive_wal_cleanup()
+                    if live is None:
+                        self._connect_with_wal_validation()
+                    else:
+                        # Pin the same-mode live instance; never recover
+                        # another user's DB.
+                        self.connection = duckdb.connect(
+                            str(self.db_path), read_only=self._read_only
+                        )
+                    register_duckdb_connection(
+                        self.db_path, self._read_only, self.connection
+                    )
+                    self._load_extensions()
+                except BaseException as error:
+                    # Observe setup before cursor/disconnect cleanup can replace it.
+                    if on_open_failure is not None:
+                        on_open_failure(error)
+                    raise
         except BaseException:
             self.disconnect(skip_checkpoint=True)
             raise
@@ -306,6 +319,13 @@ class DuckDBConnectionManager:
                 pass  # If VSS unavailable, ATTACH may still work for non-HNSW DBs
             escaped = str(self.db_path).replace("'", "''")
             test_conn.execute(f"ATTACH '{escaped}' AS validation_db")
+            # ATTACH just replayed the WAL. Checkpoint explicitly, now: on
+            # DuckDB 1.4-1.5 the implicit checkpoint DETACH would run instead
+            # persists secondary ART indexes WITHOUT the replayed rows, and a
+            # later delete of those rows fails "Failed to delete all rows from
+            # index" (duckdb/duckdb#26106). An explicit CHECKPOINT straight
+            # after replay persists them correctly.
+            test_conn.execute("CHECKPOINT validation_db")
             test_conn.execute("SELECT 1").fetchone()
             test_conn.execute("DETACH validation_db")
             logger.debug("WAL file validation passed")
@@ -405,7 +425,8 @@ class DuckDBConnectionManager:
                         )
                     else:
                         log_if_not_mcp(
-                            "debug", "Skipping checkpoint before disconnect (already done)"
+                            "debug",
+                            "Skipping checkpoint before disconnect (already done)"
                         )
                 except Exception as e:
                     log_if_not_mcp("error", f"Checkpoint failed during disconnect: {e}")

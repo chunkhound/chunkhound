@@ -8,12 +8,13 @@ import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 
 from chunkhound.hub.errors import HubUnavailable
 from chunkhound.hub.manifest import Artifact
+from chunkhound.utils.http_redirects import RedirectChain, RedirectError
 
 MANIFEST_LIMIT = 4 * 1024 * 1024
 CHUNK = 1024 * 1024
@@ -26,8 +27,11 @@ for name in ("httpx", "httpcore"):
 
 
 def url_scheme_ok(url: str) -> bool:
-    parts = urlsplit(url)
-    return parts.scheme in {"http", "https"} and parts.hostname is not None
+    try:
+        parts = urlsplit(url)
+        return parts.scheme in {"http", "https"} and parts.hostname is not None
+    except ValueError:
+        return False
 
 
 def require_space(directory: Path, needed: int) -> None:
@@ -35,38 +39,43 @@ def require_space(directory: Path, needed: int) -> None:
         raise HubUnavailable("Insufficient disk space for hub candidate")
 
 
+def _validate_hub_destination(url: str, previous: str | None) -> None:
+    try:
+        parts = urlsplit(url)
+        valid = (
+            parts.scheme in {"http", "https"}
+            and bool(parts.hostname)
+            and parts.username is None
+        )
+        _ = parts.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RedirectError("Hub URL must use HTTP or HTTPS without userinfo")
+    if previous is not None:
+        if urlsplit(previous).scheme == "https" and parts.scheme == "http":
+            raise RedirectError("Hub redirect cannot downgrade HTTPS to HTTP")
+
+
 @asynccontextmanager
 async def response(
     client: httpx.AsyncClient, url: str, headers: dict[str, str]
 ) -> AsyncIterator[httpx.Response]:
-    current = url
-    for hop in range(6):
-        try:
-            parts = urlsplit(current)
-            valid = (
-                bool(parts.hostname)
-                and url_scheme_ok(current)
-                and parts.username is None
-            )
-            # Accessing port also rejects malformed or out-of-range ports.
-            _ = parts.port
-        except ValueError:
-            valid = False
-        if not valid:
-            raise HubUnavailable("Hub URL must use HTTP or HTTPS without userinfo")
-        async with client.stream("GET", current, headers=headers) as result:
-            if result.status_code not in {301, 302, 303, 307, 308}:
-                yield result
-                return
-            location = result.headers.get("location")
-            if hop == 5 or not location:
-                raise HubUnavailable("Hub redirect chain is invalid")
-            # Only HTTP redirects resolve relative references, never artifact URLs.
-            target = urljoin(current, location)
-            if parts.scheme == "https" and urlsplit(target).scheme == "http":
-                raise HubUnavailable("Hub redirect cannot downgrade HTTPS to HTTP")
-            current = target
-    raise HubUnavailable("Hub redirect limit exceeded")
+    try:
+        chain = RedirectChain(
+            url, headers, validate=_validate_hub_destination, max_redirects=5
+        )
+        while True:
+            async with client.stream(
+                "GET", chain.current_url, headers=chain.headers
+            ) as result:
+                if not chain.advance(
+                    result.status_code, result.headers.get("location")
+                ):
+                    yield result
+                    return
+    except RedirectError as exc:
+        raise HubUnavailable(str(exc)) from None
 
 
 async def fetch_manifest(url: str) -> bytes:
@@ -102,11 +111,16 @@ async def fetch_manifest(url: str) -> bytes:
         raise HubUnavailable("Hub manifest request failed") from None
 
 
-async def download(artifact: Artifact, part: Path) -> Path:
+async def download(
+    artifact: Artifact, part: Path, *, timeout_seconds: float = 3600.0
+) -> Path:
     """Verify a caller-owned part, retaining contiguous bytes across three attempts.
 
     The caller owns the temporary workspace and its cleanup. Resuming between
     process invocations is not promised; every returned file is size/hash checked.
+    One cooperative total budget covers all attempts and verification. Network
+    inactivity limits are independent; synchronous disk work cannot be forcibly
+    interrupted by this budget.
     """
 
     async def transfer() -> Path:
@@ -183,14 +197,14 @@ async def download(artifact: Artifact, part: Path) -> Path:
             return part
 
     try:
-        return await asyncio.wait_for(transfer(), timeout=3600)
+        return await asyncio.wait_for(transfer(), timeout=timeout_seconds)
     except HubUnavailable:
         raise
-    except (
-        httpx.HTTPError,
-        httpx.InvalidURL,
-        OSError,
-        ValueError,
-        asyncio.TimeoutError,
-    ):
+    except asyncio.TimeoutError:
+        raise HubUnavailable(
+            f"Hub artifact download exceeded {timeout_seconds:g} seconds; increase "
+            "hub.download_timeout_seconds or "
+            "CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS"
+        ) from None
+    except (httpx.HTTPError, httpx.InvalidURL, OSError, ValueError):
         raise HubUnavailable("Hub artifact download failed") from None

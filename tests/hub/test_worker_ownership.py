@@ -19,6 +19,7 @@ import pytest
 
 import chunkhound_native as native
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.providers.database.lifecycle import DatabaseRecoveryRequiredError
 from chunkhound.providers.database.serial_executor import (
     DatabaseRustPipelineInProgressError,
     SerialDatabaseExecutor,
@@ -39,30 +40,50 @@ def test_admitted_connect_cannot_reopen_python_handles_during_native_handoff(tmp
         if "future = self._submit" in line
     )
 
+    previous_trace = threading.gettrace()
+
     def pause_after_admission(frame, event, arg):
-        # Schedule a real public connect at the caller's admission/submission
-        # boundary, without replacing any executor or backend operation.
+        # The public connect's readiness worker owns this admission/submission
+        # boundary. Stop tracing it before pausing the real backend operation.
         if (
             event == "line"
             and frame.f_code is prepare.__code__
             and frame.f_lineno == submit_line
         ):
+            sys.settrace(previous_trace)
             admitted.set()
             assert resume.wait(20)
         return pause_after_admission
 
+    def trace_new_thread(frame, event, arg):
+        # Never pause another provider or trace unrelated frames locally. An
+        # unrelated thread that inherited this hook sheds it after restoration.
+        if threading.gettrace() is not trace_new_thread:
+            sys.settrace(previous_trace)
+        elif (
+            frame.f_code is prepare.__code__
+            and frame.f_locals.get("self") is provider._executor
+        ):
+            return pause_after_admission
+        if previous_trace is not None:
+            return previous_trace(frame, event, arg)
+        return None
+
     def connect():
-        sys.settrace(pause_after_admission)
+        # Install only after this caller thread exists; the readiness thread
+        # spawned by the real connect inherits the hook, unlike sys.settrace().
+        threading.settrace(trace_new_thread)
         try:
             provider.connect()
         finally:
-            sys.settrace(None)
+            threading.settrace(previous_trace)
 
     try:
         with concurrent.futures.ThreadPoolExecutor(1) as callers:
             pending = callers.submit(connect)
             try:
                 assert admitted.wait(10)
+                threading.settrace(previous_trace)
                 provider.set_rust_pipeline_in_progress(True)
                 provider.release_for_rust_pipeline()
                 assert provider.connection is None
@@ -79,11 +100,13 @@ def test_admitted_connect_cannot_reopen_python_handles_during_native_handoff(tmp
                 ).run([], lambda paths, config: [])
                 assert provider.connection is None
             finally:
+                threading.settrace(previous_trace)
                 resume.set()
         provider.set_rust_pipeline_in_progress(False)
         provider.connect()
         assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
     finally:
+        threading.settrace(previous_trace)
         resume.set()
         provider.set_rust_pipeline_in_progress(False)
         provider.close()
@@ -448,10 +471,11 @@ async def test_handoff_reconnect_are_responsive_guarded_and_drained(
         assert provider.is_rust_pipeline_in_progress() is fail
         if fail:
             assert provider._rust_pipeline_cleanup is not None
-            with pytest.raises(DatabaseRustPipelineInProgressError):
-                provider.execute_query("SELECT 1")
             with pytest.raises(native.DatabaseBusyError):
                 native.acquire_install_lease(str(path), "duckdb")
+            assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+            assert provider.is_connected
+            assert not provider.is_rust_pipeline_in_progress()
         else:
             assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
             assert provider.get_stats()["files"] == (0 if stage == "release" else 1)
@@ -460,8 +484,10 @@ async def test_handoff_reconnect_are_responsive_guarded_and_drained(
         watchdog.cancel()
         watchdog.join(timeout=5)
         await asyncio.gather(task, return_exceptions=True)
-        provider.set_rust_pipeline_in_progress(False)  # explicit teardown after joins
-        provider.close()
+        try:
+            assert provider.execute_query("SELECT 42 AS value") == [{"value": 42}]
+        finally:
+            provider.close()
     native.acquire_install_lease(str(path), "duckdb").close()
 
 
@@ -469,7 +495,6 @@ async def test_handoff_reconnect_are_responsive_guarded_and_drained(
 async def test_failed_client_cleanup_retains_unavailable_provider_after_cancel(
     tmp_path, monkeypatch
 ):
-    import chunkhound.pipeline_bridge as bridge
     from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
     from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
 
@@ -561,9 +586,9 @@ async def test_failed_client_cleanup_retains_unavailable_provider_after_cancel(
         # Public behavior MUST precede optional Task 3 resource-slot assertions:
         # the retrospective Task 2 baseline falsely reconnects here.
         assert provider.is_rust_pipeline_in_progress() and not provider.is_connected
-        with pytest.raises(DatabaseRustPipelineInProgressError):
+        with pytest.raises(DatabaseRecoveryRequiredError):
             provider.execute_query("SELECT 1")
-        with pytest.raises(DatabaseRustPipelineInProgressError):
+        with pytest.raises(DatabaseRecoveryRequiredError):
             provider.connect()
         with pytest.raises(native.DatabaseBusyError):
             native.acquire_install_lease(str(path), "duckdb")
@@ -573,8 +598,11 @@ async def test_failed_client_cleanup_retains_unavailable_provider_after_cancel(
         assert client in resources.cache.providers.values()
         assert owner_loop in resources.cache.loops.values()
         assert not resources.cache_closed
-        assert resources.native_future.done() and resources.token.cleanup_complete
-        assert resources.cleanup_future.done()
+        assert resources.token.cleanup_complete
+        assert all(future is None or future.done() for future in (
+            resources.native_future, resources.cleanup_future,
+            resources.reconnect_future,
+        ))
     finally:
         release.set()
         if watchdog is not None:
@@ -582,42 +610,14 @@ async def test_failed_client_cleanup_retains_unavailable_provider_after_cancel(
             if watchdog.ident is not None:
                 watchdog.join(timeout=5)
         await asyncio.gather(*tasks, return_exceptions=True)
-        fail = False  # Explicit recovery only after every owner task has drained.
-        resources = getattr(provider, "_rust_pipeline_cleanup", None)
-        if resources is None and exception_resources:
-            resources = exception_resources[0]
-        recovered = False
-        try:
-            if resources is not None:
-                for future in (resources.native_future, resources.cleanup_future):
-                    assert future is None or future.done()
-                assert not resources.native_started or resources.token.cleanup_complete
-                await asyncio.to_thread(
-                    bridge._shutdown_embed_thread_resources, resources.cache
-                )
-                assert not resources.cache.providers and not resources.cache.loops
-            else:
-                # Setup-only fallback: never close a loop with active work.
-                shutdown_entered = entered.is_set()
-
-                def recover_observed():
-                    for client, loop in set(observed):
-                        if not loop.is_closed():
-                            assert not loop.is_running()
-                            loop.run_until_complete(client.shutdown())
-                            loop.close()
-
-                await asyncio.to_thread(recover_observed)
-                assert not shutdown_entered, "failed shutdown lost its resource owner"
-            assert all(c.closed and loop.is_closed() for c, loop in observed)
-            recovered = True
-        finally:
-            if recovered and provider is not None:
-                if hasattr(provider, "_rust_pipeline_cleanup"):
-                    provider._rust_pipeline_cleanup = None
-                provider.set_rust_pipeline_in_progress(False)
+        fail = False
+        if provider is not None:
+            try:
+                assert provider.search_regex("never_matches")[0] == []
+                assert all(c.closed and loop.is_closed() for c, loop in observed)
+            finally:
                 provider.close()
-                native.acquire_install_lease(str(path), "duckdb").close()
+            native.acquire_install_lease(str(path), "duckdb").close()
 
 
 @pytest.mark.asyncio
@@ -705,7 +705,8 @@ async def test_duplicate_indexing_scope_cannot_take_active_owner(tmp_path, monke
         if hasattr(provider, "_rust_pipeline_cleanup"):
             assert resources is not None
             assert provider._rust_pipeline_cleanup is resources
-            assert resources.native_future.done() and resources.token.cleanup_complete
+            assert resources.token.cleanup_complete
+            assert resources.native_future is None or resources.native_future.done()
             assert resources.cache.providers and not resources.cache_closed
         with pytest.raises(DatabaseRustPipelineInProgressError):
             provider.execute_query("SELECT 1")
@@ -751,7 +752,8 @@ async def test_duplicate_indexing_refuses_while_reconnect_reads_sidecar(
             # This is trusted reconnect, not initial connection/preparation:
             # native execution and client cleanup have already completed.
             resources = provider._rust_pipeline_cleanup
-            assert resources.native_started and resources.native_future.done()
+            assert resources.native_started
+            assert resources.native_future is None or resources.native_future.done()
             assert resources.token.cleanup_complete and resources.safe_to_reconnect
             entered.set()
             assert release.wait(20), "sidecar read was not released"
@@ -817,7 +819,9 @@ async def test_duplicate_indexing_refuses_while_reconnect_reads_sidecar(
 
 
 @pytest.mark.asyncio
-async def test_direct_cleanup_failure_preserves_cancellation_and_resources(tmp_path, monkeypatch):
+async def test_direct_cleanup_failure_preserves_cancellation_and_resources(
+    tmp_path, monkeypatch
+):
     import chunkhound.pipeline_bridge as bridge
     entered, release = threading.Event(), threading.Event()
     resources = bridge.RustRunResources()
@@ -1021,9 +1025,7 @@ def test_parser_worker_does_not_inherit_owner_lease(tmp_path):
     stop = tmp_path / "stop"
     process = subprocess.Popen(
         [
-            "uv",
-            "run",
-            "python",
+            sys.executable,
             str(script),
             str(target),
             str(child_file),

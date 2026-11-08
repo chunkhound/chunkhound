@@ -1278,10 +1278,11 @@ class MCPServerBase(ABC):
         self._service_registry.complete_database_initialization()
 
     async def _connect_provider(self) -> None:
-        """Connect the database provider if not already connected.
+        """Admit a DB-backed action through the retained provider's readiness.
 
-        Uses a lock to prevent concurrent connect() calls which would
-        leak a DuckDB connection handle.
+        Serial providers own single-flight recovery, cancellation draining, and
+        pending service/model completion even when already connected. Providers
+        without readiness retain the locked connect/initialization fallback.
 
         During DuckDB compaction, or while the Rust indexing pipeline owns
         write access to the database file, the connection is temporarily
@@ -1298,6 +1299,14 @@ class MCPServerBase(ABC):
         run_rust_indexing_phase() restore the connection when the
         respective owner finishes.
         """
+        if self.services is None:
+            raise RuntimeError("Services not initialized. Call initialize() first.")
+        ready = getattr(self.services.provider, "ensure_ready_async", None)
+        if callable(ready):
+            await ready()
+            self._database_provider_connected_once = True
+            self._database_services_ready = True
+            return
         if self.services.provider.is_connected and self._database_services_ready:
             return
         async with self._connect_lock:

@@ -992,3 +992,72 @@ async def test_quota_refusal_preserves_interrupted_install_and_unknown_wal(
     assert not await pull(config)
     assert snapshot(target.parent) == before
     assert not list(target.parent.glob(".chunkhound-pull-*"))
+
+
+@pytest.mark.parametrize("mcp_mode,no_embeddings,disabled,configured", [
+    (True, False, False, True),
+    (False, True, False, True),
+    (False, False, True, True),
+    (False, False, False, False),
+])
+async def test_automatic_pull_refuses_ineligible_modes_before_local_or_network_work(
+    tmp_path, hub_http, mcp_mode, no_embeddings, disabled, configured
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    config.embeddings_disabled = disabled
+    if not configured:
+        config.hub.url = None
+    config.database.path = Path(":memory:")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(str(message)),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    try:
+        assert not await pull(
+            config, automatic=True, mcp_mode=mcp_mode, no_embeddings=no_embeddings
+        )
+    finally:
+        logger.remove(sink)
+    assert hub_http.requests == []
+    assert messages == []
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_pull_reports_invalid_layout_before_missing_embedding_identity(
+    tmp_path, hub_http, automatic
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    config.database.path = Path(":memory:")
+    config.embedding = None
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(str(message)),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    try:
+        assert not await pull(config, automatic=automatic)
+    finally:
+        logger.remove(sink)
+    text = "\n".join(messages)
+    assert "writable directory-layout database" in text
+    assert "requires embedding configuration" not in text
+    assert hub_http.requests == []
+
+
+async def test_explicit_pull_is_not_silently_skipped_by_automatic_mode_inputs(
+    tmp_path, hub_http
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    config.database.path = Path(":memory:")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(str(message)),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    try:
+        assert not await pull(config, mcp_mode=True, no_embeddings=True)
+    finally:
+        logger.remove(sink)
+    assert "writable directory-layout database" in "\n".join(messages)
+    assert hub_http.requests == []

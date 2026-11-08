@@ -1,6 +1,7 @@
 import hashlib
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -158,7 +159,7 @@ sys.argv = ['chunkhound', *sys.argv[1:]]
 main()
 """
         result = subprocess.run(
-            ["uv", "run", "python", "-c", script, mode, str(project), "--verbose"],
+            [sys.executable, "-c", script, mode, str(project), "--verbose"],
             cwd=project,
             env=cli_env(project),
             capture_output=True,
@@ -323,8 +324,10 @@ finally:
 raise outcome
 '''
     result = subprocess.run(
-        ["uv", "run", "python", "-c", script, str(ROOT), boundary, str(target),
-         str(report), mode, str(project)],
+        [
+            sys.executable, "-c", script, str(ROOT), boundary, str(target),
+            str(report), mode, str(project),
+        ],
         cwd=project, env=cli_env(project), capture_output=True, text=True,
         timeout=180,
     )

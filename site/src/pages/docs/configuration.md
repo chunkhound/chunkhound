@@ -160,6 +160,7 @@ publisher rows; ordinary indexing performs the local overlay.
 {
   "hub": {
     "url": "https://hub.internal/catalogue?branch=main",
+    "download_timeout_seconds": 3600,
     "archive_limits": {
       "max_members": 100000,
       "max_path_depth": 32,
@@ -171,6 +172,32 @@ publisher rows; ordinary indexing performs the local overlay.
   }
 }
 ```
+
+`hub.download_timeout_seconds` defaults to **3600 seconds**: one cooperative
+artifact-download deadline across all three attempts, not per retry. Set a
+positive finite number (fractions allowed); booleans, zero, negatives, infinity,
+NaN, `null`, strings and unlimited sentinels are rejected. Environment override:
+
+```bash
+CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS=7200 chunkhound pull .
+```
+
+Environment text is decoded as a JSON number and validated through the normal
+configuration layers. Existing precedence is unchanged: defaults, environment,
+global configuration (including persisted remote-config rules), project
+`.chunkhound.json`, explicit `--config`, then applicable CLI/direct overrides.
+There is no download-timeout CLI flag. Remote rules may set
+`hub.download_timeout_seconds`; project/explicit configuration still overrides
+that persisted global value.
+
+This budget differs from HTTP's 60-second inactivity limit, manifest's
+10-second request budget, and archive extraction limits. Size/hash checks remain
+required. The cooperative deadline cannot forcibly interrupt synchronous disk
+work and is not an extraction time limit. Timeout cleans staging under normal
+cleanup rules, never installing an unverified candidate. Automatic pull may
+continue local indexing; explicit pull fails. Diagnostics name the effective
+duration/setting, never URLs/credentials. Resume applies only within this
+invocation, not across invocations.
 
 The shown archive limits are defaults, not measured production thresholds.
 Each value must be a positive finite integer; booleans, fractions, zero,
@@ -213,6 +240,13 @@ are rejected before the downgraded request, including after an earlier
 HTTP-to-HTTPS upgrade. Malformed URLs, userinfo (`user:password@host`) and
 non-HTTP(S) schemes are rejected. Bounded retries, byte-count and checksum
 verification, and disk-space checks apply to both schemes.
+
+Hub and remote config share at most five redirects after the initial request,
+not security policies. Hub bans all HTTPS-to-HTTP redirects. Remote allows
+HTTPS or HTTP to loopback and strips `Authorization` on scheme/host/effective
+port changes (equivalent default ports stay same-origin). Its HTTPS-to-HTTP
+loopback exception does not permit arbitrary HTTP hosts. Shared mechanics do
+not buffer hub artifacts.
 
 **HTTP provides no protection against network interception or tampering.** A
 checksum delivered through the same untrusted connection does not authenticate
@@ -421,7 +455,7 @@ Some settings describe the local install and are protected against server overri
 - `embeddings_disabled` — operator kill-switch.
 - `local_config_file`, `global_config_file`, `config_file` — discovery inputs to the loader (allowing remote to override them would recurse).
 
-`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused wholesale — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable. One narrow guard applies: a rule-set `remote_config.url` that fails the fetcher's scheme rule (cleartext `http://` to a non-loopback host) is reverted to the pre-rules on-disk value — or removed if there is none — with a WARNING. Persisting such a URL would brick the next fetch, since the fetcher refuses to send credentials over cleartext to a non-loopback host. Every `https://` URL passes, so rotation to a new HTTPS origin is unrestricted; `remote_config.auth_header` has no scheme concept and is accepted verbatim.
+`remote_config.url` and `remote_config.auth_header` are intentionally **not** refused wholesale — server-driven URL/header rotation is a supported migration path via envelope rules on those keys, and the self-registration step (below) seeds the on-disk value on the first successful fetch so a URL supplied only via CLI or env becomes durable. One narrow guard applies: a rule-set `remote_config.url` that fails the fetcher's scheme rule (cleartext `http://` to a non-loopback host) is reverted to the pre-rules on-disk value — or removed if there is none — with a WARNING. Persisting such a URL would brick the next fetch, since the fetcher refuses to send credentials over cleartext to a non-loopback host. HTTPS URLs with a valid host and port pass, so rotation to a new HTTPS origin is unrestricted; `remote_config.auth_header` has no scheme concept and is accepted verbatim.
 
 ### Self-registration
 
@@ -688,6 +722,9 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Requesty API. Registry providers require explicit `model`. |
 | API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | API Route API. Registry providers require explicit `model`. |
 | Opper | `opper` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Opper API. Registry providers require explicit `model`. |
+| Obscurify.ai | `obscurify-ai` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Obscurify.ai API. Registry providers require explicit `model`. |
+| Atlas Cloud | `atlascloud` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Atlas Cloud API. Registry providers require explicit `model`. |
+| Runcrate | `runcrate` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Runcrate API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
@@ -743,7 +780,7 @@ The environment variables are `CHUNKHOUND_LLM_CLAUDE_APPEND_SYSTEM_PROMPT` and `
 | `output_limits_enabled` | `boolean` | `false` | Restore the exact legacy numeric output limits for research synthesis instead of provider-managed limits. |
 | `output_limit_fallback` | `number` | `64000` | Positive output-token fallback used when a synthesis provider cannot authoritatively omit a limit or declare one. |
 | `claude_append_system_prompt` | `string` | `file` | `file` or `inline`. One mode cannot fit every machine: `file` stays off `cmd.exe` and beside a wrapper's `--append-system-prompt`; `inline` is for a file-flag wrapper or Claude Code older than 2.0.34. |
-| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file and MCP config file, such as Docker or a limited user. |
+| `claude_temp_dir` | `string` | system temp | Optional override for the Claude instruction file, MCP config file and settings file, such as Docker or a limited user. |
 | `codex_reasoning_effort` | `string` | `null` | Default reasoning effort for Codex/OpenAI: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex_reasoning_effort_utility` | `string` | `null` | Reasoning effort override for utility stage |
 | `codex_reasoning_effort_synthesis` | `string` | `null` | Reasoning effort override for synthesis stage |

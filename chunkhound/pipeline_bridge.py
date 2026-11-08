@@ -25,6 +25,11 @@ from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipeline
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.parsers.parser_factory import create_parser_for_language
+from chunkhound.providers.database.lifecycle import (
+    DatabaseRecoveryRequiredError,
+    Failure,
+    LifecycleFailure,
+)
 from chunkhound.utils.async_worker import WorkerDrain
 
 if TYPE_CHECKING:
@@ -76,7 +81,44 @@ class RustRunResources:
     release_future: asyncio.Future[None] | None = None
     native_future: asyncio.Future[Any] | None = None
     cleanup_future: asyncio.Future[None] | None = None
-    reconnect_future: asyncio.Future[None] | None = None
+    reconnect_future: asyncio.Future[Failure | None] | None = None
+    recovery_required: bool = False
+    original_failure: Failure | None = None
+    cleanup_failure: Failure | None = None
+    failure_stage: str = "Rust cleanup"
+
+    def remember_original(self, error: BaseException) -> None:
+        if self.original_failure is None and not isinstance(
+            error, RustPipelineCleanupError
+        ):
+            self.original_failure = Failure.capture(error)
+
+    def remember_cleanup(self, stage: str, error: BaseException) -> None:
+        self.failure_stage = stage
+        self.cleanup_failure = Failure.capture(error)
+
+    def forget_completed_futures(self) -> None:
+        for name in (
+            "release_future", "native_future", "cleanup_future", "reconnect_future"
+        ):
+            future = getattr(self, name)
+            if future is not None and future.done():
+                # Errors are already snapshotted at the owning await boundary.
+                # Removing this reference prevents its exception traceback from
+                # retaining a backend or a whole completed indexing action.
+                setattr(self, name, None)
+
+    def assert_native_drained(self) -> None:
+        futures = (
+            self.release_future, self.native_future,
+            self.cleanup_future, self.reconnect_future,
+        )
+        if any(future is not None and not future.done() for future in futures):
+            raise RuntimeError("Lifecycle work has not drained; recovery refused")
+        if self.native_started and not self.token.cleanup_complete:
+            raise RuntimeError(
+                "Native cleanup is not acknowledged; process restart required"
+            )
 
     def __post_init__(self) -> None:
         self.drain = WorkerDrain(self.token.cancel)
@@ -87,28 +129,38 @@ class RustRunResources:
             not self.native_started or bool(self.token.cleanup_complete)
         )
 
-class RustPipelineCleanupError(RuntimeError):
+class RustPipelineCleanupError(DatabaseRecoveryRequiredError):
     def __init__(self, resources: RustRunResources) -> None:
-        super().__init__("Rust indexing cleanup failed; database remains unavailable")
+        cleanup = resources.cleanup_failure or Failure(
+            RuntimeError, "Rust cleanup did not establish safe reconnect"
+        )
+        super().__init__(LifecycleFailure(
+            resources.failure_stage, resources.original_failure, cleanup,
+            restart_required=(
+                resources.native_started and not resources.token.cleanup_complete
+            ),
+        ))
         self.resources = resources
 
 
 def _shutdown_embed_thread_resources(cache: _EmbedThreadCache) -> None:
-    failed = False
+    failures: list[Failure] = []
     with cache.lock:
         providers = list(cache.providers.items())
     for tid, provider in providers:
         with cache.lock:
             loop = cache.loops.get(tid)
         if loop is None or loop.is_closed():
-            failed = True
+            failures.append(Failure(
+                RuntimeError, "Embedding cleanup has no usable owner loop"
+            ))
             logger.error("Embedding cleanup has no usable owner loop")
             continue
         try:
             loop.run_until_complete(provider.shutdown())
             loop.close()
         except BaseException as error:
-            failed = True
+            failures.append(Failure.capture(error))
             logger.error("Embedding cleanup failed: {}", type(error).__name__)
         else:
             with cache.lock:
@@ -122,13 +174,18 @@ def _shutdown_embed_thread_resources(cache: _EmbedThreadCache) -> None:
             if not loop.is_closed():
                 loop.close()
         except BaseException as error:
-            failed = True
+            failures.append(Failure.capture(error))
             logger.error("Embedding loop cleanup failed: {}", type(error).__name__)
         else:
             with cache.lock:
                 cache.loops.pop(tid, None)
-    if failed:
-        raise RuntimeError("Embedding resource cleanup incomplete")
+    if failures:
+        aggregate = RuntimeError("Embedding resource cleanup incomplete")
+        aggregate.__cause__ = failures[0].exception()
+        getattr(aggregate, "add_note")(
+            "; ".join(f"{item.kind.__name__}: {item.message}" for item in failures)
+        )
+        raise aggregate from aggregate.__cause__
 
 
 _parse_pool: ProcessPoolExecutor | None = None
@@ -1012,13 +1069,18 @@ async def run_rust_pipeline(
             result = await _run_rust_pipeline_body(
                 files_to_process, db_path=db_path, project_root=project_root,
                 force_reindex=force_reindex, skip_embeddings=skip_embeddings,
-                do_cleanup=do_cleanup, config=config, progress_callback=progress_callback,
+                do_cleanup=do_cleanup, config=config,
+                progress_callback=progress_callback,
                 _resources=resources,
             )
     except BaseException as caught:
         error = caught
+        resources.remember_original(caught)
     finally:
         try:
+            # A returned native future is not acknowledgment of safe cleanup.
+            # Retain callback clients/loops until native ownership is drained.
+            resources.assert_native_drained()
             cleanup = asyncio.get_running_loop().run_in_executor(
                 None, contextvars.copy_context().run,
                 _shutdown_embed_thread_resources, resources.cache,
@@ -1027,8 +1089,12 @@ async def run_rust_pipeline(
             await resources.drain.wait(cleanup)
             resources.cache_closed = True
         except BaseException as cleanup_error:
-            logger.error("Rust resource cleanup failed: {}", type(cleanup_error).__name__)
+            logger.error(
+                "Rust resource cleanup failed: {}", type(cleanup_error).__name__
+            )
+            resources.remember_cleanup("embedding client/cache close", cleanup_error)
             error = RustPipelineCleanupError(resources)
+    resources.forget_completed_futures()
     if not resources.safe_to_reconnect:
         error = RustPipelineCleanupError(resources)
     if isinstance(error, PipelineCancelledError) and resources.token.is_cancelled():
@@ -1038,9 +1104,15 @@ async def run_rust_pipeline(
     if owned:
         # Direct callers have no provider retaining failed resources. Attach them
         # to the delivered cancellation too, rather than discarding that owner.
-        if resources.drain.cancellation is not None and not resources.safe_to_reconnect:
-            setattr(resources.drain.cancellation, "resources", resources)
-        resources.drain.finish(error)
+        cancellation = resources.drain.cancellation is not None
+        resources.drain.cancellation = None
+        if cancellation:
+            cancelled = asyncio.CancelledError()
+            if not resources.safe_to_reconnect:
+                setattr(cancelled, "resources", resources)
+            raise cancelled
+        if error is not None:
+            raise error
     elif error is not None:
         raise error
     return result

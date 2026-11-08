@@ -238,6 +238,30 @@ def test_opper_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_obscurify_ai_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "obscurify-ai")
+
+    assert config["provider"] == "obscurify-ai"
+    assert config["model"] == "deepseek/deepseek-v4-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_atlascloud_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "atlascloud")
+
+    assert config["provider"] == "atlascloud"
+    assert config["model"] == "deepseek-ai/deepseek-v4-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_runcrate_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "runcrate")
+
+    assert config["provider"] == "runcrate"
+    assert config["model"] == "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 

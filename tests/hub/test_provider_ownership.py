@@ -30,6 +30,7 @@ from chunkhound.providers.database.duckdb.live_connections import (
 )
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+from chunkhound.providers.database.lifecycle import DatabaseRecoveryRequiredError
 from chunkhound.providers.database.ownership import DatabaseReaderCloseError
 from tests.hub.test_index_format import run_python, snapshot
 
@@ -748,11 +749,21 @@ def test_cursor_close_failure_retains_install_exclusion_until_cleanup_retry(
     try:
         # Keep the public exception alive throughout final close and installation
         # admission. Backend tracking uses weak refs, never a test-owned lease.
-        with pytest.raises(OSError, match="compatible cursor close failed") as raised:
+        expected = (
+            OSError
+            if opening == "standalone-manager"
+            else DatabaseRecoveryRequiredError
+        )
+        with pytest.raises(expected, match="compatible cursor close failed") as raised:
             if opening == "lazy":
                 second.get_stats()
             else:
                 second.connect()
+        if opening != "standalone-manager":
+            assert raised.value.failure.stage == "failed-open cleanup"
+            assert (
+                raised.value.failure.cleanup.message == "compatible cursor close failed"
+            )
         assert cursors[target_cursor - 1]().execute("SELECT 42").fetchone() == (42,)
         first.close()
         with pytest.raises(OSError, match="compatible cursor close failed"):
@@ -820,8 +831,16 @@ def test_rust_release_closes_all_retained_handles_or_preserves_lease_for_retry(
     monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", fail_extension)
     monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", fail_retained_close)
     try:
-        with pytest.raises(OSError, match="retained backend close failed") as raised:
+        with pytest.raises(
+            DatabaseRecoveryRequiredError, match="retained backend close failed"
+        ) as raised:
             provider.get_stats()
+        assert raised.value.failure.stage == "failed-open cleanup"
+        assert raised.value.failure.cleanup.message == "retained backend close failed"
+        if retained == "failed-open":
+            assert raised.value.failure.original.message == (
+                "extension initialization failed"
+            )
         assert handles
         assert all(ref() is not None for ref in handles)
         for reference in handles:

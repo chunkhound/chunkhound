@@ -15,6 +15,7 @@ from chunkhound.core.embedding_model_drift import (
 )
 from chunkhound.hub.artifact import PreparationState, prepare
 from chunkhound.hub.errors import (
+    FATAL_HUB_ERRORS,
     HubDatabaseMismatch,
     HubInstallationInterrupted,
     HubReaderCloseError,
@@ -84,27 +85,46 @@ async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
         # The shared helper has fully drained this private executor Future.
         # Keep its cancellation policy except when recovery/fatal reporting is due.
         failure = worker.exception()
-        if isinstance(
+        if failure is not None and isinstance(
             failure,
             (
-                HubDatabaseMismatch,
-                HubInstallationInterrupted,
+                *FATAL_HUB_ERRORS,
                 native.DatabaseInterruptedError,
                 DatabaseReaderCloseError,
-                HubReaderCloseError,
             ),
         ):
             raise failure from None
         raise
 
 
-async def _pull(config: Config, rel: str, automatic: bool) -> bool:
-    if automatic and (config.embeddings_disabled or not config.hub.url):
+def automatic_pull_eligible(
+    config: Config, *, mcp_mode: bool, no_embeddings: bool
+) -> bool:
+    """Policy only: local identity/ownership inspection decides replacement."""
+    return (
+        not mcp_mode
+        and not no_embeddings
+        and not config.embeddings_disabled
+        and bool(config.hub.url)
+    )
+
+
+async def _pull(
+    config: Config,
+    rel: str,
+    automatic: bool,
+    *,
+    mcp_mode: bool,
+    no_embeddings: bool,
+) -> bool:
+    if automatic and not automatic_pull_eligible(
+        config, mcp_mode=mcp_mode, no_embeddings=no_embeddings
+    ):
         return False
     if not config.hub.url:
         raise HubUnavailable("No hub manifest URL configured")
-    key = configured_key(config)  # Offline; do not let drift pinning run first.
     target = installation_target(config)
+    key = configured_key(config)  # Offline; do not let drift pinning run first.
     if automatic:
         # Keep actual executor completion private: shutdown cancels Tasks, not threads.
         worker = asyncio.get_running_loop().run_in_executor(
@@ -131,6 +151,7 @@ async def _pull(config: Config, rel: str, automatic: bool) -> bool:
         work_parent=target.parent,
         state=state,
         limits=config.hub.archive_limits,
+        download_timeout_seconds=config.hub.download_timeout_seconds,
     ) as candidate:
 
         def commit() -> bool:
@@ -157,10 +178,23 @@ async def _pull(config: Config, rel: str, automatic: bool) -> bool:
     return installed
 
 
-async def pull(config: Config, rel: str = "latest", automatic: bool = False) -> bool:
+async def pull(
+    config: Config,
+    rel: str = "latest",
+    automatic: bool = False,
+    *,
+    mcp_mode: bool = False,
+    no_embeddings: bool = False,
+) -> bool:
     try:
         try:
-            return await _pull(config, rel, automatic)
+            return await _pull(
+                config,
+                rel,
+                automatic,
+                mcp_mode=mcp_mode,
+                no_embeddings=no_embeddings,
+            )
         except DatabaseReaderCloseError as exc:
             raise HubReaderCloseError(exc) from None
         except _NATIVE_ERRORS as exc:

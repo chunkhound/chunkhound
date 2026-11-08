@@ -144,6 +144,51 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "obscurify-ai",
+            "model": "deepseek/deepseek-v4-flash",
+            "expected_name": "obscurify-ai",
+            "expected_base_url": "https://obscurify.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'obscurify-ai'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="obscurify-ai",
+    ),
+    pytest.param(
+        {
+            "provider": "atlascloud",
+            "model": "deepseek-ai/deepseek-v4-flash",
+            "expected_name": "atlascloud",
+            "expected_base_url": "https://api.atlascloud.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'atlascloud'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="atlascloud",
+    ),
+    pytest.param(
+        {
+            "provider": "runcrate",
+            "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "expected_name": "runcrate",
+            "expected_base_url": "https://api.runcrate.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'runcrate'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="runcrate",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -298,6 +343,9 @@ class TestFactoryPipeline:
             "requesty": 10,
             "api-route": 10,
             "opper": 10,
+            "obscurify-ai": 10,
+            "atlascloud": 10,
+            "runcrate": 10,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected

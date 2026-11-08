@@ -48,6 +48,11 @@ from chunkhound.providers.database.duckdb.live_connections import (
     register_duckdb_connection,
 )
 from chunkhound.providers.database.index_format import preflight_duckdb
+from chunkhound.providers.database.lifecycle import (
+    DatabaseRecoveryRequiredError,
+    Failure,
+    LifecycleFailure,
+)
 from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
@@ -56,7 +61,6 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
     DatabaseOperationTimeoutError,
     DatabaseRustPipelineInProgressError,
-    DatabaseTemporarilyUnavailableError,
     _executor_local,
     get_thread_local_state,
 )
@@ -308,25 +312,53 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._connect_initialized = False
         read_only = self._connection_manager.is_read_only
         conn = None
+        setup_failure: Failure | None = None
+        setup_error_id: int | None = None
         try:
             with compatible_duckdb_cursor(
                 self.db_path,
                 read_only=read_only,
                 retained_connections=self._failed_open_connections,
             ) as live:
-                preflight_duckdb(self.db_path, live_connection=live, ownership=owned)
-                conn = duckdb.connect(str(self.db_path), read_only=read_only)
-                # Strong ownership and registry admission precede extension setup
-                # and survive a failure when the compatible cursor context exits.
-                self._failed_open_connections.append(conn)
-                register_duckdb_connection(self.db_path, read_only, conn)
-                conn.execute("INSTALL vss")
-                conn.execute("LOAD vss")
-                conn.execute("SET hnsw_enable_experimental_persistence = true")
-        except BaseException:
+                try:
+                    preflight_duckdb(
+                        self.db_path, live_connection=live, ownership=owned
+                    )
+                    conn = duckdb.connect(str(self.db_path), read_only=read_only)
+                    # Retain before setup and compatible-cursor cleanup can fail.
+                    self._failed_open_connections.append(conn)
+                    register_duckdb_connection(self.db_path, read_only, conn)
+                    conn.execute("INSTALL vss")
+                    conn.execute("LOAD vss")
+                    conn.execute("SET hnsw_enable_experimental_persistence = true")
+                except BaseException as error:
+                    setup_failure = Failure.capture(error)
+                    setup_error_id = id(error)
+                    raise
+        except BaseException as escaping:
+            escaped_failure = Failure.capture(escaping)
             if conn is not None:
-                close_duckdb_connection(conn)
+                try:
+                    close_duckdb_connection(conn)
+                except BaseException as cleanup:
+                    closed_failure = Failure.capture(cleanup)
+                    raise DatabaseRecoveryRequiredError(
+                        LifecycleFailure(
+                            "backend-open handle close",
+                            setup_failure or escaped_failure,
+                            Failure(
+                                closed_failure.kind, closed_failure.message,
+                                closed_failure.cause + (escaped_failure,),
+                            ),
+                        )
+                    ) from None
                 self._failed_open_connections.remove(conn)
+            if setup_failure is not None and id(escaping) != setup_error_id:
+                raise DatabaseRecoveryRequiredError(
+                    LifecycleFailure(
+                        "backend-open cursor close", setup_failure, escaped_failure
+                    )
+                ) from None
             raise
         self._failed_open_connections.remove(conn)
         return conn
@@ -378,7 +410,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Safely extract file ID from either dict or File model - delegate to file repository."""
         return self._file_repository._extract_file_id(file_record)
 
-    def connect(self) -> None:
+    def _connect_backend(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         if (
             self._executor.is_rust_pipeline_in_progress()
@@ -434,20 +466,24 @@ class DuckDBProvider(SerialDatabaseProvider):
             if self._executor.prepare_connection(self):
                 return
 
-            # Call parent connect which handles executor initialization
-            super().connect()
+            # Backend work stays separate from shared readiness orchestration.
+            self._execute_in_db_thread_sync("connect")
             self._connect_initialized = True
 
-        except (DatabaseTemporarilyUnavailableError, DatabaseOperationTimeoutError):
+        except (
+            DatabaseCompactionInProgressError,
+            DatabaseRustPipelineInProgressError,
+            DatabaseOperationTimeoutError,
+        ):
             raise
         except Exception as e:
-            logger.error(f"DuckDB connection failed: {e}")
+            logger.error("DuckDB connection failed: {}", type(e).__name__)
             if self._executor._is_rust_reconnect_owner():
                 # Retain partial handles/lease under unavailable guard;
                 # do not finalize executor.
                 raise
             if not had_ownership or self._reconnect_preflight_passed:
-                self.disconnect(skip_checkpoint=True)
+                self._rollback_failed_open(e)
             raise
 
     def _executor_prepare_connection(self) -> bool:
@@ -530,7 +566,26 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._connection_manager.disconnect(skip_checkpoint=True)
         get_thread_local_state()["transaction_active"] = False
         self._wal_cleanup_done = False
-        self._connection_manager.connect(ownership=owned)
+        setup_failure: Failure | None = None
+        setup_error_id: int | None = None
+
+        def capture_setup(error: BaseException) -> None:
+            nonlocal setup_failure, setup_error_id
+            setup_failure = Failure.capture(error)
+            setup_error_id = id(error)
+
+        try:
+            self._connection_manager.connect(
+                ownership=owned, on_open_failure=capture_setup
+            )
+        except BaseException as escaping:
+            if setup_failure is not None and id(escaping) != setup_error_id:
+                raise DatabaseRecoveryRequiredError(
+                    LifecycleFailure(
+                        "manager-open cleanup", setup_failure, Failure.capture(escaping)
+                    )
+                ) from None
+            raise
         return False
 
     def ensure_indexed_root_identity(

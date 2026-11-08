@@ -7,10 +7,10 @@ by provider and model, so an unannounced change returns nothing at all, and
 re-indexing skips chunks that already hold vectors for the provider and model.
 """
 
+import asyncio
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -532,15 +532,20 @@ class TestConfigureKeepsTheIndexUsable:
         finally:
             services.provider.disconnect(skip_checkpoint=True)
 
-    def test_config_without_embeddings_leaves_other_providers_alone(
+    def test_config_without_embeddings_resets_leftover_embedding_ownership(
         self, tmp_path: Path, clean_environment: None
     ):
-        """``create_services`` registers a caller's provider after configure().
+        """Configure is a composition reset, not adoption of prior registration.
 
-        The next configure() without an embedding section built nothing of its
-        own, so it must not treat that leftover as its provider and fail on it.
+        A seeded index remains usable without constructing or consulting an
+        embedding provider that is absent from this owner's configuration.
         """
-        leftover = SimpleNamespace(name="dummy", model="dummy")
+        class UnconfiguredEmbedding:
+            @property
+            def model(self):
+                pytest.fail("configure interrogated a leftover embedding provider")
+
+        leftover = UnconfiguredEmbedding()
         config = Config(target_dir=tmp_path)
         config.database = _seed_index(tmp_path, _CODE_3_INDEX)
         config.embedding = None
@@ -549,7 +554,23 @@ class TestConfigureKeepsTheIndexUsable:
         try:
             registry.configure(config)
 
-            assert registry.get_provider("embedding") is leftover
+            with pytest.raises(
+                ValueError, match="No provider registered for embedding"
+            ):
+                registry.get_provider("embedding")
+            search = registry.create_search_service()
+            coordinator = registry.create_indexing_coordinator()
+            assert search._embedding_provider is None
+            assert coordinator._embedding_provider is None
+            database = registry.get_provider("database")
+            assert database.embedding_manager is None
+            assert sum(g.count for g in read_index_groups(database)) == 2
+            source = tmp_path / "reset_contract.py"
+            source.write_text("def reset_owner_marker():\n    return 42\n")
+            result = asyncio.run(coordinator.process_file(source))
+            assert result["status"] == "success", result
+            assert result["embeddings_generated"] == 0
+            assert search.search_regex("reset_owner_marker")[0]
         finally:
             registry.get_provider("database").disconnect(skip_checkpoint=True)
 

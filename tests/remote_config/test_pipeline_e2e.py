@@ -56,6 +56,14 @@ from chunkhound.core.config.remote import run_remote_config_fetch
 # --------------------------------------------------------------------------- #
 
 
+@pytest.fixture(autouse=True)
+def _project_root(_isolate: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run real project discovery separately from the isolated HOME config."""
+    project = _isolate / "pipeline-project"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.chdir(project)
+
+
 def _args(**overrides: Any) -> argparse.Namespace:
     """Build an argparse.Namespace shaped like a `search` invocation."""
     defaults: dict[str, Any] = {
@@ -1813,3 +1821,49 @@ async def test_nested_archive_invalid_quota_rolls_back_before_next_rule(
         "rule 1 on" in m and "schema_error" in m
         and "sub-model validation failed" in m for m in messages
     ), messages
+
+
+@pytest.mark.parametrize("value", [0.25, True, 0, -1, "unlimited", None])
+async def test_remote_download_timeout_rules_validate_persist_and_reload(
+    _isolate, monkeypatch, tmp_path, value
+):
+    import httpx
+
+    from chunkhound.core.config.config import Config
+
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({"hub": {"download_timeout_seconds": 12}}))
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "hub.download_timeout_seconds", "op": "set", "value": value},
+            {"id": "hub.url", "op": "set", "value": "https://hub.test/catalogue"},
+        ],
+    }
+    real_client = httpx.AsyncClient
+
+    def make_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=envelope)
+        )
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", make_client)
+    monkeypatch.setenv("CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS", "4")
+    await run_remote_config_fetch(_args(), "search")
+    expected = 0.25 if type(value) is float else 12
+    assert _read_target(target)["hub"] == {
+        "download_timeout_seconds": expected,
+        "url": "https://hub.test/catalogue",
+    }
+    project = tmp_path / "project"
+    project.mkdir()
+    config = Config(target_dir=project, skip_layers={"cli"})
+    assert config.hub.download_timeout_seconds == expected
+    (project / ".chunkhound.json").write_text(
+        json.dumps({"hub": {"download_timeout_seconds": 9}})
+    )
+    assert (
+        Config(target_dir=project, skip_layers={"cli"}).hub.download_timeout_seconds
+        == 9
+    )

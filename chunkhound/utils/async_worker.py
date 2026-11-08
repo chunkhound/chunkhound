@@ -2,6 +2,7 @@
 import asyncio
 from collections.abc import Callable
 from typing import TypeVar
+
 from loguru import logger
 
 T = TypeVar("T")
@@ -25,7 +26,10 @@ class WorkerDrain:
                         # Stop signalling is best effort, drainage is mandatory.
                         # In particular a broken callback must not release the
                         # caller while the private completion future still runs.
-                        logger.error("Worker stop callback failed: {}", type(callback_error).__name__)
+                        logger.error(
+                            "Worker stop callback failed: {}",
+                            type(callback_error).__name__,
+                        )
             except BaseException:
                 break
         return future.result()
@@ -33,7 +37,9 @@ class WorkerDrain:
     def finish(self, error: BaseException | None = None) -> None:
         if self.cancellation is not None:
             if error is not None and not isinstance(error, asyncio.CancelledError):
-                logger.error("Worker failed during cancellation: {}", type(error).__name__)
+                logger.error(
+                    "Worker failed during cancellation: {}", type(error).__name__
+                )
             raise self.cancellation
         if error is not None:
             raise error

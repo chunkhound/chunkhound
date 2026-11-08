@@ -21,9 +21,8 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from loguru import logger
 from rich.progress import Progress, TaskID
 
 from chunkhound.interfaces.database_provider import DatabaseProvider
@@ -31,8 +30,10 @@ from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
 from chunkhound.pipeline_bridge import (
     RustPipelineCleanupError,
     RustRunResources,
+    _shutdown_embed_thread_resources,
     run_rust_pipeline,
 )
+from chunkhound.providers.database.lifecycle import Failure
 from chunkhound.providers.database.serial_executor import _rust_reconnect_scope
 from chunkhound.services.progress_utils import _update_speed_field, format_bytes
 
@@ -309,9 +310,59 @@ class RustPhaseResult:
     compact_reduction_pct: float | None
 
 
-def _reconnect_after_rust(db: DatabaseProvider) -> None:
+class RustRecoveryProvider(Protocol):
+    """Lifecycle surface needed to recover the same retained provider."""
+
+    def connect(self) -> None: ...
+
+    def set_rust_pipeline_in_progress(self, active: bool) -> None: ...
+
+
+def _reconnect_after_rust(db: RustRecoveryProvider) -> None:
     with _rust_reconnect_scope(getattr(db, "_executor")):
         db.connect()
+
+
+def _reconnect_outcome(db: RustRecoveryProvider) -> Failure | None:
+    # A callback's CancelledError must not look like cancellation of the caller
+    # awaiting its future. Deliver detached data, leaving WorkerDrain to observe
+    # only externally requested cancellation (also on Python 3.10).
+    try:
+        _reconnect_after_rust(db)
+    except BaseException as error:
+        return Failure.capture(error)
+    return None
+
+
+def recover_rust_resources(
+    db: RustRecoveryProvider, resources: RustRunResources,
+) -> None:
+    if not resources.recovery_required:
+        raise RuntimeError("Rust operation is still active; recovery refused")
+    try:
+        resources.assert_native_drained()
+        resources.forget_completed_futures()
+        if not resources.cache_closed:
+            resources.failure_stage = "embedding client/cache close"
+            _shutdown_embed_thread_resources(resources.cache)
+            resources.cache_closed = True
+        if not resources.safe_to_reconnect:
+            raise RuntimeError("Rust cleanup does not permit reconnect")
+        resources.failure_stage = "trusted database reconnect and configuration"
+        _reconnect_after_rust(db)
+    except BaseException as error:
+        resources.cleanup_failure = Failure.capture(error)
+    else:
+        resources.recovery_required = False
+        setattr(db, "_rust_pipeline_cleanup", None)
+        db.set_rust_pipeline_in_progress(False)
+        return
+    # Raise outside the handler so detached delivery has no raw context.
+    failure = resources.cleanup_failure
+    if failure.kind in (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        control = failure.exception()
+        raise control from control.__cause__
+    raise RustPipelineCleanupError(resources) from None
 
 
 async def run_rust_indexing_phase(
@@ -446,28 +497,72 @@ async def run_rust_indexing_phase(
             )
     except BaseException as caught:
         error = caught
+        resources.remember_original(caught)
     finally:
         if not resources.native_started and resources.cleanup_future is None:
-            resources.cache_closed = True
+            resources.cache_closed = (
+                not resources.cache.providers and not resources.cache.loops
+            )
         if resources.safe_to_reconnect:
+            reconnect: asyncio.Future[Failure | None] | None = None
             try:
                 reconnect = asyncio.get_running_loop().run_in_executor(
-                    None, contextvars.copy_context().run, _reconnect_after_rust, db,
+                    None, contextvars.copy_context().run, _reconnect_outcome, db,
                 )
                 resources.reconnect_future = reconnect
-                await resources.drain.wait(reconnect)
+                reconnect_failure = await resources.drain.wait(reconnect)
             except BaseException as cleanup_error:
-                logger.error(
-                    "Database reconnect failed: {}", type(cleanup_error).__name__
+                resources.remember_cleanup(
+                    "trusted database reconnect and configuration", cleanup_error
                 )
                 error = RustPipelineCleanupError(resources)
             else:
-                setattr(db, "_rust_pipeline_cleanup", None)
-                db.set_rust_pipeline_in_progress(False)
+                if reconnect_failure is not None:
+                    resources.failure_stage = (
+                        "trusted database reconnect and configuration"
+                    )
+                    resources.cleanup_failure = reconnect_failure
+                    error = RustPipelineCleanupError(resources)
+                else:
+                    setattr(db, "_rust_pipeline_cleanup", None)
+                    db.set_rust_pipeline_in_progress(False)
+            finally:
+                # Delivered tracebacks need no completed transport future.
+                reconnect = None
         else:
-            logger.error("Rust cleanup incomplete; database remains unavailable")
             error = RustPipelineCleanupError(resources)
-    resources.drain.finish(error)
+        if (
+            resources.drain.cancellation is not None
+            and resources.original_failure is None
+        ):
+            resources.original_failure = Failure(
+                asyncio.CancelledError, "indexing request cancelled"
+            )
+        if getattr(db, "_rust_pipeline_cleanup", None) is resources:
+            error = RustPipelineCleanupError(resources)
+        resources.forget_completed_futures()
+        # Freeze this caller's detached outcome before another thread can recover
+        # and replace the retained resources' diagnostics. Delivery is attempt-local.
+        failure = resources.cleanup_failure
+        cancellation = resources.drain.cancellation is not None
+        resources.drain.cancellation = None
+        if getattr(db, "_rust_pipeline_cleanup", None) is resources:
+            # No await after publication: original owner has drained every
+            # admitted worker and will not touch handles again.
+            resources.recovery_required = True
+        # Ordinary readiness observes the completed backend on the next action.
+        # Publishing success here, after guard release, could overwrite a newer
+        # caller's failed completion.
+    if cancellation:
+        # Explicit caller cancellation dominates callback-generated control flow.
+        raise asyncio.CancelledError()
+    if failure is not None and failure.kind in (
+        asyncio.CancelledError, KeyboardInterrupt, SystemExit,
+    ):
+        control = failure.exception()
+        raise control from control.__cause__
+    if error is not None:
+        raise error
 
     diff_elapsed = 0.0
     compact_ran = False

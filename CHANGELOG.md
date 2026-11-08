@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Hub index pull** — `chunkhound pull` installs a compatible published DuckDB or LanceDB base. Run `chunkhound index` afterward to overlay local changes.
+- **Configurable artifact download deadline** — `hub.download_timeout_seconds` defaults to 3600 seconds; set it through configuration or `CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS` using existing configuration precedence. One cooperative deadline covers all artifact download attempts, separately from network inactivity and archive extraction limits.
+
+### Changed
+- **Automatic hub replacement during indexing** — Eligible embedding-enabled indexing can install a hub base for a missing or misaligned index before normal local indexing. Aligned indexes, search, MCP, simulation, ignore checking, and no-embeddings indexing do not automatically pull.
+- **Parser workers always use spawn** — `CHUNKHOUND_MP_START_METHOD` is retired and ignored. Startup warns once when it is present, including an empty setting; remove it from your environment.
+
+### Fixed
+- **Compatibility and installation admission** — Unsupported or uninspectable index formats are refused before recovery can mutate them. Active database owners and workers exclude hub installation; incompatible or interrupted local state retains actionable preservation and recovery guidance.
+- **Cancellation and next-action recovery** — Cancellation drains admitted database work and cleanup without releasing ownership early. After a retryable initialization, cleanup, or reconnect failure, the next database-backed search or indexing action attempts recovery on the same provider and proceeds only when recovery succeeds. Failed indexing is not replayed automatically, explicitly closed providers stay closed, and unsafe or unsuccessful recovery remains unavailable with actionable diagnostics.
+
 ## [6.1.0] - 2026-10-20
 
 ### Added

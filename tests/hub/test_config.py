@@ -170,3 +170,95 @@ def test_archive_limits_follow_existing_nested_layer_precedence(tmp_path, monkey
         target_dir=tmp_path, skip_layers={"local_config", "config_file", "cli"}
     )
     assert global_only.hub.archive_limits.max_members == 21
+
+
+TIMEOUT_ENV = "CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS"
+ISOLATED_LAYERS = {"global", "env", "local_config", "config_file", "cli"}
+
+
+def test_download_timeout_defaults_to_one_hour(tmp_path):
+    config = Config(target_dir=tmp_path, skip_layers=ISOLATED_LAYERS)
+    assert config.hub.download_timeout_seconds == 3600.0
+
+
+@pytest.mark.parametrize("value", [1, 0.125, 3600.0, 7200])
+def test_download_timeout_accepts_positive_finite_numbers(tmp_path, value):
+    config = Config(
+        target_dir=tmp_path,
+        hub={"download_timeout_seconds": value},
+        skip_layers=ISOLATED_LAYERS,
+    )
+    assert config.hub.download_timeout_seconds == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 0, -1, float("inf"), float("-inf"), float("nan"),
+     None, "unlimited", "3600"],
+)
+def test_download_timeout_rejects_invalid_config(tmp_path, value):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Config(
+            target_dir=tmp_path,
+            hub={"download_timeout_seconds": value},
+            skip_layers=ISOLATED_LAYERS,
+        )
+
+
+@pytest.mark.parametrize("text,value", [("7200", 7200), ("0.25", 0.25), ("1e2", 100)])
+def test_download_timeout_environment_is_decoded(tmp_path, monkeypatch, text, value):
+    monkeypatch.setenv(TIMEOUT_ENV, text)
+    config = Config(target_dir=tmp_path, skip_layers=ISOLATED_LAYERS - {"env"})
+    assert config.hub.download_timeout_seconds == value
+    skipped = Config(target_dir=tmp_path, skip_layers=ISOLATED_LAYERS)
+    assert skipped.hub.download_timeout_seconds == 3600.0
+
+
+@pytest.mark.parametrize(
+    "text", ["true", "false", "0", "-1", "Infinity", "-Infinity", "NaN",
+             "inf", "null", "unlimited", "", '"3600"'],
+)
+def test_download_timeout_invalid_environment_is_rejected(tmp_path, monkeypatch, text):
+    from pydantic import ValidationError
+
+    monkeypatch.setenv(TIMEOUT_ENV, text)
+    with pytest.raises(ValidationError):
+        Config(target_dir=tmp_path, skip_layers=ISOLATED_LAYERS - {"env"})
+
+
+def test_download_timeout_obeys_existing_config_precedence(tmp_path, monkeypatch):
+    monkeypatch.setenv(TIMEOUT_ENV, "unlimited")
+    global_file = tmp_path / "global.json"
+    global_file.write_text(json.dumps({"hub": {"download_timeout_seconds": 21}}))
+    monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_file))
+    local = tmp_path / ".chunkhound.json"
+    local.write_text(json.dumps({"hub": {"download_timeout_seconds": 31}}))
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text(json.dumps({"hub": {"download_timeout_seconds": 41}}))
+    assert (
+        Config(target_dir=tmp_path, skip_layers={"cli"}).hub.download_timeout_seconds
+        == 31
+    )
+    args = argparse.Namespace(config=str(explicit))
+    assert (
+        Config(target_dir=tmp_path, args=args, skip_layers={"cli"})
+        .hub.download_timeout_seconds == 41
+    )
+    direct = Config(
+        target_dir=tmp_path, args=args, hub={"download_timeout_seconds": 51},
+        skip_layers={"cli"},
+    )
+    assert direct.hub.download_timeout_seconds == 51
+    local.unlink()
+    assert (
+        Config(target_dir=tmp_path, skip_layers={"cli"}).hub.download_timeout_seconds
+        == 21
+    )
+    global_file.unlink()
+    monkeypatch.setenv(TIMEOUT_ENV, "11")
+    assert (
+        Config(target_dir=tmp_path, skip_layers={"cli"}).hub.download_timeout_seconds
+        == 11
+    )
