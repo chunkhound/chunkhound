@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
+import psutil
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -258,13 +259,50 @@ def _new_chrome(chrome_path: str) -> zd.Browser:
 
 
 def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
+    """Close pipe fds without taking the buffered reader's lock.
+
+    A reader thread blocked on the pipe holds the BufferedReader lock, so a
+    buffered close() waits for that lock. Chrome stdin is never written, so
+    skipping the buffered flush is safe.
+    """
     for pipe in (process.stdin, process.stdout, process.stderr):
         if pipe is None:
             continue
+        raw = getattr(pipe, "raw", None)
+        if raw is None:
+            logger.debug("Chrome pipe has no raw stream; leaving it open")
+            continue
         try:
-            pipe.close()
-        except OSError as exc:
+            raw.close()
+        except (OSError, ValueError) as exc:
             logger.debug("Chrome pipe close failed: {!r}", exc)
+
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kill Chrome and every descendant so no child keeps a pipe open.
+
+    Chrome's descendants inherit the stderr pipe. Killing the tree lets the
+    abandoned stderr reader reach EOF instead of blocking teardown forever.
+    """
+    try:
+        children = psutil.Process(process.pid).children(recursive=True)
+    except psutil.Error:
+        children = []
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    for child in children:
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(children, timeout=1.0)
+    if alive:
+        logger.warning(
+            "Chrome descendants survived cleanup: {}",
+            ", ".join(str(child.pid) for child in alive),
+        )
 
 
 def _reap_chrome_process(browser: zd.Browser) -> None:
@@ -273,10 +311,7 @@ def _reap_chrome_process(browser: zd.Browser) -> None:
     if process is None:
         return
     if process.poll() is None:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass
+        _kill_process_tree(process)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:

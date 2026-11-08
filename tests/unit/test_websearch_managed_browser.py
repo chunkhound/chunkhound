@@ -6,10 +6,12 @@ import asyncio
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 import zendriver
 import zendriver.core.browser as browser_mod
@@ -420,7 +422,83 @@ async def test_reap_process_clears_state_for_exited_child() -> None:
 
     assert browser._process is None
     assert browser._process_pid is None
-    assert process.stdin is not None and process.stdin.closed
-    assert process.stdout is not None and process.stdout.closed
-    assert process.stderr is not None and process.stderr.closed
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        assert pipe is not None
+        assert getattr(pipe, "raw").closed
     websearch_core._cleanup_browser_sync(browser)
+
+
+@pytest.mark.asyncio
+async def test_reap_process_returns_when_descendant_holds_pipe_open(
+    tmp_path: Path,
+) -> None:
+    """A descendant that keeps stderr open cannot block teardown.
+
+    The grandchild inherits the parent's stderr write end. The reader thread
+    holds the BufferedReader lock, which is the state that deadlocks a
+    buffered close().
+    """
+    pid_file = tmp_path / "grandchild.pid"
+    child_script = (
+        "import pathlib, subprocess, sys, time;"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
+        "pathlib.Path(sys.argv[1]).write_text(str(p.pid));"
+        "time.sleep(60)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child_script, str(pid_file)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    browser = _make_browser_with_profile()
+    browser._process = process
+    browser._process_pid = process.pid
+
+    def drain() -> None:
+        try:
+            process.stderr.read(65536)
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + 5.0
+    while not pid_file.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    grandchild_pid = int(pid_file.read_text())
+    parent_proc = psutil.Process(process.pid)
+    grandchild_proc = psutil.Process(grandchild_pid)
+    await asyncio.sleep(0.2)  # let the reader block on the open pipe
+
+    started = time.monotonic()
+    cleanup = threading.Thread(
+        target=websearch_core._reap_chrome_process,
+        args=(browser,),
+        daemon=True,
+    )
+    cleanup.start()
+    await asyncio.to_thread(cleanup.join, 5.0)
+    elapsed = time.monotonic() - started
+
+    try:
+        assert not cleanup.is_alive(), "cleanup blocked on a descendant-held pipe"
+        assert elapsed < 5.0
+        assert browser._process is None
+        _, alive = psutil.wait_procs(
+            [parent_proc, grandchild_proc],
+            timeout=5.0,
+        )
+        assert not alive
+    finally:
+        for pid in (process.pid, grandchild_pid):
+            try:
+                psutil.Process(pid).kill()
+            except psutil.Error:
+                pass
+        if process.stderr is not None:
+            raw = getattr(process.stderr, "raw", None)
+            if raw is not None:
+                raw.close()
+        await asyncio.to_thread(reader.join, 2.0)
+        await asyncio.to_thread(cleanup.join, 2.0)
