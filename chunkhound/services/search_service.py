@@ -264,7 +264,7 @@ class SearchService(BaseService):
             # is populated by the result enhancer.
             if query and self._embedding_provider and results:
                 try:
-                    query_vec = (await self._embedding_provider.embed([query]))[0]
+                    query_vec = (await self._embedding_provider.embed_query([query]))[0]
                     chunk_ids = [
                         c["chunk_id"]
                         for c in results

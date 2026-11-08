@@ -65,10 +65,13 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
         )
 
     provider.embed = _embed
+    provider.embed_query = _embed
     em.register_provider(provider, set_default=True)
 
     # Also wire embed_texts on the manager itself so the injection block works
-    async def _embed_texts(texts: list[str]) -> LocalEmbeddingResult:
+    async def _embed_texts(
+        texts: list[str], provider_name: str | None = None
+    ) -> LocalEmbeddingResult:
         import math
         vec = [1.0 / math.sqrt(dim)] * dim
         return LocalEmbeddingResult(
@@ -79,6 +82,7 @@ def _make_embedding_manager(dim: int = 4) -> EmbeddingManager:
         )
 
     em.embed_texts = _embed_texts  # type: ignore[method-assign]
+    em.embed_query_texts = _embed_texts  # type: ignore[method-assign]
     return em
 
 

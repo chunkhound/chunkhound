@@ -31,6 +31,7 @@ from chunkhound.providers.database.lifecycle import (
     LifecycleFailure,
 )
 from chunkhound.utils.async_worker import WorkerDrain
+from chunkhound.utils.parent_watch import exit_when_parent_dies
 
 if TYPE_CHECKING:
     from chunkhound.interfaces.embedding_provider import EmbeddingProvider
@@ -274,6 +275,7 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
                 pool = ProcessPoolExecutor(
                     max_workers=max(1, max_workers),
                     mp_context=multiprocessing.get_context("spawn"),
+                    initializer=exit_when_parent_dies,
                 )
                 atexit.register(pool.shutdown, cancel_futures=True)
                 _parse_pool = pool
@@ -511,6 +513,7 @@ def _parse_file_worker_for_timeout(
     detection + the binary guard + the config-file size gate) instead of
     parsing directly.
     """
+    exit_when_parent_dies()
     try:
         lang, chunks, skip = parse_file_callback(
             file_path,

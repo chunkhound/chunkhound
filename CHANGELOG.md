@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Compatibility and installation admission** — Unsupported or uninspectable index formats are refused before recovery can mutate them. Active database owners and workers exclude hub installation; incompatible or interrupted local state retains actionable preservation and recovery guidance.
 - **Cancellation and next-action recovery** — Cancellation drains admitted database work and cleanup without releasing ownership early. After a retryable initialization, cleanup, or reconnect failure, the next database-backed search or indexing action attempts recovery on the same provider and proceeds only when recovery succeeds. Failed indexing is not replayed automatically, explicitly closed providers stay closed, and unsafe or unsuccessful recovery remains unavailable with actionable diagnostics.
+- **VoyageAI semantic search ranks better** — Search queries are now embedded with Voyage `input_type="query"` instead of `"document"`. Voyage models embed queries and documents differently, and a query embedded as a document was matched as one document against another, which pushed relevant code far down the results. Indexed chunks were always embedded as documents and still are, so no re-index is needed. Other providers are unchanged.
 
 ## [6.1.0] - 2026-10-20
 
