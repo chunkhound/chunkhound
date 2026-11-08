@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sys
 import urllib.error
 
@@ -12,6 +11,7 @@ from chunkhound.utils.websearch_core import websearch_timeout
 from chunkhound.utils.websearch_pipeline import (
     EmptyWebSearchError,
     NoPagesFetchedError,
+    WebSearchTimeoutError,
     run_websearch,
 )
 
@@ -68,7 +68,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     except urllib.error.URLError as e:
         formatter.error(f"Web search failed: {e.reason}")
         sys.exit(1)
-    except (TimeoutError, asyncio.TimeoutError) as e:
+    except WebSearchTimeoutError as e:
         formatter.error(str(e))
         sys.exit(124)
     except NoPagesFetchedError as e:
