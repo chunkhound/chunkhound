@@ -1457,8 +1457,8 @@ class MCPServerBase(ABC):
 
         async def on_call_tool(
             ctx: Any,
-            params: "types.CallToolRequestParams",
-        ) -> "types.CallToolResult":
+            params: types.CallToolRequestParams,
+        ) -> types.CallToolResult:
             """Universal tool handler that routes to the unified handler."""
             arguments = params.arguments or {}
             validation_error = _validate_tool_arguments(params.name, arguments)
@@ -1493,7 +1493,7 @@ class MCPServerBase(ABC):
         async def on_list_tools(
             ctx: Any,
             params: Any,
-        ) -> "types.ListToolsResult":
+        ) -> types.ListToolsResult:
             # Wait for initialization
             try:
                 await asyncio.wait_for(

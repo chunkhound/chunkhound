@@ -152,7 +152,7 @@ markdown-it-py==4.0.0
     # via rich
 markupsafe==3.0.3
     # via werkzeug
-mcp==1.16.0
+mcp==2.3.0
     # via
     #   chunkhound (pyproject.toml)
     #   fastmcp

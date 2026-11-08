@@ -1,5 +1,6 @@
-"""Enforces the single-dispatch-point design: exactly
-chunkhound/mcp_server/base.py imports the mcp SDK — no more, no less."""
+"""Enforces the single-dispatch-point design: among the
+transport wrappers, only chunkhound/mcp_server/base.py imports the mcp SDK
+(common.py imports mcp.types for type helpers only)."""
 
 import ast
 from pathlib import Path
