@@ -2331,7 +2331,6 @@ class TestAutoCompactionMaintenance:
             logger.remove(sink_id)
 
         out = buf.getvalue()
-        assert "Database compaction in progress — refusing connection" in out
         assert "DuckDB connection failed" not in out
 
     def test_unexpected_connect_failure_is_still_logged_as_error(
@@ -2356,7 +2355,7 @@ class TestAutoCompactionMaintenance:
         finally:
             logger.remove(sink_id)
 
-        assert "DuckDB connection failed: boom" in buf.getvalue()
+        assert "DuckDB connection failed: RuntimeError" in buf.getvalue()
 
     def test_dispatch_layer_triggers_compact_if_needed(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch

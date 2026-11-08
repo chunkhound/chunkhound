@@ -92,11 +92,18 @@ async def indexed_project(tmp_path):
 async def test_file_backed_search_command_uses_factory_initialization(
     tmp_path, monkeypatch, clean_environment, capsys
 ):
-    import chunkhound.registry as registry_module
+    import chunkhound.api.cli.commands.search as search_module
 
-    # Isolate global lifecycle state but use the real registry/factory/provider.
-    registry = registry_module.ProviderRegistry()
-    monkeypatch.setattr(registry_module, "_registry", registry)
+    # Capture services built by the real factory inside search_command.
+    created: list = []
+    real_create_services = search_module.create_services
+
+    def _capturing_create_services(*a, **kw):
+        svc = real_create_services(*a, **kw)
+        created.append(svc)
+        return svc
+
+    monkeypatch.setattr(search_module, "create_services", _capturing_create_services)
     (tmp_path / "calculator.py").write_text(CALCULATOR_PY)
     config = Config(
         database=DatabaseConfig(
@@ -132,9 +139,11 @@ async def test_file_backed_search_command_uses_factory_initialization(
         assert "calculator.py" in output
         assert "calculate_tax" in output
         assert config.database.get_db_path() == db_path
-        assert registry.get_provider("database").get_base_directory() == tmp_path
+        assert len(created) == 1
+        assert created[0].provider.get_base_directory() == tmp_path
     finally:
-        registry.get_provider("database").disconnect()
+        for svc in created:
+            svc.provider.disconnect()
 
 
 async def _regex_search(services, query, **kwargs):
