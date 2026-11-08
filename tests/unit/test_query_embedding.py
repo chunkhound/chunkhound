@@ -117,6 +117,7 @@ async def test_single_hop_search_scores_the_query_vector() -> None:
 async def test_regex_search_scores_results_with_the_query_vector() -> None:
     provider = _AsymmetricProvider()
     db = MagicMock()
+    db.ensure_ready_async = AsyncMock()
     db.search_regex_async = AsyncMock(
         return_value=([{"chunk_id": 7, "file_path": "a.py", "content": "x"}], {})
     )
