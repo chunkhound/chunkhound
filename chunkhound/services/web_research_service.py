@@ -125,25 +125,49 @@ class _TransientProvider:
         )
         # Do not retain raw PDF bytes after bounded normalization. The source
         # fingerprint remains in the descriptor for live-refetch validation.
-        content = cached_page[2]
-        # Count each distinct object once: raw and normalized text (and chunk
-        # strings) often share storage, so summing per reference overcounts.
+        # Count each distinct retained object once: raw and normalized text
+        # often share storage. Traverse cache-owned containers and chunk
+        # fields explicitly without following classes, enums, or other
+        # process-global object graphs.
         seen: set[int] = set()
 
-        def sized(obj: object) -> int:
-            if id(obj) in seen:
+        def retained_size(obj: object) -> int:
+            if obj is None or id(obj) in seen:
                 return 0
             seen.add(id(obj))
-            return sys.getsizeof(obj)
+            size = sys.getsizeof(obj)
+            if isinstance(obj, dict):
+                size += sum(
+                    retained_size(key) + retained_size(value)
+                    for key, value in obj.items()
+                )
+            elif isinstance(obj, (tuple, list, set, frozenset)):
+                size += sum(retained_size(item) for item in obj)
+            return size
 
-        size = (
-            sum(
-                sized(item)
-                for item in (cached_page, source_url, extension, content, text)
+        # The placeholder integer has the same tuple slot cost as the stored
+        # size while avoiding a second accounting pass after size is known.
+        size = retained_size((cached_page, text, cached_chunks, 0))
+        for chunk in cached_chunks or ():
+            size += sum(
+                retained_size(value)
+                for value in (
+                    chunk.symbol,
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.code,
+                    chunk.file_id,
+                    chunk.file_path,
+                    chunk.parent_header,
+                    chunk.start_byte,
+                    chunk.end_byte,
+                    chunk.created_at,
+                    chunk.updated_at,
+                    chunk.metadata,
+                )
             )
-            + sum(sized(chunk) + sized(chunk.code) for chunk in cached_chunks or ())
-            + 512
-        )
+        # Allow for the OrderedDict node and allocator bookkeeping.
+        size += 512
         if size > _SOURCE_CACHE_BYTES:
             return
         while self._sources and self._source_bytes + size > _SOURCE_CACHE_BYTES:
