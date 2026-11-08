@@ -22,7 +22,7 @@ Purpose: Transform codebases into searchable knowledge bases for AI agents
 ## KEY_COMMANDS
 ```bash
 # Development
-lint:      uv run ruff check chunkhound brand
+lint:      make lint
 typecheck: uv run mypy chunkhound
 test:      uv run pytest
 smoke:     uv run pytest tests/test_smoke.py -v -n auto  # MANDATORY before commits
