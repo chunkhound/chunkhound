@@ -916,6 +916,11 @@ class TransientSearchService:
             return await self._search_transient_regex(
                 pattern, page_size, offset, path_filter
             )
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+            )
 
         snapshot_size = min(
             max(offset + page_size, _candidate_pool_size(page_size)),
