@@ -1005,7 +1005,12 @@ def test_parser_worker_does_not_inherit_owner_lease(tmp_path):
         import os, sys, time
         from pathlib import Path
         import chunkhound_native as native
-        from chunkhound.pipeline_bridge import _get_parse_pool
+        import chunkhound.pipeline_bridge as bridge
+
+        def keep_alive_after_parent_death():
+            # The pool normally exits workers when the owner dies. This test needs a
+            # surviving worker to prove it does not inherit the owner's lease.
+            pass
 
         def child(pid_path, stop_path):
             Path(pid_path).write_text(str(os.getpid()))
@@ -1017,7 +1022,8 @@ def test_parser_worker_does_not_inherit_owner_lease(tmp_path):
         if __name__ == '__main__':
             lease = native.acquire_database_lease(sys.argv[1])
             Path(sys.argv[4]).write_text(str(os.getpid()))
-            _get_parse_pool(1).submit(child, sys.argv[2], sys.argv[3]).result()
+            bridge.exit_when_parent_dies = keep_alive_after_parent_death
+            bridge._get_parse_pool(1).submit(child, sys.argv[2], sys.argv[3]).result()
     """)
     )
     target = tmp_path / "chunks.db"
