@@ -46,7 +46,7 @@ def _consume_task_result(task: asyncio.Task[Any]) -> None:
 
 
 async def _cancel_and_wait(task: asyncio.Task[Any], *, deadline: float) -> None:
-    """Cancel a sibling task, detaching it when the total budget is spent."""
+    """Cancel a sibling task, detaching cooperative cleanup at the deadline."""
     if task.done():
         _consume_task_result(task)
         return
@@ -94,6 +94,11 @@ async def run_websearch(
     at most 60s. Fetch overlaps research under whatever time remains. Research
     stays on the same task as the page async generator: wrapping only
     research in wait_for moves iteration to a child task and hangs on 3.10.
+
+    When the total deadline expires, this function responds immediately and
+    lets cooperative task/generator cleanup finish in the background. Callers
+    using a short-lived event loop should keep it alive if that cleanup must
+    complete before shutdown.
     """
     from chunkhound.services.web_research_service import Page, research_web_pages
     from chunkhound.utils.websearch_core import fetch_pages, search_multi
@@ -175,8 +180,23 @@ async def run_websearch(
         finally:
             await _close_pages_by_deadline(fetched_pages, deadline=deadline)
 
+    run_task = asyncio.create_task(_run())
     try:
-        return await asyncio.wait_for(_run(), timeout=total)
+        done, _pending = await asyncio.wait({run_task}, timeout=total)
+        if not done:
+            # Do not await cancellation here: research may be consuming the
+            # page generator, whose cleanup can outlive the response budget.
+            # _run owns eventual stream closure and the callback observes any
+            # late exception.
+            run_task.cancel()
+            run_task.add_done_callback(_consume_task_result)
+            raise _timeout("research", total)
+        return run_task.result()
+    except asyncio.CancelledError:
+        # Caller cancellation is not a deadline response; retain normal
+        # structured cleanup semantics before propagating it.
+        await _cancel_and_wait(run_task, deadline=deadline)
+        raise
     except WebSearchTimeoutError:
         raise
     except (asyncio.TimeoutError, TimeoutError):
