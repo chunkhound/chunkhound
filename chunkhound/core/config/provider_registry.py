@@ -165,4 +165,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://cheapaimodel.ai/docs",
         auth_url="https://console.cheapaimodel.ai/keys",
     ),
+    "standardcompute": OpenAICompatibleSpec(
+        name="standardcompute",
+        default_base_url="https://api.stdcmpt.com/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=10,
+        docs_url="https://docs.standardcompute.com",
+        auth_url="https://www.standardcompute.com/dashboard",
+    ),
 }

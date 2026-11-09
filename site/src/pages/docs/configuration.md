@@ -511,6 +511,7 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | Atlas Cloud | `atlascloud` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Atlas Cloud API. Registry providers require explicit `model`. |
 | Runcrate | `runcrate` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Runcrate API. Registry providers require explicit `model`. |
 | cheapaimodel | `cheapaimodel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | cheapaimodel API. Registry providers require explicit `model`. |
+| Standard Compute | `standardcompute` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Standard Compute API. `StandardCompute` routes each request to the cheapest enabled model that can handle it; pinned ids such as `deepseek/deepseek-v4-pro` are listed at `GET https://api.stdcmpt.com/v1/models`. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 

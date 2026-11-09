@@ -328,6 +328,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_CHEAPAIMODEL_API_KEY>",
     },
     {
+        id: "standardcompute",
+        name: "Standard Compute",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M6 6h12v12H6zM9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "standardcompute",
+            model: "StandardCompute",
+        },
+        apiKeyPlaceholder: "<YOUR_STANDARDCOMPUTE_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,

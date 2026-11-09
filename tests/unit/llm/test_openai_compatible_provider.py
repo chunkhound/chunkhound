@@ -204,6 +204,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "standardcompute",
+            "model": "StandardCompute",
+            "expected_name": "standardcompute",
+            "expected_base_url": "https://api.stdcmpt.com/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'standardcompute'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="standardcompute",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -362,6 +377,7 @@ class TestFactoryPipeline:
             "atlascloud": 10,
             "runcrate": 10,
             "cheapaimodel": 10,
+            "standardcompute": 10,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected
