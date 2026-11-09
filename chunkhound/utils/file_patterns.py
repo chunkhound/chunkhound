@@ -56,6 +56,27 @@ def _compile_pattern_global(pattern: str) -> Pattern[str]:
     return re.compile(translate(pattern))
 
 
+@lru_cache(maxsize=1024)
+def _recursive_glob_variants(pattern: str) -> tuple[str, ...]:
+    """Return variants where each `/**/` may match zero directories."""
+    token = "/**/"
+    variants = {pattern}
+    for _ in range(pattern.count(token)):
+        variants.update(
+            candidate[: match.start()] + "/" + candidate[match.end() :]
+            for candidate in tuple(variants)
+            for match in re.finditer(re.escape(token), candidate)
+        )
+    return tuple(variants)
+
+
+def _matches_glob(pattern: str, text: str, cache: dict[str, Pattern[str]]) -> bool:
+    return any(
+        compile_pattern(variant, cache).match(text)
+        for variant in _recursive_glob_variants(pattern)
+    )
+
+
 def compile_pattern(pattern: str, cache: dict[str, Pattern[str]]) -> Pattern[str]:
     """Compile fnmatch pattern to regex with caching.
 
@@ -260,24 +281,17 @@ def should_exclude_path(
     for exclude_pattern in patterns:
         # Handle **/ prefix and /** suffix patterns (directory subtree excludes)
         if exclude_pattern.startswith("**/") and exclude_pattern.endswith("/**"):
-            # Example: **/.venv/**, **/.venv*/**, **/node_modules/**
             target = exclude_pattern[3:-3]
-
-            # If the target segment contains wildcard characters, evaluate it
-            # against each path component using fnmatch so patterns like
-            # "**/.venv*/**" correctly match ".venv-docling" directories.
-            if "*" in target or "?" in target or ("[" in target and "]" in target):
-                # Check both relative and absolute component views for robustness
-                for part in rel_path.parts:
-                    if fnmatch(part, target):
+            target_parts = tuple(part for part in target.split("/") if part)
+            if not target_parts:
+                continue
+            for parts in (rel_path.parts, path.parts):
+                for index in range(len(parts) - len(target_parts) + 1):
+                    if all(
+                        fnmatch(part, pattern)
+                        for part, pattern in zip(parts[index:], target_parts)
+                    ):
                         return True
-                for part in path.parts:
-                    if fnmatch(part, target):
-                        return True
-            else:
-                # Fast path for exact directory segment matches
-                if target in rel_path.parts or target in path.parts:
-                    return True
         elif exclude_pattern.startswith("**/"):
             # Treat "**/..." like include logic: try full and simple variants
             compiled_full = compile_pattern(exclude_pattern, cache)
@@ -325,24 +339,22 @@ def should_include_file(
         if pattern.startswith("**/"):
             simple_pattern = pattern[3:]  # Remove **/ prefix (e.g., *.md from **/*.md)
 
-            # Use compiled patterns for consistent performance
-            compiled_full = compile_pattern(pattern, cache)
-            compiled_simple = compile_pattern(simple_pattern, cache)
-
+            # Python's fnmatch requires `**` to consume a directory here.
+            # Try variants where recursive segments consume none as well.
             # Match against:
             # 1. Full relative path with **/ for nested files
             # 2. Simple pattern for any depth
             # 3. Filename only for simple patterns
             if (
-                compiled_full.match(rel_path_str)
-                or compiled_simple.match(rel_path_str)
-                or compiled_simple.match(filename)
+                _matches_glob(pattern, rel_path_str, cache)
+                or _matches_glob(simple_pattern, rel_path_str, cache)
+                or _matches_glob(simple_pattern, filename, cache)
             ):
                 return True
         else:
-            # Use compiled regex for faster matching
-            compiled = compile_pattern(pattern, cache)
-            if compiled.match(rel_path_str) or compiled.match(filename):
+            if _matches_glob(pattern, rel_path_str, cache) or _matches_glob(
+                pattern, filename, cache
+            ):
                 return True
     return False
 
