@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
+import sys
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -100,8 +102,17 @@ async def daemon_harness(tmp_path: Path) -> AsyncIterator[DaemonHarness]:
     # routinely exceed that limit, failing bind() with "AF_UNIX path too long"
     # on ordinary usernames/CI prefixes. Use a short, independent socket dir
     # instead of nesting under the (test-name-derived) project_dir.
-    socket_dir = tempfile.mkdtemp(prefix="ch-")
-    socket_path = os.path.join(socket_dir, f"{uuid.uuid4().hex[:8]}.sock")
+    socket_dir: str | None = None
+    if sys.platform == "win32":
+        # Windows IPC addresses are tcp:<host>:<port> (see chunkhound.daemon.ipc),
+        # not filesystem paths. Reserve a free loopback port the way discovery
+        # hands one to the daemon.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            socket_path = f"tcp:127.0.0.1:{probe.getsockname()[1]}"
+    else:
+        socket_dir = tempfile.mkdtemp(prefix="ch-")
+        socket_path = os.path.join(socket_dir, f"{uuid.uuid4().hex[:8]}.sock")
 
     daemon = ChunkHoundDaemon(
         config,
@@ -126,4 +137,5 @@ async def daemon_harness(tmp_path: Path) -> AsyncIterator[DaemonHarness]:
             await server.wait_closed()
         except Exception:
             pass
-        shutil.rmtree(socket_dir, ignore_errors=True)
+        if socket_dir is not None:
+            shutil.rmtree(socket_dir, ignore_errors=True)
