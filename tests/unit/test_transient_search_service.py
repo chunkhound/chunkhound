@@ -1462,10 +1462,10 @@ async def test_partial_cache_hits_preserve_ranking_and_tie_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_small_result_limit_never_truncates_or_advertises_empty_page() -> None:
+async def test_diff_semantic_pagination_continues_past_retained_pool() -> None:
     chunks = [
         make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
-        for i in range(100)
+        for i in range(60)
     ]
     service = TransientSearchService(
         make_original(),
@@ -1476,17 +1476,30 @@ async def test_small_result_limit_never_truncates_or_advertises_empty_page() -> 
     )
 
     results, pagination = await service.search_semantic(
-        "query", page_size=10, offset=20, result_limit=5
+        "query", page_size=10, offset=40
     )
     assert len(results) == 10
-    assert pagination["has_more"] is False
-    assert pagination["next_offset"] is None
+    assert pagination["has_more"] is True
+    assert pagination["next_offset"] == 50
+
+    next_results, next_pagination = await service.search_semantic(
+        "query", page_size=10, offset=pagination["next_offset"]
+    )
+    assert len(next_results) == 10
+    assert next_pagination["has_more"] is False
 
     many = await service.search_semantic_many(
-        ["query"], page_size=10, offset=20, result_limit=5
+        ["query"], page_size=10, offset=40, result_limit=5
     )
     assert len(many[0][0]) == 10
-    assert many[0][1]["has_more"] is False
+    assert many[0][1]["has_more"] is True
+    assert many[0][1]["next_offset"] == 50
+
+    bulk_next = await service.search_semantic_many(
+        ["query"], page_size=10, offset=many[0][1]["next_offset"], result_limit=5
+    )
+    assert len(bulk_next[0][0]) == 10
+    assert bulk_next[0][1]["has_more"] is False
 
 
 @pytest.mark.asyncio

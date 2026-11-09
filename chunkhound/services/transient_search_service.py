@@ -315,7 +315,7 @@ class TransientSearchService:
             entry[2] for entry in sorted(heap, key=lambda item: (-item[0], -item[1]))
         ]
         return ranked[offset : offset + page_size], self._pagination(
-            page_size, offset, qualifying_count, retained=len(ranked)
+            page_size, offset, qualifying_count
         )
 
     async def _search_transient_many(
@@ -413,9 +413,7 @@ class TransientSearchService:
             outputs.append(
                 (
                     ranked[offset : offset + page_size],
-                    self._pagination(
-                        page_size, offset, total, retained=len(ranked)
-                    ),
+                    self._pagination(page_size, offset, total),
                 )
             )
         return outputs
@@ -434,14 +432,10 @@ class TransientSearchService:
         offset: int,
         total: int,
         window: int = _MAX_RESULT_WINDOW,
-        retained: int | None = None,
     ) -> dict[str, Any]:
         # Only advertise a next page the same call would accept: the next
         # request must keep offset + page_size inside the supported window.
-        # ``retained`` caps paging at the results actually kept, so a small
-        # result limit never advertises a next page that would be empty.
-        pageable = total if retained is None else min(total, retained)
-        has_more = offset + page_size < pageable and offset + 2 * page_size <= window
+        has_more = offset + page_size < total and offset + 2 * page_size <= window
         return {
             "offset": offset,
             "page_size": page_size,
