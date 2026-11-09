@@ -270,6 +270,14 @@ def test_cheapaimodel_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_standardcompute_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "standardcompute")
+
+    assert config["provider"] == "standardcompute"
+    assert config["model"] == "StandardCompute"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 
