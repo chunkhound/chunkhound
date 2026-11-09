@@ -21,10 +21,10 @@ the answer is "nothing", and hand Rust only the changed files otherwise:
 - mtime equal but a known stored size differs: changed;
 - otherwise unchanged.
 
-A file is called unchanged only when Rust would call it unchanged: a matching
-hash means identical bytes, so any disagreement with Rust over the mtime read
-(the two DuckDB builds' session time zones) can only make this check hash
-more files, never skip a changed one.
+A file is called unchanged only when its bytes are unchanged: either the hash
+matches, or mtime and size both match (the same trust Rust's mtime fast path
+places in them). A disagreement with Rust over the mtime read (the two DuckDB
+builds' session time zones) can only make this check hash more files.
 """
 
 from __future__ import annotations
@@ -94,7 +94,9 @@ def classify_files(
                 same_bytes = (
                     bool(stored_hash) and compute_file_hash(path) == stored_hash
                 )
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError: compute_file_hash refuses a path that stopped
+                # being a regular file after stat() (deleted or replaced).
                 same_bytes = False
             if same_bytes:
                 skipped_by_hash += 1

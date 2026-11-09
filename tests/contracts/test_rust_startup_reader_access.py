@@ -88,3 +88,43 @@ def test_unchanged_reindex_never_takes_the_database_from_readers(tmp_path, monke
     assert results, "a search after the unchanged run must return results"
     disconnect_registry_db()
     assert files_table_paths(db_dir) == {"alpha.py", "beta.py"}
+
+
+def test_editing_one_file_reindexes_it_and_keeps_every_other_file(
+    tmp_path, monkeypatch
+):
+    """With nothing removed, Rust is handed only the changed files. It must
+    run with cleanup off: with cleanup on, Rust treats every row missing from
+    the list it was given as a deleted file."""
+    monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name in ("alpha.py", "beta.py", "gamma.py"):
+        (root / name).write_text(f"def {name[:-3]}_marker():\n    return 1\n")
+    db_dir = tmp_path / "db"
+
+    config = _config(root, db_dir)
+    configure_registry(config)
+    asyncio.run(
+        DirectoryIndexingService(
+            indexing_coordinator=create_indexing_coordinator(), config=config
+        ).process_directory(root, no_embeddings=True)
+    )
+    disconnect_registry_db()
+
+    (root / "alpha.py").write_text("def alpha_edited_marker():\n    return 2\n")
+
+    configure_registry(config)
+    coordinator = create_indexing_coordinator()
+    stats = asyncio.run(
+        DirectoryIndexingService(
+            indexing_coordinator=coordinator, config=config
+        ).process_directory(root, no_embeddings=True)
+    )
+
+    assert stats.files_processed == 1
+    assert coordinator._db.search_regex("alpha_edited_marker")[0]
+    assert coordinator._db.search_regex("gamma_marker")[0]
+    disconnect_registry_db()
+    assert files_table_paths(db_dir) == {"alpha.py", "beta.py", "gamma.py"}
