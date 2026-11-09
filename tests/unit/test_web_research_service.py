@@ -234,15 +234,31 @@ async def test_isolated_pdf_parser_enforces_hard_timeout(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_isolated_pdf_parser_reports_worker_exit_without_result(
+async def test_isolated_pdf_parser_reports_worker_exit_and_removes_staged_input(
     monkeypatch,
 ) -> None:
     from chunkhound.services import web_research_service as web
 
+    staged_paths: list[Path] = []
+    stage_content = web._stage_pdf_content
+
+    def capture_staged_path(content: bytes, deadline: float) -> str:
+        input_path = stage_content(content, deadline)
+        staged_paths.append(Path(input_path))
+        return input_path
+
+    monkeypatch.setattr(web, "_PDF_PARSE_TIMEOUT_SECONDS", 0.5)
     monkeypatch.setattr(web, "_pdf_parse_worker", exiting_pdf_worker)
+    monkeypatch.setattr(web, "_stage_pdf_content", capture_staged_path)
+    started = asyncio.get_running_loop().time()
 
     with pytest.raises(RuntimeError, match="exited without a result"):
-        await web._parse_pdf_isolated(b"%PDF", "https://example.invalid/dead.pdf")
+        await web._parse_pdf_isolated(
+            b"%PDF" * 2_000_000, "https://example.invalid/dead.pdf"
+        )
+
+    assert asyncio.get_running_loop().time() - started < 1.5
+    assert staged_paths and not staged_paths[0].exists()
 
 
 @pytest.mark.asyncio
@@ -274,8 +290,8 @@ async def test_isolated_pdf_parser_cancellation_reaps_worker(monkeypatch) -> Non
     stopped = asyncio.Event()
     real_stop = web._stop_pdf_process
 
-    def observed_stop(process) -> None:
-        real_stop(process)
+    def observed_stop(process, deadline: float) -> None:
+        real_stop(process, deadline)
         stopped.set()
 
     monkeypatch.setattr(web, "_pdf_parse_worker", blocking_pdf_worker)
@@ -288,11 +304,50 @@ async def test_isolated_pdf_parser_cancellation_reaps_worker(monkeypatch) -> Non
 
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert stopped.is_set()
+    await asyncio.wait_for(stopped.wait(), timeout=2)
+
+
+def test_staged_pdf_removal_retries_windows_sharing_violation(
+    monkeypatch, tmp_path
+) -> None:
+    from chunkhound.services import web_research_service as web
+
+    input_path = tmp_path / "input.pdf"
+    input_path.write_bytes(b"%PDF")
+    unlink = web.os.unlink
+    attempts = 0
+
+    def temporarily_locked(path: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("file is in use")
+        unlink(path)
+
+    monkeypatch.setattr(web.os, "unlink", temporarily_locked)
+    monkeypatch.setattr(web.time, "sleep", lambda _: None)
+
+    web._remove_staged_pdf(str(input_path))
+
+    assert attempts == 2
+    assert not input_path.exists()
 
 
 @pytest.mark.asyncio
-async def test_isolated_pdf_parser_extracts_fixture_without_disk_writes() -> None:
+async def test_isolated_pdf_parser_extracts_fixture_and_removes_staged_input(
+    monkeypatch,
+) -> None:
+    from chunkhound.services import web_research_service as web
+
+    staged_paths: list[Path] = []
+    stage_content = web._stage_pdf_content
+
+    def capture_staged_path(content: bytes, deadline: float) -> str:
+        input_path = stage_content(content, deadline)
+        staged_paths.append(Path(input_path))
+        return input_path
+
+    monkeypatch.setattr(web, "_stage_pdf_content", capture_staged_path)
     content = Path("tests/fixtures/test_simple.pdf").read_bytes()
 
     chunks = await _parse_pdf_isolated(
@@ -300,6 +355,7 @@ async def test_isolated_pdf_parser_extracts_fixture_without_disk_writes() -> Non
     )
 
     assert chunks
+    assert staged_paths and not staged_paths[0].exists()
     assert all(
         chunk.file_path == "https://example.invalid/test_simple.pdf" for chunk in chunks
     )

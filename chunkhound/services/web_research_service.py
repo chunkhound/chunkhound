@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import os
 import sys
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -312,10 +313,12 @@ def _redirect_stdout_to_stderr() -> None:
     os.dup2(target, 1)
 
 
-def _pdf_parse_worker(content: bytes, connection: Connection) -> None:
-    """Parse one PDF in a disposable process and send bounded JSON bytes."""
+def _pdf_parse_worker(input_path: str, connection: Connection) -> None:
+    """Parse a staged PDF in a disposable process and send bounded JSON bytes."""
     try:
         _redirect_stdout_to_stderr()
+        with open(input_path, "rb") as input_file:
+            content = input_file.read()
         parsed = PDFMapping().parse_pdf_content(content, None, FileId(0))
         bounded, truncated = _bounded_pdf_chunks(parsed)
         wire: list[_PDFChunkWire] = [
@@ -347,16 +350,67 @@ def _pdf_parse_worker(content: bytes, connection: Connection) -> None:
         connection.close()
 
 
-def _stop_pdf_process(process: Any) -> None:
+def _stop_pdf_process(process: Any, deadline: float) -> None:
+    """Stop a worker; finish reaping only after its caller's deadline elapsed."""
+
+    def join_until_deadline() -> None:
+        process.join(
+            max(0.0, min(_PDF_PROCESS_JOIN_SECONDS, deadline - time.monotonic()))
+        )
+
     if process.is_alive():
         process.terminate()
-        process.join(_PDF_PROCESS_JOIN_SECONDS)
+        join_until_deadline()
     if process.is_alive():
         process.kill()
-        process.join(_PDF_PROCESS_JOIN_SECONDS)
+        join_until_deadline()
+    if process.is_alive():
+        # The async caller has already returned at its absolute deadline. Keep
+        # this detached thread until Windows releases the worker's file handle.
+        process.join()
     else:
         process.join(0)
     process.close()
+
+
+def _remove_staged_pdf(input_path: str) -> None:
+    """Remove a staged PDF, tolerating transient Windows file sharing locks."""
+    for attempt in range(50):
+        try:
+            os.unlink(input_path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == 49:
+                raise
+            time.sleep(0.01)
+
+
+def _stage_pdf_content(content: bytes, deadline: float) -> str:
+    """Write PDF bytes to a private file while observing the parse deadline."""
+    fd, input_path = tempfile.mkstemp(prefix="chunkhound-pdf-", suffix=".pdf")
+    try:
+        view = memoryview(content)
+        for offset in range(0, len(view), 64 * 1024):
+            chunk = view[offset : offset + 64 * 1024]
+            while chunk:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"PDF parsing timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+                    )
+                written = os.write(fd, chunk)
+                chunk = chunk[written:]
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"PDF parsing timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+            )
+    except BaseException:
+        os.close(fd)
+        _remove_staged_pdf(input_path)
+        raise
+    os.close(fd)
+    return input_path
 
 
 def _recv_pdf_result(parent: Any, process: Any) -> bytes:
@@ -373,13 +427,25 @@ def _recv_pdf_result(parent: Any, process: Any) -> bytes:
 def _run_pdf_parser_process(
     content: bytes,
     stop: threading.Event,
+    deadline: float,
 ) -> bytes:
-    """Own the blocking spawn/IPC lifecycle outside the asyncio event loop."""
-    context = multiprocessing.get_context("spawn")
-    parent, child = context.Pipe(duplex=False)
-    process = context.Process(target=_pdf_parse_worker, args=(content, child))
+    """Own the staged-file, spawn, IPC, and cleanup lifecycle off the event loop."""
+    input_path: str | None = None
+    parent: Any | None = None
+    child: Any | None = None
+    process: Any | None = None
     started = False
     try:
+        input_path = _stage_pdf_content(content, deadline)
+        if stop.is_set():
+            raise RuntimeError("PDF parsing cancelled")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"PDF parsing timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+            )
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=False)
+        process = context.Process(target=_pdf_parse_worker, args=(input_path, child))
         try:
             process.start()
             started = True
@@ -387,9 +453,9 @@ def _run_pdf_parser_process(
             raise RuntimeError(f"Unable to start PDF parser: {error}") from error
         finally:
             child.close()
-        expires = time.monotonic() + _PDF_PARSE_TIMEOUT_SECONDS
-        while not stop.is_set() and time.monotonic() < expires:
-            if parent.poll(0.01):
+            child = None
+        while not stop.is_set() and time.monotonic() < deadline:
+            if parent.poll(max(0.0, min(0.01, deadline - time.monotonic()))):
                 return _recv_pdf_result(parent, process)
             if not process.is_alive():
                 if parent.poll():
@@ -403,11 +469,17 @@ def _run_pdf_parser_process(
             f"PDF parsing timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
         )
     finally:
-        parent.close()
-        if started:
-            _stop_pdf_process(process)
-        else:
-            process.close()
+        if child is not None:
+            child.close()
+        if parent is not None:
+            parent.close()
+        if process is not None:
+            if started:
+                _stop_pdf_process(process, deadline)
+            else:
+                process.close()
+        if input_path is not None:
+            _remove_staged_pdf(input_path)
 
 
 def _decode_pdf_payload(payload_bytes: bytes, source_url: str) -> list[Chunk]:
@@ -470,22 +542,34 @@ def _decode_pdf_payload(payload_bytes: bytes, source_url: str) -> list[Chunk]:
     return chunks
 
 
+def _consume_pdf_task_exception(task: asyncio.Task[bytes]) -> None:
+    """Retrieve a detached worker task's result after its caller timed out."""
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 async def _parse_pdf_isolated(content: bytes, source_url: str) -> list[Chunk]:
-    """Parse PDF bytes with a hard timeout and cancellation-safe cleanup."""
+    """Parse a PDF within one deadline, without waiting past it for cleanup."""
     stop = threading.Event()
+    deadline = time.monotonic() + _PDF_PARSE_TIMEOUT_SECONDS
     task = asyncio.create_task(
-        asyncio.to_thread(_run_pdf_parser_process, content, stop)
+        asyncio.to_thread(_run_pdf_parser_process, content, stop, deadline)
     )
     try:
         payload = await asyncio.wait_for(
-            asyncio.shield(task), timeout=_PDF_PARSE_TIMEOUT_SECONDS + 1.5
+            asyncio.shield(task), timeout=max(0.0, deadline - time.monotonic())
         )
+    except asyncio.TimeoutError as error:
+        stop.set()
+        task.add_done_callback(_consume_pdf_task_exception)
+        raise TimeoutError(
+            f"PDF parsing timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+        ) from error
     except BaseException:
         stop.set()
-        try:
-            await asyncio.shield(task)
-        except BaseException:
-            pass
+        task.add_done_callback(_consume_pdf_task_exception)
         raise
     return _decode_pdf_payload(payload, source_url)
 
