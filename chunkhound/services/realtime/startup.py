@@ -51,6 +51,23 @@ def _create_watchdog_observer() -> RealtimeObserver:
     return Observer()
 
 
+def _forward_to_loop(
+    loop: asyncio.AbstractEventLoop, callback: Callable[[str, Path], None]
+) -> Callable[[str, Path], None]:
+    """Run an observer-thread event callback on the service's event loop.
+
+    The event loop owns the service's event counters, event-pressure state and
+    status snapshots; the watchdog observer calls back from its own thread.
+    call_soon_threadsafe runs callbacks in the order they were scheduled, so a
+    source event is still recorded before the queueing of the same event.
+    """
+
+    def forward(event_type: str, file_path: Path) -> None:
+        loop.call_soon_threadsafe(callback, event_type, file_path)
+
+    return forward
+
+
 class RealtimeStartupStatusTracker:
     """Track bounded daemon-side startup timing for public status surfaces."""
 
@@ -632,6 +649,10 @@ class RealtimeStartupMixin:
         self._next_source_generation = 0
         self._latest_source_generation_by_path.clear()
         self._event_pressure_by_path.clear()
+        # cancel_all() above cancelled any pending trailing filtered-status
+        # publish; the final update below carries its counters.
+        self._filtered_status_flush_pending = False
+        self._filtered_status_last_emit = float("-inf")
         self._active_change_generations.clear()
         self._reserved_follow_up_change_generations.clear()
         self.file_queue = asyncio.PriorityQueue()
@@ -641,8 +662,6 @@ class RealtimeStartupMixin:
 
         self._service_state = "stopped"
         self._monitor_adapter = None
-        # This final update carries every counter a pending throttled one would.
-        self._cancel_filtered_status_flush()
         self._emit_status_update()
 
     async def _setup_watchdog_with_timeout(
@@ -803,8 +822,8 @@ class RealtimeStartupMixin:
             loop,
             root_path=watch_path,
             queue_result_callback=self._handle_queue_result,
-            source_event_callback=self._record_source_event,
-            filtered_event_callback=self._record_filtered_event,
+            source_event_callback=_forward_to_loop(loop, self._record_source_event),
+            filtered_event_callback=_forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
         )
         observer = _create_watchdog_observer()

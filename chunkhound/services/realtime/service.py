@@ -193,9 +193,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._last_processing_completed_at: str | None = None
         self._last_processing_completed_path: str | None = None
         self._filtered_event_count = 0
-        self._filtered_status_lock = threading.Lock()
         self._filtered_status_last_emit = float("-inf")
-        self._filtered_status_flush: threading.Timer | None = None
+        self._filtered_status_flush_pending = False
         self._suppressed_duplicate_count = 0
         self._translation_error_count = 0
         self._processing_error_count = 0
