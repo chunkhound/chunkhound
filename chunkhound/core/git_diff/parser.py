@@ -316,7 +316,12 @@ class StreamingDiffParser:
             return
         text, line_offset = self._pending
         self._part_number += 1
-        part_start = max(1, self._hunk_start + line_offset)
+        # Deleted lines have no new-file position. When a deletion-only
+        # fragment follows the hunk's final new-side line, anchor it to that
+        # final valid line rather than producing an invalid line range.
+        part_start = min(
+            self._hunk_end, max(1, self._hunk_start + line_offset)
+        )
         raw_end = self._hunk_start + next_offset - 1
         part_end = min(self._hunk_end, max(part_start, raw_end))
         symbol = (

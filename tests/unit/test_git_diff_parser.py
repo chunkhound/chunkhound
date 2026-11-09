@@ -302,6 +302,35 @@ def test_oversized_deletion_heavy_hunk_preserves_all_body_text() -> None:
     assert "+replacement\n" in combined
 
 
+def test_trailing_deletions_are_anchored_and_later_file_is_parsed() -> None:
+    deleted = "".join(f"-old{i}\n" for i in range(500))
+    diff = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,503 +1,3 @@ fn\n"
+        " context-1\n"
+        " context-2\n"
+        " context-3\n"
+        f"{deleted}"
+        "diff --git a/later.py b/later.py\n"
+        "--- a/later.py\n"
+        "+++ b/later.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=100)
+
+    assert all(chunk.start_line <= chunk.end_line for chunk in chunks)
+    assert {chunk.file_path for chunk in chunks} == {"a.py", "later.py"}
+    assert any(
+        chunk.file_path == "later.py" and "+new\n" in chunk.code
+        for chunk in chunks
+    )
+
+
 def test_small_hunk_not_split() -> None:
     chunks = parse_diff_to_chunks(SINGLE_HUNK_DIFF)
     assert len(chunks) == 1
