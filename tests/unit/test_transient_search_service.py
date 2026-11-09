@@ -156,9 +156,7 @@ async def test_shared_cache_isolates_embedding_provider_instances(
                 "test-v1", endpoint, deployment
             )
 
-    def manager(
-        endpoint: str, deployment: str, chunk_vector: list[float]
-    ) -> MagicMock:
+    def manager(endpoint: str, deployment: str, chunk_vector: list[float]) -> MagicMock:
         embedding_provider = Provider(endpoint, deployment)
         embedding_manager = MagicMock()
         embedding_manager.get_provider.return_value = embedding_provider
@@ -179,9 +177,7 @@ async def test_shared_cache_isolates_embedding_provider_instances(
         embedding_manager.embed_query_texts = embedding_manager.embed_texts
         return embedding_manager
 
-    first_manager = manager(
-        "https://one.example/v1", "deployment-a", [1.0, 0.0]
-    )
+    first_manager = manager("https://one.example/v1", "deployment-a", [1.0, 0.0])
     second_manager = manager(second_endpoint, second_deployment, [0.0, 1.0])
 
     first_service = TransientSearchService(
@@ -318,7 +314,10 @@ async def test_bulk_search_scans_source_once_and_matches_scalar_ranking() -> Non
             for text in texts
         ]
         return LocalEmbeddingResult(
-            embeddings=vectors, model="test", provider="test", dims=2,
+            embeddings=vectors,
+            model="test",
+            provider="test",
+            dims=2,
             embedding_space_identity="test-space",
         )
 
@@ -345,7 +344,10 @@ async def test_bulk_search_empty_query_embeddings_match_scalar_empty_results() -
     manager = MagicMock()
     manager.embed_texts = AsyncMock(
         return_value=LocalEmbeddingResult(
-            embeddings=[], model="test", provider="test", dims=0,
+            embeddings=[],
+            model="test",
+            provider="test",
+            dims=0,
             embedding_space_identity="test-space",
         )
     )
@@ -435,7 +437,10 @@ async def test_concurrent_searches_do_not_cross_results() -> None:
             angle = 0.0 if text in {"left", "left query"} else math.pi / 2
             vectors.append([math.cos(angle), math.sin(angle)])
         return LocalEmbeddingResult(
-            embeddings=vectors, model="test", provider="test", dims=2,
+            embeddings=vectors,
+            model="test",
+            provider="test",
+            dims=2,
             embedding_space_identity="test-space",
         )
 
@@ -801,7 +806,10 @@ async def test_lower_scoring_diff_wins_same_file_line() -> None:
         for text in texts:
             vectors.append([1.0, 0.0] if text == "query" else [0.0, 1.0])
         return LocalEmbeddingResult(
-            embeddings=vectors, model="test", provider="test", dims=2,
+            embeddings=vectors,
+            model="test",
+            provider="test",
+            dims=2,
             embedding_space_identity="test-space",
         )
 
@@ -1262,9 +1270,7 @@ async def test_hybrid_both_cancels_db_snapshot_when_diff_stream_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_hybrid_both_merges_diff_regex_match_into_semantic_result() -> None:
-    chunks = [
-        make_chunk("diff", file_path="shared.py", start_line=7, code="target")
-    ]
+    chunks = [make_chunk("diff", file_path="shared.py", start_line=7, code="target")]
     service = TransientSearchService(
         make_original(),
         stream_chunks(chunks),
@@ -1500,6 +1506,30 @@ async def test_diff_semantic_pagination_continues_past_retained_pool() -> None:
     )
     assert len(bulk_next[0][0]) == 10
     assert bulk_next[0][1]["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_transient_regex_times_out_on_catastrophic_backtracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user pattern cannot outlive the transient-search circuit breaker."""
+    import chunkhound.services.transient_search_service as tss_module
+
+    monkeypatch.setattr(tss_module, "_TRANSIENT_SEARCH_TIMEOUT_SECONDS", 0.05)
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks([make_chunk("slow", code="a" * 10_000 + "!")]),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(TimeoutError, match="regex search timed out"):
+        await service.search_regex_async(r"^(a+)+$")
+
+    assert loop.time() - started < 0.5
 
 
 @pytest.mark.asyncio

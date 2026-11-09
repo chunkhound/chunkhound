@@ -4,12 +4,13 @@ import asyncio
 import heapq
 import math
 import os
-import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from numbers import Real
 from typing import Any
 
 import numpy as np
+import regex
 from loguru import logger
 
 from chunkhound.services.search_service_protocol import SearchServiceProtocol
@@ -378,9 +379,7 @@ class TransientSearchService:
         cache_ns = self._cache_namespace(query_result)
         path_prefix = normalize_path_filter(path_filter)
         effective_limit = self._retained_pool_size(limit, page_size, offset)
-        heaps: list[list[tuple[float, int, dict[str, Any]]]] = [
-            [] for _ in queries
-        ]
+        heaps: list[list[tuple[float, int, dict[str, Any]]]] = [[] for _ in queries]
         qualifying_counts = [0] * len(queries)
         peak_live_vectors = 0
 
@@ -552,14 +551,10 @@ class TransientSearchService:
             transient_task.cancel()
             for task in db_tasks:
                 task.cancel()
-            await asyncio.gather(
-                transient_task, *db_tasks, return_exceptions=True
-            )
+            await asyncio.gather(transient_task, *db_tasks, return_exceptions=True)
             raise
 
-        outputs: list[
-            tuple[list[dict[str, Any]], dict[str, Any]] | BaseException
-        ] = []
+        outputs: list[tuple[list[dict[str, Any]], dict[str, Any]] | BaseException] = []
         for query, transient_result, db_result in zip(
             queries, transient_results, db_results
         ):
@@ -855,9 +850,10 @@ class TransientSearchService:
                 f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
             )
         try:
-            expression = re.compile(pattern)
-        except re.error as exc:
+            expression = regex.compile(pattern)
+        except regex.error as exc:
             raise ValueError(f"Invalid regex pattern {pattern!r}: {exc}") from exc
+        deadline = time.monotonic() + _TRANSIENT_SEARCH_TIMEOUT_SECONDS
         path_prefix = normalize_path_filter(path_filter)
         effective_limit = limit if limit is not None else offset + page_size
         matches: list[dict[str, Any]] = []
@@ -870,7 +866,15 @@ class TransientSearchService:
                     path = str(chunk.file_path).replace("\\", "/")
                     if path_prefix and not path_matches_filter(path, path_prefix):
                         continue
-                    if expression.search(chunk.code) is None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    if (
+                        expression.search(
+                            chunk.code, timeout=remaining, concurrent=True
+                        )
+                        is None
+                    ):
                         continue
                     total += 1
                     if len(matches) < effective_limit:
@@ -882,7 +886,7 @@ class TransientSearchService:
 
         try:
             await asyncio.wait_for(scan(), timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             raise TimeoutError(
                 f"Diff/web regex search timed out after "
                 f"{_TRANSIENT_SEARCH_TIMEOUT_SECONDS}s streaming transient content. "
