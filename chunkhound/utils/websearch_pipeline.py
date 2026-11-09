@@ -88,7 +88,7 @@ async def run_websearch(
     failure_callback: Callable[[str, urllib.error.URLError], None] | None = None,
     timeout_s: float | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Expand, search, fetch, and research under one total wall-clock budget.
+    """Expand, search, fetch, and research under one response deadline.
 
     Discovery (expansion + DuckDuckGo) is capped at a quarter of the total,
     at most 60s. Fetch overlaps research under whatever time remains. Research

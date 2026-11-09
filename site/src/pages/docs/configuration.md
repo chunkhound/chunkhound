@@ -817,7 +817,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DB_EXECUTE_TIMEOUT` | Legacy alias for `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` |
 | `CHUNKHOUND_YAML_ENGINE` | YAML parser engine (`rapid` or `tree`) |
 | `CHUNKHOUND_CONFIG_FILE` | Path to config file (alternative to `--config`) |
-| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Total websearch budget in seconds (default: 600). Discovery (DDG) is capped at 60s or a quarter of this, whichever is smaller; fetch+research use the remainder. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive or non-finite values fall back to 600. |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Websearch response deadline in seconds (default: 600). Discovery (DDG) is capped at 60s or a quarter of this, whichever is smaller; fetch+research use the remainder. Cancellation cleanup may outlive the deadline, so a one-shot CLI process can wait briefly during event-loop shutdown. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive or non-finite values fall back to 600. |
 | `CHUNKHOUND_DEBUG` | Enable debug logging |
 | `VOYAGE_API_KEY` | Fallback API key for VoyageAI provider |
 
@@ -1054,7 +1054,7 @@ If any of these are missing, the MCP `websearch` tool is not registered (capabil
 
 | Variable | Description |
 |---|---|
-| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Total wall-clock budget (seconds) for websearch. Default: 600. Discovery is capped at min(60, total/4); fetch and research share the remainder. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive, non-finite, or malformed values fall back to 600. |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Websearch response deadline (seconds). Default: 600. Discovery is capped at min(60, total/4); fetch and research share the remainder. Cancellation cleanup may outlive the deadline, so a one-shot CLI process can wait briefly during event-loop shutdown. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive, non-finite, or malformed values fall back to 600. |
 
 ### Fixed Constants
 

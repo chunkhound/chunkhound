@@ -295,11 +295,13 @@ def clamp_limit(limit: int) -> int:
 
 
 def websearch_timeout() -> float:
-    """Total wall-clock budget (seconds) for one websearch call.
+    """Response deadline (seconds) for one websearch request.
 
     Covers query expansion, DuckDuckGo, fetch, and in-process research.
     Discovery is internally capped so DDG cannot consume the research
-    remainder. Reads CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS; falls back to
+    remainder. Cancellation cleanup may outlive the deadline; in particular,
+    a one-shot CLI process can wait for that cleanup during event-loop
+    shutdown. Reads CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS; falls back to
     600.0 on unset or malformed values.
     """
     raw = os.environ.get("CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS")
