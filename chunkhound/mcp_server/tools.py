@@ -369,6 +369,42 @@ def estimate_tokens(text: str) -> int:
 _BACKTICK_RUN_RE = re.compile(r"`+")
 
 
+def _format_search_results_within_token_limit(
+    results: list[dict[str, Any]],
+    pagination: dict[str, Any],
+    search_type: str,
+) -> str:
+    """Render every requested result, truncating content rather than entries."""
+    rendered_results = [dict(result) for result in results]
+    content_limits = [len(result.get("content") or "") for result in rendered_results]
+    truncated_marker = "\n\n[... truncated ...]"
+
+    def render() -> str:
+        return format_search_results_markdown(
+            rendered_results, pagination, search_type
+        )
+
+    markdown = render()
+    while estimate_tokens(markdown) > MAX_RESPONSE_TOKENS:
+        candidates = [
+            index for index, limit in enumerate(content_limits) if limit > 0
+        ]
+        if not candidates:
+            raise ValueError(
+                "Search response metadata exceeds the response size limit; "
+                "retry with a smaller page_size"
+            )
+        index = max(candidates, key=lambda candidate: content_limits[candidate])
+        excess_chars = (estimate_tokens(markdown) - MAX_RESPONSE_TOKENS) * 3
+        content_limits[index] = max(0, content_limits[index] - excess_chars - 1)
+        content = results[index].get("content") or ""
+        rendered_results[index]["content"] = (
+            content[: content_limits[index]] + truncated_marker
+        )
+        markdown = render()
+    return markdown
+
+
 def format_search_results_markdown(
     results: list[dict[str, Any]],
     pagination: dict[str, Any],
@@ -1069,45 +1105,9 @@ async def execute_tool(
             search_type = arguments.get("type", "regex")
             results_list = list(result.get("results", []))
             pagination = dict(result.get("pagination", {}))
-            md = format_search_results_markdown(results_list, pagination, search_type)
-            # Keep at least 1 result; preserve original page_size so the footer's
-            # total-page count stays calibrated to the requested page size.
-            while len(results_list) > 1 and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
-                trim = max(1, len(results_list) // 4)
-                results_list = results_list[:-trim]
-                pagination = {
-                    **pagination,
-                    "has_more": True,
-                    "next_offset": pagination.get("offset", 0) + len(results_list),
-                }
-                md = format_search_results_markdown(
-                    results_list, pagination, search_type
-                )
-            # If the single remaining result still exceeds the limit, truncate its content.
-            if results_list and estimate_tokens(md) > MAX_RESPONSE_TOKENS:
-                result_copy = dict(results_list[0])
-                content = result_copy.get("content") or ""
-                # Start conservatively. Dynamic fence length (backtick-heavy content adds
-                # two fence lines of max_run+1 backticks each) means the 300-char reserve
-                # can be wildly insufficient; re-render and shrink until the actual output fits.
-                max_content_chars = max(0, MAX_RESPONSE_TOKENS * 3 - 300)
-                result_copy["content"] = (
-                    content[:max_content_chars] + "\n\n[... truncated ...]"
-                )
-                md = format_search_results_markdown(
-                    [result_copy], pagination, search_type
-                )
-                while (
-                    estimate_tokens(md) > MAX_RESPONSE_TOKENS and max_content_chars > 0
-                ):
-                    excess_chars = (estimate_tokens(md) - MAX_RESPONSE_TOKENS) * 3
-                    max_content_chars = max(0, max_content_chars - excess_chars - 1)
-                    result_copy["content"] = (
-                        content[:max_content_chars] + "\n\n[... truncated ...]"
-                    )
-                    md = format_search_results_markdown(
-                        [result_copy], pagination, search_type
-                    )
+            md = _format_search_results_within_token_limit(
+                results_list, pagination, search_type
+            )
             ignored = [
                 name
                 for name in ("commit_range", "commit_hash", "last_n_commits")
