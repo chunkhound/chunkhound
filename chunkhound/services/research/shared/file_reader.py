@@ -77,10 +77,11 @@ async def read_transient_sources_with_budget(
     if not isinstance(byte_budget, int) or byte_budget <= 0:
         return None
     llm = llm_manager.get_utility_provider()
+    source_available = getattr(provider, "is_transient_source_available", None)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for chunk in chunks:
         path = chunk.get("file_path") or chunk.get("path")
-        if path:
+        if path and (not callable(source_available) or source_available(path)):
             grouped.setdefault(path, []).append(chunk)
     contents: dict[str, str] = {}
     remaining_tokens = max_tokens
@@ -151,9 +152,7 @@ async def read_transient_sources_with_budget(
                 current_label = "[Current working-tree evidence]\n"
                 section_separator = "\n\n"
                 label_chars = (
-                    len(historical_label)
-                    + len(current_label)
-                    + len(section_separator)
+                    len(historical_label) + len(current_label) + len(section_separator)
                 )
                 evidence_chars = max(0, max_chars - label_chars)
                 historical = selected_excerpt(
@@ -203,6 +202,7 @@ async def read_transient_sources_with_budget(
             )
             del source
         if remaining_tokens is not None:
+
             def truncate_to_tokens(text: str, token_limit: int) -> str:
                 low, high = 0, len(text)
                 while low < high:

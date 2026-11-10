@@ -99,6 +99,7 @@ class _TransientProvider:
         ] = OrderedDict()
         self._source_bytes = 0
         self._load_source: Callable[[str], Awaitable[str | None]] | None = None
+        self._source_available: Callable[[str], bool] | None = None
 
     def _cached(
         self, source_url: str
@@ -187,6 +188,10 @@ class _TransientProvider:
         if self._load_source is None:
             return None
         return await self._load_source(file_path)
+
+    def is_transient_source_available(self, source_url: str) -> bool:
+        """Return whether this session can still use a previously fetched source."""
+        return self._source_available is None or self._source_available(source_url)
 
     def get_base_directory(self) -> Path:
         return Path.cwd()
@@ -645,6 +650,7 @@ class _BoundedPageStream:
         self.usable_page_count = 0
         self.dropped_usable_page_count = 0
         provider._load_source = self.load_source
+        provider._source_available = self.is_source_available
 
     def _record_error(self, exc: BaseException) -> None:
         # Keep failures sticky without retaining frames holding page bodies.
@@ -653,6 +659,10 @@ class _BoundedPageStream:
             self._error.__context__ = None
             self._error.__cause__ = None
         self._complete = True
+
+    def is_source_available(self, source_url: str) -> bool:
+        """Return false after a source has been withdrawn for this session."""
+        return source_url not in self._dropped
 
     async def _refetch(
         self, descriptor: _PageDescriptor

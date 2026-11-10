@@ -125,6 +125,13 @@ async def test_evicted_pages_support_concurrent_late_search_and_async_source(
                 )
                 is None
             )
+            # Chunks from the initial search must not survive into synthesis
+            # evidence after their URL is withdrawn in this same session.
+            evidence_after_drop = await FileReader(services).read_files_with_budget(
+                results[0][0], llm_manager, max_tokens=500
+            )
+            assert "https://example.invalid/0" not in evidence_after_drop
+            assert evidence_after_drop
         else:
             assert await provider.get_transient_file_content_async(
                 "https://example.invalid/0"
