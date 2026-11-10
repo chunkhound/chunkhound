@@ -104,7 +104,12 @@ export function initWorkflowDemo(
     if (!session.reducedMotion) steps.forEach((step) => { step.hidden = true; });
     bootTerminalFrame(session, {
         render: (measure) => renderTranscript(steps, measure),
-        toggle: () => { if (running) finish(); else void play(); },
+        toggle: () => {
+            // A manual toggle owns the run: a late visibility callback must not
+            // autoplay a second run after the user stopped or replayed.
+            started = true;
+            if (running) finish(); else void play();
+        },
         visibilityTarget: composer,
         onVisibility: (visible) => {
             if (visible && !started) {
