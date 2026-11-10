@@ -785,6 +785,42 @@ class LanceDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"Error updating file {file_id}: {e}")
 
+    def _executor_refresh_file_mtimes(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        entries: list[tuple[str, float, str]],
+    ) -> int:
+        """Executor method for refresh_file_mtimes - runs in DB thread.
+
+        Sets modified_time on rows whose path and content_hash both match an
+        entry, with one merge_insert of the updated rows.
+        """
+        if not self._files_table:
+            return 0
+        wanted = {  # type: ignore[unreachable]
+            path: (mtime, content_hash) for path, mtime, content_hash in entries
+        }
+        in_list = ", ".join("'" + p.replace("'", "''") + "'" for p in wanted)
+        rows = (
+            self._files_table.search()
+            .where(f"path IN ({in_list})")
+            .limit(len(wanted))
+            .to_list()
+        )
+        updated = []
+        for row in rows:
+            mtime, content_hash = wanted[row["path"]]
+            if row.get("content_hash") == content_hash:
+                row = dict(row)
+                row["modified_time"] = mtime
+                updated.append(row)
+        if updated:
+            self._files_table.merge_insert("id").when_matched_update_all().execute(
+                updated
+            )
+        return len(updated)
+
     def record_skipped_file(
         self,
         path: str,

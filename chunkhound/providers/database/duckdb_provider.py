@@ -3022,6 +3022,34 @@ class DuckDBProvider(SerialDatabaseProvider):
             params.append(file_id)
             conn.execute(query, params)
 
+    def _executor_refresh_file_mtimes(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        entries: list[tuple[str, float, str]],
+    ) -> int:
+        """Executor method for refresh_file_mtimes - runs in DB thread.
+
+        One statement for the whole batch. Leaves updated_at and skip_reason
+        alone: the row's content was confirmed, not re-indexed.
+        """
+        paths = [e[0] for e in entries]
+        mtimes = [float(e[1]) for e in entries]
+        hashes = [e[2] for e in entries]
+        row = conn.execute(
+            """
+            UPDATE files SET modified_time = to_timestamp(v.mtime)
+            FROM (
+                SELECT unnest(?::VARCHAR[]) AS path,
+                       unnest(?::DOUBLE[]) AS mtime,
+                       unnest(?::VARCHAR[]) AS h
+            ) v
+            WHERE files.path = v.path AND files.content_hash = v.h
+            """,
+            [paths, mtimes, hashes],
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def record_skipped_file(
         self,
         path: str,

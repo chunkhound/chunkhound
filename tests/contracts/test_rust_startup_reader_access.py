@@ -24,6 +24,8 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
+from chunkhound.services.indexing_coordinator import IndexingCoordinator
+from chunkhound.services.rust_incremental_precheck import find_rust_incremental_work
 from tests.contracts.pipeline_harness import disconnect_registry_db, files_table_paths
 
 
@@ -128,3 +130,82 @@ def test_editing_one_file_reindexes_it_and_keeps_every_other_file(
     assert coordinator._db.search_regex("gamma_marker")[0]
     disconnect_registry_db()
     assert files_table_paths(db_dir) == {"alpha.py", "beta.py", "gamma.py"}
+
+
+def _index_then_touch(root: Path, config: Config) -> None:
+    """Index root, then give every file a new mtime with the same bytes."""
+    configure_registry(config)
+    asyncio.run(
+        DirectoryIndexingService(
+            indexing_coordinator=create_indexing_coordinator(), config=config
+        ).process_directory(root, no_embeddings=True)
+    )
+    disconnect_registry_db()
+    for path in root.iterdir():
+        st = path.stat()
+        os.utime(path, (st.st_atime + 1000, st.st_mtime + 1000))
+
+
+def test_precheck_refreshes_the_mtime_of_a_hash_confirmed_file(
+    tmp_path, monkeypatch
+):
+    """A file the precheck confirms unchanged by hash gets its stored mtime
+    refreshed, so the next start does not hash it again."""
+    monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name in ("alpha.py", "beta.py", "gamma.py"):
+        (root / name).write_text(f"def {name[:-3]}_marker():\n    return 1\n")
+    config = _config(root, tmp_path / "db")
+    _index_then_touch(root, config)
+
+    configure_registry(config)
+    db = create_indexing_coordinator()._db
+    files = sorted(root.iterdir())
+    first = asyncio.run(find_rust_incremental_work(db, files, root, 0.01))
+    second = asyncio.run(find_rust_incremental_work(db, files, root, 0.01))
+    disconnect_registry_db()
+
+    assert first.skipped_by_hash == len(files)
+    assert second.changed == []
+    assert second.skipped_by_hash == 0
+
+
+def test_python_change_scan_refreshes_the_mtime_of_a_hash_confirmed_file(
+    tmp_path, monkeypatch
+):
+    """Phase 2.5 of the Python pipeline: a file confirmed unchanged by hash
+    gets its stored mtime refreshed, so the next run does not hash it again."""
+    # Unset means Rust ON, which bypasses Phase 2.5.
+    monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name in ("alpha.py", "beta.py", "gamma.py"):
+        (root / name).write_text(f"def {name[:-3]}_marker():\n    return 1\n")
+    config = _config(root, tmp_path / "db")
+    _index_then_touch(root, config)
+
+    hashed: list[Path] = []
+    original = IndexingCoordinator._compute_hash_with_fallback
+
+    def _spy(self: IndexingCoordinator, file_path: Path) -> str | None:
+        hashed.append(file_path)
+        return original(self, file_path)
+
+    monkeypatch.setattr(IndexingCoordinator, "_compute_hash_with_fallback", _spy)
+
+    hashes_per_run: list[int] = []
+    for _ in range(2):
+        hashed.clear()
+        configure_registry(config)
+        asyncio.run(
+            DirectoryIndexingService(
+                indexing_coordinator=create_indexing_coordinator(), config=config
+            ).process_directory(root, no_embeddings=True)
+        )
+        disconnect_registry_db()
+        hashes_per_run.append(len(hashed))
+
+    assert hashes_per_run == [3, 0]
