@@ -252,6 +252,8 @@ class TransientSearchService:
         provider: str | None = None,
         *,
         limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
             return await asyncio.wait_for(
@@ -263,6 +265,8 @@ class TransientSearchService:
                     path_filter,
                     provider,
                     limit=limit,
+                    candidate_locations=candidate_locations,
+                    diff_owned_locations=diff_owned_locations,
                 ),
                 timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
             )
@@ -284,6 +288,8 @@ class TransientSearchService:
         provider: str | None = None,
         *,
         limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         self.peak_live_vectors = 0
         query_result = await self._embed_texts([query], provider, query=True)
@@ -303,6 +309,13 @@ class TransientSearchService:
                 if threshold is not None and score < threshold:
                     continue
                 qualifying_count += 1
+                location = (chunk.file_path, chunk.start_line)
+                if (
+                    candidate_locations is not None
+                    and diff_owned_locations is not None
+                    and location in candidate_locations
+                ):
+                    diff_owned_locations.add(location)
                 result = self._chunk_to_dict(chunk, score)
                 # The root is the worst retained rank: lowest score, then
                 # latest source position. Ties in output prefer earlier chunks.
@@ -329,6 +342,8 @@ class TransientSearchService:
         provider: str | None,
         *,
         limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
     ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
         """Score compatible queries during one pass over the transient source."""
         try:
@@ -341,6 +356,8 @@ class TransientSearchService:
                     path_filter,
                     provider,
                     limit=limit,
+                    candidate_locations=candidate_locations,
+                    diff_owned_locations=diff_owned_locations,
                 ),
                 timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
             )
@@ -362,6 +379,8 @@ class TransientSearchService:
         provider: str | None,
         *,
         limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
     ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
         if not queries:
             return []
@@ -391,6 +410,13 @@ class TransientSearchService:
                 sum(len(heap) for heap in heaps) + len(batch),
             )
             for chunk_index, (ordinal, chunk, _) in enumerate(batch):
+                location = (chunk.file_path, chunk.start_line)
+                if (
+                    candidate_locations is not None
+                    and diff_owned_locations is not None
+                    and location in candidate_locations
+                ):
+                    diff_owned_locations.add(location)
                 for query_index, heap in enumerate(heaps):
                     score = float(scores[chunk_index, query_index])
                     if threshold is not None and score < threshold:
@@ -514,17 +540,6 @@ class TransientSearchService:
             return list(transient_results)
 
         snapshot_size = self._both_mode_window(page_size, offset)
-        transient_task = asyncio.create_task(
-            self._search_transient_many(
-                queries,
-                snapshot_size,
-                0,
-                None,
-                path_filter,
-                provider,
-                limit=snapshot_size,
-            )
-        )
         db_tasks = [
             asyncio.create_task(
                 self._original.search_semantic(
@@ -543,15 +558,32 @@ class TransientSearchService:
             for query in queries
         ]
         try:
-            transient_results, db_results = await asyncio.gather(
-                transient_task,
-                asyncio.gather(*db_tasks, return_exceptions=True),
+            # Retain ownership only for locations the bounded DB snapshots can
+            # return. Waiting for those snapshots avoids an unbounded set while
+            # a complete diff scan identifies even pruned historical owners.
+            db_results = await asyncio.gather(*db_tasks, return_exceptions=True)
+            candidate_locations = {
+                (result.get("file_path"), result.get("start_line"))
+                for db_result in db_results
+                if not isinstance(db_result, BaseException)
+                for result in db_result[0]
+            }
+            diff_owned_locations: set[tuple[Any, Any]] = set()
+            transient_results = await self._search_transient_many(
+                queries,
+                snapshot_size,
+                0,
+                None,
+                path_filter,
+                provider,
+                limit=snapshot_size,
+                candidate_locations=candidate_locations,
+                diff_owned_locations=diff_owned_locations,
             )
         except BaseException:
-            transient_task.cancel()
             for task in db_tasks:
                 task.cancel()
-            await asyncio.gather(transient_task, *db_tasks, return_exceptions=True)
+            await asyncio.gather(*db_tasks, return_exceptions=True)
             raise
 
         outputs: list[tuple[list[dict[str, Any]], dict[str, Any]] | BaseException] = []
@@ -566,6 +598,7 @@ class TransientSearchService:
                     query=query,
                     transient_results=transient_result[0],
                     db_results=db_result[0],
+                    diff_owned_locations=diff_owned_locations,
                     snapshot_size=snapshot_size,
                     threshold=threshold,
                     provider=provider,
@@ -666,17 +699,6 @@ class TransientSearchService:
         final_rerank: bool = True,
     ) -> list[dict[str, Any]]:
         """Fetch and combine equal bounded snapshots from both sources."""
-        transient_task = asyncio.create_task(
-            self._search_transient(
-                query,
-                snapshot_size,
-                0,
-                None,
-                path_filter,
-                provider,
-                limit=snapshot_size,
-            )
-        )
         db_task = asyncio.create_task(
             self._original.search_semantic(
                 query=query,
@@ -691,17 +713,35 @@ class TransientSearchService:
                 result_limit=result_limit,
             )
         )
-        (transient_results, _), (db_results, _) = await _await_pair(
-            transient_task, db_task
+        # Retain ownership only for locations the bounded DB snapshot can
+        # return, while scanning the complete diff for those owners.
+        db_results, _ = await db_task
+        candidate_locations = {
+            (result.get("file_path"), result.get("start_line")) for result in db_results
+        }
+        diff_owned_locations: set[tuple[Any, Any]] = set()
+        transient_results, _ = await self._search_transient(
+            query,
+            snapshot_size,
+            0,
+            None,
+            path_filter,
+            provider,
+            limit=snapshot_size,
+            candidate_locations=candidate_locations,
+            diff_owned_locations=diff_owned_locations,
         )
         if not final_rerank:
             # Hybrid position fusion intentionally retains its existing source
             # scoring behavior and larger fixed snapshot.
-            return self._merge(transient_results, db_results, threshold)
+            return self._merge(
+                transient_results, db_results, threshold, diff_owned_locations
+            )
         return await self._finalize_both_results(
             query=query,
             transient_results=transient_results,
             db_results=db_results,
+            diff_owned_locations=diff_owned_locations,
             snapshot_size=snapshot_size,
             threshold=threshold,
             provider=provider,
@@ -722,13 +762,16 @@ class TransientSearchService:
         query: str,
         transient_results: list[dict[str, Any]],
         db_results: list[dict[str, Any]],
+        diff_owned_locations: set[tuple[Any, Any]],
         snapshot_size: int,
         threshold: float | None,
         provider: str | None,
         force_strategy: str | None,
     ) -> list[dict[str, Any]]:
         """Put retained both-mode candidates onto one validated score scale."""
-        candidates = self._merge(transient_results, db_results, None)
+        candidates = self._merge(
+            transient_results, db_results, None, diff_owned_locations
+        )
         use_rerank, embedding_provider = self._uses_final_rerank(
             provider, force_strategy
         )
@@ -789,9 +832,11 @@ class TransientSearchService:
         transient_results: list[dict[str, Any]],
         db_results: list[dict[str, Any]],
         threshold: float | None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []
         transient_locations: set[tuple[Any, Any]] = set()
+        owned_locations = diff_owned_locations or set()
         seen_transient_ids: set[str] = set()
         for result in transient_results:
             chunk_id = str(result.get("chunk_id", ""))
@@ -809,7 +854,11 @@ class TransientSearchService:
             if "similarity" in result and "score" not in result:
                 result["score"] = result["similarity"]
             location = (result.get("file_path"), result.get("start_line"))
-            if location in transient_locations or location in seen_db_locations:
+            if (
+                location in transient_locations
+                or location in owned_locations
+                or location in seen_db_locations
+            ):
                 continue
             seen_db_locations.add(location)
             merged.append(result)

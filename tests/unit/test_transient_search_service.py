@@ -1207,6 +1207,50 @@ async def test_hybrid_both_diff_wins_duplicate_db_location() -> None:
 
 
 @pytest.mark.asyncio
+async def test_both_mode_pruned_diff_location_suppresses_db_copy() -> None:
+    chunks = [
+        make_chunk(
+            f"diff-{index}",
+            file_path=f"diff-{index}.py",
+            start_line=1,
+            code=f"diff-{index}",
+        )
+        for index in range(50)
+    ]
+    chunks.append(
+        make_chunk(
+            "historical-owner",
+            file_path="shared.py",
+            start_line=7,
+            code="low-scoring historical evidence",
+        )
+    )
+    original = make_original(
+        [
+            {
+                "chunk_id": "db-duplicate",
+                "file_path": "shared.py",
+                "start_line": 7,
+                "content": "high-scoring working tree copy",
+                "similarity": 1.0,
+                "score": 1.0,
+            }
+        ]
+    )
+    service = TransientSearchService(
+        original,
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_semantic("query", page_size=10)
+
+    assert all(result["file_path"] != "shared.py" for result in results)
+
+
+@pytest.mark.asyncio
 async def test_hybrid_both_uses_stable_bounded_db_snapshot_across_pages() -> None:
     requested_sizes: list[int] = []
 
