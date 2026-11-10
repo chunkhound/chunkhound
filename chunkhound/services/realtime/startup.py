@@ -22,7 +22,7 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler
+from .events import SimpleEventHandler, watchdog_event_filter
 
 
 class RealtimeObserver(Protocol):
@@ -33,6 +33,7 @@ class RealtimeObserver(Protocol):
         event_handler: SimpleEventHandler,
         path: str,
         recursive: bool = ...,
+        event_filter: list[type] | None = ...,
     ) -> Any: ...
 
     def start(self) -> None: ...
@@ -813,6 +814,7 @@ class RealtimeStartupMixin:
             event_handler,
             str(watch_path),
             recursive=True,  # Use recursive for complete event coverage
+            event_filter=watchdog_event_filter(),
         )
         observer.start()
 

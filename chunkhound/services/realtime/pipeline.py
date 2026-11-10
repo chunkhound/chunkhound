@@ -18,7 +18,12 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseTemporarilyUnavailableError,
 )
 
-from .events import RealtimeMutation, SimpleEventHandler, normalize_file_path
+from .events import (
+    RealtimeMutation,
+    SimpleEventHandler,
+    normalize_file_path,
+    watchdog_event_filter,
+)
 
 
 class RealtimePipelineMixin:
@@ -1138,6 +1143,7 @@ class RealtimePipelineMixin:
                         self.event_handler,
                         dir_path,
                         recursive=True,  # Keep new directories recursively covered.
+                        event_filter=watchdog_event_filter(),
                     )
                     self.watched_directories.add(dir_path)
                     logger.debug(f"Added recursive watch for new directory: {dir_path}")

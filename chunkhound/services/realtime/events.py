@@ -12,6 +12,50 @@ from loguru import logger
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
+# The only watchdog event types that can mean a file's content changed. Every
+# other type is dropped where it arrives, before it takes an event-queue slot.
+# On Linux, inotify reports every open and close (`opened`, `closed`,
+# `closed_no_write`); a start-up scan or a type-check run reads the whole tree,
+# so letting those through filled the queue, overflowed it and forced a full
+# resync. The consumer never acted on `closed`, so dropping it
+# changes nothing indexed (a write also yields `modified`, `created` or
+# `moved`, except an mmap write, which inotify reports only on close).
+# `attrib` is admitted although the consumer does not act on it yet: on
+# Windows, watchdog 7 reports an in-place write as `attrib` whenever the change
+# time is ahead of the write time, so for some writes it is the only signal.
+# It also arrives for every last-access update there, one per file read, so on
+# Windows reads still take queue slots. Neither is changed here.
+CONTENT_EVENT_TYPES = frozenset({"created", "modified", "deleted", "moved", "attrib"})
+
+
+def watchdog_event_filter() -> list[type]:
+    """The `event_filter` for every watchdog `schedule` call.
+
+    On inotify it also narrows the kernel watch mask, so reads are never
+    reported at all. Every schedule on one observer must pass the same filter:
+    watchdog 7 shares one inotify descriptor per observer and each
+    `inotify_add_watch` replaces the inode's mask, so a narrower filter on one
+    watch would silently narrow an overlapping one.
+    """
+    # Imported here so this module stays importable without watchdog.
+    import watchdog.events as watchdog_events
+
+    names = {
+        "created": ("FileCreatedEvent", "DirCreatedEvent"),
+        "modified": ("FileModifiedEvent",),
+        "deleted": ("FileDeletedEvent", "DirDeletedEvent"),
+        "moved": ("FileMovedEvent", "DirMovedEvent"),
+        # Only watchdog 7 has the attrib classes; 6 reports attrib as modified.
+        "attrib": ("FileAttribEvent",),
+    }
+    return [
+        getattr(watchdog_events, name)
+        for event_type in sorted(names)
+        for name in names[event_type]
+        if hasattr(watchdog_events, name)
+    ]
+
+
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
@@ -151,6 +195,10 @@ class SimpleEventHandler:
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
+        # No callbacks for a dropped read: each would cost a cross-thread call.
+        if event.event_type not in CONTENT_EVENT_TYPES:
+            return
+
         # Handle directory creation
         if event.event_type == "created" and event.is_directory:
             # Queue directory creation for processing
