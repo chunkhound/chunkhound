@@ -1,12 +1,19 @@
-import { createSession } from "./terminal-session";
+import {
+    createSession,
+    type HeroTerminalOptions,
+    type TerminalSession,
+} from "./terminal-session";
 import { setControl } from "./terminal-controls";
 import { bootTerminalFrame } from "./terminal-frame";
 import { enterRow } from "./terminal-entrance";
 import { typeText } from "./terminal-typing";
 import { renderTranscript, resetPickers, revealKey, selectOption, workflowParts, writeStatus } from "./workflow-demo-view";
 
-function startWorkflowDemo(card: HTMLElement): void {
-    const session = createSession(document, {}, card);
+export function initWorkflowDemo(
+    card: HTMLElement,
+    options: HeroTerminalOptions = {},
+): TerminalSession {
+    const session = createSession(card.ownerDocument, options, card);
     if (!session) throw new Error("Workflow demo terminal is incomplete");
     const { steps, command, status, targets, warning, composer, pickers } = workflowParts(card);
     resetPickers(pickers);
@@ -107,6 +114,11 @@ function startWorkflowDemo(card: HTMLElement): void {
         },
         onMotion: (reduced) => { if (reduced) finish(); },
     });
+    return session;
 }
 
-for (const card of document.querySelectorAll<HTMLElement>(".terminal-card:has(.workflow-demo-lines)")) startWorkflowDemo(card);
+if (typeof document !== "undefined") {
+    for (const card of document.querySelectorAll<HTMLElement>(
+        ".terminal-card:has(.workflow-demo-lines)",
+    )) initWorkflowDemo(card);
+}
