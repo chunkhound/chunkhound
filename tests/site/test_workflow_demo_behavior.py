@@ -15,9 +15,27 @@ const card = demo.locator('xpath=ancestor::div[contains(@class,"terminal-card")]
 
 # Motion contracts need the animated path; the probe context requests reduced
 # motion by default, so every animated test reloads under no preference.
-_ANIMATED = """
-await page.emulateMedia({ reducedMotion: 'no-preference' });
+_MOTION = "await page.emulateMedia({ reducedMotion: 'no-preference' });\n"
+
+_ANIMATED = _MOTION + "await page.reload();\n"
+
+# Timed choreography runs on page timers. Freeze those timers and step them, so
+# a 500 ms confirmation window cannot be missed on a slow or fast CI runner.
+_CLOCKED = _MOTION + """
+const clockStart = new Date('2026-01-01T00:00:00Z');
+await page.clock.install({ time: clockStart });
+await page.clock.pauseAt(clockStart);
 await page.reload();
+// Clock does not control CSS smooth scrolling; this probe asserts geometry.
+await page.addStyleTag({ content: 'html { scroll-behavior: auto !important; }' });
+const stepUntil = async (predicate, label, maxMs = 15000) => {
+  // 50 ms < the shortest asserted state window (500 ms), so no state is skipped.
+  for (let elapsed = 0; elapsed < maxMs; elapsed += 50) {
+    if (await predicate()) return;
+    await page.clock.runFor(50);
+  }
+  throw new Error(`Timed out in fake time waiting for ${label}`);
+};
 """
 
 
@@ -228,36 +246,77 @@ def test_animation_shows_dialogues_and_keeps_status_visible_until_checkpoint(
 def test_replay_uses_composer_for_command_and_pickers(built_site) -> None:
     results = _probe(
         [320, 1000],
-        _ANIMATED
+        _CLOCKED
         + """
 await card.locator('.terminal-composer').scrollIntoViewIfNeeded();
-await card.getByRole('button', { name: /stop animation/i }).click();
+const control = card.locator('.terminal-control');
+const controlLabel = () => control.getAttribute('aria-label');
+// Autoplay is IntersectionObserver-driven, not clock-driven. Converge to the
+// settled state without assuming it fired: Replay starts, Stop finishes.
+for (let attempt = 0; attempt < 50; attempt += 1) {
+  const state = await controlLabel();
+  await control.click();
+  if (state === 'Stop animation') break;
+}
+await stepUntil(
+  () => controlLabel().then(value => value === 'Replay demo'),
+  'settled replay control',
+);
 const stopped = await demo.innerText();
 await card.evaluate(card => {
   const input = card.querySelector('.input-text');
+  const command = input.closest('.terminal-input').dataset.command;
+  const pickers = [...card.querySelectorAll('.workflow-picker')];
+  let lastInput = '';
   window.workflowFrames = [];
-  new MutationObserver(() => {
-    const range = document.createRange();
-    range.selectNodeContents(input);
-    const line = input.parentElement.getBoundingClientRect();
-    const fits = [...range.getClientRects()].every(rect =>
-      rect.left >= line.left - 1 && rect.right <= line.right + 1);
-    window.workflowFrames.push({ input: input.innerText, text: card.innerText,
-      inputVisible: input.getClientRects().length > 0, fits });
-  }).observe(card, {
-    subtree: true, childList: true, characterData: true, attributes: true,
+  // Object method, not a named arrow: tsx keep-names rewrites named arrows into
+  // __name(...) calls that cannot cross into the page.
+  const recorder = { record() {
+    const text = input.textContent;
+    let fits = true;
+    if (text !== lastInput && text === command) {
+      const line = input.parentElement.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      fits = [...range.getClientRects()].every(rect =>
+        rect.left >= line.left - 1 && rect.right <= line.right + 1);
+    }
+    lastInput = text;
+    window.workflowFrames.push({
+      input: text,
+      inputVisible: input.getClientRects().length > 0,
+      fits,
+      pickers: pickers.map(picker => ({
+        visible: !picker.hidden,
+        keyVisible: !picker.hidden
+          && !picker.querySelector('.workflow-key')?.hidden,
+        options: [...picker.querySelectorAll('[data-option]')]
+          .map(option => option.textContent),
+      })),
+    });
+  } };
+  new MutationObserver(recorder.record).observe(input, {
+    childList: true, characterData: true,
   });
+  for (const picker of pickers) {
+    new MutationObserver(recorder.record).observe(picker, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+    });
+  }
 });
-await card.getByRole('button', { name: /replay demo/i }).click();
+await control.click();
 const pickers = [];
 for (const heading of ['Cost target (USD)', 'Time target']) {
   const picker = card.locator('.workflow-picker').filter({ hasText: heading });
-  await picker.waitFor({ state: 'visible' });
+  await stepUntil(() => picker.isVisible(), `${heading} picker`);
   const before = await picker.evaluate(el => {
     const rect = el.getBoundingClientRect();
     return { width: rect.width, height: rect.height };
   });
-  await picker.locator('.workflow-key').waitFor({ state: 'visible' });
+  await stepUntil(
+    () => picker.locator('.workflow-key').isVisible(),
+    `${heading} confirmation key`,
+  );
   pickers.push(await picker.evaluate((el, before) => {
     const card = el.closest('.terminal-card');
     const viewport = card.querySelector('.terminal-viewport').getBoundingClientRect();
@@ -275,7 +334,10 @@ for (const heading of ['Cost target (USD)', 'Time target']) {
     };
   }, before));
 }
-await demo.getByText('/detect-tests', { exact: true }).waitFor({ state: 'visible' });
+await stepUntil(
+  () => demo.getByText('/detect-tests', { exact: true }).isVisible(),
+  'first workflow step',
+);
 return {
   frames: await page.evaluate(() => window.workflowFrames), pickers, stopped,
   transcript: await demo.innerText(),
@@ -285,6 +347,10 @@ return {
 """,
     )
     command = "/workflow implement-spec specs/checkout.md"
+    picker_options = (
+        ("Cost target (USD)", ("$1", "$5", "$10", "No target", "Custom…")),
+        ("Time target", ("1 hour", "4 hours", "8 hours", "No target", "Custom…")),
+    )
     for width, result in results.items():
         typed = [frame["input"] for frame in result["frames"] if frame["inputVisible"]]
         assert command in typed, width
@@ -299,23 +365,23 @@ return {
         assert result["composerRestored"] and result["stopping"], width
         assert all(all(picker.values()) for picker in result["pickers"]), width
 
-        for heading, options in (
-            ("Cost target (USD)", ("$1", "$5", "$10", "No target", "Custom…")),
-            ("Time target", ("1 hour", "4 hours", "8 hours", "No target", "Custom…")),
-        ):
+        for index, (heading, options) in enumerate(picker_options):
             frames = [
-                frame["text"] for frame in result["frames"] if heading in frame["text"]
+                frame for frame in result["frames"]
+                if frame["pickers"][index]["visible"]
             ]
-            selections = {
-                option
-                for text in frames
-                for option in options
-                if re.search(rf"(?m)^\s*❯\s*{re.escape(option)}\s*$", text)
-            }
-            assert len(selections) >= 2, f"{width}: {heading} selection did not move"
             assert any(
-                re.search(r"\benter\b", text, re.IGNORECASE) for text in frames
+                frame["pickers"][index]["keyVisible"] for frame in result["frames"]
             ), f"{width}: {heading} did not show Enter confirmation"
+            selections = {
+                re.sub(r"^\s*❯\s*", "", option)
+                for frame in frames
+                for option in frame["pickers"][index]["options"]
+                if option.lstrip().startswith("❯")
+            }
+            assert len(selections & set(options)) >= 2, (
+                f"{width}: {heading} selection did not move"
+            )
 
 
 def test_live_effect_has_reserved_line_without_shifting_status(
