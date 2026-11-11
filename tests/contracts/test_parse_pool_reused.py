@@ -43,7 +43,7 @@ def _get_pid_probe(_args) -> int:
 class TestParsePoolReused:
     """The parse worker pool must be created once and reused, not per batch."""
 
-    def test_parse_pool_reuses_worker_processes(self, monkeypatch):
+    def test_parse_pool_reuses_worker_processes(self):
         """The same worker process must serve calls across separate
         _leased_parse_pool() leases.
 

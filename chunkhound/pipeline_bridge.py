@@ -117,8 +117,8 @@ _parse_pool_lock = threading.Lock()
 # The parse pool is only used by bulk parsing (start-up scans, resyncs, `index`);
 # a long-lived MCP server otherwise holds max_workers idle processes for its whole
 # session. Once no parse batch has been in flight for this long, the pool is shut
-# down; the next batch creates a new one. All four names below are guarded by
-# _parse_pool_lock.
+# down; the next batch creates a new one. The four variables below (not the
+# constant) are guarded by _parse_pool_lock.
 _PARSE_POOL_IDLE_SECONDS = 60.0
 _parse_pool_leases = 0
 _parse_pool_idle_timer: threading.Timer | None = None
@@ -263,11 +263,16 @@ def _shut_down_idle_parse_pool(token: object) -> None:
         _parse_pool_idle_timer = None
         _parse_pool_idle_token = None
     if pool is not None:
-        # No lease is held, so no task is in flight on this pool.
+        # No lease is held, so no batch is using this pool; wait=True still
+        # waits for any task a failed batch left running.
         pool.shutdown(wait=True)
 
 
 def _shut_down_parse_pool_at_exit() -> None:
+    """Shut the parse pool down at interpreter exit, cancelling queued tasks.
+
+    Also cancels a pending idle timer, so the next lease starts from no pool.
+    """
     global _parse_pool, _parse_pool_idle_timer, _parse_pool_idle_token
     with _parse_pool_lock:
         if _parse_pool_idle_timer is not None:
