@@ -14,6 +14,7 @@ import xxhash
 
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.utils.hashing import compute_embedding_space_identity
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
@@ -253,6 +254,19 @@ class FakeEmbeddingProvider:
         return self._dims
 
     @property
+    def embedding_space_identity(self) -> str:
+        """Stable identity for this deterministic fake embedding space."""
+        return compute_embedding_space_identity(
+            "fake-embedding-v1",
+            type(self).__module__,
+            type(self).__qualname__,
+            self._model,
+            str(self._dims),
+            str(self._output_dims),
+            str(self._client_side_truncation),
+        )
+
+    @property
     def native_dims(self) -> int:
         """Model's full/native embedding dimension."""
         return self._dims
@@ -364,6 +378,9 @@ class FakeEmbeddingProvider:
                 embeddings = [v[: self._output_dims] for v in embeddings]
 
         return embeddings
+
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        return await self.embed(texts)
 
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""

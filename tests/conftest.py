@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterator
 
 import pytest
 from loguru import logger
@@ -50,6 +51,32 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_heavy)
         if not native_watchman_ready and "requires_native_watchman" in item.keywords:
             item.add_marker(skip_native_watchman)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ignore_user_global_config(tmp_path_factory):
+    """Keep the developer's user-wide config out of every test.
+
+    ``Config()`` merges the first file it finds among
+    ``Config.get_global_config_candidates()`` (``~/.config/chunkhound/...``),
+    so a test that builds a Config without an ``embedding`` section inherits
+    whatever provider the machine is configured with. On a machine whose
+    global config selects ``voyageai`` with the key in the environment, every
+    realtime test that calls ``create_services`` then fails in
+    ``EmbeddingProviderFactory`` (or, with the key present, builds a real
+    provider). Pinning ``CHUNKHOUND_GLOBAL_CONFIG_FILE`` to an existing empty
+    file makes the global layer empty, as it is in CI. Tests that exercise
+    global-config discovery set or delete the variable themselves.
+    """
+    empty = tmp_path_factory.mktemp("global-config") / "chunkhound.json"
+    empty.write_text("{}", encoding="utf-8")
+    previous = os.environ.get("CHUNKHOUND_GLOBAL_CONFIG_FILE")
+    os.environ["CHUNKHOUND_GLOBAL_CONFIG_FILE"] = str(empty)
+    yield empty
+    if previous is None:
+        os.environ.pop("CHUNKHOUND_GLOBAL_CONFIG_FILE", None)
+    else:
+        os.environ["CHUNKHOUND_GLOBAL_CONFIG_FILE"] = previous
 
 
 def _discover_free_opencode_models() -> list[str]:
@@ -147,6 +174,22 @@ def free_opencode_models() -> list[str]:
         reasons = "; ".join(f"{slug}: {reason}" for slug, reason in rejected)
         pytest.skip(f"No servable free OpenCode models ({reasons})")
     return servable
+
+
+@pytest.fixture
+def isolated_mcp_mode() -> Iterator[None]:
+    """Restore CHUNKHOUND_MCP_MODE after tests that run an MCP entry point.
+
+    mcp_command and async_main set it for the process lifetime. Restore it by
+    hand: monkeypatch.delenv records no undo when the variable is unset, so it
+    would let those writes leak into later tests.
+    """
+    saved = os.environ.get("CHUNKHOUND_MCP_MODE")
+    yield
+    if saved is None:
+        os.environ.pop("CHUNKHOUND_MCP_MODE", None)
+    else:
+        os.environ["CHUNKHOUND_MCP_MODE"] = saved
 
 
 @pytest.fixture

@@ -23,6 +23,7 @@ from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipeline
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.parsers.parser_factory import create_parser_for_language
+from chunkhound.utils.parent_watch import exit_when_parent_dies
 
 if TYPE_CHECKING:
     import asyncio
@@ -207,6 +208,7 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
                 pool = ProcessPoolExecutor(
                     max_workers=max(1, max_workers),
                     mp_context=multiprocessing.get_context("spawn"),
+                    initializer=exit_when_parent_dies,
                 )
                 atexit.register(pool.shutdown, cancel_futures=True)
                 _parse_pool = pool
@@ -444,6 +446,7 @@ def _parse_file_worker_for_timeout(
     detection + the binary guard + the config-file size gate) instead of
     parsing directly.
     """
+    exit_when_parent_dies()
     try:
         lang, chunks, skip = parse_file_callback(
             file_path,

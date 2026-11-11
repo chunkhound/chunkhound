@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **`_quickresearch` subcommand, `run_git_diff`, and `IndexingConfig.reset_user_include_exclude()`** — superseded by in-process streaming (`stream_git_diff_fragments`, `run_websearch`).
+
+### Changed
+- **`CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` is now the websearch response deadline** — It previously bounded only the research subprocess; it now covers query expansion, DDG, fetch, and research. Discovery is capped at `min(60, total/4)`. Cancellation cleanup can outlive the deadline, so a one-shot CLI process may wait briefly during event-loop shutdown. If you tuned this value, add headroom (up to 60s) for discovery. Non-positive or non-finite values fall back to the 600s default.
+- **Websearch pages chunk by line window** — Fetched pages are split into ≤1,200-character line windows (`page:N` symbols) instead of markdown-heading chunks, to stay under embedding provider limits.
+- **Transient search streams in-process** — Git-history and web-page search stream chunks through a bounded vector cache and top-K heap instead of loading everything into memory; `MAX_DIFF_CHUNKS` truncation and the `_quickresearch` subprocess are gone. Set `CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES=0` to disable the cache, `CHUNKHOUND_VECTOR_CACHE_TTL_SECONDS` to change expiry, and `CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR` to tune the candidate pool (default 5). With `--vector-source both`, each page merges overfetch-sized heaps from diff and DB (`total` is a lower bound on that merged top-K); `offset+page_size` cannot exceed the candidate window `min(max(page_size × overfetch factor, 50), 2000)`, and requests outside it fail explicitly. `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` is the response deadline: discovery (query expansion + DDG) is capped at 60s or a quarter of the total; fetch and research share the remainder. Cancellation cleanup can outlive the deadline, including during one-shot CLI shutdown.
+- **Diff/web `path_filter` matches indexed search** — `vector_source=diff|both` now applies the same path rules as DB search: file filters (`src/foo.py`) match by path suffix instead of returning nothing, and directory filters match a nested folder anywhere in the path (`services` matches `chunkhound/services/...`).
+- **Web research survives unstable pages** — A fetched page evicted from the in-process source cache is refetched on demand; if the refetch fails or the content changed since first read, that page is dropped from the rest of the research with a `Dropped from research: …` fetch warning instead of failing the run. Research still fails if every usable source is dropped.
+- **Removed `DiffAwareSearchService`** — The unused preloaded-vector git-diff search facade is gone; use `TransientSearchService`, which git-history search already uses.
+
+### Fixed
+- **VoyageAI semantic search ranks better** — Search queries are now embedded with Voyage `input_type="query"` instead of `"document"`. Voyage models embed queries and documents differently, and a query embedded as a document was matched as one document against another, which pushed relevant code far down the results. Indexed chunks were always embedded as documents and still are, so no re-index is needed. Other providers are unchanged.
+
 ## [6.1.0] - 2026-10-20
 
 ### Added

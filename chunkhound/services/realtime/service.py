@@ -8,6 +8,7 @@ infrastructure and respects the single-threaded database constraint.
 from __future__ import annotations
 
 import asyncio
+import copy
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -481,6 +482,15 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         except Exception:
             # Never let debug plumbing affect runtime
             pass
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """The realtime health structure as of now, for a status read.
+
+        The status callback publishes a snapshot only when the service records
+        something; between publishes the queue can drain and time can pass, so
+        a reader must not rely on the last published one.
+        """
+        return copy.deepcopy(self._build_health_snapshot())
 
     def _build_health_snapshot(self) -> dict[str, Any]:
         monitoring_active = False
