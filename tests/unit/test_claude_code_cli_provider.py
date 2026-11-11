@@ -180,6 +180,43 @@ class TestClaudeCodeCLIProvider:
             assert ".json" in blob
 
     @pytest.mark.asyncio
+    async def test_complete_disables_user_hooks(self, provider, mock_subprocess):
+        """User hooks (e.g. a Stop hook) cannot replace the answer the caller gets."""
+        from pathlib import Path
+
+        captured: dict[str, object] = {}
+
+        async def read_settings(input=None):
+            cmd = mock_subprocess.call_args.args
+            path = Path(cmd[cmd.index("--settings") + 1])
+            captured["path"] = path
+            captured["settings"] = json.loads(path.read_text(encoding="utf-8"))
+            return (b"ok", b"")
+
+        mock_process = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.communicate = read_settings
+        mock_subprocess.return_value = mock_process
+
+        await provider.complete("Test prompt")
+
+        assert captured["settings"] == {"disableAllHooks": True}
+        assert not captured["path"].exists()
+
+    @pytest.mark.asyncio
+    async def test_cancel_stops_cli_process(self, provider, monkeypatch):
+        """Cancelling a completion stops the CLI instead of leaving it running."""
+        import sys
+
+        from chunkhound.providers.llm import claude_code_cli_provider as mod
+        from tests.helpers import cli_runs_after_cancel
+
+        monkeypatch.setattr(mod, "resolve_cli_binary", lambda name: sys.executable)
+        assert not await cli_runs_after_cancel(
+            monkeypatch, mod, lambda: provider.complete("Test prompt")
+        )
+
+    @pytest.mark.asyncio
     async def test_complete_disables_tools_with_empty_tools_value(
         self, provider, mock_subprocess
     ):

@@ -159,6 +159,66 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "atlascloud",
+            "model": "deepseek-ai/deepseek-v4-flash",
+            "expected_name": "atlascloud",
+            "expected_base_url": "https://api.atlascloud.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'atlascloud'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="atlascloud",
+    ),
+    pytest.param(
+        {
+            "provider": "runcrate",
+            "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "expected_name": "runcrate",
+            "expected_base_url": "https://api.runcrate.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'runcrate'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="runcrate",
+    ),
+    pytest.param(
+        {
+            "provider": "cheapaimodel",
+            "model": "deepseek-v4-1-flash",
+            "expected_name": "cheapaimodel",
+            "expected_base_url": "https://api.cheapaimodel.ai/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'cheapaimodel'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="cheapaimodel",
+    ),
+    pytest.param(
+        {
+            "provider": "uberllm",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "expected_name": "uberllm",
+            "expected_base_url": "https://api.uberllm.dev/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'uberllm'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="uberllm",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -314,6 +374,10 @@ class TestFactoryPipeline:
             "api-route": 10,
             "opper": 10,
             "obscurify-ai": 10,
+            "atlascloud": 10,
+            "runcrate": 10,
+            "cheapaimodel": 10,
+            "uberllm": 10,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected

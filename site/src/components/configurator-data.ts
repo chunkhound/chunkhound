@@ -298,6 +298,46 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_OBSCURIFY_API_KEY>",
     },
     {
+        id: "atlascloud",
+        name: "Atlas Cloud",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 18a4 4 0 0 1-.5-7.97A5.5 5.5 0 0 1 17 8.5a4.75 4.75 0 0 1 0 9.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "atlascloud",
+            model: "deepseek-ai/deepseek-v4-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_ATLASCLOUD_API_KEY>",
+    },
+    {
+        id: "runcrate",
+        name: "Runcrate",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73zM12 22V12M3.3 7l7.7 4.73a2 2 0 0 0 2 0L20.7 7M7.5 4.27l9 5.15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "runcrate",
+            model: "deepseek-ai/DeepSeek-V4.1-Flash",
+        },
+        apiKeyPlaceholder: "<YOUR_RUNCRATE_API_KEY>",
+    },
+    {
+        id: "cheapaimodel",
+        name: "cheapaimodel",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "cheapaimodel",
+            model: "deepseek-v4-1-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_CHEAPAIMODEL_API_KEY>",
+    },
+    {
+        id: "uberllm",
+        name: "UberLLM",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M6 4v9a6 6 0 0 0 12 0V4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "uberllm",
+            model: "deepseek/deepseek-v4.1-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_UBERLLM_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,

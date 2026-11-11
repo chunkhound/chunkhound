@@ -105,6 +105,9 @@ dependencies = [
     "pymupdf>=1.27.0",
     "rich>=13.0.0",
     "readchar>=4.2.1",
+    # Native per-match timeouts prevent user-supplied search regexes from
+    # monopolizing transient search workers through catastrophic backtracking.
+    "regex>=2025.9.18",
     "scikit-learn>=1.3.0",
     "scipy>=1.7.0",
     "numpy>=1.24.0",
@@ -125,7 +128,10 @@ dependencies = [
     # Response.charset workaround). Bumping requires re-validating the
     # response-event race ordering and the async-handler dispatch path.
     "zendriver==0.15.3",
-    "chunkhound-native>=5.2.0",
+    # 6.1.0 is the first release with AnalyticsRecorder, which
+    # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
+    # command; an older native satisfies a lower bound and then fails there.
+    "chunkhound-native>=6.1.0",
 ]
 
 [project.optional-dependencies]
@@ -282,4 +288,5 @@ dev = [
     "ruff>=0.11.12",
     "types-psutil>=7.0.0.20250601",
     "types-jsonschema>=4.0.0",
+    "types-regex>=2025.11.3.20251106",
 ]
