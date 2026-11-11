@@ -22,7 +22,11 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler, watchdog_event_filter
+from .events import (
+    SimpleEventHandler,
+    ignore_windows_last_access,
+    watchdog_event_filter,
+)
 
 
 class RealtimeObserver(Protocol):
@@ -49,6 +53,7 @@ def _create_watchdog_observer() -> RealtimeObserver:
     """Import watchdog only inside the watchdog startup path."""
     from watchdog.observers import Observer
 
+    ignore_windows_last_access()
     return Observer()
 
 
