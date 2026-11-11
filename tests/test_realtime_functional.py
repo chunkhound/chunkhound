@@ -918,6 +918,79 @@ class TestRealtimeFunctional:
                     await task
 
     @pytest.mark.asyncio
+    async def test_write_after_failed_processing_inside_dedup_window_is_indexed(
+        self,
+        realtime_setup,
+        monkeypatch,
+    ):
+        """A failed attempt leaves no record suppressing the next write."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "write_after_failure.py"
+        target_file.write_text("value = 1\n")
+        attempted_contents: list[str] = []
+        retry_processed = asyncio.Event()
+
+        async def failing_then_recording_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            attempted_contents.append(file_path.read_text())
+            if len(attempted_contents) == 1:
+                raise RuntimeError("synthetic realtime processing failure")
+            retry_processed.set()
+            return {"status": "processed", "chunks": 1, "embeddings": 0}
+
+        original_add_file = service.add_file
+
+        async def skip_embed_follow_up(
+            file_path: Path, priority: str = "change"
+        ) -> bool:
+            if priority == "embed":
+                return True
+            return await original_add_file(file_path, priority)
+
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            failing_then_recording_process_file,
+        )
+        monkeypatch.setattr(service, "add_file", skip_embed_follow_up)
+        # Wide enough that the second event always falls inside the window.
+        monkeypatch.setattr(service, "_EVENT_DEDUP_WINDOW_SECONDS", 60.0)
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        async def watcher_event() -> None:
+            service._record_source_event("modified", target_file)
+            service._record_accepted_event("modified", target_file)
+            await service.event_queue.put(("modified", target_file))
+
+        consumer_task = asyncio.create_task(service._consume_events())
+        process_task = asyncio.create_task(service._process_loop())
+        service.event_consumer_task = consumer_task
+        service.process_task = process_task
+
+        try:
+            await watcher_event()
+            await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["pipeline"]["processing_error_count"] >= 1,
+                timeout=3.0,
+            )
+
+            target_file.write_text("value = 2\n")
+            await watcher_event()
+            await asyncio.wait_for(retry_processed.wait(), timeout=3.0)
+            assert attempted_contents == ["value = 1\n", "value = 2\n"]
+        finally:
+            for task in (consumer_task, process_task):
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+    @pytest.mark.asyncio
     async def test_processing_error_requeues_reserved_newer_generation(
         self,
         realtime_setup,
