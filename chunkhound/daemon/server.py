@@ -388,7 +388,7 @@ class ChunkHoundDaemon(MCPServerBase):
             embedding_manager=self.embedding_manager,
             initialization_complete=self._initialization_complete,
             debug_mode=self.debug_mode,
-            scan_progress=self._scan_progress,
+            scan_progress=self._scan_progress_for_tool(tool_name),
             llm_manager=self.llm_manager,
             config=self.config,
             ensure_services=self.ensure_tool_services,
