@@ -136,6 +136,31 @@ async def test_serve_connection_skips_invalid_jsonrpc_shape_and_keeps_serving() 
 
 
 @pytest.mark.asyncio
+async def test_serve_connection_replies_invalid_request_when_id_is_readable() -> None:
+    """A malformed request carrying an id gets a -32600 error, not silence."""
+    server = StdioMCPServer(config=MagicMock())
+    incoming: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+    outgoing: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def read_frame() -> dict[str, Any] | None:
+        return await incoming.get()
+
+    async def write_frame(frame: dict) -> None:
+        await outgoing.put(frame)
+
+    session_task = asyncio.create_task(server.serve_connection(read_frame, write_frame))
+    try:
+        await incoming.put({"jsonrpc": "2.0", "id": 7, "method": 123})
+        response = await asyncio.wait_for(outgoing.get(), timeout=5.0)
+        assert response["id"] == 7
+        assert response["error"]["code"] == -32600
+        assert not session_task.done()
+    finally:
+        await incoming.put(None)
+        await asyncio.wait_for(session_task, timeout=5.0)
+
+
+@pytest.mark.asyncio
 async def test_tools_call_rejects_arguments_violating_input_schema() -> None:
     server = StdioMCPServer(config=MagicMock())
     init = {

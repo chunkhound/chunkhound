@@ -1594,6 +1594,13 @@ class MCPServerBase(ABC):
             SessionMessage
         ](0)
 
+        # pump_in (invalid-request replies) and pump_out both write frames.
+        write_lock = anyio.Lock()
+
+        async def send_frame(payload: dict[str, Any]) -> None:
+            async with write_lock:
+                await write_frame(payload)
+
         async def pump_in() -> None:
             async with read_stream_writer:
                 while True:
@@ -1606,8 +1613,26 @@ class MCPServerBase(ABC):
                         )
                     except Exception as exc:
                         self.debug_log(
-                            f"serve_connection: invalid JSON-RPC frame, skipping: {exc}"
+                            f"serve_connection: invalid JSON-RPC frame: {exc}"
                         )
+                        request_id = (
+                            frame.get("id") if isinstance(frame, dict) else None
+                        )
+                        if isinstance(request_id, (str, int)) and not isinstance(
+                            request_id, bool
+                        ):
+                            # JSON-RPC 2.0: a request whose id is readable must
+                            # get an error reply, or the caller waits forever.
+                            await send_frame(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "error": {
+                                        "code": -32600,
+                                        "message": "Invalid Request",
+                                    },
+                                }
+                            )
                         await read_stream_writer.send(exc)
                         continue
                     await read_stream_writer.send(message)
@@ -1618,7 +1643,7 @@ class MCPServerBase(ABC):
                     payload = session_message.message.model_dump(
                         by_alias=True, mode="json", exclude_unset=True
                     )
-                    await write_frame(payload)
+                    await send_frame(payload)
 
         async with anyio.create_task_group() as tg:
             # pump_in has its own scope so it can be cancelled alone: pump_out
