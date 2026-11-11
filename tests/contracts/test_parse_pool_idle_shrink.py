@@ -28,17 +28,21 @@ def _reset_pool() -> None:
 
 def test_idle_parse_pool_is_shut_down_and_recreated(monkeypatch, tmp_path):
     _reset_pool()
-    # Every read of the pool below holds a lease, so a slow machine cannot
-    # have the timer shut it down mid-read.
-    monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 2.0)
     src = tmp_path / "a.py"
     src.write_text("def f():\n    return 1\n", encoding="utf-8")
     try:
+        # An hour of idle time, so the unleased reads below cannot race it.
+        monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 3600.0)
         first = pb.parse_batch_callback([str(src)], _CFG)
-        with pb._leased_parse_pool(1) as pool:
-            pool.submit(os.getpid).result()
-            workers = list(pool._processes.values())
+        pool = pb._parse_pool
+        assert pool is not None  # the batch went through the shared pool
+        workers = list(pool._processes.values())
         assert workers
+
+        # A lease restarts the idle timer, now at 2 s.
+        monkeypatch.setattr(pb, "_PARSE_POOL_IDLE_SECONDS", 2.0)
+        with pb._leased_parse_pool(1) as leased:
+            assert leased is pool
 
         deadline = time.monotonic() + 30
         while pb._parse_pool is not None and time.monotonic() < deadline:
@@ -77,12 +81,12 @@ def test_parse_pool_is_never_shut_down_while_leased():
         with pb._leased_parse_pool(1):
             pb._shut_down_idle_parse_pool(stale)  # fires while a batch runs
             assert pb._parse_pool is pool
+        # The direct calls below stand in for the real timer that release
+        # started; it is cancelled at the end so it does not outlive the test.
+        current_timer = pb._parse_pool_idle_timer
         pb._shut_down_idle_parse_pool(stale)  # as if that timer fired late
         assert pb._parse_pool is pool
 
-        # The direct call stands in for the real timer, which is then
-        # cancelled so it does not outlive the test.
-        current_timer = pb._parse_pool_idle_timer
         pb._shut_down_idle_parse_pool(pb._parse_pool_idle_token)
         assert pb._parse_pool is None
     finally:

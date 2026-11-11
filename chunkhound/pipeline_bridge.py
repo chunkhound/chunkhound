@@ -271,7 +271,8 @@ def _shut_down_idle_parse_pool(token: object) -> None:
 def _shut_down_parse_pool_at_exit() -> None:
     """Shut the parse pool down at interpreter exit, cancelling queued tasks.
 
-    Also cancels a pending idle timer, so the next lease starts from no pool.
+    Waits for running tasks. Also cancels any pending idle timer and clears its
+    token, leaving no pool and no timer; tests call it to reset that state.
     """
     global _parse_pool, _parse_pool_idle_timer, _parse_pool_idle_token
     with _parse_pool_lock:
