@@ -98,3 +98,20 @@ def test_write_stdout_line_writes_and_flushes(monkeypatch: pytest.MonkeyPatch) -
 
     assert written == [b'{"ok":true}\n']
     assert flushed is True
+
+
+@pytest.mark.asyncio
+async def test_iter_json_frames_skips_undecodable_and_non_object_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = [b"not-json\n", b"\xff\xfe\n", b"[1, 2]\n", b'{"id": 1}\n']
+
+    async def fake_lines():
+        for line in lines:
+            yield line
+
+    monkeypatch.setattr(stdio_lines_module, "iter_stdin_lines", fake_lines)
+
+    frames = [f async for f in stdio_lines_module.iter_json_frames()]
+
+    assert frames == [{"id": 1}]

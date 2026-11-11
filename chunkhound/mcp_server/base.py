@@ -1430,7 +1430,8 @@ class MCPServerBase(ABC):
         clients are shown. Tools that are not advertised (unknown or hidden by
         missing capabilities) are left to ``handle_tool_call``'s own error path.
         """
-        from jsonschema import ValidationError, validate
+        from jsonschema import ValidationError
+        from jsonschema.validators import validator_for
 
         schema = next(
             (
@@ -1443,7 +1444,8 @@ class MCPServerBase(ABC):
         if schema is None:
             return None
         try:
-            validate(instance=arguments, schema=schema)
+            # Skip validate()'s per-call check_schema(): the schema is ours.
+            validator_for(schema)(schema).validate(arguments)
         except ValidationError as e:
             return e.message
         return None

@@ -144,25 +144,17 @@ class StdioMCPServer(MCPServerBase):
         try:
             if _MCP_AVAILABLE:
                 async with self.server_lifespan():
+                    import contextlib
                     import json
 
-                    import anyio
                     import anyio.to_thread
 
                     from chunkhound.utils import stdio_lines
 
-                    lines = stdio_lines.iter_stdin_lines()
+                    frames = stdio_lines.iter_json_frames()
 
                     async def read_frame() -> dict[str, Any] | None:
-                        async for line in lines:
-                            try:
-                                frame = json.loads(line.decode())
-                            except (json.JSONDecodeError, UnicodeDecodeError):
-                                continue  # skip undecodable lines
-                            if isinstance(frame, dict):
-                                return frame
-                            # Non-object JSON (e.g. a batch array): skip it.
-                        return None
+                        return await anext(frames, None)
 
                     async def write_frame(frame: dict[str, Any]) -> None:
                         # Blocking stdout write off the event loop; serve_connection's
@@ -173,7 +165,8 @@ class StdioMCPServer(MCPServerBase):
                         )
 
                     self.debug_log("Stdio server started, awaiting requests")
-                    await self.serve_connection(read_frame, write_frame)
+                    async with contextlib.aclosing(frames):
+                        await self.serve_connection(read_frame, write_frame)
             else:
                 # Minimal fallback stdio: read initialize request,
                 # respond with matching ID so tests can proceed

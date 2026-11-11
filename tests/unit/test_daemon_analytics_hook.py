@@ -19,11 +19,11 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import mcp.types as types
 import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.daemon.server import ChunkHoundDaemon
+from tests.utils.mcp_session import call_tool
 
 
 def _read_events(buffer_dir: Path) -> list[dict]:
@@ -71,10 +71,7 @@ async def test_daemon_proxied_tool_call_records_one_command_summary(
 ) -> None:
     instance, buffer_dir = daemon
 
-    call_tool_handler = instance.server._request_handlers["tools/call"].handler
-    result = await call_tool_handler(
-        None, types.CallToolRequestParams(name="daemon_status", arguments={})
-    )
+    result = await call_tool(instance, "daemon_status", {})
 
     assert result.is_error is False
     events = _read_events(buffer_dir)
@@ -106,9 +103,6 @@ async def test_disabled_analytics_records_nothing_via_the_daemon(
     )
     instance._initialization_complete.set()
 
-    call_tool_handler = instance.server._request_handlers["tools/call"].handler
-    await call_tool_handler(
-        None, types.CallToolRequestParams(name="daemon_status", arguments={})
-    )
+    await call_tool(instance, "daemon_status", {})
 
     assert not buffer_dir.exists()

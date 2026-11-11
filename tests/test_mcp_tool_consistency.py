@@ -1185,26 +1185,10 @@ def test_no_tool_definitions_list():
 
 
 async def _invoke_call_tool(server, name: str, arguments: dict):
-    """Drive the server's on_call_tool callback directly (test-only helper).
+    """Call a tool through the server's public serve_connection() session."""
+    from tests.utils.mcp_session import call_tool
 
-    Under the SDK 2.x constructor-callback API there is no public
-    ``request_handlers`` dict keyed by request type anymore; the registered
-    callback is reachable via ``_request_handlers["tools/call"].handler``.
-    Bypasses JSON-RPC envelope serialization so tests can assert directly on
-    the returned ``types.CallToolResult``.
-    """
-    import mcp.types as types
-    from mcp.server.context import ServerRequestContext
-
-    handler = server.server._request_handlers["tools/call"].handler
-    ctx = ServerRequestContext(
-        session=None,
-        lifespan_context={},
-        protocol_version="2025-06-18",
-        method="tools/call",
-    )
-    params = types.CallToolRequestParams(name=name, arguments=arguments)
-    return await handler(ctx, params)
+    return await call_tool(server, name, arguments)
 
 
 @pytest.mark.asyncio
@@ -1232,21 +1216,14 @@ async def test_server_list_tools_returns_list_tools_result() -> None:
     from unittest.mock import MagicMock
 
     import mcp.types as types
-    from mcp.server.context import ServerRequestContext
 
     from chunkhound.mcp_server.stdio import StdioMCPServer
+    from tests.utils.mcp_session import list_tools
 
     server = StdioMCPServer(config=MagicMock())
     server._initialization_complete.set()
-    handler = server.server._request_handlers["tools/list"].handler
-    ctx = ServerRequestContext(
-        session=None,
-        lifespan_context={},
-        protocol_version="2025-06-18",
-        method="tools/list",
-    )
 
-    result = await handler(ctx, None)
+    result = await list_tools(server)
 
     assert isinstance(result, types.ListToolsResult)
     assert any(t.name == "search" for t in result.tools)

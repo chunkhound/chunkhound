@@ -275,12 +275,8 @@ class ClientProxy:
         )
 
     async def _forward_stdin_to_socket(self, writer: asyncio.StreamWriter) -> None:
-        """Read JSON lines from stdin, parse, and write as IPC frames to the socket."""
-        async for line in stdio_lines.iter_stdin_lines():
-            try:
-                msg = json.loads(line.decode())
-            except json.JSONDecodeError:
-                continue
+        """Read JSON lines from stdin and write them as IPC frames to the socket."""
+        async for msg in stdio_lines.iter_json_frames():
             ipc.write_frame(writer, msg)
             await writer.drain()
 

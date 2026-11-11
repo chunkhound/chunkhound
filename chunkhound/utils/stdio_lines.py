@@ -8,16 +8,19 @@ Zero chunkhound domain logic, zero mcp imports — pure OS I/O.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import Any
 
 _WINDOWS_STDIN_POLL_INTERVAL = 0.01
 _WINDOWS_STDIN_READ_CHUNK_SIZE = 65536
 _WINDOWS_PIPE_CLOSED_ERRORS = {6, 38, 109}  # invalid handle, EOF, broken pipe
 
 
-async def iter_stdin_lines() -> AsyncIterator[bytes]:
+async def iter_stdin_lines() -> AsyncGenerator[bytes, None]:
     """Yield raw lines (including trailing \\n) from stdin until EOF."""
     if sys.platform == "win32":
         async for line in _iter_stdin_lines_windows():
@@ -25,6 +28,22 @@ async def iter_stdin_lines() -> AsyncIterator[bytes]:
     else:
         async for line in _iter_stdin_lines_unix():
             yield line
+
+
+async def iter_json_frames() -> AsyncGenerator[dict[str, Any], None]:
+    """Yield JSON-object frames from stdin until EOF.
+
+    Undecodable lines and non-object JSON (e.g. batch arrays) are skipped; this
+    is the one place that owns that policy for stdin transports.
+    """
+    async with contextlib.aclosing(iter_stdin_lines()) as lines:
+        async for line in lines:
+            try:
+                frame = json.loads(line.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(frame, dict):
+                yield frame
 
 
 async def _iter_stdin_lines_unix() -> AsyncIterator[bytes]:
