@@ -1619,16 +1619,26 @@ class MCPServerBase(ABC):
                     await write_frame(payload)
 
         async with anyio.create_task_group() as tg:
-            tg.start_soon(pump_in)
+            # pump_in has its own scope so it can be cancelled alone: pump_out
+            # must keep draining responses already queued when run() returns.
+            in_scope = anyio.CancelScope()
+
+            async def pump_in_scoped() -> None:
+                with in_scope:
+                    await pump_in()
+
+            tg.start_soon(pump_in_scoped)
             tg.start_soon(pump_out)
             try:
                 await self.server.run(read_stream, write_stream, init_options)
             finally:
                 await read_stream_writer.aclose()
-                await write_stream.aclose()
                 # pump_in may be blocked in read_frame() with no EOF coming;
                 # don't let it keep the task group alive once run() is done.
-                tg.cancel_scope.cancel()
+                in_scope.cancel()
+                # Closing the write side lets pump_out finish after delivering
+                # every response still in flight.
+                await write_stream.aclose()
 
     def build_streamable_http_app(self, **kwargs: Any) -> Any:
         """Wrap StreamableHTTPSessionManager construction for HttpMCPServer."""

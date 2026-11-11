@@ -261,3 +261,37 @@ async def test_serve_connection_returns_when_run_ends_while_read_blocks(
         pass
 
     await asyncio.wait_for(server.serve_connection(read_frame, write_frame), 2.0)
+
+
+@pytest.mark.asyncio
+async def test_serve_connection_delivers_last_response_when_input_ends() -> None:
+    """EOF right after a request must not cut off the in-flight response,
+    even when writing it is slow (e.g. an IPC drain)."""
+    server = StdioMCPServer(config=MagicMock())
+    sent = False
+    delivered: list[dict] = []
+
+    async def read_frame() -> dict[str, Any] | None:
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-client", "version": "0.0.0"},
+                },
+            }
+        await asyncio.sleep(0.05)
+        return None  # EOF immediately after the request
+
+    async def write_frame(frame: dict) -> None:
+        await asyncio.sleep(0.2)
+        delivered.append(frame)
+
+    await asyncio.wait_for(server.serve_connection(read_frame, write_frame), 5.0)
+
+    assert [f["id"] for f in delivered] == [1]
