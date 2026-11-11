@@ -143,33 +143,18 @@ class StdioMCPServer(MCPServerBase):
         """Run the stdio server with proper lifecycle management."""
         try:
             if _MCP_AVAILABLE:
-                # Set initialization options with capabilities
-                from mcp.server.lowlevel import NotificationOptions
-                from mcp.server.models import InitializationOptions
-
-                init_options = InitializationOptions(
-                    server_name="ChunkHound Code Search",
-                    server_version=__version__,
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                )
-
-                # Run with lifespan management
                 async with self.server_lifespan():
-                    # Run the stdio server
-                    import mcp.server.stdio
+                    import contextlib
 
-                    async with mcp.server.stdio.stdio_server() as (
-                        read_stream,
-                        write_stream,
-                    ):
-                        self.debug_log("Stdio server started, awaiting requests")
-                        await self.server.run(
-                            read_stream,
-                            write_stream,
-                            init_options,
+                    from chunkhound.utils import stdio_lines
+
+                    frames = stdio_lines.iter_json_frames()
+                    read_frame = stdio_lines.make_stdin_frame_reader(frames)
+
+                    self.debug_log("Stdio server started, awaiting requests")
+                    async with contextlib.aclosing(frames):
+                        await self.serve_connection(
+                            read_frame, stdio_lines.write_json_frame
                         )
             else:
                 # Minimal fallback stdio: read initialize request,

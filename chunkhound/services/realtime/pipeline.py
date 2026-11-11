@@ -1050,6 +1050,11 @@ class RealtimePipelineMixin:
                     continue
 
                 # Layer 3: Event deduplication to prevent redundant processing.
+                # A duplicate is redundant while the path's change is pending
+                # (the queued work reads the latest content), but not while it is
+                # being processed: that run may already have read the file, and
+                # only add_file reserves the follow-up that indexes the newer
+                # write.
                 file_key = str(file_path)
                 current_time = time.time()
 
@@ -1061,6 +1066,11 @@ class RealtimePipelineMixin:
                         last_event_type == event_type
                         and (current_time - last_event_time)
                         < self._EVENT_DEDUP_WINDOW_SECONDS
+                        and not (
+                            event_type in ("created", "modified")
+                            and str(self._normalize_mutation_path(file_path))
+                            in self._active_change_generations
+                        )
                     ):
                         logger.debug(
                             "Suppressing duplicate "
@@ -1551,9 +1561,6 @@ class RealtimePipelineMixin:
                         self._indexed_files.add(normalized)
                         self._file_condition.notify_all()
 
-                    # Clear event dedup entry so future modifications aren't suppressed
-                    self._recent_file_events.pop(str(file_path), None)
-
                     # If we skipped embeddings, queue for embedding generation
                     if skip_embeddings:
                         await self.add_file(file_path, priority="embed")
@@ -1582,6 +1589,11 @@ class RealtimePipelineMixin:
                     processing_error = error
                 finally:
                     self._record_processing_finished(file_path, completed=completed)
+                    # Clear the event dedup entry whether or not processing
+                    # succeeded: once the path is no longer active, a same-type
+                    # write inside the window would be suppressed, and after a
+                    # failed attempt nothing else would index it.
+                    self._recent_file_events.pop(str(file_path), None)
                     if active_change_path is not None:
                         self._active_change_generations.pop(active_change_path, None)
                         await self._drain_reserved_follow_up_change(

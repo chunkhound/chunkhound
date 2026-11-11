@@ -1,8 +1,7 @@
 """Unit tests for ``build_forwarded_argv``.
 
-These tests are the regression contract for argv reconstruction across
-both subprocess forwarding paths (websearch → _quickresearch and the
-mcp → _daemon proxy). They lock in the helper's handling of
+These tests are the regression contract for argv reconstruction used by the
+MCP → daemon proxy. They lock in the helper's handling of
 BooleanOptionalAction, store_true/store_false, list, and scalar actions.
 """
 

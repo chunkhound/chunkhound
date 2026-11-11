@@ -112,7 +112,7 @@ class SubprocessJsonRpcClient:
         self._reader_task = asyncio.create_task(self._read_responses())
 
     async def send_request(
-        self, method: str, params: dict[str, Any] | None = None, timeout: float = 5.0
+        self, method: str, params: dict[str, Any] | None = None, timeout: float = 15.0
     ) -> dict[str, Any]:
         """Send a JSON-RPC request and wait for the response.
 

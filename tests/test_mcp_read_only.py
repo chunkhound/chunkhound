@@ -203,12 +203,13 @@ async def test_read_only_daemon_status_reports_ready(populated_db_path, tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("isolated_mcp_mode")
 async def test_read_only_forces_stdio_when_daemon_requested(tmp_path, monkeypatch):
     # CHUNKHOUND_DAEMON_MODE feeds into mcp_command's no_daemon derivation,
     # so clear it to stay independent of the developer/CI shell. Also clear
-    # CHUNKHOUND_MCP_MODE via monkeypatch so its teardown restores the unset
-    # state — otherwise mcp_command's unconditional write would bleed into
-    # subsequent tests.
+    # CHUNKHOUND_MCP_MODE so the test starts from the unset state; the
+    # isolated_mcp_mode fixture restores it, since mcp_command's unconditional
+    # write would otherwise bleed into subsequent tests.
     monkeypatch.delenv("CHUNKHOUND_DAEMON_MODE", raising=False)
     monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
 
