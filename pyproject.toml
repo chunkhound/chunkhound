@@ -128,7 +128,10 @@ dependencies = [
     # Response.charset workaround). Bumping requires re-validating the
     # response-event race ordering and the async-handler dispatch path.
     "zendriver==0.15.3",
-    "chunkhound-native>=5.2.0",
+    # 6.1.0 is the first release with AnalyticsRecorder, which
+    # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
+    # command; an older native satisfies a lower bound and then fails there.
+    "chunkhound-native>=6.1.0",
 ]
 
 [project.optional-dependencies]
