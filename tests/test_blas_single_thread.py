@@ -33,6 +33,11 @@ print(json.dumps([i["num_threads"] for i in threadpool_info()
 
 
 def _openblas_threads(entry: str, extra_env: dict[str, str]) -> list[int]:
+    """Return the thread count of each OpenBLAS pool after importing *entry*.
+
+    Skips the test where numpy is not built on OpenBLAS: macOS wheels use
+    Apple's Accelerate, which OPENBLAS_NUM_THREADS does not apply to.
+    """
     env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
     env.update(extra_env)
     env["PYTHONPATH"] = os.pathsep.join(
@@ -42,7 +47,10 @@ def _openblas_threads(entry: str, extra_env: dict[str, str]) -> list[int]:
         [sys.executable, "-c", _PROBE, entry],
         capture_output=True, text=True, env=env, check=True, timeout=120,
     ).stdout.strip().splitlines()[-1]
-    return json.loads(out)
+    threads: list[int] = json.loads(out)
+    if not threads:
+        pytest.skip("numpy is not using OpenBLAS here")
+    return threads
 
 
 @pytest.mark.parametrize(
@@ -50,10 +58,10 @@ def _openblas_threads(entry: str, extra_env: dict[str, str]) -> list[int]:
 )
 def test_entry_points_run_openblas_single_threaded(entry: str) -> None:
     threads = _openblas_threads(entry, {})
-    assert threads and set(threads) == {1}, threads
+    assert set(threads) == {1}, threads
 
 
 def test_an_explicit_openblas_setting_wins() -> None:
     explicit = {"OPENBLAS_NUM_THREADS": "2"}
     threads = _openblas_threads("chunkhound.api.cli.main", explicit)
-    assert threads and set(threads) == {2}, threads
+    assert set(threads) == {2}, threads
