@@ -854,6 +854,34 @@ async def test_both_mode_cancels_sibling_on_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bulk_both_mode_cancels_db_snapshot_when_stream_fails() -> None:
+    cancelled = asyncio.Event()
+    original = make_original()
+
+    async def hang(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    original.search_semantic = hang
+
+    async def boom() -> AsyncIterator[list]:
+        raise RuntimeError("stream failed")
+        yield []  # pragma: no cover
+
+    service = TransientSearchService(
+        original, boom, "both", embedding_manager(), VectorCache(max_entries=0)
+    )
+
+    with pytest.raises(RuntimeError, match="stream failed"):
+        await service.search_semantic_many(["query", "other"])
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("page_size, last_offset", [(10, 1990), (30, 1950)])
 async def test_large_corpus_pagination_stops_at_supported_window(
     page_size, last_offset

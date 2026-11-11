@@ -193,11 +193,42 @@ class TransientSearchService:
             raise RuntimeError("Cannot embed an empty query batch")
         return embeddings, expected_result
 
+    async def _gated_chunk_batches(
+        self, source_ready: Awaitable[Any] | None
+    ) -> AsyncIterator[list[Any]]:
+        """Start a source promptly, but withhold its first batch until ready.
+
+        Both-mode needs its bounded DB snapshot before it can decide whether a
+        diff location owns a DB result. Prefetching exactly one batch means a
+        source failure can still cancel a stalled DB request without buffering
+        an unbounded diff or scoring chunks before that snapshot is available.
+        """
+        stream = self._chunk_stream()
+        prefetch: asyncio.Task[list[Any] | None] | None = None
+        try:
+            if source_ready is not None:
+                prefetch = asyncio.create_task(anext(stream, None))
+                first_batch, _ = await asyncio.gather(prefetch, source_ready)
+                prefetch = None
+                if first_batch is not None:
+                    yield first_batch
+            async for batch in stream:
+                yield batch
+        finally:
+            if prefetch is not None:
+                prefetch.cancel()
+                await asyncio.gather(prefetch, return_exceptions=True)
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                await aclose()
+
     async def _vectorized_batches(
         self,
         path_prefix: str | None,
         cache_ns: dict[str, Any],
         provider: str | None,
+        *,
+        source_ready: Awaitable[Any] | None = None,
     ) -> AsyncIterator[list[tuple[int, Any, np.ndarray]]]:
         """Yield ``(ordinal, chunk, unit_vector)`` batches for one stream scan.
 
@@ -226,7 +257,7 @@ class TransientSearchService:
             pending.clear()
             return resolved
 
-        async for chunks in self._chunk_stream():
+        async for chunks in self._gated_chunk_batches(source_ready):
             hits: list[tuple[int, Any, np.ndarray]] = []
             for chunk in chunks:
                 if path_prefix and not (
@@ -286,6 +317,7 @@ class TransientSearchService:
         limit: int | None = None,
         candidate_locations: set[tuple[Any, Any]] | None = None,
         diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
             return await asyncio.wait_for(
@@ -299,6 +331,7 @@ class TransientSearchService:
                     limit=limit,
                     candidate_locations=candidate_locations,
                     diff_owned_locations=diff_owned_locations,
+                    source_ready=source_ready,
                 ),
                 timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
             )
@@ -322,6 +355,7 @@ class TransientSearchService:
         limit: int | None = None,
         candidate_locations: set[tuple[Any, Any]] | None = None,
         diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         self.peak_live_vectors = 0
         query_result = await self._embed_texts([query], provider, query=True)
@@ -334,7 +368,9 @@ class TransientSearchService:
         heap: list[tuple[float, int, dict[str, Any]]] = []
         qualifying_count = 0
 
-        async for batch in self._vectorized_batches(path_prefix, cache_ns, provider):
+        async for batch in self._vectorized_batches(
+            path_prefix, cache_ns, provider, source_ready=source_ready
+        ):
             self.peak_live_vectors = max(self.peak_live_vectors, len(heap) + len(batch))
             for ordinal, chunk, vector in batch:
                 score = float(np.dot(vector, query_vector))
@@ -376,6 +412,7 @@ class TransientSearchService:
         limit: int | None = None,
         candidate_locations: set[tuple[Any, Any]] | None = None,
         diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
     ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
         """Score compatible queries during one pass over the transient source."""
         try:
@@ -390,6 +427,7 @@ class TransientSearchService:
                     limit=limit,
                     candidate_locations=candidate_locations,
                     diff_owned_locations=diff_owned_locations,
+                    source_ready=source_ready,
                 ),
                 timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
             )
@@ -413,6 +451,7 @@ class TransientSearchService:
         limit: int | None = None,
         candidate_locations: set[tuple[Any, Any]] | None = None,
         diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
     ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
         if not queries:
             return []
@@ -432,7 +471,9 @@ class TransientSearchService:
         qualifying_counts = [0] * len(queries)
         peak_live_vectors = 0
 
-        async for batch in self._vectorized_batches(path_prefix, cache_ns, provider):
+        async for batch in self._vectorized_batches(
+            path_prefix, cache_ns, provider, source_ready=source_ready
+        ):
             chunk_matrix = np.stack([vector for _, _, vector in batch])
             scores = chunk_matrix @ query_vectors.T
             peak_live_vectors = max(
@@ -587,19 +628,25 @@ class TransientSearchService:
             )
             for query in queries
         ]
-        try:
-            # Retain ownership only for locations the bounded DB snapshots can
-            # return. Waiting for those snapshots avoids an unbounded set while
-            # a complete diff scan identifies even pruned historical owners.
-            db_results = await asyncio.gather(*db_tasks, return_exceptions=True)
-            candidate_locations = {
+        candidate_locations: set[tuple[Any, Any]] = set()
+        diff_owned_locations: set[tuple[Any, Any]] = set()
+
+        async def collect_db_results() -> list[Any]:
+            # Only the bounded DB snapshots contribute ownership locations.
+            # The transient source begins concurrently, but its first batch is
+            # gated on this collection so no diff chunk is scored too early.
+            results = await asyncio.gather(*db_tasks, return_exceptions=True)
+            candidate_locations.update(
                 (result.get("file_path"), result.get("start_line"))
-                for db_result in db_results
+                for db_result in results
                 if not isinstance(db_result, BaseException)
                 for result in db_result[0]
-            }
-            diff_owned_locations: set[tuple[Any, Any]] = set()
-            transient_results = await self._search_transient_many(
+            )
+            return results
+
+        db_results_task = asyncio.create_task(collect_db_results())
+        transient_task = asyncio.create_task(
+            self._search_transient_many(
                 queries,
                 snapshot_size,
                 0,
@@ -609,6 +656,12 @@ class TransientSearchService:
                 limit=snapshot_size,
                 candidate_locations=candidate_locations,
                 diff_owned_locations=diff_owned_locations,
+                source_ready=db_results_task,
+            )
+        )
+        try:
+            db_results, transient_results = await _await_pair(
+                db_results_task, transient_task
             )
         except BaseException:
             for task in db_tasks:
@@ -729,8 +782,10 @@ class TransientSearchService:
         final_rerank: bool = True,
     ) -> list[dict[str, Any]]:
         """Fetch and combine equal bounded snapshots from both sources."""
-        db_task = asyncio.create_task(
-            self._original.search_semantic(
+        candidate_locations: set[tuple[Any, Any]] = set()
+
+        async def collect_db_results() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            results = await self._original.search_semantic(
                 query=query,
                 page_size=snapshot_size,
                 offset=0,
@@ -742,24 +797,34 @@ class TransientSearchService:
                 time_limit=time_limit,
                 result_limit=result_limit,
             )
-        )
+            candidate_locations.update(
+                (result.get("file_path"), result.get("start_line"))
+                for result in results[0]
+            )
+            return results
+
+        db_task = asyncio.create_task(collect_db_results())
         # Retain ownership only for locations the bounded DB snapshot can
-        # return, while scanning the complete diff for those owners.
-        db_results, _ = await db_task
-        candidate_locations = {
-            (result.get("file_path"), result.get("start_line")) for result in db_results
-        }
+        # return, while scanning the complete diff for those owners. The
+        # transient task prefetches one batch immediately, so a source failure
+        # still cancels a stalled DB request.
         diff_owned_locations: set[tuple[Any, Any]] = set()
-        transient_results, _ = await self._search_transient(
-            query,
-            snapshot_size,
-            0,
-            None,
-            path_filter,
-            provider,
-            limit=snapshot_size,
-            candidate_locations=candidate_locations,
-            diff_owned_locations=diff_owned_locations,
+        transient_task = asyncio.create_task(
+            self._search_transient(
+                query,
+                snapshot_size,
+                0,
+                None,
+                path_filter,
+                provider,
+                limit=snapshot_size,
+                candidate_locations=candidate_locations,
+                diff_owned_locations=diff_owned_locations,
+                source_ready=db_task,
+            )
+        )
+        (db_results, _), (transient_results, _) = await _await_pair(
+            db_task, transient_task
         )
         if not final_rerank:
             # Hybrid position fusion intentionally retains its existing source
