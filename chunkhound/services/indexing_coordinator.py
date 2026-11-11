@@ -66,7 +66,7 @@ from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
 from .progress_utils import _update_speed_field
 from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
-from .rust_incremental_precheck import RustIncrementalWork, find_rust_incremental_work
+from .rust_incremental_precheck import RustRunPlan, plan_rust_run
 
 # Lazy multiprocessing start-method guard — applied once before pool creation.
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
@@ -1640,36 +1640,22 @@ class IndexingCoordinator(BaseService):
             # the Rust run has anything to write, BEFORE the database is handed
             # to Rust -- the handoff refuses every reader until Rust returns.
             # See chunkhound/services/rust_incremental_precheck.py.
-            rust_work: RustIncrementalWork | None = None
+            rust_plan: RustRunPlan | None = None
             rust_do_cleanup = do_cleanup
             if _use_rust and not force_reindex:
-                from chunkhound.pipeline_bridge import _cfg_or
+                from chunkhound.pipeline_bridge import rust_mtime_epsilon
 
-                rust_work = await find_rust_incremental_work(
+                rust_plan = await plan_rust_run(
                     self._db,
                     files,
                     directory,
-                    mtime_epsilon=_cfg_or(
-                        getattr(self.config, "indexing", None) if self.config else None,
-                        "mtime_epsilon_seconds",
-                        0.01,
-                        float,
-                    ),
+                    rust_mtime_epsilon(self.config),
+                    do_cleanup=do_cleanup,
+                    files_to_process=files_to_process,
                 )
-                if rust_work.changed and not (do_cleanup and rust_work.removed):
-                    # Nothing to remove: Rust needs only the changed files, so
-                    # its own diff stats and hashes those instead of the whole
-                    # tree while it owns the database. Cleanup MUST be off for
-                    # a subset run -- Rust would treat every row missing from
-                    # the list as a deleted file.
-                    changed_files: list[tuple[Path, str | None]] = [
-                        (p, None) for p in rust_work.changed
-                    ]
-                    files_to_process = changed_files
-                    rust_do_cleanup = False
-            skip_rust = rust_work is not None and not rust_work.has_work(
-                do_cleanup=do_cleanup
-            )
+                files_to_process = rust_plan.files_to_process
+                rust_do_cleanup = rust_plan.do_cleanup
+            skip_rust = rust_plan is not None and rust_plan.skip
 
             # Phase 3: Parse + Store
             parse_task: TaskID | None = None
@@ -1759,7 +1745,7 @@ class IndexingCoordinator(BaseService):
                 skipped_unchanged = len(files)
                 logger.info(
                     f"Diff: 0/{len(files)} changed "
-                    f"({rust_work.skipped_by_hash if rust_work else 0} "
+                    f"({rust_plan.work.skipped_by_hash if rust_plan else 0} "
                     "unchanged-by-hash); Rust pipeline not started"
                 )
 

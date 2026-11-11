@@ -57,6 +57,11 @@ class RustIncrementalWork:
     skipped_by_hash: int
 
     def has_work(self, *, do_cleanup: bool) -> bool:
+        """Return whether the Rust run would write or remove anything.
+
+        A changed file is always work. A DB row with no discovered file is
+        work only when the run cleans up removed files (*do_cleanup*).
+        """
         return bool(self.changed) or (do_cleanup and bool(self.removed))
 
 
@@ -116,13 +121,59 @@ async def find_rust_incremental_work(
     project_root: Path,
     mtime_epsilon: float,
 ) -> RustIncrementalWork:
-    """Read the file rows through the provider's ordinary (shared) connection
-    and classify every discovered file. Runs off the event loop: hashing a
-    fresh worktree reads every file, and the MCP server must keep answering
-    meanwhile."""
+    """Classify every discovered file against the DB's file rows.
+
+    Reads the rows through the provider's ordinary (shared) connection. Runs
+    off the event loop: hashing a fresh worktree reads every file, and the MCP
+    server must keep answering meanwhile.
+    """
 
     def _run() -> RustIncrementalWork:
         rows = db.execute_query(_FILE_STATE_SELECT, [])
         return classify_files(rows, files, project_root, mtime_epsilon)
 
     return await asyncio.to_thread(_run)
+
+
+@dataclass(frozen=True)
+class RustRunPlan:
+    """How to run the incremental Rust pipeline, decided before the handoff."""
+
+    files_to_process: list[Path] | list[tuple[Path, str | None]]
+    do_cleanup: bool
+    skip: bool
+    work: RustIncrementalWork
+
+
+async def plan_rust_run(
+    db: DatabaseProvider,
+    files: list[Path],
+    project_root: Path,
+    mtime_epsilon: float,
+    *,
+    do_cleanup: bool,
+    files_to_process: list[Path] | list[tuple[Path, str | None]],
+) -> RustRunPlan:
+    """Decide what an incremental Rust run is handed, on Python's connection.
+
+    Returns *files_to_process* and *do_cleanup* unchanged unless the run can be
+    narrowed to the changed files, and ``skip=True`` when it has nothing to
+    write or remove -- the caller then never hands the database to Rust.
+    """
+    work = await find_rust_incremental_work(db, files, project_root, mtime_epsilon)
+    rust_do_cleanup = do_cleanup
+    if work.changed and not (do_cleanup and work.removed):
+        # Nothing to remove: Rust needs only the changed files, so
+        # its own diff stats and hashes those instead of the whole
+        # tree while it owns the database. Cleanup MUST be off for
+        # a subset run -- Rust would treat every row missing from
+        # the list as a deleted file.
+        changed_files: list[tuple[Path, str | None]] = [(p, None) for p in work.changed]
+        files_to_process = changed_files
+        rust_do_cleanup = False
+    return RustRunPlan(
+        files_to_process=files_to_process,
+        do_cleanup=rust_do_cleanup,
+        skip=not work.has_work(do_cleanup=do_cleanup),
+        work=work,
+    )
