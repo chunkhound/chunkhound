@@ -1521,6 +1521,106 @@ class RealtimePipelineMixin:
             await self._enqueue_mutation(self._build_mutation("embed", path))
         self._emit_status_update()
 
+    async def _process_change_mutation(self, mutation: RealtimeMutation) -> None:
+        """Index one change or scan; its path is active until this returns.
+
+        While the path is active, add_file reserves a follow-up for a newer
+        write. Every exit (indexed, failed, or the file missing at the
+        existence check) ends the active span in the one finally below, so a
+        reservation is never stranded. A process_file error is re-raised for
+        the processing loop's handlers.
+        """
+        file_path = mutation.path
+        active_change_path = str(mutation.path)
+        self._active_change_generations[active_change_path] = mutation.source_generation
+        processing_error: Exception | None = None
+        try:
+            overdue = self._overdue_embed_mutations()
+            if overdue:
+                await self._run_promoted_embed_pass(overdue)
+
+            # Check if file still exists (prevent race condition with deletion)
+            if not file_path.exists():
+                logger.debug(f"Skipping {file_path} - file no longer exists")
+                async with self._file_condition:
+                    self.failed_files.add(normalize_file_path(file_path))
+                    self._file_condition.notify_all()
+                return
+
+            logger.debug(f"Processing {file_path} (operation: {mutation.operation})")
+
+            # Skip embeddings for initial and change events to keep loop responsive.
+            # An explicit 'embed' follow-up event will generate embeddings.
+            skip_embeddings = True
+
+            self._record_processing_started(file_path)
+            completed = False
+            try:
+                result = await self.services.indexing_coordinator.process_file(
+                    file_path, skip_embeddings=skip_embeddings
+                )
+
+                # Ensure database transaction is flushed for immediate visibility
+                if hasattr(self.services.provider, "flush"):
+                    await self.services.provider.flush()
+
+                normalized = normalize_file_path(file_path)
+                async with self._file_condition:
+                    self._indexed_files.add(normalized)
+                    self._file_condition.notify_all()
+
+                # Clear event dedup entry so future modifications aren't suppressed
+                self._recent_file_events.pop(str(file_path), None)
+
+                # If we skipped embeddings, queue for embedding generation
+                if skip_embeddings:
+                    await self.add_file(file_path, priority="embed")
+
+                # Record processing summary into MCP debug log
+                try:
+                    chunks = (
+                        result.get("chunks", None) if isinstance(result, dict) else None
+                    )
+                    embeds = (
+                        result.get("embeddings", None)
+                        if isinstance(result, dict)
+                        else None
+                    )
+                    self._debug(
+                        f"processed {file_path} operation={mutation.operation} "
+                        f"skip_embeddings={skip_embeddings} "
+                        f"chunks={chunks} embeddings={embeds}"
+                    )
+                except Exception:
+                    pass
+                completed = True
+            except Exception as error:
+                processing_error = error
+                raise
+            finally:
+                self._record_processing_finished(file_path, completed=completed)
+        finally:
+            await self._end_active_change(
+                file_path,
+                active_change_path=active_change_path,
+                processing_error=processing_error,
+            )
+
+    async def _end_active_change(
+        self,
+        file_path: Path,
+        *,
+        active_change_path: str,
+        processing_error: Exception | None,
+    ) -> None:
+        """End a change's active span; the only place an active path is released."""
+        self._active_change_generations.pop(active_change_path, None)
+        await self._drain_reserved_follow_up_change(
+            file_path,
+            normalized_path=active_change_path,
+            processing_error=processing_error,
+        )
+
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
@@ -1554,12 +1654,9 @@ class RealtimePipelineMixin:
                 if mutation.operation != "embed":
                     self._embed_pass_since_change = False
 
-                active_change_path: str | None = None
                 if mutation.operation in {"change", "scan"}:
-                    active_change_path = str(mutation.path)
-                    self._active_change_generations[active_change_path] = (
-                        mutation.source_generation
-                    )
+                    await self._process_change_mutation(mutation)
+                    continue
 
                 if mutation.operation != "embed":
                     overdue = self._overdue_embed_mutations()
@@ -1622,86 +1719,6 @@ class RealtimePipelineMixin:
                 if mutation.operation == "dir_index":
                     await self._index_directory(mutation.path)
                     continue
-
-                file_path = mutation.path
-
-                # Check if file still exists (prevent race condition with deletion)
-                if not file_path.exists():
-                    if active_change_path is not None:
-                        self._active_change_generations.pop(active_change_path, None)
-                    logger.debug(f"Skipping {file_path} - file no longer exists")
-                    async with self._file_condition:
-                        self.failed_files.add(normalize_file_path(file_path))
-                        self._file_condition.notify_all()
-                    continue
-
-                # Process the file
-                logger.debug(
-                    f"Processing {file_path} (operation: {mutation.operation})"
-                )
-
-                # Skip embeddings for initial and change events to keep loop responsive.
-                # An explicit 'embed' follow-up event will generate embeddings.
-                skip_embeddings = True
-
-                # Use existing indexing coordinator
-                self._record_processing_started(file_path)
-                completed = False
-                processing_error: Exception | None = None
-                try:
-                    result = await self.services.indexing_coordinator.process_file(
-                        file_path, skip_embeddings=skip_embeddings
-                    )
-
-                    # Ensure database transaction is flushed for immediate visibility
-                    if hasattr(self.services.provider, "flush"):
-                        await self.services.provider.flush()
-
-                    normalized = normalize_file_path(file_path)
-                    async with self._file_condition:
-                        self._indexed_files.add(normalized)
-                        self._file_condition.notify_all()
-
-                    # Clear event dedup entry so future modifications aren't suppressed
-                    self._recent_file_events.pop(str(file_path), None)
-
-                    # If we skipped embeddings, queue for embedding generation
-                    if skip_embeddings:
-                        await self.add_file(file_path, priority="embed")
-
-                    # Record processing summary into MCP debug log
-                    try:
-                        chunks = (
-                            result.get("chunks", None)
-                            if isinstance(result, dict)
-                            else None
-                        )
-                        embeds = (
-                            result.get("embeddings", None)
-                            if isinstance(result, dict)
-                            else None
-                        )
-                        self._debug(
-                            f"processed {file_path} operation={mutation.operation} "
-                            f"skip_embeddings={skip_embeddings} "
-                            f"chunks={chunks} embeddings={embeds}"
-                        )
-                    except Exception:
-                        pass
-                    completed = True
-                except Exception as error:
-                    processing_error = error
-                finally:
-                    self._record_processing_finished(file_path, completed=completed)
-                    if active_change_path is not None:
-                        self._active_change_generations.pop(active_change_path, None)
-                        await self._drain_reserved_follow_up_change(
-                            file_path,
-                            normalized_path=active_change_path,
-                            processing_error=processing_error,
-                        )
-                if processing_error is not None:
-                    raise processing_error
 
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
