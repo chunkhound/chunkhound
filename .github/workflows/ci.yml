@@ -31,12 +31,20 @@ jobs:
         run: bash scripts/resolve_docs_version.sh
       - run: npm ci --prefix site
       - run: npm run build --prefix site
+        env:
+          # Build-time contributor receipt; authenticated avoids the 60/h limit.
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Create .nojekyll sentinel
         run: touch site/dist/.nojekyll
       - uses: actions/upload-artifact@v4
         with:
           name: site-dist
           path: site/dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-contributors-record
+          path: site/src/lib/contributors.json
+          if-no-files-found: error
 
   site-build-validation:
     strategy:
@@ -58,6 +66,9 @@ jobs:
         run: bash scripts/resolve_docs_version.sh
       - run: npm ci --prefix site
       - run: npm run check --prefix site
+        env:
+          # precheck resolves generated sources (contributors.json).
+          GITHUB_TOKEN: ${{ github.token }}
       # prepare:site runs inside `npm run build` via prebuild — no separate step.
       - run: npm --prefix site run sync:readme-positioning -- --check
       # `generate:llms-txt --check` is intentionally not a separate CI step: the
@@ -65,6 +76,9 @@ jobs:
       # (prepare:site), so a post-build check only re-compares output to itself.
       # Content contracts live in tests/site/test_generate_llms_txt.py.
       - run: npm run build --prefix site
+        env:
+          # Build-time contributor receipt; authenticated avoids the 60/h limit.
+          GITHUB_TOKEN: ${{ github.token }}
 
   tests:
     strategy:

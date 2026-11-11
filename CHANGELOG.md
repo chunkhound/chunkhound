@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Backend validates `embedding.rerank_url` at config load when reranking is active.** A valid `http://`/`https://` URL is accepted with any scheme casing and normalized to lowercase (endpoint path, query, and fragment stay unchanged); malformed forms (`http:/…`, `//host`, `http://`, embedded whitespace) are rejected instead of being silently joined into a broken endpoint. An unused `rerank_url` no longer blocks config load. The site configurator applies the same rules — including the backend's Unicode whitespace class — and lowercases the scheme in the emitted config.
 - **Chrome launch handling is simplified to a single bounded attempt.** The previous retry/backoff/deadline machinery and the exit-time cleanup net are removed. `_managed_browser` creates and owns the `zd.Browser` before `start()`, bounds `browser.start()` at 20 s, bounds the failed-start CDP close at 2 s, and reaps the owned process and temporary profile on failure, cancellation, or a failed stop. This reverses the accidental scope increase while keeping cold-start tolerance (0.5 s × 30 connection tries ≈ 15 s) and cleanup ownership.
 - **Documentation site upgraded to Astro 7** with a refreshed homepage, architecture page, and a rebuilt configurator/nav/hero experience.
+- **Homepage contributor count is generated at build time.** The homepage receipt now shows the count resolved from the GitHub contributors API, its as-of date, and a verify link. `npm run build`, `dev`, and `check` fetch it first — CI passes `GITHUB_TOKEN` because an unauthenticated address is limited to 60 requests/hour. An unreachable API, empty result, or exhausted quota fails the build instead of publishing a stale number; set `CHUNKHOUND_CONTRIBUTORS_JSON` to an API-shaped snapshot for an offline or hermetic run. Accounts are deduplicated by immutable id, and bot/agent logins are excluded.
 
 ### Fixed
 - **UTF-8-BOM config files now work consistently** for standard configuration loading, Code Mapper workspace overrides, remote-config persistence, and the CLI prompt that adds timeout exclusions. Files written by Windows tools are accepted. Configs saved in the platform's legacy ANSI code page keep loading through a locale fallback, so existing Windows setups do not regress; input that neither UTF-8 nor the locale can decode still fails — now with the friendly "Invalid JSON in config file" error instead of a raw decode traceback. The timeout-exclusion rewrite normalizes BOM files to plain UTF-8.
@@ -62,7 +63,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **DuckDB** — Sequence names in `nextval()` calls are parameterized.
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - **Claude Code CLI prompt delivery is configurable** — One mode cannot fit every machine, so `llm.claude_append_system_prompt` chooses `file` (default, every OS) or `inline`. `file` uses `--append-system-prompt-file`: instructions stay in the system prompt, off the Windows command line, and beside a wrapper's `--append-system-prompt`. `inline` is for a wrapper that uses the file flag, or Claude Code older than 2.0.34. Those files use the system temp directory. `llm.claude_temp_dir` overrides it for a special case such as Docker or a limited user. See [Claude Code CLI](https://chunkhound.dev/docs/configuration/#claude-code-cli).
 
 ## [6.0.0] - 2026-09-14
@@ -132,7 +132,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **`chunkhound mcp --read-only` (DuckDB)** — Point an MCP client at a pre-indexed database — shared, mounted read-only, or otherwise untouchable — without risking writes from the indexer or daemon. Regex search still works; writes through the provider raise. Also exposed as `database.read_only`; rejected for non-`mcp` subcommands.
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - **DeepSeek/Grok refactored to data-driven registry** — Per-provider
   subclasses replaced with a unified `OpenAICompatibleSpec` registry.
   Adding a new OpenAI-compatible provider is now a data entry + a few
@@ -270,7 +269,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Global gitignore support** — ChunkHound now reads the user's global gitignore file (via `git config --global core.excludesFile`) when building the exclusion list during indexing.
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - **Watchman default backend** — Watchman is now the default realtime backend on supported native-runtime platforms; `watchdog` and `polling` remain explicit fallback backends.
 
 ### Enhanced
@@ -396,7 +394,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - MCP setup improvements with multi-client support and `--show-setup` flag
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - **BREAKING**: Removed `depth` parameter from `code_research` MCP tool - system now auto-scales synthesis budgets based on repository size
 - **BREAKING**: Checksum algorithm switched from SHA-256 to xxHash3-64 for faster file change detection - all files will be reindexed on first run after upgrade
 - **BREAKING**: Default exclusion behavior changed - providing `indexing.exclude` list no longer disables .gitignore (use `exclude_mode: "config_only"` for legacy behavior)
@@ -659,7 +656,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Configuration system project root detection for .chunkhound.json files improved
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Enhanced database provider architecture with capability detection and activity tracking
 - Modernized configuration system by removing legacy registry config building
 
@@ -672,7 +668,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [2.3.0] - 2025-07-08
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - **BREAKING**: Configuration system completely refactored with centralized management and clear precedence hierarchy
 - **BREAKING**: Automatic configuration file loading removed - config files now only load with explicit `--config` flag
 - **BREAKING**: Environment variables standardized to `CHUNKHOUND_*` prefix with `__` delimiters (e.g., `CHUNKHOUND_EMBEDDING__API_KEY`)
@@ -698,7 +693,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - File deletion operations now properly handle async contexts without blocking the event loop
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Aligned LanceDB provider with serial executor pattern for consistency with DuckDB
 - Improved path normalization to handle symlinks and different path representations
 - Enhanced database operation reliability with proper thread isolation
@@ -716,7 +710,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [2.1.3] - 2025-07-03
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Consolidated embedding provider creation to use single factory pattern for consistency
 - Reduced embedding provider log verbosity for cleaner output
 
@@ -735,7 +728,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Centralized version management system for consistent versioning across all components
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Simplified version updates through automated scripts
 - Enhanced installation and development documentation
 - Code formatting improvements and linting cleanup
@@ -755,7 +747,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Connection management architectural violations
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Consolidated database operations through DuckDBProvider executor pattern
 - Simplified ConnectionManager to handle only connection lifecycle
 - Updated file discovery patterns to include all 16 supported languages
@@ -783,7 +774,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Embedding cache optimization with CRC32-based content tracking
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - **BREAKING**: 'run' command renamed to 'index' with current directory default
 - **BREAKING**: Parser system refactored to registry pattern
 - Centralized language support in Language enum
@@ -805,7 +795,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [1.2.3] - 2025-06-23
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Default database location changed to current directory for better persistence
 
 ### Fixed
@@ -826,7 +815,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - File watching CLI for real-time code monitoring
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Unified JavaScript and TypeScript parsers
 - Default database location to current directory
 
@@ -862,7 +850,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Binary distribution with faster startup
 
 ### Changed
-- **`rerank()` raises `RerankEndpointError` instead of raw httpx errors.** The OpenAI and VoyageAI providers no longer surface `httpx.HTTPStatusError`, `httpx.ConnectError` or `httpx.TimeoutException` from reranking; catch `RerankEndpointError` imported from `chunkhound.core.exceptions` (also re-exported from `chunkhound.providers.embeddings`) and read `.status_code` (also `.error_type`) instead of `.response.status_code`. The class subclasses `EmbeddingProviderError` and `RuntimeError`, so existing `RuntimeError` handlers still catch it. The httpx cause is intentionally not chained, because its message embeds the configured endpoint URL; the redacted message keeps only the status and exception type.
 - Improved CLI startup performance (90% faster)
 - Binary startup performance (16x faster)
 

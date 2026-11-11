@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -76,8 +77,11 @@ def built_site() -> None:
         return
 
     print(f"Building site for tests... ({DIST})")
+    # Hermetic contributor receipt: the build resolves it from the GitHub API
+    # otherwise. Tests assert the rendered contract, never a live count.
+    snapshot = ROOT / "tests" / "site" / "fixtures" / "contributors-api.json"
     # Cache dir is deleted on context exit; a stalled build fails, not hangs CI.
-    with isolated_subprocess_env() as env:
+    with isolated_subprocess_env(CHUNKHOUND_CONTRIBUTORS_JSON=str(snapshot)) as env:
         try:
             result = run_text_process(
                 [NPM, "run", "build", "--prefix", "site"],
@@ -96,3 +100,12 @@ def built_site() -> None:
         raise RuntimeError(
             f"Build succeeded but {DIST / 'index.html'} was not produced"
         )
+
+
+@pytest.fixture(scope="session")
+def generated_contributors(built_site: None) -> dict:
+    """The receipt the build read; gitignored, so dist reuse needs it supplied."""
+    path = ROOT / "site" / "src" / "lib" / "contributors.json"
+    if not path.exists():
+        skip_or_fail(f"Contributor provenance needs {path}; run the site build.")
+    return json.loads(path.read_text(encoding="utf-8"))

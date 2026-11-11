@@ -1,6 +1,16 @@
 ---
 import { ENTRY_POINTS, PROMISES } from "../scripts/conditions";
 import PhosphorIcon from "./PhosphorIcon.astro";
+// Generated before the build by scripts/sync-contributors.mjs: one number for
+// the receipt, its as-of date, and the page where readers can verify it.
+import contributors from "../lib/contributors.json";
+
+const contributorCount = contributors.count;
+const contributorLabel = `${contributorCount} contributors`;
+const contributorAsOf = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeZone: "UTC",
+}).format(new Date(contributors.asOf));
 
 // Origin story + the scale receipt, and the engine teaser.
 // The terms rail (the conditions + interfaces, relocated from the hero) follows
@@ -31,7 +41,7 @@ import PhosphorIcon from "./PhosphorIcon.astro";
         <dd>feature characterization time</dd>
       </div>
       <div data-reveal><dt aria-label="180 million" data-count-to="180" data-suffix="M">180M</dt><dd>lines indexed from one developer laptop</dd></div>
-      <div data-reveal><dt aria-label="over 20" data-count-to="20" data-suffix="+">20+</dt><dd>maintainers from multiple companies</dd></div>
+      <div data-reveal><dt aria-label={contributorLabel} data-count-to={contributorCount}>{contributorCount}</dt><dd>contributors from multiple companies · <a href={contributors.source}>as of {contributorAsOf}</a></dd></div>
     </dl>
     <div class="engine-fold" data-reveal>
       <p class="engine-lede">That result comes from a single engine, running on your machine — <a href="/docs/architecture/">see how the engine works <span aria-hidden="true">→</span></a></p>

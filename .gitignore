@@ -336,6 +336,9 @@ site/.astro/
 # Generated — synced from root CHANGELOG.md at build time
 site/src/pages/docs/changelog.md
 
+# Generated — contributor count resolved from the GitHub API at build time
+site/src/lib/contributors.json
+
 # Generated — OG PNGs rendered from SVGs at build time
 site/public/og-image-dark.png
 site/public/og-image-light.png

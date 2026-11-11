@@ -54,5 +54,11 @@ runs:
       with:
         name: site-dist
         path: site/dist
+    - name: Download contributor receipt
+      if: inputs.site == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: site-contributors-record
+        path: site/src/lib
     - name: Build Rust extension
       uses: ./.github/actions/build-rust-extension
