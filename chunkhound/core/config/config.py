@@ -59,7 +59,7 @@ class ConfigErrorCode(str, Enum):
 # the remote-config terminal delta gate, in addition to the current command.
 # Any new command whose command-scoped gate can be tripped by a
 # remote-pushable value must be added here. `research` stands in for the
-# LLM-requiring commands (`websearch`, `fetchurl`, `_quickresearch`) — its
+# LLM-requiring commands (`websearch`, `fetchurl`) — its
 # LLM validation branch produces the same codes (`LLM_NOT_CONFIGURED`,
 # `LLM_MISSING_ROLE_CONFIG`) they all do, so covering it catches a payload
 # that would remove or break `llm.*` from any low-privilege invocation
@@ -285,6 +285,12 @@ class Config(BaseModel):
             self._mark_exclude_user_supplied(kwargs)
             Config.deep_merge(config_data, kwargs)
 
+        # VOYAGE_API_KEY only fills in a missing key for the voyageai provider.
+        # Apply it after every layer is merged, so a provider chosen by a
+        # config file or a CLI flag gets the key too, not only an env provider.
+        if "env" not in skips:
+            self._apply_voyage_api_key_fallback(config_data)
+
         # Special handling for EmbeddingConfig
         if "embedding" in config_data and isinstance(config_data["embedding"], dict):
             # Create EmbeddingConfig instance with the data
@@ -331,6 +337,18 @@ class Config(BaseModel):
         """Merge environment-variable-derived values into ``config_data``."""
         env_vars = self._load_env_vars()
         Config.deep_merge(config_data, env_vars)
+
+    @staticmethod
+    def _apply_voyage_api_key_fallback(config_data: dict[str, Any]) -> None:
+        """Use ``VOYAGE_API_KEY`` when the merged embedding config selects
+        voyageai and no layer supplied an API key."""
+        embedding = config_data.get("embedding")
+        if not isinstance(embedding, dict) or embedding.get("api_key"):
+            return
+        if embedding.get("provider") != "voyageai":
+            return
+        if voyage_key := os.getenv("VOYAGE_API_KEY"):
+            embedding["api_key"] = voyage_key
 
     def _apply_global_json(
         self,
@@ -751,11 +769,9 @@ class Config(BaseModel):
                 for item in missing_config
             )
 
-        # websearch only spawns _quickresearch as a subprocess, but we validate
-        # LLM/embedding config in the parent so misconfiguration fails fast
-        # before fetching DDG results and writing tempfiles.
+        # Validate websearch dependencies before fetching remote pages.
         requires_llm = (
-            command in ("research", "websearch", "_quickresearch", "fetchurl")
+            command in ("research", "websearch", "fetchurl")
             or (command == "map" and not getattr(args, "overview_only", False))
             or (command == "autodoc" and not getattr(args, "assets_only", False))
         )
@@ -786,7 +802,7 @@ class Config(BaseModel):
                     )
 
         # Validate embedding provider requirements for commands that index code
-        if command in ("index", "websearch", "_quickresearch"):
+        if command in ("index", "websearch"):
             # Skip embedding validation if embeddings were explicitly disabled
             if not self.embeddings_disabled:
                 if self.embedding is None:
@@ -850,11 +866,7 @@ class Config(BaseModel):
                 )
 
         if self.database.read_only:
-            # _quickresearch always uses a :memory: DB (see quickresearch.py),
-            # so a project-level read_only setting inherited via --config is
-            # structurally inapplicable — accept it here and let the connection
-            # manager drop read_only for :memory: paths.
-            if command not in ("mcp", "_quickresearch"):
+            if command != "mcp":
                 errors.append(
                     (
                         ConfigErrorCode.DB_READONLY_WRONG_COMMAND,

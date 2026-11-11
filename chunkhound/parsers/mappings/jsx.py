@@ -221,6 +221,9 @@ class JSXMapping(JavaScriptMapping):
             return """
             (comment) @definition
             """
+        elif concept in (UniversalConcept.IMPORT, UniversalConcept.BLOCK):
+            # Same top-level imports and call statements as JavaScript.
+            return super().get_query_for_concept(concept)
         return None
 
     def extract_component_name(self, node: TSNode | None, source: str) -> str:

@@ -52,6 +52,32 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_native_watchman)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _ignore_user_global_config(tmp_path_factory):
+    """Keep the developer's user-wide config out of every test.
+
+    ``Config()`` merges the first file it finds among
+    ``Config.get_global_config_candidates()`` (``~/.config/chunkhound/...``),
+    so a test that builds a Config without an ``embedding`` section inherits
+    whatever provider the machine is configured with. On a machine whose
+    global config selects ``voyageai`` with the key in the environment, every
+    realtime test that calls ``create_services`` then fails in
+    ``EmbeddingProviderFactory`` (or, with the key present, builds a real
+    provider). Pinning ``CHUNKHOUND_GLOBAL_CONFIG_FILE`` to an existing empty
+    file makes the global layer empty, as it is in CI. Tests that exercise
+    global-config discovery set or delete the variable themselves.
+    """
+    empty = tmp_path_factory.mktemp("global-config") / "chunkhound.json"
+    empty.write_text("{}", encoding="utf-8")
+    previous = os.environ.get("CHUNKHOUND_GLOBAL_CONFIG_FILE")
+    os.environ["CHUNKHOUND_GLOBAL_CONFIG_FILE"] = str(empty)
+    yield empty
+    if previous is None:
+        os.environ.pop("CHUNKHOUND_GLOBAL_CONFIG_FILE", None)
+    else:
+        os.environ["CHUNKHOUND_GLOBAL_CONFIG_FILE"] = previous
+
+
 def _discover_free_opencode_models() -> list[str]:
     """Discover currently free OpenCode model slugs."""
     try:

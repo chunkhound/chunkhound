@@ -59,6 +59,7 @@ from chunkhound.utils.file_patterns import (
 )
 from chunkhound.utils.hashing import compute_file_hash
 from chunkhound.utils.logging_guard import log_if_not_mcp
+from chunkhound.utils.parent_watch import exit_when_parent_dies
 
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
@@ -572,8 +573,20 @@ class IndexingCoordinator(BaseService):
                     )
                 self._root_identity_validated = True
 
-            # Use batch processor with single file for consistency
-            single_file: list[tuple[Path, str | None]] = [(file_path, None)]
+            # Use batch processor with single file for consistency. Pass the
+            # content hash: a None here is stored as content_hash = NULL, which
+            # stops the next directory scan's hash-confirm from skipping this
+            # file when only its mtime moves (checkout, branch switch, copied
+            # index), so the whole file is re-parsed and re-embedded. A path
+            # that is gone (realtime delete race) keeps None, so the batch
+            # processor reports it as before instead of compute_file_hash
+            # raising ValueError here.
+            content_hash = (
+                self._compute_hash_with_fallback(file_path)
+                if Path(file_path).is_file()
+                else None
+            )
+            single_file: list[tuple[Path, str | None]] = [(file_path, content_hash)]
             parsed_results = await self._process_files_in_batches(single_file)
 
             if not parsed_results:
@@ -823,7 +836,9 @@ class IndexingCoordinator(BaseService):
         # Process batches in parallel using ProcessPoolExecutor
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers, initializer=exit_when_parent_dies
+        ) as executor:
             # Submit all batches for concurrent processing
             # Pass config for structured file size filtering (JSON/YAML/TOML)
             timeout_s = timeout_s_probe
@@ -2520,7 +2535,9 @@ class IndexingCoordinator(BaseService):
         # Process subtrees in parallel
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers, initializer=exit_when_parent_dies
+        ) as executor:
             futures = []
             for subtree in top_level_items:
                 # Filter precomputed repo roots to those under this subtree

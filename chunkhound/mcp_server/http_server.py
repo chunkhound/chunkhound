@@ -161,7 +161,7 @@ class HttpMCPServer(MCPServerBase):
             # derive_daemon_status can include scan_error/last_error text
             # (e.g. file paths from a failed scan) — an accepted tradeoff
             # for operational visibility, not an oversight.
-            return JSONResponse(derive_daemon_status(self._scan_progress))
+            return JSONResponse(derive_daemon_status(self._current_scan_progress()))
 
         from starlette.middleware import Middleware
 

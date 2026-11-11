@@ -6,7 +6,9 @@ and text blocks using PyMuPDF for text extraction and follows the
 same chunking patterns as TextMapping.
 """
 
+import importlib.util
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +26,24 @@ from chunkhound.parsers.chunk_splitter import CASTConfig, ChunkSplitter
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
-try:
-    import pymupdf as fitz  # type: ignore  # PyMuPDF
+# PyMuPDF is imported lazily, on the first PDF actually parsed. The import is not
+# free: PyMuPDF 2.x depends on `pymupdf-layout`, and with it installed `import pymupdf`
+# loads an ONNX layout + table-grid model. `chunkhound.parsers.mappings` imports
+# every mapping, so an eager import here made EVERY parse worker load that model,
+# even for a repo with no PDFs - enough, across a few concurrent indexes, to fail
+# workers with ONNX "bad allocation" and stall indexing.
+# The sys.modules check comes first because find_spec raises ValueError for a module
+# already in sys.modules with __spec__ = None (e.g. a test stub).
+PYMUPDF_AVAILABLE = (
+    "pymupdf" in sys.modules or importlib.util.find_spec("pymupdf") is not None
+)
 
-    PYMUPDF_AVAILABLE = True
-except ImportError:
-    PYMUPDF_AVAILABLE = False
+
+def _fitz() -> Any:
+    """Import PyMuPDF on first use and return the module."""
+    import pymupdf  # PyMuPDF
+
+    return pymupdf
 
 
 class PDFMapping(BaseMapping):
@@ -79,7 +93,7 @@ class PDFMapping(BaseMapping):
 
         try:
             # Extract text from PDF using PyMuPDF
-            doc = fitz.open(stream=content_bytes, filetype="pdf")
+            doc = _fitz().open(stream=content_bytes, filetype="pdf")
             chunks = []
             current_line = 1
 
@@ -534,7 +548,7 @@ class PDFMapping(BaseMapping):
             return "PDF parsing not available (PyMuPDF not installed)", {}
 
         try:
-            doc = fitz.open(stream=content, filetype="pdf")
+            doc = _fitz().open(stream=content, filetype="pdf")
             page_info = {}
             all_text = []
 

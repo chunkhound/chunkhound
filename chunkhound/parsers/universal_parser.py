@@ -42,7 +42,12 @@ from .chunk_splitter import CASTConfig, ChunkMetrics, ChunkSplitter
 from .concept_extractor import ConceptExtractor
 from .mapping_adapter import MappingAdapter
 from .mappings.base import BaseMapping
-from .universal_engine import TreeSitterEngine, UniversalChunk, UniversalConcept
+from .universal_engine import (
+    TOP_LEVEL_STATEMENT,
+    TreeSitterEngine,
+    UniversalChunk,
+    UniversalConcept,
+)
 
 # Concept pairs that can be safely merged across concept boundaries.
 # Used in both _can_merge_chunks and _greedy_merge_pass.
@@ -57,6 +62,81 @@ _COMPATIBLE_CONCEPT_PAIRS: frozenset[_ConceptPair] = frozenset(
         (UniversalConcept.STRUCTURE, UniversalConcept.DEFINITION),
     }
 )
+
+
+def _is_top_level_statement(chunk: UniversalChunk) -> bool:
+    return chunk.concept == UniversalConcept.BLOCK and bool(
+        chunk.metadata.get(TOP_LEVEL_STATEMENT)
+    )
+
+
+def _carve_nested_definitions(
+    chunks: list[UniversalChunk], source: str
+) -> list[UniversalChunk]:
+    """Cut the definitions nested in a top-level statement out of its block.
+
+    A top-level statement such as ``describe(...)`` or an IIFE holds functions
+    and classes that the DEFINITION queries already chunk on their own, so
+    keeping the whole statement would index that code twice. The statement
+    keeps the lines no nested definition covers, one block per contiguous run;
+    a run that is only closing brackets is dropped. Chunks carry no columns, so
+    a definition that starts or ends partway through a line leaves that line
+    in the statement, and the statement's own text on it is not lost.
+    """
+    if not any(_is_top_level_statement(chunk) for chunk in chunks):
+        return chunks
+
+    definitions = [c for c in chunks if c.concept == UniversalConcept.DEFINITION]
+    lines = source.splitlines()
+
+    def fills_line(line_no: int, text: str) -> bool:
+        return 0 < line_no <= len(lines) and lines[line_no - 1].strip() == text.strip()
+
+    result: list[UniversalChunk] = []
+    for chunk in chunks:
+        if not _is_top_level_statement(chunk):
+            result.append(chunk)
+            continue
+
+        covered: set[int] = set()
+        for definition in definitions:
+            if not (
+                chunk.start_line <= definition.start_line
+                and definition.end_line <= chunk.end_line
+            ):
+                continue
+            def_lines = definition.content.split("\n")
+            first = definition.start_line
+            if not fills_line(first, def_lines[0]):
+                first += 1
+            last = definition.end_line
+            if not fills_line(last, def_lines[-1]):
+                last -= 1
+            covered.update(range(first, last + 1))
+
+        if not covered:
+            result.append(chunk)
+            continue
+
+        run_start: int | None = None
+        for line_no in range(chunk.start_line, chunk.end_line + 2):
+            inside = line_no <= chunk.end_line and line_no not in covered
+            if inside and run_start is None:
+                run_start = line_no
+            elif not inside and run_start is not None:
+                text = normalize_content("\n".join(lines[run_start - 1 : line_no - 1]))
+                if any(ch.isalnum() for ch in text):
+                    result.append(
+                        replace(
+                            chunk,
+                            content=text,
+                            start_line=run_start,
+                            end_line=line_no - 1,
+                        )
+                    )
+                run_start = None
+
+    return result
 
 
 class UniversalParser:
@@ -395,6 +475,7 @@ class UniversalParser:
         # NEW: Deduplicate chunks with identical content before processing
         # This prevents issues where the same source code is extracted multiple
         # times as different concepts (e.g., function as DEFINITION, COMMENT, STRUCTURE)
+        universal_chunks = _carve_nested_definitions(universal_chunks, content)
         universal_chunks = deduplicate_chunks(universal_chunks, self.language_name)
 
         # Group chunks by concept type for structured processing
@@ -412,8 +493,15 @@ class UniversalParser:
                 # Definitions (functions, classes) should remain intact when possible
                 optimized_chunks.extend(self._chunk_definitions(concept_chunks))
             elif concept == UniversalConcept.BLOCK:
-                # Blocks can be merged more aggressively
-                optimized_chunks.extend(self._chunk_blocks(concept_chunks))
+                # Blocks can be merged more aggressively, except top-level
+                # statements: grouping them by concept alone would merge two
+                # statements across the definitions between them. They are
+                # kept whole here and only the greedy pass below, which sees
+                # every concept in line order, merges directly adjacent ones.
+                statements = [c for c in concept_chunks if _is_top_level_statement(c)]
+                others = [c for c in concept_chunks if not _is_top_level_statement(c)]
+                optimized_chunks.extend(self._chunk_definitions(statements))
+                optimized_chunks.extend(self._chunk_blocks(others))
             elif concept == UniversalConcept.COMMENT:
                 # Comments can be merged with nearby code
                 optimized_chunks.extend(self._chunk_comments(concept_chunks))

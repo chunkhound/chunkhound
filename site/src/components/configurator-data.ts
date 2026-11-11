@@ -268,6 +268,66 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_REQUESTY_API_KEY>",
     },
     {
+        id: "api-route",
+        name: "API Route",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 21v-6L3 9l4-6 5 4 5-4 4 6-9 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "api-route",
+            model: "gemini-3.5-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_API_ROUTE_API_KEY>",
+    },
+    {
+        id: "opper",
+        name: "Opper",
+        svg: `<svg viewBox="-49.5 0 315 315" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M159.78 315C71.53 315 0 244.49 0 157.5C0 -18.9499 159.78 0.650075 159.78 0.650075C159.78 87.2201 88.36 157.4 0.2 157.5C149.8 157.64 159.78 315 159.78 315ZM160.52 217.98C160.52 217.98 156.94 161.65 105.04 157.52C120.6 157.34 160.52 151.54 160.52 96.5601C160.52 151.54 200.44 157.34 216 157.52C164.1 161.63 160.52 217.98 160.52 217.98Z"/></svg>`,
+        config: {
+            provider: "opper",
+            model: "claude-sonnet-5",
+        },
+        apiKeyPlaceholder: "<YOUR_OPPER_API_KEY>",
+    },
+    {
+        id: "obscurify-ai",
+        name: "Obscurify.ai",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5zM12 15v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "obscurify-ai",
+            model: "deepseek/deepseek-v4-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_OBSCURIFY_API_KEY>",
+    },
+    {
+        id: "atlascloud",
+        name: "Atlas Cloud",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 18a4 4 0 0 1-.5-7.97A5.5 5.5 0 0 1 17 8.5a4.75 4.75 0 0 1 0 9.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "atlascloud",
+            model: "deepseek-ai/deepseek-v4-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_ATLASCLOUD_API_KEY>",
+    },
+    {
+        id: "runcrate",
+        name: "Runcrate",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73zM12 22V12M3.3 7l7.7 4.73a2 2 0 0 0 2 0L20.7 7M7.5 4.27l9 5.15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "runcrate",
+            model: "deepseek-ai/DeepSeek-V4.1-Flash",
+        },
+        apiKeyPlaceholder: "<YOUR_RUNCRATE_API_KEY>",
+    },
+    {
+        id: "cheapaimodel",
+        name: "cheapaimodel",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "cheapaimodel",
+            model: "deepseek-v4-1-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_CHEAPAIMODEL_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,

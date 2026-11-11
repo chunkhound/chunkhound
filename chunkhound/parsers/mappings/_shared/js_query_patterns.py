@@ -22,6 +22,29 @@ VAR_DECLARATION_CONFIG = """
 ) @definition
 """
 
+# Top-level ES imports (UniversalConcept.IMPORT)
+TOP_LEVEL_IMPORTS = """
+; Top-level import statements
+(program
+    (import_statement) @definition
+)
+"""
+
+# Top-level call statements (UniversalConcept.BLOCK): describe/it/test, IIFEs,
+# main(), app.listen(...), top-level await. Assignment statements are
+# deliberately NOT captured; the CommonJS patterns below already own those.
+TOP_LEVEL_CALL_STATEMENTS = """
+; Top-level call statements (incl. top-level await)
+(program
+    (expression_statement
+        [
+            (call_expression)
+            (await_expression (call_expression))
+        ]
+    ) @definition
+)
+"""
+
 # CommonJS patterns
 COMMONJS_MODULE_EXPORTS = """
 ; CommonJS assignment: module.exports = ...

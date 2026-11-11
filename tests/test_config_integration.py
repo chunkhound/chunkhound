@@ -354,6 +354,74 @@ def test_gemini_legacy_env_model_does_not_satisfy_runtime_config_validation(
     ]
 
 
+def test_voyage_api_key_used_for_provider_from_local_config(
+    monkeypatch, clean_environment
+) -> None:
+    """VOYAGE_API_KEY must apply when .chunkhound.json selects voyageai."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
+
+    with windows_safe_tempdir() as temp_path:
+        (temp_path / ".chunkhound.json").write_text(
+            json.dumps({"embedding": {"provider": "voyageai"}}), encoding="utf-8"
+        )
+
+        config = Config(target_dir=temp_path)
+
+    assert config.embedding is not None
+    assert config.embedding.provider == "voyageai"
+    assert config.embedding.api_key.get_secret_value() == "voyage-env-key"
+    assert config.embedding.get_missing_config() == []
+
+
+def test_voyage_api_key_used_for_provider_from_cli(
+    monkeypatch, clean_environment
+) -> None:
+    """VOYAGE_API_KEY must apply when --provider voyageai is passed."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
+    parser = argparse.ArgumentParser()
+    EmbeddingConfig.add_cli_arguments(parser)
+    args = parser.parse_args(["--provider", "voyageai"])
+
+    with windows_safe_tempdir() as temp_path:
+        config = Config(args=args, target_dir=temp_path)
+
+    assert config.embedding is not None
+    assert config.embedding.api_key.get_secret_value() == "voyage-env-key"
+
+
+def test_voyage_api_key_does_not_override_configured_key(
+    monkeypatch, clean_environment
+) -> None:
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
+
+    with windows_safe_tempdir() as temp_path:
+        (temp_path / ".chunkhound.json").write_text(
+            json.dumps({"embedding": {"provider": "voyageai", "api_key": "file-key"}}),
+            encoding="utf-8",
+        )
+
+        config = Config(target_dir=temp_path)
+
+    assert config.embedding is not None
+    assert config.embedding.api_key.get_secret_value() == "file-key"
+
+
+def test_voyage_api_key_not_used_for_openai_provider(
+    monkeypatch, clean_environment
+) -> None:
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-env-key")
+
+    with windows_safe_tempdir() as temp_path:
+        (temp_path / ".chunkhound.json").write_text(
+            json.dumps({"embedding": {"provider": "openai"}}), encoding="utf-8"
+        )
+
+        config = Config(target_dir=temp_path)
+
+    assert config.embedding is not None
+    assert config.embedding.api_key is None
+
+
 def test_embedding_cli_ssl_flags_parse() -> None:
     """Embedding CLI should expose explicit positive/negative SSL flags."""
     parser = argparse.ArgumentParser()

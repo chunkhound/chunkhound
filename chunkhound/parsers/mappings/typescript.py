@@ -20,6 +20,8 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
     LEXICAL_DECLARATION_CONFIG,
+    TOP_LEVEL_CALL_STATEMENTS,
+    TOP_LEVEL_IMPORTS,
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
@@ -164,6 +166,12 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             return """
             (comment) @definition
             """
+        elif concept == UniversalConcept.IMPORT:
+            return TOP_LEVEL_IMPORTS
+        elif concept == UniversalConcept.BLOCK:
+            # BLOCK here means a top-level call statement only (describe/it,
+            # an IIFE, main(), app.listen(...)); never a nested block.
+            return TOP_LEVEL_CALL_STATEMENTS
         return None
 
     # extract_name / extract_metadata / extract_content are inherited
