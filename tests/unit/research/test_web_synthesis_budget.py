@@ -1,5 +1,6 @@
 """The outgoing synthesis request must preserve web evidence selection budgets."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +83,54 @@ async def test_web_prompt_uses_only_budgeted_evidence(
     assert excluded not in prompt
     assert "z" * 100 not in prompt
     assert chunks == original_chunks  # Selection must not mutate search results.
+
+
+@pytest.mark.asyncio
+async def test_historical_evidence_survives_unreadable_current_source(
+    tmp_path, monkeypatch, capturing_llm_manager
+):
+    """A bad working-tree path must not discard valid historical evidence."""
+    manager, _ = capturing_llm_manager
+    path = "src/replaced.py"
+    current_file = tmp_path / path
+    current_file.parent.mkdir()
+    current_file.write_text("current source", encoding="utf-8")
+
+    def fail_read(self, *args, **kwargs):
+        if self == current_file:
+            raise OSError("file became unreadable")
+        return original_read_text(self, *args, **kwargs)
+
+    original_read_text = Path.read_text
+    monkeypatch.setattr(Path, "read_text", fail_read)
+    services = SimpleNamespace(
+        provider=SimpleNamespace(
+            transient_source_budget_bytes=4_000,
+            get_base_directory=lambda: tmp_path,
+            transient_chunks_are_source=lambda chunk: bool(
+                chunk.get("authoritative_source")
+            ),
+        )
+    )
+    chunks = [
+        {
+            "file_path": path,
+            "content": "HISTORICAL_EVIDENCE",
+            "start_line": 1,
+            "end_line": 1,
+            "authoritative_source": True,
+        },
+        {
+            "file_path": path,
+            "content": "STALE_CURRENT_SNIPPET",
+            "start_line": 2,
+            "end_line": 2,
+        },
+    ]
+
+    files = await FileReader(services).read_files_with_budget(chunks, manager)
+
+    assert files[path] == "HISTORICAL_EVIDENCE"
 
 
 @pytest.mark.asyncio

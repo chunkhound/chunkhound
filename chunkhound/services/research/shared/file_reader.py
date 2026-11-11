@@ -37,8 +37,14 @@ def resolve_source_text(provider: Any, file_path: str) -> str | None:
 
     base_dir = provider.get_base_directory()
     path = Path(file_path) if Path(file_path).is_absolute() else base_dir / file_path
-    if path.exists():
-        return path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        # Current working-tree context is optional beside authoritative
+        # historical evidence. Files may be removed, replaced, or become
+        # unreadable after indexing, so keep other sources usable.
+        logger.warning(f"Unable to read source file {file_path}: {exc}")
     return None
 
 
