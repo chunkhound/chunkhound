@@ -1553,15 +1553,14 @@ class MCPServerBase(ABC):
         ``read_frame``/``write_frame`` exchange plain JSON-RPC dicts; this
         method owns everything SDK-specific. Callers never see an mcp type.
 
-        A frame that fails JSON-RPC shape validation is forwarded to the
-        session as an exception (mirroring the SDK's ``stdio_server``); the
-        SDK dispatcher logs and drops it -- no reply is sent -- and the session
-        keeps serving. Only ``read_frame`` returning ``None`` (or ``run()``
-        returning) ends it.
-
-        Known gap: a malformed request that carries an ``id`` gets no JSON-RPC
-        error reply, so a client waiting on that id must rely on its own
-        timeout.
+        A frame that fails JSON-RPC shape validation is logged, and if it
+        carries a readable ``id`` this method replies itself with a -32600
+        "Invalid Request" error. The frame is then forwarded to the session as
+        an exception (mirroring the SDK's ``stdio_server``), which the SDK
+        dispatcher logs and drops; the session keeps serving. The error reply
+        is written inline before the exception is forwarded, so a slow client
+        whose ``write_frame`` blocks (drain) also stalls inbound reads. Only
+        ``read_frame`` returning ``None`` (or ``run()`` returning) ends it.
 
         Used by:
         - ChunkHoundDaemon, once per client IPC connection.

@@ -145,28 +145,17 @@ class StdioMCPServer(MCPServerBase):
             if _MCP_AVAILABLE:
                 async with self.server_lifespan():
                     import contextlib
-                    import json
-
-                    import anyio.to_thread
 
                     from chunkhound.utils import stdio_lines
 
                     frames = stdio_lines.iter_json_frames()
-
-                    async def read_frame() -> dict[str, Any] | None:
-                        return await anext(frames, None)
-
-                    async def write_frame(frame: dict[str, Any]) -> None:
-                        # Blocking stdout write off the event loop; serve_connection's
-                        # single pump_out task keeps output ordered.
-                        await anyio.to_thread.run_sync(
-                            stdio_lines.write_stdout_line,
-                            (json.dumps(frame) + "\n").encode(),
-                        )
+                    read_frame = stdio_lines.make_stdin_frame_reader(frames)
 
                     self.debug_log("Stdio server started, awaiting requests")
                     async with contextlib.aclosing(frames):
-                        await self.serve_connection(read_frame, write_frame)
+                        await self.serve_connection(
+                            read_frame, stdio_lines.write_json_frame
+                        )
             else:
                 # Minimal fallback stdio: read initialize request,
                 # respond with matching ID so tests can proceed

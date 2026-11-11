@@ -12,7 +12,7 @@ import contextlib
 import json
 import os
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import Any
 
 _WINDOWS_STDIN_POLL_INTERVAL = 0.01
@@ -30,6 +30,14 @@ async def iter_stdin_lines() -> AsyncGenerator[bytes, None]:
             yield line
 
 
+def is_object_frame(frame: Any) -> bool:
+    """Skip policy shared by all frame readers: only JSON objects are frames.
+
+    Non-object JSON (e.g. batch arrays) is dropped and the reader keeps going.
+    """
+    return isinstance(frame, dict)
+
+
 async def iter_json_frames() -> AsyncGenerator[dict[str, Any], None]:
     """Yield JSON-object frames from stdin until EOF.
 
@@ -42,7 +50,7 @@ async def iter_json_frames() -> AsyncGenerator[dict[str, Any], None]:
                 frame = json.loads(line.decode())
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            if isinstance(frame, dict):
+            if is_object_frame(frame):
                 yield frame
 
 
@@ -126,3 +134,26 @@ def write_stdout_line(line: bytes) -> None:
     """Write one line (caller includes trailing \\n) to stdout and flush."""
     sys.stdout.buffer.write(line)
     sys.stdout.buffer.flush()
+
+
+async def write_json_frame(frame: dict[str, Any]) -> None:
+    """Write one JSON frame as a line to stdout, off the event loop.
+
+    Callers must serialize writes (serve_connection's write lock does).
+    """
+    import anyio.to_thread
+
+    await anyio.to_thread.run_sync(
+        write_stdout_line, (json.dumps(frame) + "\n").encode()
+    )
+
+
+def make_stdin_frame_reader(
+    frames: AsyncGenerator[dict[str, Any], None],
+) -> Callable[[], Awaitable[dict[str, Any] | None]]:
+    """Adapt an iter_json_frames() generator to a read_frame() callable."""
+
+    async def read_frame() -> dict[str, Any] | None:
+        return await anext(frames, None)
+
+    return read_frame

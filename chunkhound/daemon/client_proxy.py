@@ -292,6 +292,8 @@ class ClientProxy:
                 return _SocketForwardResult(
                     message_count=message_count,
                 )
+            if not stdio_lines.is_object_frame(msg):
+                continue
             line = json.dumps(msg) + "\n"
             stdio_lines.write_stdout_line(line.encode())
             message_count += 1

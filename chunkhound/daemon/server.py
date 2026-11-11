@@ -17,10 +17,11 @@ import secrets
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.utils import stdio_lines
 
 from . import ipc
 from .client_manager import ClientManager
@@ -283,8 +284,8 @@ class ChunkHoundDaemon(MCPServerBase):
                     except Exception as e:
                         self.debug_log(f"IPC read error: {e!r}")
                         return None
-                    if isinstance(frame, dict):
-                        return frame
+                    if stdio_lines.is_object_frame(frame):
+                        return cast(dict[str, Any], frame)
                     # Non-object JSON (e.g. a batch array): skip, keep serving.
                     self.debug_log(
                         f"Skipping non-object IPC frame: {type(frame).__name__}"
