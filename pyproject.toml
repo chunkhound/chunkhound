@@ -105,6 +105,9 @@ dependencies = [
     "pymupdf>=1.27.0",
     "rich>=13.0.0",
     "readchar>=4.2.1",
+    # Native per-match timeouts prevent user-supplied search regexes from
+    # monopolizing transient search workers through catastrophic backtracking.
+    "regex>=2025.9.18",
     "scikit-learn>=1.3.0",
     "scipy>=1.7.0",
     "numpy>=1.24.0",
@@ -282,4 +285,5 @@ dev = [
     "ruff>=0.11.12",
     "types-psutil>=7.0.0.20250601",
     "types-jsonschema>=4.0.0",
+    "types-regex>=2025.11.3.20251106",
 ]
