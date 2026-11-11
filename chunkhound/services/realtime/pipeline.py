@@ -347,8 +347,70 @@ class RealtimePipelineMixin:
             self._release_pending_mutation(mutation)
             raise
 
+    def _database_held_by_owner(self) -> bool:
+        """True while a Rust run or a compaction in this process holds the DB."""
+        provider = self.services.provider
+        return bool(
+            provider.is_rust_pipeline_in_progress()
+            or provider.is_compaction_in_progress()
+        )
+
+    async def _wait_for_db_release_then_retry(self, mutation: RealtimeMutation) -> None:
+        """Park a mutation until the database holder lets go.
+
+        The hold is bounded by its owner, which clears its flag in `finally`,
+        so the wait spends no retry budget.
+        """
+        try:
+            while self._database_held_by_owner():
+                await asyncio.sleep(self._HELD_DB_RETRY_DELAY_SECONDS)
+                if not self._owns_pending_mutation(mutation):
+                    self._debug(
+                        "dropped superseded held-database retry "
+                        f"operation={mutation.operation} path={mutation.path}"
+                    )
+                    return
+                if mutation.operation == "delete" and self._delete_mutation_is_stale(
+                    mutation
+                ):
+                    self._debug(
+                        "dropped stale held-database delete retry "
+                        f"path={mutation.path}"
+                    )
+                    self._release_pending_mutation(mutation)
+                    self._emit_status_update()
+                    return
+        except asyncio.CancelledError:
+            self._release_pending_mutation(mutation)
+            raise
+        except Exception:
+            self._release_pending_mutation(mutation)
+            raise
+        await self._retry_mutation_after_delay(mutation, 0)
+
     def _schedule_compaction_retry(self, mutation: RealtimeMutation) -> bool:
         """Retry realtime work later when compaction temporarily owns the DB."""
+        if self._database_held_by_owner():
+            parked_mutation = self._build_mutation(
+                mutation.operation,
+                mutation.path,
+                retry_count=mutation.retry_count,
+                source_generation=mutation.source_generation,
+                first_queued_at=mutation.first_queued_at,
+            )
+            if not self._register_pending_mutation(parked_mutation):
+                return True
+            self._start_transient_task(
+                self._wait_for_db_release_then_retry(parked_mutation)
+            )
+            self._debug(
+                "waiting for the database owner to release the database "
+                f"operation={parked_mutation.operation} "
+                f"path={parked_mutation.path}"
+            )
+            self._emit_status_update()
+            return True
+
         if mutation.retry_count >= self._MAX_RETRY_BUDGET:
             return False
 

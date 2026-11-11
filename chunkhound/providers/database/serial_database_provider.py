@@ -195,6 +195,10 @@ class SerialDatabaseProvider(ABC):
         """Return True when the Rust pipeline currently owns the database file."""
         return self._executor.is_rust_pipeline_in_progress()
 
+    def is_compaction_in_progress(self) -> bool:
+        """Return True while a compaction holds the database file."""
+        return self._executor.is_compaction_in_progress()
+
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
         return self._executor.execute_sync(self, operation_name, *args, **kwargs)

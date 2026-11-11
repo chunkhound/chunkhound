@@ -11,11 +11,20 @@ from chunkhound.providers.database.serial_executor import (
 )
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
+# A provider whose database no Rust run or compaction currently holds.
+_NOT_HELD = {
+    "is_rust_pipeline_in_progress": lambda: False,
+    "is_compaction_in_progress": lambda: False,
+}
+
 
 @pytest.fixture
 async def service():
+    services = MagicMock()
+    services.provider.is_rust_pipeline_in_progress.return_value = False
+    services.provider.is_compaction_in_progress.return_value = False
     svc = RealtimeIndexingService(
-        services=MagicMock(),
+        services=services,
         config=MagicMock(),
     )
     yield svc
@@ -63,7 +72,7 @@ async def test_change_processing_retries_when_compaction_is_active(
 
     service.services = SimpleNamespace(
         indexing_coordinator=SimpleNamespace(process_file=flaky_process_file),
-        provider=SimpleNamespace(flush=AsyncMock()),
+        provider=SimpleNamespace(flush=AsyncMock(), **_NOT_HELD),
     )
     service.add_file = AsyncMock(return_value=True)
 
@@ -113,7 +122,7 @@ async def test_change_processing_retries_when_rust_pipeline_owns_db(
 
     service.services = SimpleNamespace(
         indexing_coordinator=SimpleNamespace(process_file=flaky_process_file),
-        provider=SimpleNamespace(flush=AsyncMock()),
+        provider=SimpleNamespace(flush=AsyncMock(), **_NOT_HELD),
     )
     service.add_file = AsyncMock(return_value=True)
 
@@ -131,6 +140,62 @@ async def test_change_processing_retries_when_rust_pipeline_owns_db(
 
     assert service.failed_files == set()
     assert service._last_error is None
+
+
+@pytest.mark.asyncio
+async def test_write_rejected_while_db_held_waits_for_release(
+    service: RealtimeIndexingService,
+    tmp_path: Path,
+) -> None:
+    """A write rejected while a known owner holds the database
+    waits for the hold to end instead of spending the retry budget."""
+    target_file = tmp_path / "held_write.py"
+    target_file.write_text("def held_write():\n    return 1\n", encoding="utf-8")
+
+    held = True
+    processed = asyncio.Event()
+
+    def release_hold() -> None:
+        nonlocal held
+        held = False
+
+    async def process_while_held(
+        file_path: Path, skip_embeddings: bool = False
+    ) -> dict[str, int]:
+        assert file_path == target_file
+        if held:
+            raise DatabaseRustPipelineInProgressError("rust busy")
+        processed.set()
+        return {"chunks": 1, "embeddings": 0}
+
+    service._MAX_RETRY_BUDGET = 1
+    service._RETRY_BASE_DELAY_SECONDS = 0.0
+    service._HELD_DB_RETRY_DELAY_SECONDS = 0.01
+    service.services = SimpleNamespace(
+        indexing_coordinator=SimpleNamespace(process_file=process_while_held),
+        provider=SimpleNamespace(
+            flush=AsyncMock(),
+            is_rust_pipeline_in_progress=lambda: held,
+            is_compaction_in_progress=lambda: False,
+        ),
+    )
+    service.add_file = AsyncMock(return_value=True)
+
+    await service._enqueue_mutation(service._build_mutation("scan", target_file))
+
+    asyncio.get_running_loop().call_later(0.3, release_hold)
+    process_task = asyncio.create_task(service._process_loop())
+    service.process_task = process_task
+    try:
+        await asyncio.wait_for(processed.wait(), timeout=2.0)
+    finally:
+        process_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await process_task
+
+    assert service.failed_files == set()
+    assert service._last_error is None
+    assert service._service_state != "degraded"
 
 
 @pytest.mark.asyncio
@@ -154,7 +219,7 @@ async def test_compaction_retry_budget_exhaustion_marks_failure(
     service._RETRY_BASE_DELAY_SECONDS = 0.0
     service.services = SimpleNamespace(
         indexing_coordinator=SimpleNamespace(process_file=always_busy),
-        provider=SimpleNamespace(flush=AsyncMock()),
+        provider=SimpleNamespace(flush=AsyncMock(), **_NOT_HELD),
     )
     service.add_file = AsyncMock(return_value=True)
 
@@ -192,7 +257,9 @@ async def test_delete_processing_retries_when_compaction_is_active(
         delete_completed.set()
 
     service.services = SimpleNamespace(
-        provider=SimpleNamespace(delete_file_completely_async=flaky_delete),
+        provider=SimpleNamespace(
+            delete_file_completely_async=flaky_delete, **_NOT_HELD
+        ),
     )
 
     await service._enqueue_mutation(service._build_mutation("delete", target_file))
@@ -232,6 +299,7 @@ async def test_embed_processing_retries_when_compaction_is_active(
         indexing_coordinator=SimpleNamespace(
             generate_missing_embeddings=flaky_generate_missing_embeddings,
         ),
+        provider=SimpleNamespace(**_NOT_HELD),
     )
 
     await service._enqueue_mutation(service._build_mutation("embed", target_file))
@@ -271,6 +339,7 @@ async def test_embed_compaction_retry_budget_exhaustion_marks_failure(
         indexing_coordinator=SimpleNamespace(
             generate_missing_embeddings=always_busy_generate,
         ),
+        provider=SimpleNamespace(**_NOT_HELD),
     )
 
     await service._enqueue_mutation(service._build_mutation("embed", target_file))

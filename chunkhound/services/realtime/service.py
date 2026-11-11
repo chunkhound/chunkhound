@@ -90,6 +90,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     # Retry budget shared by delete-conflict and compaction-busy retries.
     _MAX_RETRY_BUDGET = 5
     _RETRY_BASE_DELAY_SECONDS = 0.1
+    # Poll interval while a Rust run or a compaction holds the database; such
+    # a wait spends no retry budget.
+    _HELD_DB_RETRY_DELAY_SECONDS = 0.5
     _DELETE_BATCH_SIZE = 64
     _MUTATION_PRIORITIES = {
         "delete": 0,
@@ -852,6 +855,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         )
         if backlog_size <= 0:
             return "idle"
+        # A known owner is writing; the backlog waits for it, not on a stall.
+        if self._database_held_by_owner():
+            return "busy"
 
         accepted_at = self._parse_status_timestamp(pipeline["last_accepted_event_at"])
         latest_progress_at = self._latest_timestamp(
