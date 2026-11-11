@@ -903,13 +903,23 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         A native run cannot be interrupted from Python, so a hung one is
         reported rather than recovered.
         """
-        progress = self.services.provider.rust_pipeline_progress()
+        provider = self.services.provider
+        # The ceiling follows the store stage's step, not the last report: a
+        # parse or embed report can land while the store thread runs a single
+        # native step. Before the store thread first reports it may be
+        # rebuilding missing vector indexes at open, which reports nothing, so
+        # that wait gets the single-step ceiling too; a hang there reads late.
+        # Read the store phase first: a report landing between the two reads
+        # then only refreshes the idle time, a hold ending between them reads
+        # None, and a hold starting between them reads the long ceiling.
+        store_phase = provider.rust_pipeline_store_phase()
+        progress = provider.rust_pipeline_progress()
         if progress is None:
             return None
-        idle_seconds, phase = progress
+        idle_seconds, _phase = progress
         ceiling = (
             self._RUST_SINGLE_STEP_STALL_SECONDS
-            if phase in self._RUST_SINGLE_STEP_PHASES
+            if store_phase is None or store_phase in self._RUST_SINGLE_STEP_PHASES
             else self._RUST_HOLD_STALL_SECONDS
         )
         return progress if idle_seconds > ceiling else None

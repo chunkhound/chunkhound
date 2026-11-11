@@ -115,9 +115,20 @@ async def test_status_read_keeps_a_recorded_realtime_failure(
     assert realtime["last_error"] == "watcher lost"
 
 
+def _scan_progress_after(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, seconds: float
+) -> dict:
+    """Read the daemon_status scan progress as if ``seconds`` had passed."""
+    real = time.monotonic
+    with monkeypatch.context() as patch:
+        patch.setattr(time, "monotonic", lambda: real() + seconds)
+        return server._scan_progress_for_tool("daemon_status")
+
+
 @pytest.mark.asyncio
 async def test_hung_rust_hold_reads_stalled(
     server_and_service: tuple[_Server, RealtimeIndexingService, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Rust run holding the database without progress reads stalled.
 
@@ -126,24 +137,73 @@ async def test_hung_rust_hold_reads_stalled(
     server, service, _root = server_and_service
     provider = service.services.provider
     assert isinstance(provider, SerialDatabaseProvider)
-    executor = provider._executor
-    executor.set_rust_pipeline_in_progress(True)
+    provider.set_rust_pipeline_in_progress(True)
     try:
-        executor._rust_progress_at = time.monotonic() - 601
-        executor._rust_progress_phase = "embed"
-        realtime = _realtime(server)
+        provider.note_rust_pipeline_progress("write-data")
+        progress = _scan_progress_after(server, monkeypatch, 601)
+        realtime = progress["realtime"]
         assert realtime["live_indexing_state"] == "stalled"
         assert "holding the database" in realtime["live_indexing_hint"]
-        assert "last phase: embed" in realtime["live_indexing_hint"]
-        progress = server._scan_progress_for_tool("daemon_status")
+        assert "last phase: write-data" in realtime["live_indexing_hint"]
         assert derive_daemon_status(progress)["status"] == "degraded"
 
-        executor._rust_progress_at = time.monotonic() - 590
-        assert _realtime(server)["live_indexing_state"] == "idle"
+        progress = _scan_progress_after(server, monkeypatch, 590)
+        assert progress["realtime"]["live_indexing_state"] == "idle"
 
         # A single native step reports nothing until it ends.
-        executor._rust_progress_at = time.monotonic() - 700
-        executor._rust_progress_phase = "write-compact"
-        assert _realtime(server)["live_indexing_state"] == "idle"
+        provider.note_rust_pipeline_progress("write-compact")
+        progress = _scan_progress_after(server, monkeypatch, 700)
+        assert progress["realtime"]["live_indexing_state"] == "idle"
     finally:
-        executor.set_rust_pipeline_in_progress(False)
+        provider.set_rust_pipeline_in_progress(False)
+
+
+@pytest.mark.asyncio
+async def test_late_main_report_keeps_the_store_step_ceiling(
+    server_and_service: tuple[_Server, RealtimeIndexingService, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parse report after the store starts an index build keeps its ceiling.
+
+    After a disk-limit trip the store thread starts building indexes while the
+    parse and embed threads can still report their in-flight batch.
+    """
+    server, service, _root = server_and_service
+    provider = service.services.provider
+    assert isinstance(provider, SerialDatabaseProvider)
+    provider.set_rust_pipeline_in_progress(True)
+    try:
+        provider.note_rust_pipeline_progress("write-index")
+        provider.note_rust_pipeline_progress("parse")
+        progress = _scan_progress_after(server, monkeypatch, 700)
+        assert progress["realtime"]["live_indexing_state"] == "idle"
+    finally:
+        provider.set_rust_pipeline_in_progress(False)
+
+
+@pytest.mark.asyncio
+async def test_hold_before_the_store_reports_uses_the_long_ceiling(
+    server_and_service: tuple[_Server, RealtimeIndexingService, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hold whose store thread has not reported gets the single-step ceiling.
+
+    The store thread opens the database first, which can rebuild missing
+    vector indexes without reporting.
+    """
+    server, service, _root = server_and_service
+    provider = service.services.provider
+    assert isinstance(provider, SerialDatabaseProvider)
+    provider.set_rust_pipeline_in_progress(True)
+    try:
+        provider.note_rust_pipeline_progress("parse")
+        provider.note_rust_pipeline_progress("embed")
+        progress = _scan_progress_after(server, monkeypatch, 700)
+        assert progress["realtime"]["live_indexing_state"] == "idle"
+
+        progress = _scan_progress_after(server, monkeypatch, 1321)
+        realtime = progress["realtime"]
+        assert realtime["live_indexing_state"] == "stalled"
+        assert "last phase: embed" in realtime["live_indexing_hint"]
+    finally:
+        provider.set_rust_pipeline_in_progress(False)
