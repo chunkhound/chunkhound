@@ -326,8 +326,7 @@ def test_trailing_deletions_are_anchored_and_later_file_is_parsed() -> None:
     assert all(chunk.start_line <= chunk.end_line for chunk in chunks)
     assert {chunk.file_path for chunk in chunks} == {"a.py", "later.py"}
     assert any(
-        chunk.file_path == "later.py" and "+new\n" in chunk.code
-        for chunk in chunks
+        chunk.file_path == "later.py" and "+new\n" in chunk.code for chunk in chunks
     )
 
 
@@ -350,6 +349,34 @@ def test_single_overlong_line_split() -> None:
     assert len(chunks) > 1
     for c in chunks:
         assert len(c.code) <= 10_000
+
+
+def test_overlong_line_does_not_expand_preceding_chunk_range() -> None:
+    """A marker on an oversized next line must be attributed to that line."""
+    marker = "OVERSIZED_LINE_MARKER"
+    diff = (
+        "diff --git a/source.py b/source.py\n"
+        "--- a/source.py\n"
+        "+++ b/source.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        "+short\n"
+        f"+{marker}" + "x" * 200 + "\n"
+        "diff --git a/later.py b/later.py\n"
+        "--- a/later.py\n"
+        "+++ b/later.py\n"
+        "@@ -1 +1 @@\n"
+        "+LATER_FILE_MARKER\n"
+    )
+
+    chunks = parse_diff_to_chunks(diff, max_chunk_chars=100)
+
+    marker_chunks = [chunk for chunk in chunks if marker in chunk.code]
+    assert marker_chunks
+    assert all(chunk.start_line <= 2 <= chunk.end_line for chunk in marker_chunks)
+    assert any(
+        chunk.file_path == "later.py" and "LATER_FILE_MARKER" in chunk.code
+        for chunk in chunks
+    )
 
 
 def test_single_overlong_line_fragments_report_hunk_start_as_start_line() -> None:

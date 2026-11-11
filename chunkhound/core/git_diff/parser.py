@@ -151,8 +151,8 @@ class StreamingDiffParser:
                 # anyway. Shorter partial lines wait for their newline so chunk
                 # boundaries do not depend on where pipe reads happen to split.
                 advances = self._line_buffer[0] in ("+", " ")
-                self._append_hunk_text(
-                    self._line_buffer, self._running_line, output, is_body=True
+                self._append_oversized_hunk_line(
+                    self._line_buffer, self._running_line, output
                 )
                 self._line_buffer = ""
                 self._streaming_line_advances = advances
@@ -259,7 +259,7 @@ class StreamingDiffParser:
     def _append_complete_hunk_line(self, line: str, output: list[Chunk]) -> None:
         advances = bool(line) and line[0] in ("+", " ")
         if len(line) > self._max_chunk_chars:
-            self._append_hunk_text(line, self._running_line, output, is_body=True)
+            self._append_oversized_hunk_line(line, self._running_line, output)
         else:
             would_overflow = (
                 self._draft_text
@@ -279,6 +279,18 @@ class StreamingDiffParser:
             self._draft_has_body = True
         if advances:
             self._running_line += 1
+
+    def _append_oversized_hunk_line(
+        self, text: str, line_offset: int, output: list[Chunk]
+    ) -> None:
+        """Append an oversized source line without absorbing it into prior text."""
+        # Do not let a fragment of this source line fill a completed draft: the
+        # previous part would then contain this line's text while its end range
+        # still points at the preceding line. This must apply equally when the
+        # line crosses read boundaries and is streamed incrementally.
+        if self._draft_has_body:
+            self._rotate_draft(output)
+        self._append_hunk_text(text, line_offset, output, is_body=True)
 
     def _append_hunk_text(
         self,
@@ -319,9 +331,7 @@ class StreamingDiffParser:
         # Deleted lines have no new-file position. When a deletion-only
         # fragment follows the hunk's final new-side line, anchor it to that
         # final valid line rather than producing an invalid line range.
-        part_start = min(
-            self._hunk_end, max(1, self._hunk_start + line_offset)
-        )
+        part_start = min(self._hunk_end, max(1, self._hunk_start + line_offset))
         raw_end = self._hunk_start + next_offset - 1
         part_end = min(self._hunk_end, max(part_start, raw_end))
         symbol = (
