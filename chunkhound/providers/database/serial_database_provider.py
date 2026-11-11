@@ -2,6 +2,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -405,6 +406,78 @@ class SerialDatabaseProvider(ABC):
             logger.debug("rollback_transaction not supported by this provider")
             return
         await self._execute_in_db_thread("rollback_transaction")
+
+    async def store_file_result_async(
+        self,
+        file: File,
+        plan_chunks: Callable[[int, list[Chunk]], tuple[list[int], list[Chunk]]],
+    ) -> tuple[int, bool, list[int]]:
+        """Store one parsed file and its chunks in ONE executor submission."""
+        return cast(
+            tuple[int, bool, list[int]],
+            await self._execute_in_db_thread("store_file_result", file, plan_chunks),
+        )
+
+    def _executor_store_file_result(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        file: File,
+        plan_chunks: Callable[[int, list[Chunk]], tuple[list[int], list[Chunk]]],
+    ) -> tuple[int, bool, list[int]]:
+        """Upsert a file and apply its chunk changes inside one transaction.
+
+        One submission, so no transaction is ever open between executor ops: a
+        Rust handover's disconnect queues behind it and runs after the commit.
+        Providers without transactions run the same steps plain.
+        """
+        transactional = hasattr(
+            self, "_executor_begin_transaction"
+        ) and not state.get("transaction_active", False)
+        if transactional:
+            self._executor_begin_transaction(conn, state)
+        try:
+            existing = cast(
+                dict[str, Any] | None,
+                self._executor_get_file_by_path(conn, state, str(file.path), False),
+            )
+            if existing:
+                file_id = int(existing["id"])
+                self._executor_update_file(
+                    conn,
+                    state,
+                    file_id,
+                    size_bytes=file.size_bytes,
+                    mtime=file.mtime,
+                    content_hash=file.content_hash,
+                )
+                existing_chunks = cast(
+                    list[Chunk],
+                    self._executor_get_chunks_by_file_id(conn, state, file_id, True),
+                )
+            else:
+                file_id = self._executor_insert_file(conn, state, file)
+                existing_chunks = []
+            delete_ids, to_insert = plan_chunks(file_id, existing_chunks)
+            if delete_ids and hasattr(self, "_executor_delete_chunks_batch"):
+                self._executor_delete_chunks_batch(conn, state, delete_ids)
+            inserted = (
+                self._executor_insert_chunks_batch(conn, state, to_insert)
+                if to_insert
+                else []
+            )
+            if transactional:
+                self._executor_commit_transaction(conn, state, False)
+        except BaseException:
+            if transactional:
+                try:
+                    self._executor_rollback_transaction(conn, state)
+                except Exception:
+                    logger.warning(
+                        f"Rollback failed after storing {file.path}", exc_info=True
+                    )
+            raise
+        return file_id, bool(existing), inserted
 
     async def get_file_by_path_async(
         self, path: str, as_model: bool = False

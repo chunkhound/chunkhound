@@ -717,6 +717,7 @@ class RealtimePipelineMixin:
                 self._set_error(self._last_resync_error)
                 return
 
+            self._resync_retry_count = 0
             while True:
                 started_request_at = self._last_resync_request_monotonic
                 self._resync_in_progress = True
@@ -724,13 +725,19 @@ class RealtimePipelineMixin:
                 self._last_resync_error = None
                 self._emit_status_update()
 
+                scan_raised = False
                 try:
-                    result = await callback(reason, details)
+                    try:
+                        result = await callback(reason, details)
+                    except Exception:
+                        scan_raised = True
+                        raise
                     callback_error = self._resync_callback_error(result)
                     if callback_error is not None:
                         raise RuntimeError(callback_error)
                     self._needs_resync = False
                     self._resync_performed_count += 1
+                    self._resync_retry_count = 0
                     self._last_resync_completed_at = self._utc_now()
                     self._complete_event_queue_overflow_burst(success=True)
                     if self._service_state not in {"stopping", "stopped"}:
@@ -739,13 +746,26 @@ class RealtimePipelineMixin:
                     self._last_resync_error = str(e)
                     self._complete_event_queue_overflow_burst(success=False)
                     self._set_error(f"Realtime resync failed: {e}")
-                    break
                 finally:
                     self._resync_in_progress = False
                     self._emit_status_update()
 
-                if started_request_at == self._last_resync_request_monotonic:
+                # A scan that raised (e.g. a failed Rust handover) is
+                # retried after a backoff. An error status from the embedding
+                # follow-up is not: re-running the scan cannot fix it.
+                delays = self._RESYNC_RETRY_DELAYS_SECONDS
+                if scan_raised and self._resync_retry_count < len(delays):
+                    delay = delays[self._resync_retry_count]
+                    self._resync_retry_count += 1
+                    self._resync_retry_pending = True
+                    self._emit_status_update()
+                    try:
+                        await asyncio.sleep(delay)
+                    finally:
+                        self._resync_retry_pending = False
+                elif started_request_at == self._last_resync_request_monotonic:
                     break
+                # Otherwise a request arrived during the run, failed or not: run it.
                 reason = self._last_resync_reason or reason
                 details = self._last_resync_details
         finally:

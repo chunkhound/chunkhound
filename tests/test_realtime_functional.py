@@ -2251,6 +2251,35 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
+    async def test_failed_resync_is_retried(self, realtime_setup, monkeypatch) -> None:
+        """A resync whose scan raised is retried after a backoff."""
+        service, watch_dir, _, _ = realtime_setup
+        monkeypatch.setattr(service, "_RESYNC_RETRY_DELAYS_SECONDS", (0.01,) * 3)
+        calls: list[str] = []
+
+        async def flaky_resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> None:
+            calls.append(reason)
+            if len(calls) == 1:
+                raise RuntimeError("handover failed")
+
+        service._resync_callback = flaky_resync_callback
+        try:
+            await service.start(watch_dir)
+            await service.request_resync("manual_reconcile")
+            stats = await _wait_for_realtime_condition(
+                service,
+                lambda current: current["resync"]["performed_count"] == 1,
+            )
+            assert calls == ["manual_reconcile", "manual_reconcile"]
+            assert stats["resync"]["request_count"] == 1
+            assert stats["resync"]["retry_count"] == 0
+            assert stats["resync"]["needs_resync"] is False
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
     async def test_watchdog_timeout_fallback_does_not_adopt_late_watchdog(
         self, realtime_setup, monkeypatch
     ):
