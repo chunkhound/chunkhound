@@ -161,6 +161,38 @@ class TransientSearchService:
             return min(_EMBED_BATCH_TARGET, limit)
         return _EMBED_BATCH_TARGET
 
+    async def _embed_query_batches(
+        self, queries: list[str], provider: str | None
+    ) -> tuple[list[Any], Any]:
+        """Embed expanded queries within the provider's document-count limit."""
+        embeddings: list[Any] = []
+        expected_result: Any | None = None
+        target = self._embed_batch_target(provider)
+        for start in range(0, len(queries), target):
+            batch = queries[start : start + target]
+            result = await self._embed_texts(batch, provider, query=True)
+            if not result.embeddings:
+                if embeddings:
+                    raise RuntimeError(
+                        "Embedding provider returned an unexpected number of "
+                        "query vectors"
+                    )
+                return [], result
+            if len(result.embeddings) != len(batch):
+                raise RuntimeError(
+                    "Embedding provider returned an unexpected number of query vectors"
+                )
+            if expected_result is None:
+                self._cache_namespace(result)
+                expected_result = result
+            else:
+                expected_namespace = self._cache_namespace(expected_result)
+                self._validate_embedding_result(result, expected_namespace)
+            embeddings.extend(result.embeddings)
+        if expected_result is None:
+            raise RuntimeError("Cannot embed an empty query batch")
+        return embeddings, expected_result
+
     async def _vectorized_batches(
         self,
         path_prefix: str | None,
@@ -384,16 +416,14 @@ class TransientSearchService:
     ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
         if not queries:
             return []
-        query_result = await self._embed_texts(queries, provider, query=True)
-        if not query_result.embeddings:
+        query_embeddings, query_result = await self._embed_query_batches(
+            queries, provider
+        )
+        if not query_embeddings:
             empty_page = self._pagination(page_size, offset, 0)
             return [([], dict(empty_page)) for _ in queries]
-        if len(query_result.embeddings) != len(queries):
-            raise RuntimeError(
-                "Embedding provider returned an unexpected number of query vectors"
-            )
         query_vectors = np.stack(
-            [self._normalise(vector) for vector in query_result.embeddings]
+            [self._normalise(vector) for vector in query_embeddings]
         )
         cache_ns = self._cache_namespace(query_result)
         path_prefix = normalize_path_filter(path_filter)

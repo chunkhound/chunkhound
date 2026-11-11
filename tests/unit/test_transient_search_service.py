@@ -1465,6 +1465,33 @@ async def test_chunk_embedding_requests_are_full_batches(scenario: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bulk_query_embeddings_respect_provider_document_limit() -> None:
+    requests: list[list[str]] = []
+
+    async def embed_queries(texts: list[str]) -> LocalEmbeddingResult:
+        requests.append(list(texts))
+        return LocalEmbeddingResult(
+            embeddings=[[1.0, 0.0] for _ in texts],
+            model="test-model",
+            provider="test",
+            dims=2,
+            embedding_space_identity="test-space",
+        )
+
+    manager = MagicMock()
+    manager.get_provider.return_value.get_max_documents_per_batch.return_value = 1
+    manager.embed_query_texts = AsyncMock(side_effect=embed_queries)
+    service = TransientSearchService(
+        make_original(), stream_chunks([]), "diff", manager, VectorCache(max_entries=0)
+    )
+
+    results = await service.search_semantic_many(["first", "second", "third"])
+
+    assert requests == [["first"], ["second"], ["third"]]
+    assert len(results) == 3
+
+
+@pytest.mark.asyncio
 async def test_chunk_embedding_requests_respect_provider_document_limit() -> None:
     manager, requests = _spying_embedding_manager(max_documents=64)
     service = TransientSearchService(
