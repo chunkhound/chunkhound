@@ -22,6 +22,7 @@ from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
     EmbeddingProviderError,
+    RerankEndpointError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.core.utils.openai_utils import (
@@ -29,6 +30,7 @@ from chunkhound.core.utils.openai_utils import (
     is_official_openai_endpoint,
 )
 from chunkhound.core.utils.rerank_url import resolve_rerank_url
+from chunkhound.core.utils.url_redaction import url_for_log
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 from chunkhound.providers.embeddings.shared_utils import (
     apply_client_side_truncation,
@@ -536,8 +538,9 @@ class OpenAIEmbeddingProvider:
             client_kwargs["base_url"] = self._base_url
             verify_tls = self._ssl_verify
             if not self._ssl_verify:
+                base_log_url = url_for_log(self._base_url)
                 logger.debug(
-                    f"SSL verification disabled for embedding endpoint: {self._base_url}"
+                    f"SSL verification disabled for embedding endpoint: {base_log_url}"
                 )
 
         # Bound the connection pool explicitly rather than relying on
@@ -574,7 +577,8 @@ class OpenAIEmbeddingProvider:
             raise ValueError("Azure endpoint is required for Azure OpenAI")
 
         logger.debug(
-            f"Creating Azure OpenAI client: endpoint={self._azure_endpoint}, "
+            "Creating Azure OpenAI client: "
+            f"endpoint={url_for_log(self._azure_endpoint)}, "
             f"api_version={self._api_version}, deployment={self._azure_deployment}"
         )
 
@@ -1342,7 +1346,7 @@ class OpenAIEmbeddingProvider:
                     error_details: dict[str, Any] = {
                         "error_type": type(rate_error).__name__,
                         "error_message": str(rate_error),
-                        "base_url": self._base_url,
+                        "base_url": url_for_log(self._base_url or ""),
                         "model": self._model,
                         "timeout": self._timeout,
                         "attempt": attempt + 1,
@@ -1738,7 +1742,7 @@ class OpenAIEmbeddingProvider:
             except EmbeddingProviderError:
                 raise
             except Exception as e:
-                # Classify error as retryable or not
+                exc = type(e).__name__  # httpx messages embed the request URL.
                 error_str = str(e).lower()
                 is_retryable = any(
                     [
@@ -1754,13 +1758,18 @@ class OpenAIEmbeddingProvider:
                     delay = self._retry_delay * (2**attempt)
                     logger.warning(
                         f"{label} failed (attempt {attempt + 1}), "
-                        f"retrying in {delay}s: {e}"
+                        f"retrying in {delay}s: {exc}"
                     )
                     await asyncio.sleep(delay)
                     continue
                 else:
                     # Last attempt or non-retryable error
-                    logger.error(f"{label} failed after {attempt + 1} attempts: {e}")
+                    logger.error(f"{label} failed after {attempt + 1} attempts: {exc}")
+                    if isinstance(e, httpx.HTTPError):
+                        # httpx text embeds the configured URL; callers log it.
+                        raise RerankEndpointError(
+                            e, resolve_rerank_url(self._rerank_url, self._base_url)
+                        ) from None
                     raise
 
     async def rerank(
@@ -1833,6 +1842,10 @@ class OpenAIEmbeddingProvider:
                 batch_results = await self._rerank_batch_with_retry(
                     query, batch_documents, None, label=f"Batch {batch_idx + 1}"
                 )
+            except RerankEndpointError:
+                # Subclasses EmbeddingProviderError: classify before fatal branch.
+                batch_results = []
+                failed_batches += 1
             except EmbeddingProviderError:
                 raise
             except Exception:
@@ -1907,6 +1920,7 @@ class OpenAIEmbeddingProvider:
         await self._ensure_client()
 
         rerank_endpoint = resolve_rerank_url(self._rerank_url, self._base_url)
+        rerank_log_url = url_for_log(rerank_endpoint)
 
         # Resolve format and build payload
         format_to_use = self._resolve_rerank_format()
@@ -1920,7 +1934,7 @@ class OpenAIEmbeddingProvider:
             if not self._effective_rerank_ssl_verify(rerank_endpoint):
                 client_kwargs["verify"] = False
                 logger.debug(
-                    f"SSL verification disabled for rerank endpoint: {rerank_endpoint}"
+                    f"SSL verification disabled for rerank endpoint: {rerank_log_url}"
                 )
 
             try:
@@ -1984,7 +1998,7 @@ class OpenAIEmbeddingProvider:
             # Connection failed - service not available
             self._usage_stats["errors"] += 1
             logger.error(
-                f"Failed to connect to rerank service at {rerank_endpoint}: {e}"
+                f"Failed to connect to rerank service at {rerank_log_url}: {e}"
             )
             raise
         except httpx.TimeoutException as e:

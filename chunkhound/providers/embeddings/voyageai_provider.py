@@ -17,6 +17,7 @@ from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERAN
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingProviderError,
+    RerankEndpointError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.core.utils.rerank_url import (
@@ -25,6 +26,7 @@ from chunkhound.core.utils.rerank_url import (
     normalize_rerank_url,
     resolve_rerank_url,
 )
+from chunkhound.core.utils.url_redaction import url_for_log
 from chunkhound.core.utils.voyageai_utils import (
     OFFICIAL_VOYAGEAI_BASE_V1,
     is_official_voyageai_endpoint,
@@ -301,8 +303,9 @@ class VoyageAIEmbeddingProvider:
                 provider construction may defer the missing-output_dims failure
                 until the first embed() call, but it will fail explicitly.
             base_url: Custom API base URL (overrides https://api.voyageai.com/v1)
-            rerank_url: Separate reranker endpoint URL (absolute http/https).
-                When set, reranking uses HTTP instead of the VoyageAI SDK.
+            rerank_url: Reranker endpoint URL. An absolute http/https URL is
+                used as-is; a relative path resolves against base_url. When
+                set, reranking uses HTTP instead of the VoyageAI SDK.
             rerank_format: Reranking API format when using rerank_url.
                 'cohere' for Cohere-compatible APIs (requires rerank_model),
                 'tei' for HuggingFace TEI (model set at deployment),
@@ -1176,7 +1179,8 @@ class VoyageAIEmbeddingProvider:
             raise RuntimeError("HTTP reranking requires rerank_url")
 
         logger.debug(
-            f"HTTP reranking {len(documents)} documents at {rerank_url} "
+            f"HTTP reranking {len(documents)} documents at "
+            f"{url_for_log(rerank_url)} "
             f"(format={self._rerank_format})"
         )
 
@@ -1200,6 +1204,9 @@ class VoyageAIEmbeddingProvider:
                 False,
                 error_type=type(rerank_call_error).__name__,
             )
+            if isinstance(rerank_call_error, httpx.HTTPError):
+                # httpx text embeds the configured URL; callers log it.
+                raise RerankEndpointError(rerank_call_error, rerank_url) from None
             raise
         ch_analytics.record_provider_call("reranker", self.name, rerank_model, True)
 

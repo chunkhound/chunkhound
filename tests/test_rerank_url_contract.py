@@ -7,6 +7,7 @@ from loguru import logger
 
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.core.exceptions import RerankEndpointError
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
 from tests.fixtures.rerank_server_manager import RerankServerManager
@@ -158,7 +159,7 @@ def test_voyage_format_requires_voyageai_provider():
     assert config.rerank_model == "rerank-3-lite"
 
 
-def _provider(provider, entry, base_url, rerank_url):
+def _provider(provider, entry, base_url, rerank_url, **overrides):
     config = dict(
         api_key="local-test-key",
         model="local-embedding-model",
@@ -167,6 +168,7 @@ def _provider(provider, entry, base_url, rerank_url):
         rerank_format="tei",
         rerank_model=None,
     )
+    config.update(overrides)
     if entry == "factory":
         return EmbeddingProviderFactory.create_provider(
             EmbeddingConfig(provider=provider, **config)
@@ -307,7 +309,7 @@ def test_voyage_direct_malformed_url_leaves_no_endpoint(bad_url):
 
 
 def test_voyage_creation_log_redacts_rerank_url_secrets():
-    """Debug logs must not echo userinfo credentials from rerank_url."""
+    """Debug logs must not echo userinfo credentials from any URL."""
     records: list[str] = []
 
     def capture(message) -> None:
@@ -320,7 +322,7 @@ def test_voyage_creation_log_redacts_rerank_url_secrets():
         EmbeddingProviderFactory.create_provider(
             _voyage_config(
                 rerank_url="https://REVIEW_USER:REVIEW_SECRET@host/rerank",
-                base_url="https://host/v1",
+                base_url="https://REVIEW_USER:REVIEW_SECRET@host/v1",
             )
         )
     finally:
@@ -331,6 +333,79 @@ def test_voyage_creation_log_redacts_rerank_url_secrets():
     assert "REVIEW_USER" not in message
     assert "REVIEW_SECRET" not in message
     assert "https://host/rerank" in message
+
+
+def test_openai_creation_log_redacts_userinfo():
+    """The OpenAI creation log must not echo URL credentials either."""
+    records: list[str] = []
+
+    def capture(message) -> None:
+        text = message.record["message"]
+        if "Creating OpenAI provider" in text:
+            records.append(text)
+
+    sink_id = logger.add(capture, level="DEBUG")
+    try:
+        EmbeddingProviderFactory.create_provider(
+            EmbeddingConfig(
+                provider="openai",
+                api_key="local-test-key",
+                model="text-embedding-3-small",
+                base_url="https://REVIEW_USER:REVIEW_SECRET@host/v1",
+            )
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert len(records) == 1
+    assert "REVIEW_USER" not in records[0]
+    assert "REVIEW_SECRET" not in records[0]
+    assert "https://host/v1" in records[0]
+
+
+@pytest.mark.asyncio
+async def test_http_rerank_log_redacts_userinfo(reranker):
+    """The HTTP rerank log must not echo URL credentials."""
+    url = f"http://REVIEW_USER:REVIEW_SECRET@127.0.0.1:{reranker.port}/rerank"
+    records: list[str] = []
+
+    def capture(message) -> None:
+        text = message.record["message"]
+        if "HTTP reranking" in text:
+            records.append(text)
+
+    client = _provider("voyageai", "direct", reranker.base_url, url)
+    sink_id = logger.add(capture, level="DEBUG")
+    try:
+        await client.rerank("query", ["document"])
+    finally:
+        logger.remove(sink_id)
+
+    assert records
+    assert all("REVIEW_USER" not in text for text in records)
+    assert all("REVIEW_SECRET" not in text for text in records)
+
+
+@pytest.mark.asyncio
+async def test_openai_failure_logs_redact_url_credentials():
+    """Unreachable endpoints must not leak URL userinfo into failure logs."""
+    url = "http://REVIEW_USER:REVIEW_SECRET@127.0.0.1:9"
+    client = _provider("openai", "direct", f"{url}/v1", f"{url}/rerank")
+    records: list[str] = []
+    sink_id = logger.add(lambda m: records.append(m.record["message"]), level="DEBUG")
+    try:
+        with pytest.raises(Exception):
+            await client.embed(["document"])
+        with pytest.raises(Exception):
+            await client.rerank("query", ["document"])
+    finally:
+        logger.remove(sink_id)
+
+    logs = [t for t in records if "API connection error" in t or "service at" in t]
+    assert logs
+    joined = "\n".join(logs)
+    assert "127.0.0.1:9/v1" in joined and "127.0.0.1:9/rerank" in joined
+    assert "REVIEW_USER" not in joined and "REVIEW_SECRET" not in joined
 
 
 def _voyage_for_warning(entry, url, base_url=None, rerank_model=None):
@@ -413,6 +488,11 @@ def test_voyage_empty_rerank_url_is_the_same_unset_shape(entry):
             "complete HTTP(S) URL",
         ),
         (
+            "https://REVIEW_USER:1234/REVIEW_SECRET\\?x@host/rerank",
+            "<invalid URL>",
+            "complete HTTP(S) URL",
+        ),
+        (
             "http://[REVIEW_USER:REVIEW_SECRET@host/rerank",
             "http://host/rerank",
             "complete HTTP(S) URL",
@@ -456,3 +536,31 @@ def test_voyage_usable_or_omitted_endpoint_does_not_warn(
 ):
     _voyage_for_warning(entry, url, base_url)
     assert warning_records == []
+
+
+@pytest.mark.parametrize("provider", ["openai", "voyageai"])
+async def test_rerank_http_failure_hides_configured_credentials(reranker, provider):
+    """Callers log the escaped error, so a 503 must not echo rerank_url userinfo."""
+    reranker.set_scenarios(
+        [
+            MockRerankScenario(
+                name="userinfo-rerank-failure",
+                query="query",
+                documents=["document"],
+                results=[],
+                response_format="tei",
+                status_code=503,
+                error="unavailable",
+            )
+        ]
+    )
+    url = f"http://REVIEW_USER:REVIEW_SECRET@{reranker.host}:{reranker.port}/rerank"
+    client = _provider(provider, "direct", reranker.base_url, url, retry_attempts=1)
+    with pytest.raises(RerankEndpointError) as excinfo:
+        await client.rerank("query", ["document"])
+    message = str(excinfo.value)
+    assert "REVIEW_USER" not in message and "REVIEW_SECRET" not in message
+    assert f"127.0.0.1:{reranker.port}/rerank" in message
+    assert "503" in message
+    assert (excinfo.value.status_code, excinfo.value.error_type) == (503, "HTTPStatusError")
+    assert excinfo.value.__cause__ is None

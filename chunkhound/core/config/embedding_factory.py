@@ -102,7 +102,8 @@ class EmbeddingProviderFactory:
         if azure_endpoint:
             logger.debug(
                 f"Creating Azure OpenAI provider: model={model}, "
-                f"azure_endpoint={azure_endpoint}, api_version={api_version}, "
+                f"azure_endpoint={url_for_log(azure_endpoint)}, "
+                f"api_version={api_version}, "
                 f"azure_deployment={azure_deployment}, "
                 f"api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
@@ -114,7 +115,8 @@ class EmbeddingProviderFactory:
         else:
             logger.debug(
                 f"Creating OpenAI provider: model={model}, "
-                f"base_url={base_url}, api_key={'***' if api_key else None}, "
+                f"base_url={url_for_log(base_url) if base_url else None}, "
+                f"api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
                 f"rerank_batch_size={rerank_batch_size}, "
                 f"output_dims={output_dims}, "
@@ -183,7 +185,8 @@ class EmbeddingProviderFactory:
         # redactor rather than the raw value.
         logger.debug(
             f"Creating VoyageAI provider: model={model}, "
-            f"base_url={base_url}, api_key={'***' if api_key else None}, "
+            f"base_url={url_for_log(base_url) if base_url else None}, "
+            f"api_key={'***' if api_key else None}, "
             f"rerank_model={rerank_model}, "
             f"rerank_url={url_for_log(rerank_url) if rerank_url else None}, "
             f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"

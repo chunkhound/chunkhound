@@ -3,7 +3,10 @@
 import re
 from urllib.parse import urljoin, urlsplit
 
-from chunkhound.core.utils.url_redaction import url_for_log
+from chunkhound.core.utils.url_redaction import (
+    has_url_ambiguous_characters,
+    url_for_log,
+)
 
 RERANK_BASE_URL_REQUIRED = (
     "rerank_model or rerank_format requires base_url or explicit rerank_url"
@@ -31,10 +34,10 @@ def drop_relative_rerank_url_message(provider: str, url: str) -> str:
 
 def normalize_rerank_url(value: str) -> str:
     """Normalize only the scheme; preserve endpoint path, query, and fragment."""
-    # A literal backslash has no URL meaning and makes the effective host
-    # parser-dependent (WHATWG treats it as a path separator, httpx as an
-    # authority delimiter). Reject it so both layers agree on the target.
-    if value.startswith("//") or "\\" in value or any(c.isspace() for c in value):
+    # A literal backslash or whitespace has no URL meaning and makes the
+    # effective host parser-dependent (WHATWG vs httpx). Reject it so both
+    # layers agree on the target.
+    if value.startswith("//") or has_url_ambiguous_characters(value):
         raise ValueError(RERANK_URL_SCHEME_INVALID)
     match = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):", value)
     if not match:

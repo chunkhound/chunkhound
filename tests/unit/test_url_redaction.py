@@ -15,6 +15,7 @@ from chunkhound.core.utils.url_redaction import url_for_log
             "http://127.0.0.1:8080/config",
         ),
         ("/rerank?api_key=SECRET#frag", "/rerank"),
+        ("https://user:pw@host/path?q=a@b", "https://host/path"),
     ],
 )
 def test_redacts_userinfo_query_and_fragment(url: str, expected: str) -> None:
@@ -33,6 +34,11 @@ def test_redacts_userinfo_query_and_fragment(url: str, expected: str) -> None:
         "https://user:p#ss@host/path",
         # Malformed authority cannot distinguish credentials from the path.
         "https://user:bad/secret@host/path",
+        "https://user:1234/secret\\?x@host/rerank",
+        "https://user:1234/secret ?x@host/rerank",
+        # Only the hidden delimiter @ makes the prefix look harmless.
+        "https://user:1234/secret?x@host/rerank",
+        "https://user:1234/secret#x@host/rerank",
         # urlsplit raises on this input; the log helper must not.
         "http://[::1",
     ],
