@@ -223,15 +223,19 @@ def test_precheck_agrees_with_the_rust_differ(
 
     configure_registry(config)
     coordinator = create_indexing_coordinator()
-    # The precheck's verdict, read before Rust rewrites the rows.
-    precheck = asyncio.run(
-        find_rust_incremental_work(
-            coordinator._db,
-            sorted(root.glob("*.py")),
-            root,
-            rust_mtime_epsilon(config),
+    # The precheck's verdict, without its mtime refresh: Rust's differ below
+    # must see the same rows, or a hash-confirmed file would reach it with
+    # the new mtime and never exercise its hash path.
+    with monkeypatch.context() as m:
+        m.setattr(coordinator._db, "refresh_file_mtimes", lambda entries: 0)
+        precheck = asyncio.run(
+            find_rust_incremental_work(
+                coordinator._db,
+                sorted(root.glob("*.py")),
+                root,
+                rust_mtime_epsilon(config),
+            )
         )
-    )
 
     # Rust's verdict: the precheck bypassed, Rust gets the full list and
     # runs its own diff.
@@ -341,9 +345,7 @@ def _index_then_touch(root: Path, config: Config) -> None:
         os.utime(path, (st.st_atime + 1000, st.st_mtime + 1000))
 
 
-def test_precheck_refreshes_the_mtime_of_a_hash_confirmed_file(
-    tmp_path, monkeypatch
-):
+def test_precheck_refreshes_the_mtime_of_a_hash_confirmed_file(tmp_path, monkeypatch):
     """A file the precheck confirms unchanged by hash gets its stored mtime
     refreshed, so the next start does not hash it again."""
     monkeypatch.setenv("CHUNKHOUND_USE_RUST", "1")

@@ -184,6 +184,8 @@ async def plan_rust_run(
     Returns *files_to_process* and *do_cleanup* unchanged unless the run can be
     narrowed to the changed files, and ``skip=True`` when it has nothing to
     write or remove -- the caller then never hands the database to Rust.
+    Stores the current mtime of every file confirmed unchanged by hash (see
+    ``find_rust_incremental_work``).
     """
     work = await find_rust_incremental_work(db, files, project_root, mtime_epsilon)
     rust_do_cleanup = do_cleanup

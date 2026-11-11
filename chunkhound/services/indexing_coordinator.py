@@ -1840,7 +1840,9 @@ class IndexingCoordinator(BaseService):
                 logger.info(
                     f"Diff: {agg_total_files}/{len(files)} changed in "
                     f"{_diff_elapsed * 1000:.0f}ms "
-                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash)"
+                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash, "
+                    f"{rust_plan.work.mtimes_refreshed if rust_plan else 0} "
+                    "mtimes refreshed)"
                 )
                 # Total skipped = discovered files minus those actually processed.
                 # skipped_by_hash only covers mtime-changed-but-hash-matched files;
