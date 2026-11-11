@@ -12,7 +12,7 @@ import tempfile
 
 from tests.site.png_helpers import png_dimensions
 from tests.site.process_runner import run_text_process
-from tests.site.tsx_runner import NPM, ROOT, isolated_subprocess_env
+from tests.site.tsx_runner import NODE, ROOT, isolated_subprocess_env
 
 GENERATE_SCRIPT = ROOT / "site" / "scripts" / "generate-og-images.mjs"
 
@@ -32,7 +32,7 @@ def _run_generate(public_dir: pathlib.Path) -> subprocess.CompletedProcess:
     """Run generate-og-images.mjs against a fake public directory."""
     with isolated_subprocess_env(CHUNKHOUND_PUBLIC_DIR=str(public_dir)) as env:
         return run_text_process(
-            [NPM, "exec", "--prefix", "site", "--", "node", str(GENERATE_SCRIPT)],
+            [NODE, str(GENERATE_SCRIPT)],
             cwd=ROOT,
             env=env,
         )

@@ -15,8 +15,8 @@ never a device guess:
 The card cannot read its own cqi, so the run/composer measure lives on the
 window inside it.
 
-happy-dom has no layout engine, so these assert the shipped rules, not computed
-geometry.
+Most tests assert the shipped rules; contracts about what the reader sees are
+measured in Chromium.
 """
 
 from __future__ import annotations
@@ -172,59 +172,107 @@ def test_note_is_inline_at_every_width() -> None:
     assert not rules_containing("[data-ordinal]"), "the band ordinal chip must be gone"
 
 
-def test_note_is_a_railed_offset_annotation() -> None:
-    """The note reads as an annotation layer, not a row: a drawn rail that
-    brackets it (leading edge plus bottom edge, invisible at rest, accent only
-    while its beat is live), an indent that keeps it out of the run's measure
-    column, Inter prose against the terminal's monospace, and its own surface
-    (--code-note-bg). The run carries no band; there are no leader lines and no
-    info glyph."""
-    note = _flat("".join(bodies(".terminal-lines .note", media="")))
-    assert (
-        "linear-gradient(var(--hero-note-rail),var(--hero-note-rail))"
-        "leftbottom/0var(--border-w-accent)no-repeat" in note
-    ), (
-        "the note must draw its bottom bar from --hero-note-rail, so the live "
-        "accent reaches it and an off note draws nothing"
+def test_note_is_a_railed_offset_annotation(built_site) -> None:
+    """The note reads as an annotation layer, not a row: it stays in the flow,
+    indented out of the run's copy column and narrower than the run, set in Inter
+    prose against the terminal's monospace, on its own --code-note-bg surface.
+    Its leading-edge rail is a square 3px stroke with no trailing border, and it
+    is invisible at rest and takes the accent only for the live beat, so the
+    highlight travels with the run. The run carries no band, and there are no
+    leader lines and no info glyph."""
+    measured = homepage_probe(
+        """
+console.log(JSON.stringify(await homepageProbe(['dark'], async page => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  return page.evaluate(() => {
+    const notes = [...document.querySelectorAll('.terminal-lines .note')];
+    // The reduced-motion render raises no beat, so the attribute the run sets
+    // on the live beat is applied here to read both rail states.
+    notes[0].setAttribute('data-current', '');
+    const current = getComputedStyle(notes[0]);
+    const off = getComputedStyle(notes[1]);
+    const note = notes[0].getBoundingClientRect();
+    const call = document.querySelector('.terminal-lines .line.call');
+    const run = call.getBoundingClientRect();
+    const terminal = document.querySelector('.terminal-window');
+    const values = {
+      noteCount: notes.length,
+      position: current.position,
+      left: note.left,
+      right: note.right,
+      runLeft: run.left,
+      runRight: run.right,
+      proseFont: getComputedStyle(notes[0].querySelector('.note-headline')).fontFamily,
+      detailFont: getComputedStyle(notes[0].querySelector('.note-detail')).fontFamily,
+      terminalFont: getComputedStyle(terminal).fontFamily,
+      accent: getComputedStyle(notes[0].querySelector('.note-index')).color,
+      currentImage: current.backgroundImage,
+      offImage: off.backgroundImage,
+      surface: current.backgroundColor,
+      // The rail is drawn, not bordered: its stroke lives on ::before at the
+      // leading edge, leaving the note itself square and borderless.
+      railLeft: getComputedStyle(notes[0], '::before').insetInlineStart,
+      railWidth: getComputedStyle(notes[0], '::before').inlineSize,
+      borderRight: current.borderRightWidth,
+      radius: current.borderRadius,
+    };
+    // Resolve the surface token in its own element, after every geometry read
+    // above, so the temporary node cannot shift the measured layout.
+    const token = document.createElement('div');
+    token.style.backgroundColor = 'var(--code-note-bg)';
+    document.body.append(token);
+    values.surfaceToken = getComputedStyle(token).backgroundColor;
+    token.remove();
+    return values;
+  });
+})));
+"""
+    )["dark"]
+
+    assert measured["noteCount"] > 1, "the hero must render more than one note"
+    assert measured["position"] not in ("absolute", "fixed"), (
+        "the note must stay in the flow at every width, not float over the run"
     )
-    assert "--hero-note-rail:transparent" in note, (
-        "the rail must vanish at rest, so an off note carries no bracket"
-    )
-    current_rail = _flat(
-        "".join(bodies(".terminal-lines .note[data-current]", media=""))
-    )
-    assert "--hero-note-rail:var(--code-accent)" in current_rail, (
-        "only the live beat's rail may take the accent — the highlight travels"
-    )
-    assert "border-inline-end" not in note, "the rail lives on the leading edge alone"
-    assert "margin-inline-start:var(--hero-note-indent)" in note, (
+    assert measured["left"] > measured["runLeft"], (
         "the note must be offset out of the run's measure column"
     )
-    assert (
-        "max-inline-size:min(calc(100%-var(--hero-note-indent)),"
-        "var(--hero-note-measure))" in note
-    ), "the note must be offset from the run's edge and capped below its measure"
-    assert "border-radius:var(--radius-none)" in note, (
-        "the note's accent edge must be a sharp, straight rail"
+    assert measured["right"] <= measured["runRight"] + 1, (
+        "the note must stay within the run's edge, capped below its measure"
     )
 
-    # The note's prose is a different type from the run's monospace: the layer
-    # cannot read as another transcript row.
-    for part in (".note-headline", ".note-detail"):
-        prose = _flat("".join(bodies(f".terminal-lines {part}", media="")))
-        assert "font-family:Inter,system-ui,sans-serif" in prose, (
-            f"{part} must be set in Inter, not the run's monospace"
-        )
-    terminal = _flat("".join(bodies(".terminal-window", media="")))
-    assert "font-family:JetBrainsMono,monospace" in terminal, (
-        "the terminal must keep its monospace — the run inherits it from the "
-        "window, so the note's Inter prose is a type contrast, not a variant"
+    # Both note parts are one prose type, distinct from the run's monospace:
+    # the layer cannot read as another transcript row.
+    assert (
+        measured["detailFont"] == measured["proseFont"] != measured["terminalFont"]
+    ), "the note's prose must not inherit the terminal's monospace"
+
+    # The rail is a square stroke on the leading edge; the note carries no
+    # border of its own, so the tile cannot read as another bordered row.
+    assert measured["railLeft"] == "0px", (
+        "the rail must run on the note's leading edge, not its trailing one"
+    )
+    assert measured["railWidth"] != "0px", "the rail stroke must have width"
+    assert measured["borderRight"] == "0px", (
+        "the note must draw no trailing border — the rail is the only edge"
+    )
+    assert measured["radius"] == "0px", "the note tile must stay square"
+
+    # The rail is one token shared by the connector and the bottom bar: it takes
+    # the accent only while its beat is live, so an off note draws nothing.
+    assert measured["accent"] in measured["currentImage"], (
+        "only the live beat's rail may take the accent — the highlight travels"
+    )
+    assert "rgba(0, 0, 0, 0)" in measured["offImage"], (
+        "the rail must vanish at rest, so an off note carries no bracket"
     )
 
     # The note surface is the annotation's own: the run carries no band at all,
     # so the note never shares a highlight rectangle with the transcript.
-    assert "var(--code-note-bg)" in note, (
+    assert measured["surface"] != "rgba(0, 0, 0, 0)", (
         "the note's own surface is what marks the annotation"
+    )
+    assert measured["surface"] == measured["surfaceToken"], (
+        "the note must sit on the --code-note-bg annotation surface"
     )
     assert not rules(".terminal-lines .line[data-current]"), (
         "the run must not flash a band: the highlight lives on the notes alone"

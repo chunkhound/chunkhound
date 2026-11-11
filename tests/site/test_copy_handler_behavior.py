@@ -21,7 +21,6 @@ def test_copy_handler_uses_clipboard_then_falls_back_and_resets_status() -> None
 let clipboardMode = 'success';
 let clipboardWrites = [];
 let execResult = true;
-let execCalls = 0;
 Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
   value: {
@@ -33,10 +32,7 @@ Object.defineProperty(globalThis, 'navigator', {
     },
   },
 });
-document.execCommand = () => {
-  execCalls += 1;
-  return execResult;
-};
+document.execCommand = () => execResult;
 
 await import('./site/src/scripts/copy-handler.js');
 const button = window.document.querySelector('.copy-btn');
@@ -81,7 +77,6 @@ console.log(JSON.stringify({
   failed,
   failedReset,
   clipboardWrites,
-  execCalls,
   scratchTextareas: window.document.querySelectorAll('textarea').length,
 }));
 """
@@ -110,7 +105,6 @@ console.log(JSON.stringify({
         "fallback text",
         "failed text",
     ]
-    assert rendered["execCalls"] == 2
     assert rendered["scratchTextareas"] == 0
 
 

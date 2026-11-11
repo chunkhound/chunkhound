@@ -74,6 +74,8 @@ console.log(JSON.stringify({ sections }));
 
 
 def test_shipped_font_sizes_come_from_the_type_scale() -> None:
+    """Design-system source-of-truth guard, not a rendered contract: happy-dom
+    has no layout, so the type scale itself is the narrowest reliable check."""
     offenders = [
         f"{selector} {{ font-size: {value} }}"
         for selector, value in raw_font_sizes()

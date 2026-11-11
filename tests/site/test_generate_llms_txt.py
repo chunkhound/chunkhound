@@ -16,7 +16,7 @@ import tempfile
 import pytest
 
 from tests.site.process_runner import run_text_process
-from tests.site.tsx_runner import NPM, ROOT, isolated_subprocess_env
+from tests.site.tsx_runner import NODE, ROOT, isolated_subprocess_env
 
 GENERATE_SCRIPT = ROOT / "site" / "scripts" / "generate-llms-txt.mjs"
 
@@ -54,16 +54,7 @@ def _run_generate(repo_root: pathlib.Path, *extra: str) -> subprocess.CompletedP
     """Run generate-llms-txt.mjs against a fake repo directory."""
     with isolated_subprocess_env(CHUNKHOUND_ROOT=str(repo_root)) as env:
         return run_text_process(
-            [
-                NPM,
-                "exec",
-                "--prefix",
-                "site",
-                "--",
-                "node",
-                str(GENERATE_SCRIPT),
-                *extra,
-            ],
+            [NODE, str(GENERATE_SCRIPT), *extra],
             cwd=ROOT,
             env=env,
         )

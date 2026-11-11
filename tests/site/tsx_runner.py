@@ -12,6 +12,7 @@ from tests.site.process_runner import run_text_process
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NPM: str = shutil.which("npm") or "npm"
+NODE: str = shutil.which("node") or "node"
 _SUBPROCESS_ENV_ALLOWLIST = (
     "PATH",
     "HOME",
