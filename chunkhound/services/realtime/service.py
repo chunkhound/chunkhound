@@ -20,6 +20,9 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.providers.database.serial_executor import (
+    COMPACTION_OPERATION_TIMEOUT_SECONDS,
+)
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
@@ -78,6 +81,14 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _EVENT_QUEUE_MAXSIZE = 1000
     _RESYNC_DEBOUNCE_SECONDS = 1.0
     _STALL_THRESHOLD_SECONDS = 30.0
+    # A Rust run holding the database with no progress callback for this long
+    # reads stalled. Every phase but the single native steps below
+    # reports per batch.
+    _RUST_HOLD_STALL_SECONDS = 600.0
+    # These steps report nothing until write-done; allow twice what the
+    # executor allows the same work.
+    _RUST_SINGLE_STEP_PHASES = ("write-compact", "write-index")
+    _RUST_SINGLE_STEP_STALL_SECONDS = 2 * COMPACTION_OPERATION_TIMEOUT_SECONDS
     _EVENT_PRESSURE_WINDOW_SECONDS = 30.0
     _EVENT_PRESSURE_MAX_TRACKED_PATHS = 64
     _EVENT_PRESSURE_ELEVATED_EVENTS = 20
@@ -592,10 +603,14 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         pipeline = self._build_pipeline_snapshot()
         status["pipeline"].update(pipeline)
         status["startup"] = self._startup_tracker.snapshot()
-        live_indexing_state = self._derive_live_indexing_state(pipeline)
+        # Read once, so the state and its hint cannot disagree within one read.
+        rust_hold_stall = self._stalled_rust_hold()
+        live_indexing_state = self._derive_live_indexing_state(
+            pipeline, rust_hold_stall
+        )
         status["live_indexing_state"] = live_indexing_state
         status["live_indexing_hint"] = self._derive_live_indexing_hint(
-            live_indexing_state
+            live_indexing_state, rust_hold_stall
         )
         return status
 
@@ -830,7 +845,11 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         )
         return pipeline
 
-    def _derive_live_indexing_state(self, pipeline: dict[str, Any]) -> str:
+    def _derive_live_indexing_state(
+        self,
+        pipeline: dict[str, Any],
+        rust_hold_stall: tuple[float, str | None] | None,
+    ) -> str:
         if (
             self._service_state == "degraded"
             or self._last_error is not None
@@ -843,6 +862,10 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
             or not self.monitoring_ready.is_set()
         ):
             return "uninitialized"
+
+        # Ahead of busy and idle: a hung initial scan holds with no backlog.
+        if rust_hold_stall is not None:
+            return "stalled"
 
         if self._active_processing_count > 0:
             return "busy"
@@ -874,7 +897,28 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 return "stalled"
         return "busy"
 
-    def _derive_live_indexing_hint(self, live_indexing_state: str) -> str:
+    def _stalled_rust_hold(self) -> tuple[float, str | None] | None:
+        """Return (idle seconds, last phase) when a Rust hold has stopped progressing.
+
+        A native run cannot be interrupted from Python, so a hung one is
+        reported rather than recovered.
+        """
+        progress = self.services.provider.rust_pipeline_progress()
+        if progress is None:
+            return None
+        idle_seconds, phase = progress
+        ceiling = (
+            self._RUST_SINGLE_STEP_STALL_SECONDS
+            if phase in self._RUST_SINGLE_STEP_PHASES
+            else self._RUST_HOLD_STALL_SECONDS
+        )
+        return progress if idle_seconds > ceiling else None
+
+    def _derive_live_indexing_hint(
+        self,
+        live_indexing_state: str,
+        rust_hold_stall: tuple[float, str | None] | None,
+    ) -> str:
         if live_indexing_state == "degraded":
             if self._event_queue_overflow_state == "reconciling":
                 return (
@@ -895,6 +939,18 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "Live indexing is degraded; inspect last_error and resync.last_error."
             )
         if live_indexing_state == "stalled":
+            if rust_hold_stall is not None:
+                idle_seconds, phase = rust_hold_stall
+                since = (
+                    f"last phase: {phase}"
+                    if phase is not None
+                    else "no progress since the run started"
+                )
+                return (
+                    "The Rust indexing run has reported no progress for "
+                    f"{idle_seconds:.0f}s ({since}) while holding "
+                    "the database; realtime writes wait for it."
+                )
             return (
                 "Accepted events are queued but processing has not advanced in "
                 "30s; inspect pipeline timestamps and processing_error_count."

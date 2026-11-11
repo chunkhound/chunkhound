@@ -32,7 +32,7 @@ class DatabaseRustPipelineInProgressError(DatabaseTemporarilyUnavailableError):
     currently owns write access to the database file."""
 
 
-_COMPACTION_OPERATION_TIMEOUT_SECONDS = 660.0
+COMPACTION_OPERATION_TIMEOUT_SECONDS = 660.0
 
 
 # Probability sampling interval for auto-compaction checks.
@@ -145,6 +145,18 @@ class SerialDatabaseExecutor:
         # Same idea, for the window where the Rust pipeline owns write
         # access to the DB file (Python's connection is closed).
         self._rust_pipeline_in_progress = threading.Event()
+        # Heartbeat of the Rust run holding the file: monotonic time
+        # and phase of its last progress callback. Written directly, never
+        # through execute/submit, which fast-fail while the Rust flag is set.
+        # Rust's progress callback writes them off the event loop, on whichever
+        # thread the native run calls it from (note_rust_pipeline_progress);
+        # the event loop reads them when it
+        # derives the live status (rust_pipeline_progress). No lock: they are
+        # two independent attribute stores under the GIL, so a read can at
+        # worst pair a new time with the previous phase, which only changes
+        # which stall ceiling that one read applies.
+        self._rust_progress_at: float | None = None
+        self._rust_progress_phase: str | None = None
         self._execute_timeout_seconds = execute_timeout_seconds
 
     def resolve_timeout(self, operation_name: str) -> float:
@@ -158,7 +170,7 @@ class SerialDatabaseExecutor:
         if self._execute_timeout_seconds is not None:
             return self._execute_timeout_seconds
         if operation_name.startswith("compact"):
-            return _COMPACTION_OPERATION_TIMEOUT_SECONDS
+            return COMPACTION_OPERATION_TIMEOUT_SECONDS
         return 30.0
 
     def set_compaction_in_progress(self, active: bool) -> None:
@@ -175,13 +187,32 @@ class SerialDatabaseExecutor:
     def set_rust_pipeline_in_progress(self, active: bool) -> None:
         """Publish Rust-pipeline-owns-the-file state to callers before they enqueue work."""
         if active:
+            self._rust_progress_at = time.monotonic()
+            self._rust_progress_phase = None
             self._rust_pipeline_in_progress.set()
             return
         self._rust_pipeline_in_progress.clear()
+        self._rust_progress_at = None
+        self._rust_progress_phase = None
 
     def is_rust_pipeline_in_progress(self) -> bool:
         """Return True when the Rust pipeline currently owns the database file."""
         return self._rust_pipeline_in_progress.is_set()
+
+    def note_rust_pipeline_progress(self, phase: str) -> None:
+        """Record that the Rust run holding the file reported progress in phase."""
+        self._rust_progress_at = time.monotonic()
+        self._rust_progress_phase = phase
+
+    def rust_pipeline_progress(self) -> tuple[float, str | None] | None:
+        """Return (seconds since the last progress, its phase) during a Rust hold.
+
+        None when no Rust run holds the file.
+        """
+        progress_at = self._rust_progress_at
+        if progress_at is None or not self.is_rust_pipeline_in_progress():
+            return None
+        return time.monotonic() - progress_at, self._rust_progress_phase
 
     def _raise_if_db_unavailable_before_submit(
         self, operation_name: str, _bypass_rust_pipeline_guard: bool = False

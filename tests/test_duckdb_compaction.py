@@ -2676,7 +2676,7 @@ class TestAutoCompactionMaintenance:
     ) -> None:
         """compact_database and compact_if_needed both use extended timeout."""
         from chunkhound.providers.database.serial_executor import (
-            _COMPACTION_OPERATION_TIMEOUT_SECONDS,
+            COMPACTION_OPERATION_TIMEOUT_SECONDS,
         )
 
         captured_timeouts: list[float] = []
@@ -2686,7 +2686,7 @@ class TestAutoCompactionMaintenance:
             # Patch the env var to a known value so we can verify the
             # default was picked up correctly
             default_timeout = (
-                _COMPACTION_OPERATION_TIMEOUT_SECONDS
+                COMPACTION_OPERATION_TIMEOUT_SECONDS
                 if operation_name.startswith("compact")
                 else 30.0
             )
@@ -2699,7 +2699,7 @@ class TestAutoCompactionMaintenance:
 
         file_backed_db.compact_if_needed()
         assert len(captured_timeouts) >= 1
-        assert captured_timeouts[0] == _COMPACTION_OPERATION_TIMEOUT_SECONDS
+        assert captured_timeouts[0] == COMPACTION_OPERATION_TIMEOUT_SECONDS
 
 
 class TestCompactionGuardExtended:
