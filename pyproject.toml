@@ -52,20 +52,18 @@ dependencies = [
     "pydantic>=2.12.0",
     "pydantic-settings>=2.0.0",
     "loguru>=0.6.0",
-    # The MCP server uses the SDK 1.x low-level decorator API. MCP 2.x
-    # replaced it with constructor callbacks, so do not resolve an
-    # incompatible SDK until the server is migrated.
-    "mcp>=1.16.0,<2",
-    # Declared directly (not just pulled in transitively via mcp) because
-    # chunkhound/mcp_server/http_server.py imports their APIs directly.
-    # This adds no install weight beyond mcp's own requirements: mcp>=1.16.0
-    # already depends unconditionally on starlette>=0.27 and uvicorn>=0.31.1
-    # (no extras gating), so every chunkhound install — stdio-only or not —
-    # gets them anyway. Making these "optional" here would not save anyone
-    # an install; it would just let our own version floors drift from what
-    # mcp actually needs.
+    # SDK 2.x, constructor-callback API. All mcp imports live in
+    # chunkhound/mcp_server/base.py (single dispatch point); enforced by
+    # tests/unit/test_mcp_wrapper_sdk_isolation.py.
+    "mcp>=2.3.0,<3",
+    # Used directly by http_server.py; already a hard mcp dependency, no
+    # extra install weight.
     "starlette>=0.48.0",
     "uvicorn>=0.37.0",
+    # Used directly by base.py's serve_connection() and stdio.py's writer;
+    # previously transitive only.
+    "anyio>=4.5.0",
+    "mcp-types>=2.3.0,<3",
     "psutil>=5.8.0",
     "PyYAML>=6.0.0",
     "tiktoken>=0.9.0",
