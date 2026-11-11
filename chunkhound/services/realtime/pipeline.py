@@ -1050,6 +1050,11 @@ class RealtimePipelineMixin:
                     continue
 
                 # Layer 3: Event deduplication to prevent redundant processing.
+                # A duplicate is redundant while the path's change is pending
+                # (the queued work reads the latest content), but not while it is
+                # being processed: that run may already have read the file, and
+                # only add_file reserves the follow-up that indexes the newer
+                # write.
                 file_key = str(file_path)
                 current_time = time.time()
 
@@ -1061,6 +1066,11 @@ class RealtimePipelineMixin:
                         last_event_type == event_type
                         and (current_time - last_event_time)
                         < self._EVENT_DEDUP_WINDOW_SECONDS
+                        and not (
+                            event_type in ("created", "modified")
+                            and str(self._normalize_mutation_path(file_path))
+                            in self._active_change_generations
+                        )
                     ):
                         logger.debug(
                             "Suppressing duplicate "
