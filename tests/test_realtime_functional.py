@@ -23,6 +23,7 @@ from chunkhound.providers.database.duckdb_provider import (
 )
 from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.services.realtime.events import SimpleEventHandler
+from chunkhound.services.realtime.startup import WatchdogBootstrap
 from chunkhound.watchman import discover_nested_linux_mount_roots
 from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
@@ -2264,10 +2265,10 @@ class TestRealtimeFunctional:
             _watch_path: Path,
             loop: asyncio.AbstractEventLoop,
             _abort_event,
-        ) -> tuple[MagicMock, MagicMock]:
+        ) -> WatchdogBootstrap:
             time.sleep(0.05)
             loop.call_soon_threadsafe(late_watchdog_returned.set)
-            return late_observer, MagicMock()
+            return WatchdogBootstrap(late_observer, MagicMock(), "not_applicable")
 
         monkeypatch.setattr(
             service, "_WATCHDOG_SETUP_TIMEOUT_SECONDS", 0.01, raising=False
@@ -2302,7 +2303,7 @@ class TestRealtimeFunctional:
         service.config.indexing.realtime_backend = "watchdog"
         service._monitor_adapter = service._build_monitor_adapter()
         service._watchdog_setup_task = asyncio.create_task(asyncio.sleep(3600))
-        bootstrap_future: asyncio.Future[tuple[MagicMock, MagicMock] | None] = (
+        bootstrap_future: asyncio.Future[WatchdogBootstrap | None] = (
             asyncio.get_running_loop().create_future()
         )
         bootstrap_future.set_exception(RuntimeError("bootstrap exploded during stop"))

@@ -171,6 +171,11 @@ class RealtimeServiceContext:
     ) -> bool:
         return await self._service.request_resync(reason, details)
 
+    def schedule_loss_of_sync_resync(
+        self, source: str, details: dict[str, object] | None
+    ) -> None:
+        self._service._schedule_loss_of_sync_resync(source, details)
+
     async def setup_watchdog_with_timeout(self, watch_path: Path, loop: Any) -> None:
         await self._service._setup_watchdog_with_timeout(watch_path, loop)
 

@@ -5,6 +5,14 @@ IN_Q_OVERFLOW record. watchdog 7.1 rebuilds its watches on that record but
 emits no event, so the service cannot know that changes were lost. This module
 builds an inotify observer whose FD reader also calls ``on_overflow``.
 
+Tested with watchdog 7.1.0. The hook relies on two private watchdog internals:
+``inotify_c.InotifyFD.handle_event`` and ``InotifyObserver._inotify_fd``. On
+watchdog < 7.1, on a version whose internals no longer match, or where inotify
+is unusable, no hook is installed and detection reports "unavailable".
+tests/realtime/test_realtime_inotify_overflow.py exercises the hook on whatever
+watchdog the lock resolves to, so a version that changes these internals fails
+that test when the lock moves to it.
+
 watchdog is imported inside the function so importing this module never loads
 it (see tests/unit/test_watchdog_import_isolation.py).
 """
@@ -13,12 +21,17 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from .startup import RealtimeObserver
+
+# Whether a kernel inotify overflow reaches the service: "active" (hook
+# installed), "unavailable" (Linux, but no hook could be installed) or
+# "not_applicable" (not Linux).
+InotifyOverflowDetection = Literal["active", "unavailable", "not_applicable"]
 
 
 def create_inotify_observer(

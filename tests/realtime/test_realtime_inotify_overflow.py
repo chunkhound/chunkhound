@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from chunkhound.core.config.config import Config
+from chunkhound.services.realtime.inotify_overflow import InotifyOverflowDetection
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
 
@@ -25,9 +26,14 @@ from chunkhound.services.realtime.service import RealtimeIndexingService
     not sys.platform.startswith("linux"), reason="inotify is Linux-only"
 )
 def test_kernel_overflow_reaches_the_service() -> None:
-    inotify_c = pytest.importorskip("watchdog.observers.inotify_c")
-    if not hasattr(inotify_c, "InotifyFD"):
-        pytest.skip("watchdog < 7 has no inotify overflow hook")
+    from watchdog.version import VERSION_INFO
+
+    if VERSION_INFO < (7, 1):
+        pytest.skip("watchdog < 7.1 drops the overflow record; nothing to hook")
+    # From 7.1 on the hook must install: a renamed or reshaped private
+    # InotifyFD or observer._inotify_fd fails here instead of skipping.
+    from watchdog.observers import inotify_c
+
     import chunkhound.services.realtime.startup as startup_module
 
     calls: list[None] = []
@@ -68,7 +74,9 @@ async def test_overflow_requests_a_loss_of_sync_resync(
 
     captured: list[Callable[[], None]] = []
 
-    def fake_create(on_overflow: Callable[[], None]) -> tuple[FakeObserver, str]:
+    def fake_create(
+        on_overflow: Callable[[], None],
+    ) -> tuple[FakeObserver, InotifyOverflowDetection]:
         captured.append(on_overflow)
         return FakeObserver(), "active"
 
@@ -80,20 +88,32 @@ async def test_overflow_requests_a_loss_of_sync_resync(
         return None
 
     service._resync_callback = resync_callback
+    resync_requested = asyncio.Event()
+    original_request_resync = service.request_resync
+
+    async def recording_request_resync(
+        reason: str, details: dict[str, Any] | None = None
+    ) -> bool:
+        result = await original_request_resync(reason, details)
+        resync_requested.set()
+        return result
+
+    monkeypatch.setattr(service, "request_resync", recording_request_resync)
     loop = asyncio.get_running_loop()
     try:
-        observer, handler, detection = service._bootstrap_fs_monitor(
-            tmp_path, loop, threading.Event()
+        bootstrap = service._bootstrap_fs_monitor(tmp_path, loop, threading.Event())
+        assert bootstrap is not None
+        service._adopt_watchdog_monitor(
+            bootstrap.observer,
+            bootstrap.event_handler,
+            tmp_path,
+            bootstrap.inotify_overflow_detection,
         )
-        service._adopt_watchdog_monitor(observer, handler, tmp_path, detection)
 
         thread = threading.Thread(target=captured[0])
         thread.start()
         thread.join()
-        for _ in range(200):
-            if service._resync_request_count == 1:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(resync_requested.wait(), timeout=5.0)
 
         health = await service.get_health()
         assert health["resync"]["request_count"] == 1
