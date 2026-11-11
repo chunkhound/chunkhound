@@ -622,6 +622,30 @@ class RealtimePipelineMixin:
             return
 
         self._event_queue_overflow_current_burst_dropped += 1
+    def _record_inotify_overflow(self) -> None:
+        """Resync after the kernel dropped inotify events.
+
+        Runs on the loop. watchdog has already rebuilt its watches, so changes
+        lost before the rebuild are found by the scan and later ones arrive as
+        events.
+        """
+        # An inotify thread can outlive the observer join in _stop_observer.
+        if self._stopping or self._service_state in {"stopping", "stopped"}:
+            return
+        self._inotify_overflow_count += 1
+        self._inotify_overflow_last_at = self._utc_now()
+        logger.warning("Kernel inotify queue overflowed; requesting a resync")
+        self._set_warning("kernel inotify queue overflowed; resyncing")
+        self._start_transient_task(
+            self.request_resync(
+                "realtime_loss_of_sync",
+                {
+                    "backend": "watchdog",
+                    "loss_of_sync_reason": "inotify_queue_overflow",
+                    "overflow_count": self._inotify_overflow_count,
+                },
+            )
+        )
     def _complete_event_queue_overflow_burst(self, *, success: bool) -> None:
         if self._event_queue_overflow_state == "idle":
             return
