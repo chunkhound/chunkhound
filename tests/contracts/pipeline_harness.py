@@ -68,11 +68,17 @@ async def index_with_python(
     *,
     skip_embeddings: bool = True,
     embedding_provider: object = None,
+    force_reindex: bool = False,
+    db_file: Path | None = None,
 ) -> IndexResult:
     """Index *fixture_dir* using the current Python pipeline.
 
     When *embedding_provider* is given, it is set on the coordinator before
     processing (useful for deterministic mock providers).
+
+    When *db_file* is given, the database is created at that exact path
+    instead of ``db_dir/chunks.db``; *force_reindex* forwards to
+    ``IndexingConfig.force_reindex``.
 
     Sets ``CHUNKHOUND_USE_RUST=0`` to explicitly force the Python path
     (the Rust pipeline is on by default; this override is intentional).
@@ -86,12 +92,14 @@ async def index_with_python(
     os.environ["CHUNKHOUND_USE_RUST"] = "0"
     try:
         # Build a minimal Config — point the DB at *db_dir* and disable embeddings.
+        resolved_db_file = db_file.resolve() if db_file is not None else None
         config = Config(
             target_dir=fixture_dir.resolve(),
             database={
                 "provider": "duckdb",
-                "path": str(db_dir.resolve()),
+                "path": str(resolved_db_file or db_dir.resolve()),
             },
+            indexing={"force_reindex": force_reindex},
             embeddings_disabled=skip_embeddings,
         )
 
@@ -119,7 +127,9 @@ async def index_with_python(
         # duckdb.connect() would fail while DuckDBProvider holds the file.
         chunk_tuples = _collect_chunk_tuples(coordinator)
         coordinator._db.disconnect()
-        embedding_tuples = _collect_embedding_tuples(db_dir)
+        embedding_tuples = _collect_embedding_tuples(
+            resolved_db_file or db_dir / "chunks.db"
+        )
 
         return IndexResult(
             files_processed=stats.files_processed,
@@ -169,16 +179,15 @@ def _collect_chunk_tuples(coordinator) -> list[tuple[str, str, str, str, int, in
 
 
 def _collect_embedding_tuples(
-    db_dir: Path,
+    db_file: Path,
 ) -> list[tuple[str, str, str, str, str, int, tuple[float, ...]]]:
-    """Query the DB for all embeddings and return canonical comparison tuples.
+    """Query the DB file for all embeddings and return canonical comparison tuples.
 
     The caller is responsible for ensuring the DB file is not held by
     another connection (e.g., call coordinator._db.disconnect() first).
     """
     import duckdb
 
-    db_file = db_dir / "chunks.db"
     if not db_file.exists():
         return []
 
@@ -318,7 +327,7 @@ def index_with_rust(
     )
 
     chunk_tuples = collect_chunk_tuples_from_duckdb(db_dir)
-    embedding_tuples = _collect_embedding_tuples(db_dir)
+    embedding_tuples = _collect_embedding_tuples(db_dir / "chunks.db")
 
     # report.disk_limit is a single Option<(f64, f64)> on the Rust side
     # (current_mb, limit_mb) or None — unpacked here into IndexResult's three
