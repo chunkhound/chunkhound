@@ -66,6 +66,7 @@ from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
 from .progress_utils import _update_speed_field
 from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
+from .rust_incremental_precheck import RustRunPlan, plan_rust_run
 
 # Lazy multiprocessing start-method guard — applied once before pool creation.
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
@@ -573,8 +574,20 @@ class IndexingCoordinator(BaseService):
                     )
                 self._root_identity_validated = True
 
-            # Use batch processor with single file for consistency
-            single_file: list[tuple[Path, str | None]] = [(file_path, None)]
+            # Use batch processor with single file for consistency. Pass the
+            # content hash: a None here is stored as content_hash = NULL, which
+            # stops the next directory scan's hash-confirm from skipping this
+            # file when only its mtime moves (checkout, branch switch, copied
+            # index), so the whole file is re-parsed and re-embedded. A path
+            # that is gone (realtime delete race) keeps None, so the batch
+            # processor reports it as before instead of compute_file_hash
+            # raising ValueError here.
+            content_hash = (
+                self._compute_hash_with_fallback(file_path)
+                if Path(file_path).is_file()
+                else None
+            )
+            single_file: list[tuple[Path, str | None]] = [(file_path, content_hash)]
             parsed_results = await self._process_files_in_batches(single_file)
 
             if not parsed_results:
@@ -1623,10 +1636,31 @@ class IndexingCoordinator(BaseService):
                         f"mtime_eps={mtime_eps} files_to_process={len(files_to_process)} total={len(files)}"
                     )
 
+            # Phase 2.6 (Rust only): decide on Python's own connection whether
+            # the Rust run has anything to write, BEFORE the database is handed
+            # to Rust -- the handoff refuses every reader until Rust returns.
+            # See chunkhound/services/rust_incremental_precheck.py.
+            rust_plan: RustRunPlan | None = None
+            rust_do_cleanup = do_cleanup
+            if _use_rust and not force_reindex:
+                from chunkhound.pipeline_bridge import rust_mtime_epsilon
+
+                rust_plan = await plan_rust_run(
+                    self._db,
+                    files,
+                    directory,
+                    rust_mtime_epsilon(self.config),
+                    do_cleanup=do_cleanup,
+                    files_to_process=files_to_process,
+                )
+                files_to_process = rust_plan.files_to_process
+                rust_do_cleanup = rust_plan.do_cleanup
+            skip_rust = rust_plan is not None and rust_plan.skip
+
             # Phase 3: Parse + Store
             parse_task: TaskID | None = None
             store_task: TaskID | None = None
-            if self.progress:
+            if self.progress and not skip_rust:
                 # For the Rust pipeline, `files_to_process` is the full
                 # discovered-file list (line 1453) — Rust's own diff phase
                 # narrows it down internally, and the first "parse" callback
@@ -1696,7 +1730,26 @@ class IndexingCoordinator(BaseService):
 
             # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
             # Detected at top of process_directory to gate cleanup + change detection.
-            if _use_rust:
+            if skip_rust:
+                # Nothing to write or remove: the database is never handed to
+                # Rust, so readers are never refused. Rust's store-thread open()
+                # would also have recreated HNSW indexes a crashed earlier run
+                # left missing -- keep that recovery here (idempotent).
+                await self._db.ensure_all_hnsw_indexes_async()
+                if _diff_task is not None and self.progress:
+                    checked = max(len(files), 1)
+                    self.progress.reset(_diff_task, total=checked, start=True)
+                    self.progress.update(
+                        _diff_task, completed=checked, info="no changes"
+                    )
+                skipped_unchanged = len(files)
+                logger.info(
+                    f"Diff: 0/{len(files)} changed "
+                    f"({rust_plan.work.skipped_by_hash if rust_plan else 0} "
+                    "unchanged-by-hash); Rust pipeline not started"
+                )
+
+            elif _use_rust:
                 # The Rust pipeline handles parse → embed → write in one call.
                 from chunkhound.services.rust_pipeline_runner import (
                     run_rust_indexing_phase,
@@ -1718,7 +1771,7 @@ class IndexingCoordinator(BaseService):
                     files_to_process=_normalize_to_path_tuples(files_to_process),
                     directory=directory,
                     force_reindex=force_reindex,
-                    do_cleanup=do_cleanup,
+                    do_cleanup=rust_do_cleanup,
                     diff_task=_diff_task,
                     parse_task=parse_task,
                 )

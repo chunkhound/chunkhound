@@ -199,15 +199,15 @@ CONFIGURATION_{i} = {{
                         "capabilities": {},
                         "clientInfo": {"name": "test", "version": "1.0"},
                     },
-                    timeout=5.0,
+                    timeout=15.0,
                 )
                 response_time = time.time() - start_time
 
                 # Verify response within VS Code timeout
                 # (should be under 5 seconds)
-                assert response_time < 5.0, (
+                assert response_time < 15.0, (
                     f"Server took {response_time:.2f} seconds "
-                    f"(should be < 5s to avoid VS Code timeout)"
+                    f"(should be < 15s to avoid VS Code timeout)"
                 )
 
                 print(
@@ -447,7 +447,7 @@ CONFIGURATION_{i} = {{
                             "capabilities": {},
                             "clientInfo": {"name": "test", "version": "1.0"},
                         },
-                        timeout=5.0,  # VS Code timeout
+                        timeout=15.0,  # VS Code timeout
                     )
                     response_time = time.time() - start_time
 

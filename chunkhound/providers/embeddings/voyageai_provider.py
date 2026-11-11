@@ -3,7 +3,7 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import httpx
 from loguru import logger
@@ -21,6 +21,7 @@ from chunkhound.core.utils.voyageai_utils import (
     is_official_voyageai_endpoint,
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.utils.hashing import compute_embedding_space_identity
 
 from .shared_utils import (
     apply_client_side_truncation,
@@ -67,6 +68,10 @@ class VoyageModelConfig(TypedDict):
 # from this map are not Cohere-style: TEI sends no limit at all, and "auto"
 # probes Cohere-style only when a rerank_model is configured.
 _RERANK_LIMIT_PARAM = {"voyage": "top_k", "cohere": "top_n"}
+
+# Voyage's embed `input_type`. Indexed chunks are embedded as "document" and
+# search queries as "query"; the two are embedded asymmetrically.
+VoyageInputType = Literal["query", "document"]
 
 
 # Official VoyageAI model configuration based on API documentation
@@ -332,6 +337,7 @@ class VoyageAIEmbeddingProvider:
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
         self._discovered_native_dims: int | None = None
+        self._embedding_space_generation = 0
 
         self._output_dims = validate_positive_output_dims(output_dims, model=model)
         self._client_side_truncation = client_side_truncation
@@ -400,6 +406,17 @@ class VoyageAIEmbeddingProvider:
     def base_url(self) -> str:
         """Base URL for API requests."""
         return self._base_url or OFFICIAL_VOYAGEAI_BASE_V1
+
+    @property
+    def embedding_space_identity(self) -> str:
+        """Opaque identity for the configured VoyageAI-compatible model space."""
+        return compute_embedding_space_identity(
+            "voyageai-v2",
+            str(self._embedding_space_generation),
+            self.base_url,
+            self._api_key or "",
+            str(self._client_side_truncation),
+        )
 
     @staticmethod
     def _resolve_http_verify_setting(
@@ -516,7 +533,23 @@ class VoyageAIEmbeddingProvider:
 
         Internally sub-batches to self._batch_size so that custom endpoints
         (e.g. Azure ML) are never overwhelmed by a single oversized request.
+        Texts are embedded as documents (what gets indexed).
         """
+        return await self._embed_as(texts, "document")
+
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Embed search queries with input_type="query".
+
+        Voyage models embed queries and documents asymmetrically; a query
+        embedded as a document ranks as a document-vs-document match against
+        the indexed chunks. Callers reach this through
+        ``EmbeddingProvider.embed_query``.
+        """
+        return await self._embed_as(texts, "query")
+
+    async def _embed_as(
+        self, texts: list[str], input_type: VoyageInputType
+    ) -> list[list[float]]:
         if not texts:
             return []
 
@@ -529,15 +562,19 @@ class VoyageAIEmbeddingProvider:
             all_embeddings: list[list[float]] = []
             for i in range(0, len(validated_texts), self._batch_size):
                 sub_batch = validated_texts[i : i + self._batch_size]
-                all_embeddings.extend(await self._embed_single_batch(sub_batch))
+                all_embeddings.extend(
+                    await self._embed_single_batch(sub_batch, input_type)
+                )
             return all_embeddings
 
-        return await self._embed_single_batch(validated_texts)
+        return await self._embed_single_batch(validated_texts, input_type)
 
-    async def _embed_single_batch(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_single_batch(
+        self, texts: list[str], input_type: VoyageInputType
+    ) -> list[list[float]]:
         """Send one batch to the API with retry logic."""
         async with self._embed_semaphore:
-            return await self._embed_single_batch_locked(texts)
+            return await self._embed_single_batch_locked(texts, input_type)
 
     def _validate_output_dims_config_for(
         self,
@@ -610,7 +647,9 @@ class VoyageAIEmbeddingProvider:
                 f"for model {self._model}"
             )
 
-    async def _embed_single_batch_locked(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_single_batch_locked(
+        self, texts: list[str], input_type: VoyageInputType
+    ) -> list[list[float]]:
         """Inner embed implementation, called while holding the semaphore."""
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
@@ -618,7 +657,7 @@ class VoyageAIEmbeddingProvider:
                 embed_kwargs: dict[str, Any] = {
                     "texts": texts,
                     "model": self._model,
-                    "input_type": "document",
+                    "input_type": input_type,
                     "truncation": True,
                 }
                 output_dims = validate_runtime_output_dims_config(
@@ -851,6 +890,9 @@ class VoyageAIEmbeddingProvider:
 
     def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
+        identity_keys = {"model", "output_dims", "client_side_truncation"}
+        if identity_keys & kwargs.keys():
+            self._embedding_space_generation += 1
         next_model = kwargs.get("model", self._model)
         next_is_known_model = next_model in VOYAGE_MODEL_CONFIG
         next_model_config = VOYAGE_MODEL_CONFIG.get(

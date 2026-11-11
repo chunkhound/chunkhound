@@ -417,6 +417,109 @@ def test_lancedb_find_similar_chunks_excludes_source(lancedb_provider, tmp_path)
     assert chunk_ids[2] in result_ids, "Chunk 2 should be included"
 
 
+def _insert_chunk_with_embedding(provider, path, embedding):
+    """Insert a file holding one embedded chunk and return the chunk id."""
+    from chunkhound.core.models import Chunk, File
+    from chunkhound.core.types.common import ChunkType, Language
+
+    file_id = provider.insert_file(
+        File(
+            path=path,
+            mtime=1234567890.0,
+            language=Language.PYTHON,
+            size_bytes=100,
+        )
+    )
+    chunk_id = provider.insert_chunks_batch(
+        [
+            Chunk(
+                file_id=file_id,
+                code=f"def fn_{file_id}(): pass",
+                start_line=1,
+                end_line=1,
+                chunk_type=ChunkType.FUNCTION,
+                language=Language.PYTHON,
+                symbol=f"fn_{file_id}",
+            )
+        ]
+    )[0]
+    provider.insert_embeddings_batch(
+        [
+            {
+                "chunk_id": chunk_id,
+                "provider": "test",
+                "model": "test-model",
+                "dims": len(embedding),
+                "embedding": embedding,
+            }
+        ]
+    )
+    return chunk_id
+
+
+def test_lancedb_find_similar_chunks_path_filter_scopes_results(
+    lancedb_provider, tmp_path
+):
+    """Closer neighbors outside path_filter must not displace in-scope results."""
+    source = _insert_chunk_with_embedding(
+        lancedb_provider, "src/source.py", [1.0, 0.0, 0.0, 0.0]
+    )
+    out_of_scope = [
+        _insert_chunk_with_embedding(
+            lancedb_provider, f"docs/near_{i}.py", [0.99, 0.01 * i, 0.0, 0.0]
+        )
+        for i in range(3)
+    ]
+    # More files than LanceDB's default query limit of 10.
+    in_scope = [
+        _insert_chunk_with_embedding(
+            lancedb_provider, f"src/far_{i}.py", [0.1, 0.9, 0.01 * i, 0.0]
+        )
+        for i in range(12)
+    ]
+
+    top_one = lancedb_provider.find_similar_chunks(
+        chunk_id=source,
+        provider="test",
+        model="test-model",
+        limit=1,
+        path_filter="src/",
+    )
+    assert len(top_one) == 1, "limit should be filled from inside the scope"
+    assert top_one[0]["chunk_id"] in in_scope
+
+    all_scoped = lancedb_provider.find_similar_chunks(
+        chunk_id=source,
+        provider="test",
+        model="test-model",
+        limit=50,
+        path_filter="src\\",
+    )
+    result_ids = {r["chunk_id"] for r in all_scoped}
+    assert result_ids == set(in_scope), "Should return every in-scope chunk"
+    assert not result_ids & set(out_of_scope)
+
+
+def test_lancedb_find_similar_chunks_path_filter_without_matches(
+    lancedb_provider, tmp_path
+):
+    """A path_filter matching no files returns nothing rather than everything."""
+    source = _insert_chunk_with_embedding(
+        lancedb_provider, "src/source.py", [1.0, 0.0, 0.0, 0.0]
+    )
+    _insert_chunk_with_embedding(lancedb_provider, "src/near.py", [0.9, 0.1, 0.0, 0.0])
+
+    similar = lancedb_provider.find_similar_chunks(
+        chunk_id=source,
+        provider="test",
+        model="test-model",
+        limit=10,
+        path_filter="does/not/exist/",
+    )
+
+    assert similar == []
+
+
 def test_lancedb_find_similar_chunks_no_embedding(lancedb_provider, tmp_path):
     """Test that empty list is returned when chunk has no embedding."""
     from chunkhound.core.models import Chunk, File
