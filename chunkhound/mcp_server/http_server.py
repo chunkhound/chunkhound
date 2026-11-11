@@ -198,8 +198,10 @@ class HttpMCPServer(MCPServerBase):
             self.debug_log("HTTP server initialization complete")
 
             # Only None when _MCP_AVAILABLE is False, in which case run()
-            # raises before _lifespan is reached (see run() below).
-            async with self._session_manager.run():  # type: ignore[union-attr]
+            # raises before _lifespan is reached (see run() below), so this
+            # assertion documents an invariant rather than guarding input.
+            assert self._session_manager is not None
+            async with self._session_manager.run():
                 yield
         finally:
             await self.cleanup()

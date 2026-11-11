@@ -64,29 +64,13 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps on import
 # already-registered call_tool handler observe the patched behavior — the
 # handler closure below resolves this name from these module globals on
 # every call, not from a value captured once at registration time.
-from .common import handle_tool_call, tool_call_failed  # noqa: E402
+from .common import (  # noqa: E402
+    handle_tool_call,
+    parse_mcp_arguments,
+    tool_call_failed,
+)
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
-
-
-def _validate_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> str | None:
-    """Validate tool arguments against the registered input schema.
-
-    The MCP SDK 2.x no longer validates ``tools/call`` arguments, so do it here.
-    Unknown tools are left to the tool handler's own error path.
-    """
-    from jsonschema import ValidationError, validate
-
-    from .tools import TOOL_REGISTRY
-
-    tool = TOOL_REGISTRY.get(tool_name)
-    if tool is None:
-        return None
-    try:
-        validate(instance=arguments, schema=tool.parameters)
-    except ValidationError as e:
-        return e.message
-    return None
 
 
 class MCPServerBase(ABC):
@@ -1435,6 +1419,35 @@ class MCPServerBase(ABC):
 
         return tools
 
+    def _validate_advertised_tool_arguments(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> str | None:
+        """Validate arguments against the schema advertised via tools/list.
+
+        The MCP SDK 2.x no longer validates ``tools/call`` arguments, so do it
+        here. Uses ``_build_filtered_tool_dicts()`` -- the same source as
+        ``build_available_tools()`` -- so validation cannot diverge from what
+        clients are shown. Tools that are not advertised (unknown or hidden by
+        missing capabilities) are left to ``handle_tool_call``'s own error path.
+        """
+        from jsonschema import ValidationError, validate
+
+        schema = next(
+            (
+                d["inputSchema"]
+                for d in self._build_filtered_tool_dicts()
+                if d["name"] == tool_name
+            ),
+            None,
+        )
+        if schema is None:
+            return None
+        try:
+            validate(instance=arguments, schema=schema)
+        except ValidationError as e:
+            return e.message
+        return None
+
     def _register_common_tool_handlers(self) -> None:
         """Build the shared SDK Server with tool-call/list-tools callbacks.
 
@@ -1447,23 +1460,33 @@ class MCPServerBase(ABC):
         if not _MCP_AVAILABLE:
             return  # no-op when SDK not available
 
+        def _validation_error_result(message: str) -> types.CallToolResult:
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(
+                        type="text", text=f"Input validation error: {message}"
+                    )
+                ],
+                is_error=True,
+            )
+
         async def on_call_tool(
             ctx: Any,
             params: types.CallToolRequestParams,
         ) -> types.CallToolResult:
             """Universal tool handler that routes to the unified handler."""
             arguments = params.arguments or {}
-            validation_error = _validate_tool_arguments(params.name, arguments)
+            # Coerce first (e.g. ``page_size: "10"``) so validation sees the
+            # same values the tool will receive.
+            try:
+                arguments = parse_mcp_arguments(arguments)
+            except (ValueError, TypeError) as e:
+                return _validation_error_result(str(e))
+            validation_error = self._validate_advertised_tool_arguments(
+                params.name, arguments
+            )
             if validation_error is not None:
-                return types.CallToolResult(
-                    content=[
-                        types.TextContent(
-                            type="text",
-                            text=f"Input validation error: {validation_error}",
-                        )
-                    ],
-                    is_error=True,
-                )
+                return _validation_error_result(validation_error)
             text_contents = await handle_tool_call(
                 tool_name=params.name,
                 arguments=arguments,
@@ -1484,7 +1507,7 @@ class MCPServerBase(ABC):
 
         async def on_list_tools(
             ctx: Any,
-            params: Any,
+            params: types.PaginatedRequestParams | None,
         ) -> types.ListToolsResult:
             # Wait for initialization
             try:
@@ -1529,9 +1552,14 @@ class MCPServerBase(ABC):
         method owns everything SDK-specific. Callers never see an mcp type.
 
         A frame that fails JSON-RPC shape validation is forwarded to the
-        session as an exception (mirroring the SDK's ``stdio_server``) and
-        the session keeps serving; only ``read_frame`` returning ``None``
-        ends it.
+        session as an exception (mirroring the SDK's ``stdio_server``); the
+        SDK dispatcher logs and drops it -- no reply is sent -- and the session
+        keeps serving. Only ``read_frame`` returning ``None`` (or ``run()``
+        returning) ends it.
+
+        Known gap: a malformed request that carries an ``id`` gets no JSON-RPC
+        error reply, so a client waiting on that id must rely on its own
+        timeout.
 
         Used by:
         - ChunkHoundDaemon, once per client IPC connection.
@@ -1586,7 +1614,7 @@ class MCPServerBase(ABC):
             async with write_stream_reader:
                 async for session_message in write_stream_reader:
                     payload = session_message.message.model_dump(
-                        by_alias=True, mode="json", exclude_none=True
+                        by_alias=True, mode="json", exclude_unset=True
                     )
                     await write_frame(payload)
 
@@ -1598,6 +1626,9 @@ class MCPServerBase(ABC):
             finally:
                 await read_stream_writer.aclose()
                 await write_stream.aclose()
+                # pump_in may be blocked in read_frame() with no EOF coming;
+                # don't let it keep the task group alive once run() is done.
+                tg.cancel_scope.cancel()
 
     def build_streamable_http_app(self, **kwargs: Any) -> Any:
         """Wrap StreamableHTTPSessionManager construction for HttpMCPServer."""

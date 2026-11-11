@@ -13,7 +13,6 @@ from subprocess import PIPE
 import pytest
 
 from tests.utils import SubprocessJsonRpcClient
-from tests.utils.windows_compat import is_ci
 
 
 @pytest.mark.asyncio

@@ -26,9 +26,7 @@ async def test_iter_stdin_lines_windows_forwards_json_lines(
     stdin = SimpleNamespace(buffer=SimpleNamespace(fileno=lambda: 123))
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "stdin", stdin)
-    monkeypatch.setattr(
-        stdio_lines_module, "_windows_stdin_handle", lambda _fd: 456
-    )
+    monkeypatch.setattr(stdio_lines_module, "_windows_stdin_handle", lambda _fd: 456)
     monkeypatch.setattr(
         stdio_lines_module,
         "_windows_pipe_bytes_available",
@@ -60,9 +58,7 @@ async def test_iter_stdin_lines_windows_cancellation_does_not_wait_for_stdin_eof
     stdin = SimpleNamespace(buffer=SimpleNamespace(fileno=lambda: 123))
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "stdin", stdin)
-    monkeypatch.setattr(
-        stdio_lines_module, "_windows_stdin_handle", lambda _fd: 456
-    )
+    monkeypatch.setattr(stdio_lines_module, "_windows_stdin_handle", lambda _fd: 456)
 
     def no_data(_handle: int) -> int:
         checked_pipe.set()

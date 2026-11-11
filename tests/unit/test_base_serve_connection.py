@@ -174,3 +174,90 @@ async def test_tools_call_rejects_arguments_violating_input_schema() -> None:
         result = by_id[call_id]["result"]
         assert result["isError"] is True
         assert result["content"][0]["text"].startswith("Input validation error:")
+
+
+_INIT_FRAME = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {"name": "test-client", "version": "0.0.0"},
+    },
+}
+
+
+async def _call_search(arguments: dict[str, Any]) -> dict:
+    server = StdioMCPServer(config=MagicMock())
+    responses = await _drive(
+        server,
+        [
+            _INIT_FRAME,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": arguments},
+            },
+        ],
+    )
+    by_id = {r["id"]: r for r in responses}
+    return by_id[2]["result"]
+
+
+@pytest.mark.asyncio
+async def test_tools_call_accepts_numeric_strings_coerced_before_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp.types as types
+
+    from chunkhound.mcp_server import base
+
+    received: dict[str, Any] = {}
+
+    async def fake_handle_tool_call(**kwargs: Any) -> list[types.TextContent]:
+        received.update(kwargs["arguments"])
+        return [types.TextContent(type="text", text="{}")]
+
+    monkeypatch.setattr(base, "handle_tool_call", fake_handle_tool_call)
+    result = await _call_search({"type": "regex", "query": "x", "page_size": "10"})
+    assert not result["content"][0]["text"].startswith("Input validation error")
+    assert received["page_size"] == 10
+
+
+@pytest.mark.asyncio
+async def test_tools_call_rejects_non_numeric_page_size_as_validation_error() -> None:
+    result = await _call_search({"type": "regex", "query": "x", "page_size": "abc"})
+    assert result["isError"] is True
+    assert result["content"][0]["text"].startswith("Input validation error:")
+
+
+@pytest.mark.asyncio
+async def test_tools_call_validates_against_advertised_schema() -> None:
+    """Without an embedding provider, search only advertises type=regex."""
+    result = await _call_search({"type": "semantic", "query": "x"})
+    assert result["isError"] is True
+    assert result["content"][0]["text"].startswith("Input validation error:")
+
+
+@pytest.mark.asyncio
+async def test_serve_connection_returns_when_run_ends_while_read_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = StdioMCPServer(config=MagicMock())
+    assert server.server is not None
+
+    async def run_returns_immediately(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(server.server, "run", run_returns_immediately)
+
+    async def read_frame() -> dict[str, Any] | None:
+        await asyncio.Event().wait()  # never yields a frame nor EOF
+        return None
+
+    async def write_frame(frame: dict) -> None:
+        pass
+
+    await asyncio.wait_for(server.serve_connection(read_frame, write_frame), 2.0)
