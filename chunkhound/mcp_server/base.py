@@ -1652,17 +1652,23 @@ class MCPServerBase(ABC):
 
             async def pump_in_scoped() -> None:
                 with in_scope:
-                    await pump_in()
+                    try:
+                        await pump_in()
+                    except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+                        # run() ended (and closed read_stream) while a frame
+                        # was in flight; that is a normal shutdown, not an error.
+                        pass
 
             tg.start_soon(pump_in_scoped)
             tg.start_soon(pump_out)
             try:
                 await self.server.run(read_stream, write_stream, init_options)
             finally:
-                await read_stream_writer.aclose()
-                # pump_in may be blocked in read_frame() with no EOF coming;
-                # don't let it keep the task group alive once run() is done.
+                # Cancel before closing: pump_in may be blocked in read_frame()
+                # with no EOF coming, or in send() on the zero-buffer stream;
+                # closing the writer under it would raise inside pump_in.
                 in_scope.cancel()
+                await read_stream_writer.aclose()
                 # Closing the write side lets pump_out finish after delivering
                 # every response still in flight.
                 await write_stream.aclose()

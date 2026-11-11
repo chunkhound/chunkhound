@@ -320,3 +320,31 @@ async def test_serve_connection_delivers_last_response_when_input_ends() -> None
     await asyncio.wait_for(server.serve_connection(read_frame, write_frame), 5.0)
 
     assert [f["id"] for f in delivered] == [1]
+
+
+@pytest.mark.asyncio
+async def test_serve_connection_returns_cleanly_when_run_ends_with_frame_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run() returning while a frame is still being handed to it must not
+    surface the input pump's stream-closed errors (or mask run()'s result)."""
+    server = StdioMCPServer(config=MagicMock())
+    assert server.server is not None
+    frame_delivered = asyncio.Event()
+
+    async def run_without_reading(read_stream: Any, *_a: Any, **_k: Any) -> None:
+        # Like the SDK's run(): owns (and closes) the read stream on exit.
+        async with read_stream:
+            await frame_delivered.wait()
+            await asyncio.sleep(0.1)  # let pump_in block in send() (zero buffer)
+
+    monkeypatch.setattr(server.server, "run", run_without_reading)
+
+    async def read_frame() -> dict[str, Any] | None:
+        frame_delivered.set()
+        return {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+    async def write_frame(frame: dict) -> None:
+        pass
+
+    await asyncio.wait_for(server.serve_connection(read_frame, write_frame), 2.0)
