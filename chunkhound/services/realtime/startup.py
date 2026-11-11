@@ -22,7 +22,7 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler
+from .events import SimpleEventHandler, forward_to_loop
 
 
 class RealtimeObserver(Protocol):
@@ -49,23 +49,6 @@ def _create_watchdog_observer() -> RealtimeObserver:
     from watchdog.observers import Observer
 
     return Observer()
-
-
-def _forward_to_loop(
-    loop: asyncio.AbstractEventLoop, callback: Callable[[str, Path], None]
-) -> Callable[[str, Path], None]:
-    """Run an observer-thread event callback on the service's event loop.
-
-    The event loop owns the service's event counters, event-pressure state and
-    status snapshots; the watchdog observer calls back from its own thread.
-    call_soon_threadsafe runs callbacks in the order they were scheduled, so a
-    source event is still recorded before the queueing of the same event.
-    """
-
-    def forward(event_type: str, file_path: Path) -> None:
-        loop.call_soon_threadsafe(callback, event_type, file_path)
-
-    return forward
 
 
 class RealtimeStartupStatusTracker:
@@ -822,8 +805,8 @@ class RealtimeStartupMixin:
             loop,
             root_path=watch_path,
             queue_result_callback=self._handle_queue_result,
-            source_event_callback=_forward_to_loop(loop, self._record_source_event),
-            filtered_event_callback=_forward_to_loop(loop, self._record_filtered_event),
+            source_event_callback=forward_to_loop(loop, self._record_source_event),
+            filtered_event_callback=forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
         )
         observer = _create_watchdog_observer()

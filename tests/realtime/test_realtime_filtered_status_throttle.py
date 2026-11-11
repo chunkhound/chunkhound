@@ -3,8 +3,8 @@
 Each filtered event used to build a full health snapshot, which the daemon then
 deep-copies: about 0.58 ms per event, 44% of a filtered event's cost.
 
-The pipeline module's clock is frozen during each burst, so the number of
-publishes does not depend on how fast the machine runs the burst.
+The pipeline module's monotonic clock is frozen, so the number of publishes
+does not depend on how fast the machine runs the burst.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,6 +26,16 @@ from chunkhound.services.realtime.service import RealtimeIndexingService
 
 _BURST = 1000
 _INTERVAL_SECONDS = 0.05
+
+
+class _FrozenMonotonicTime:
+    """The time module, with monotonic() frozen; every other name is real."""
+
+    def monotonic(self) -> float:
+        return 1000.0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
 
 
 class _Published:
@@ -46,7 +55,7 @@ class _Published:
 async def service_and_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[tuple[RealtimeIndexingService, _Published, Path]]:
-    monkeypatch.setattr(pipeline, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+    monkeypatch.setattr(pipeline, "time", _FrozenMonotonicTime())
     root = tmp_path / "repo"
     root.mkdir()
     db_path = tmp_path / "db.duckdb"
@@ -72,8 +81,11 @@ def _record_burst(service: RealtimeIndexingService, root: Path) -> None:
         service._record_filtered_event("created", root / "node_modules" / f"f{i}.js")
 
 
+_WAIT_SECONDS = 5.0
+
+
 async def _wait_for_publishes(published: _Published, count: int) -> None:
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + _WAIT_SECONDS
     while len(published.snapshots) < count and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
 
@@ -102,10 +114,12 @@ async def test_trailing_publish_runs_on_loop_while_event_pressure_changes(
     loop_thread = threading.get_ident()
 
     _record_burst(service, root)
-    # While the trailing publish is pending, the loop keeps adding and trimming
-    # event-pressure entries, as it does under load.
+    # Until the trailing publish runs, the loop keeps adding and trimming
+    # event-pressure entries, as it does under load. The wait is bounded by
+    # wall-clock time, not by an iteration count a fast machine finishes early.
+    deadline = time.monotonic() + _WAIT_SECONDS
     i = 0
-    while len(published.snapshots) < 2 and i < 5000:
+    while len(published.snapshots) < 2 and time.monotonic() < deadline:
         service._record_source_event("modified", root / "src" / f"s{i}.py")
         i += 1
         await asyncio.sleep(0)
