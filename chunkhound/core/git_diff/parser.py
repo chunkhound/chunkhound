@@ -379,6 +379,9 @@ class StreamingDiffParser:
         self._part_number = 0
 
 
+DIFF_CHUNK_PIPELINE_VERSION = "diff-chunks-v1"
+
+
 async def stream_diff_to_chunks(
     fragments: AsyncIterator[str], max_chunk_chars: int = 10_000
 ) -> AsyncIterator[Chunk]:

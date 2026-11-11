@@ -35,6 +35,7 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.status import derive_daemon_status
+from chunkhound.services.diff_chunk_cache import DiffChunkCache
 from chunkhound.services.research.factory import ResearchServiceFactory
 from chunkhound.services.research.shared.validation import (
     validate_research_prerequisites,
@@ -51,6 +52,7 @@ MAX_ALLOWED_TOKENS = 25000
 MAX_DIFF_CHUNK_CHARS = 10_000
 _TRANSIENT_BATCH_SIZE = 100
 _TRANSIENT_VECTOR_CACHE = VectorCache.from_env()
+_TRANSIENT_DIFF_CHUNK_CACHE = DiffChunkCache.from_env()
 _DIFF_SOURCE_BUDGET_BYTES = 1_000_000
 
 
@@ -380,15 +382,11 @@ def _format_search_results_within_token_limit(
     truncated_marker = "\n\n[... truncated ...]"
 
     def render() -> str:
-        return format_search_results_markdown(
-            rendered_results, pagination, search_type
-        )
+        return format_search_results_markdown(rendered_results, pagination, search_type)
 
     markdown = render()
     while estimate_tokens(markdown) > MAX_RESPONSE_TOKENS:
-        candidates = [
-            index for index, limit in enumerate(content_limits) if limit > 0
-        ]
+        candidates = [index for index, limit in enumerate(content_limits) if limit > 0]
         if not candidates:
             raise ValueError(
                 "Search response metadata exceeds the response size limit; "
@@ -651,25 +649,62 @@ async def _inject_diff_service(
 
     # Local imports avoid circular dependency: tools → git_diff → (nothing in tools)
     from chunkhound.core.git_diff import (
+        DIFF_CHUNK_PIPELINE_VERSION,
+        resolve_diff_cache_identity,
         stream_diff_to_chunks,
         stream_git_diff_fragments,
     )
     from chunkhound.services.transient_search_service import TransientSearchService
 
     _cwd = await _git_cwd_from_services(services)
+    diff_identity = (
+        await resolve_diff_cache_identity(effective_commit_range, _cwd)
+        if _TRANSIENT_DIFF_CHUNK_CACHE.is_enabled()
+        else None
+    )
+    cache_key = (
+        (
+            *diff_identity,
+            MAX_DIFF_CHUNK_CHARS,
+            _TRANSIENT_BATCH_SIZE,
+            DIFF_CHUNK_PIPELINE_VERSION,
+        )
+        if diff_identity is not None
+        else None
+    )
 
     async def chunk_stream() -> AsyncIterator[list[Any]]:
+        if cache_key is not None:
+            cached_batches = _TRANSIENT_DIFF_CHUNK_CACHE.get(cache_key)
+            if cached_batches is not None:
+                for cached_batch in cached_batches:
+                    yield list(cached_batch)
+                return
+
         fragments = stream_git_diff_fragments(effective_commit_range, cwd=_cwd)
-        batch: list[Any] = []
-        async for chunk in stream_diff_to_chunks(
+        diff_chunks = stream_diff_to_chunks(
             fragments, max_chunk_chars=MAX_DIFF_CHUNK_CHARS
-        ):
-            batch.append(chunk)
-            if len(batch) == _TRANSIENT_BATCH_SIZE:
+        )
+        collected_batches: list[tuple[Any, ...]] = []
+        completed = False
+        try:
+            batch: list[Any] = []
+            async for chunk in diff_chunks:
+                batch.append(chunk)
+                if len(batch) == _TRANSIENT_BATCH_SIZE:
+                    collected_batches.append(tuple(batch))
+                    yield batch
+                    batch = []
+            if batch:
+                collected_batches.append(tuple(batch))
                 yield batch
-                batch = []
-        if batch:
-            yield batch
+            completed = True
+        finally:
+            close = getattr(diff_chunks, "aclose", None)
+            if callable(close):
+                await close()
+            if completed and cache_key is not None:
+                _TRANSIENT_DIFF_CHUNK_CACHE.put(cache_key, tuple(collected_batches))
 
     diff_service = TransientSearchService(
         original=services.search_service,

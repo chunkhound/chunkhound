@@ -79,14 +79,29 @@ async def _read_stdout_chunk(stream: asyncio.StreamReader) -> bytes:
     return await stream.read(_GIT_STDOUT_READ_BYTES)
 
 
-async def _empty_tree_oid(cwd: Path | str) -> str:
-    """Ask Git for the empty-tree ID in this repository's object format."""
+_OID_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+
+
+def _split_commit_range(commit_range: str) -> tuple[str, str, str] | None:
+    """Split a commit range into ``(operator, start_ref, end_ref)`` if two-sided."""
+    if "..." in commit_range:
+        op = "..."
+        start_raw, end_raw = commit_range.split("...", 1)
+    elif ".." in commit_range:
+        op = ".."
+        start_raw, end_raw = commit_range.split("..", 1)
+    else:
+        return None
+    if ".." in start_raw or ".." in end_raw:
+        return None
+    return op, (start_raw or "HEAD"), (end_raw or "HEAD")
+
+
+async def _run_git_capture(cwd: Path | str, args: list[str]) -> tuple[int, str, str]:
+    """Run a short-lived git subcommand and capture decoded stdout/stderr."""
     proc = await asyncio.create_subprocess_exec(
         "git",
-        "hash-object",
-        "-t",
-        "tree",
-        "--stdin",
+        *args,
         cwd=str(cwd),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
@@ -114,15 +129,109 @@ async def _empty_tree_oid(cwd: Path | str) -> str:
             await asyncio.gather(communication, return_exceptions=True)
         raise
 
-    if proc.returncode != 0:
-        error = stderr.decode("utf-8", errors="replace").strip()
+    return (
+        proc.returncode if proc.returncode is not None else -1,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace").strip(),
+    )
+
+
+async def _empty_tree_oid(cwd: Path | str) -> str:
+    """Ask Git for the empty-tree ID in this repository's object format."""
+    returncode, stdout, error = await _run_git_capture(
+        cwd, ["hash-object", "-t", "tree", "--stdin"]
+    )
+    if returncode != 0:
         raise ValueError(f"git empty-tree lookup failed: {error}")
-    oid = stdout.decode("ascii", errors="replace").strip()
+    oid = stdout.strip()
     if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", oid) is None:
         raise ValueError(
             f"git empty-tree lookup returned an invalid object ID: {oid!r}"
         )
     return oid
+
+
+def _normalize_repo_identity(raw_git_dir: str, cwd: Path | str) -> str:
+    git_dir = Path(raw_git_dir)
+    if not git_dir.is_absolute():
+        git_dir = Path(cwd) / git_dir
+    return str(git_dir.resolve())
+
+
+async def resolve_diff_cache_identity(
+    commit_range: str, cwd: Path | str
+) -> tuple[str, str, str, str] | None:
+    """Resolve repository identity and start/end OIDs for a two-sided commit range.
+
+    Returns ``(repo_identity, operator, start_oid, end_oid)``, or ``None`` if the
+    range references the mutable working tree, is invalid, or cannot be resolved.
+    """
+    try:
+        _validate_commit_range(commit_range)
+    except ValueError:
+        return None
+
+    parts = _split_commit_range(commit_range)
+    if parts is None:
+        return None
+    op, start_ref, end_ref = parts
+
+    try:
+        returncode, stdout, error = await _run_git_capture(
+            cwd,
+            [
+                "rev-parse",
+                "--git-common-dir",
+                f"{start_ref}^{{object}}",
+                f"{end_ref}^{{object}}",
+                "--",
+            ],
+        )
+        if returncode == 0:
+            lines = stdout.splitlines()
+            if lines and lines[-1] == "--":
+                lines.pop()
+            if len(lines) != 3:
+                return None
+            raw_git_dir, start_oid, end_oid = lines
+        else:
+            single_commit = _SINGLE_COMMIT_RANGE_RE.match(commit_range)
+            if (
+                not single_commit
+                or single_commit.group(1) != single_commit.group(2)
+                or not _is_missing_parent_error(error)
+            ):
+                return None
+            end_rc, end_stdout, _ = await _run_git_capture(
+                cwd,
+                [
+                    "rev-parse",
+                    "--git-common-dir",
+                    f"{end_ref}^{{object}}",
+                    "--",
+                ],
+            )
+            if end_rc != 0:
+                return None
+            lines = end_stdout.splitlines()
+            if lines and lines[-1] == "--":
+                lines.pop()
+            if len(lines) != 2:
+                return None
+            raw_git_dir, end_oid = lines
+            start_oid = await _empty_tree_oid(cwd)
+    except (OSError, ValueError, asyncio.TimeoutError):
+        return None
+
+    if not _OID_RE.match(start_oid) or not _OID_RE.match(end_oid):
+        return None
+
+    return (
+        _normalize_repo_identity(raw_git_dir, cwd),
+        op,
+        start_oid.lower(),
+        end_oid.lower(),
+    )
 
 
 async def _cleanup_git_diff_process(
