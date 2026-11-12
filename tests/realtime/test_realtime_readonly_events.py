@@ -183,11 +183,13 @@ async def test_a_burst_of_saves_is_indexed_once(tmp_path: Path) -> None:
     source.write_text("x = 0\n")
     processed: list[str] = []
     handlers: list[SimpleEventHandler] = []
+    indexed = asyncio.Event()
 
     async def process_file(
         file_path: Path, skip_embeddings: bool = False
     ) -> dict[str, object]:
         processed.append(file_path.read_text())
+        indexed.set()
         for event_type in ("opened", "closed_no_write"):  # this run's read
             handlers[0].dispatch(_event(event_type, source))
         return {"status": "processed", "chunks": 1, "embeddings": 0}
@@ -203,7 +205,9 @@ async def test_a_burst_of_saves_is_indexed_once(tmp_path: Path) -> None:
             for event_type in ("opened", "modified", "closed"):
                 handler.dispatch(_event(event_type, source))
             await asyncio.sleep(gap)
-        await asyncio.sleep(service._debounce_delay + 1.5)
+        await asyncio.wait_for(indexed.wait(), timeout=10.0)
+        # Long enough for a second pass to show up if one was queued.
+        await asyncio.sleep(service._debounce_delay + 0.5)
     assert processed == [f"x = {saves}\n"]
 
 
