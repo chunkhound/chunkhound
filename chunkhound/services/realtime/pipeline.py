@@ -1109,16 +1109,22 @@ class RealtimePipelineMixin:
                     last_event_type, last_event_time = self._recent_file_events[
                         file_key
                     ]
+                    mutation_key = str(self._normalize_mutation_path(file_path))
+                    is_write = event_type in ("created", "modified")
                     if (
                         last_event_type == event_type
                         and (current_time - last_event_time)
                         < self._EVENT_DEDUP_WINDOW_SECONDS
                         and not (
-                            event_type in ("created", "modified")
-                            and str(self._normalize_mutation_path(file_path))
-                            in self._active_change_generations
+                            is_write
+                            and mutation_key in self._active_change_generations
                         )
                     ):
+                        if is_write and mutation_key in self._pending_debounce:
+                            # Still a write: keep the pending debounce horizon
+                            # fresh, as add_file would, so a burst of saves
+                            # is indexed once, after the last one.
+                            self._pending_debounce[mutation_key] = time.monotonic()
                         logger.debug(
                             "Suppressing duplicate "
                             f"{event_type} event for {file_path} "

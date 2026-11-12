@@ -17,9 +17,12 @@ from chunkhound.services.realtime_path_filter import RealtimePathFilter
 # On Linux, inotify reports every open and close (`opened`, `closed`,
 # `closed_no_write`); a start-up scan or a type-check run reads the whole tree,
 # so letting those through filled the queue, overflowed it and forced a full
-# resync. The consumer never acted on `closed`, so dropping it
-# changes nothing indexed (a write also yields `modified`, `created` or
-# `moved`, except an mmap write, which inotify reports only on close).
+# resync. The consumer never acted on `closed` (a write also yields
+# `modified`, `created` or `moved`, except an mmap write, which inotify
+# reports only on close). Without them two writes reach the consumer as
+# `modified, modified`, so its duplicate check must neither drop a write made
+# while the file is being processed nor let a dropped duplicate skip the
+# debounce refresh (see `_consume_events`).
 # `attrib` is admitted although the consumer does not act on it yet: on
 # Windows, watchdog 7 reports an in-place write as `attrib` whenever the change
 # time is ahead of the write time, so for some writes it is the only signal.
