@@ -148,8 +148,8 @@ class DiffAwareSearchService:
         """Perform cosine-similarity search over in-memory diff chunks."""
         if not self._diff_chunks or self._norm_matrix is None:
             logger.warning(
-                "DiffAwareSearchService: no diff chunks available (vector_source=%r); "
-                "returning empty results.",
+                "DiffAwareSearchService: no diff chunks available "
+                "(vector_source={!r}); returning empty results.",
                 self._vector_source,
             )
             return [], {"total": 0, "page_size": page_size, "offset": offset}
