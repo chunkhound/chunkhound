@@ -3951,8 +3951,78 @@ class DuckDBProvider(SerialDatabaseProvider):
                     WITH (metric = 'cosine')
                 """)
 
-            # Build query with dimension-specific table
+            # Both shapes score into (chunk_id, similarity), so no vector passes
+            # through the chunk/file joins, and fetch chunk rows for the page only.
+            # - Path-scoped: find the eligible chunk ids (chunk and file present,
+            #   path matches), then score only their embeddings, so a narrow
+            #   filter scores its own chunks rather than the whole corpus.
+            # - Unscoped: score every embedding, then join to drop any whose
+            #   chunk or file is gone. Finding eligible ids first here makes
+            #   DuckDB hash the embeddings side, vectors included, which is as
+            #   slow as joining before scoring (measured 376 vs 140 ms at
+            #   14k x 1024-dim vectors).
+            # TRY() turns a malformed stored vector (NULL elements, which a NaN
+            # vector is stored as) into a NULL score that is skipped, so one bad
+            # row, in scope or not, never fails the whole search.
+            # The ORDER BY/LIMIT never sit over a bare scan of the embeddings
+            # table, so DuckDB's VSS optimizer cannot rewrite this into an
+            # approximate HNSW index scan.
+            similarity = (
+                f"TRY(array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]))"
+            )
+            params: list[Any] = []
+
+            path_like: str | None = None
+            if normalized_path is not None:
+                path_like = self._build_path_like_pattern(normalized_path)
+
+            if path_like is not None:
+                # Prepend / so %/repo_a/% only matches repo_a as a complete directory component.
+                params.extend([path_like, query_embedding, provider, model])
+                ranked = f"""
+                eligible AS (
+                    SELECT c.id AS chunk_id
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                    WHERE CONCAT('/', f.path) LIKE ? ESCAPE '\\'
+                ),
+                candidates AS (
+                    SELECT e.chunk_id, {similarity} AS similarity
+                    FROM {table_name} e
+                    SEMI JOIN eligible ON e.chunk_id = eligible.chunk_id
+                    WHERE e.provider = ? AND e.model = ?
+                )"""
+            else:
+                params.extend([query_embedding, provider, model])
+                ranked = f"""
+                scored AS (
+                    SELECT e.chunk_id, {similarity} AS similarity
+                    FROM {table_name} e
+                    WHERE e.provider = ? AND e.model = ?
+                ),
+                candidates AS (
+                    SELECT scored.chunk_id, scored.similarity
+                    FROM scored
+                    JOIN chunks c ON scored.chunk_id = c.id
+                    JOIN files f ON c.file_id = f.id
+                )"""
+
+            # NULL scores and scores under the threshold sit at the end of the
+            # ordering, so filtering them after the page returns the same rows as
+            # filtering before it. Before it, DuckDB pushes the filter down into
+            # the embeddings scan, which scores every row there first.
+            page_conditions = ""
+            if threshold is not None:
+                page_conditions = " AND page.similarity >= ?"
+
             query = f"""
+                WITH {ranked},
+                page AS (
+                    SELECT chunk_id, similarity
+                    FROM candidates
+                    ORDER BY similarity DESC NULLS LAST
+                    LIMIT ? OFFSET ?
+                )
                 SELECT
                     c.id as chunk_id,
                     c.symbol,
@@ -3962,29 +4032,14 @@ class DuckDBProvider(SerialDatabaseProvider):
                     c.end_line,
                     f.path as file_path,
                     f.language,
-                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity,
+                    page.similarity,
                     c.metadata
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
+                FROM page
+                JOIN chunks c ON page.chunk_id = c.id
                 JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
+                WHERE page.similarity IS NOT NULL{page_conditions}
+                ORDER BY page.similarity DESC
             """
-
-            params: list[Any] = [query_embedding, provider, model]
-
-            path_like: str | None = None
-            if normalized_path is not None:
-                path_like = self._build_path_like_pattern(normalized_path)
-
-            if threshold is not None:
-                query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
-                params.append(query_embedding)
-                params.append(threshold)
-
-            if path_like is not None:
-                query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
-                # Prepend / so %/repo_a/% only matches repo_a as a complete directory component.
-                params.append(path_like)
 
             # Get total count for pagination
             # Build count query separately to avoid string replacement issues
@@ -3999,7 +4054,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             count_params = [provider, model]
 
             if threshold is not None:
-                count_query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
+                count_query += f" AND {similarity} >= ?"
                 count_params.extend([query_embedding, threshold])
 
             if path_like is not None:
@@ -4009,8 +4064,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             total_count = conn.execute(count_query, count_params).fetchone()[0]
 
-            query += " ORDER BY similarity DESC LIMIT ? OFFSET ?"
             params.extend([page_size, offset])
+            if threshold is not None:
+                params.append(threshold)
 
             results = conn.execute(query, params).fetchall()
 
