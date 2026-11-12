@@ -450,8 +450,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         if _write_indexed_root_sidecar(sidecar, current_root):
             logger.warning(
-                "DuckDB indexed-root sidecar was missing for %s; treated as legacy "
-                "DB migration and claimed current root %s. Future opens under a "
+                "DuckDB indexed-root sidecar was missing for {}; treated as legacy "
+                "DB migration and claimed current root {}. Future opens under a "
                 "different root will fail.",
                 self._connection_manager.db_path,
                 current_root,
