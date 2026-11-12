@@ -20,7 +20,7 @@ from pathlib import Path
 
 # A printf conversion spec, e.g. %s, %d, %i, %f, %.2f, %05d -- but not
 # an escaped literal "%%".
-_PRINTF_SPEC = re.compile(r"%(?!%)[#0\- +]*\d*(?:\.\d+)?[sdifgeE]")
+_PRINTF_SPEC = re.compile(r"%(?!%)[#0\- +]*\d*(?:\.\d+)?[sdifgeEra]")
 
 _LOGURU_LEVELS = {
     "trace",
@@ -92,6 +92,10 @@ def test_scanner_catches_printf_style_and_ignores_braces() -> None:
     ]
     assert find_printf_loguru_calls('logger.warning("missing for {}", path)\n') == []
     assert find_printf_loguru_calls('logger.debug("after %ds", timeout)\n') != []
+    # %r (repr) is also a printf-style specifier the guard must catch.
+    assert find_printf_loguru_calls('logger.info("value=%r", x)\n') == [
+        "1: 'value=%r'"
+    ]
     # A literal "%%" is an escaped percent, not a placeholder.
     assert find_printf_loguru_calls('logger.info("100%% complete")\n') == []
 
