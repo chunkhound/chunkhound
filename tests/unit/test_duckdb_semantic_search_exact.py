@@ -162,3 +162,53 @@ def test_malformed_vector_outside_the_scope_does_not_empty_the_search(indexed) -
     _assert_same(everything, _expected(vectors, query))
     assert pagination["total"] == len(vectors)
     _assert_same(in_beta, _expected(vectors, query, lambda c: paths[c] == "beta"))
+
+
+def test_total_counts_only_the_results_pages_return(indexed) -> None:
+    """A live chunk whose vector is malformed is never returned, so the total must
+    not count it either: every page offered holds results, the pages together
+    hold exactly `total` results, and a page past the end still reports it."""
+    provider, paths, vectors, query, _ = indexed
+    beta = sorted(cid for cid, sub in paths.items() if sub == "beta")
+    bad = beta[len(beta) // 2]
+    provider.delete_embeddings_by_chunk_id(bad)
+    provider.insert_embeddings_batch(
+        [
+            {
+                "chunk_id": bad,
+                "provider": "test",
+                "model": "mini",
+                "embedding": [float("nan")] * _DIMS,
+                "dims": _DIMS,
+            }
+        ]
+    )
+    del vectors[bad]
+
+    for path_filter, keep in (
+        (None, lambda c: True),
+        ("beta", lambda c: paths[c] == "beta"),
+    ):
+        expected = _expected(vectors, query, keep)
+        paged: list[tuple[int, float]] = []
+        offset = 0
+        while offset is not None:
+            page, pagination = _search(
+                provider, query, page_size=_PAGE, offset=offset, path_filter=path_filter
+            )
+            assert page, f"empty page offered at offset {offset} ({path_filter=})"
+            paged += page
+            offset = pagination["next_offset"]
+
+        _assert_same(paged, expected)
+        assert pagination["total"] == len(expected)
+
+        past_end, pagination = _search(
+            provider,
+            query,
+            page_size=_PAGE,
+            offset=len(expected),
+            path_filter=path_filter,
+        )
+        assert past_end == []
+        assert pagination["total"] == len(expected)
