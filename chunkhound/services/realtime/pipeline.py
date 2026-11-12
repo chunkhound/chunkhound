@@ -59,7 +59,49 @@ class RealtimePipelineMixin:
             event_type=event_type,
             scope="excluded",
         )
+        self._emit_filtered_status_update()
+
+    def _emit_filtered_status_update(self) -> None:
+        """Publish status for a filtered event at most once per interval.
+
+        A filtered event changes only counters, and filtered events arrive in
+        bursts of thousands (an npm install, a junction to node_modules), where
+        building and publishing a full snapshot per event cost more than
+        filtering the event did. The first event after a quiet interval
+        publishes at once; later events in the interval share one trailing
+        publish, so the counters the burst's last event left still reach the
+        status consumer when the burst ends.
+
+        Runs on the event loop, which owns the counters and event-pressure
+        state the snapshot reads. The trailing publish is a transient task, so
+        it also runs on the loop, and stop() cancels it with the others.
+        """
+        if not self._status_callback or self._filtered_status_flush_pending:
+            return
+        now = time.monotonic()
+        wait = (
+            self._filtered_status_last_emit
+            + self._FILTERED_STATUS_INTERVAL_SECONDS
+            - now
+        )
+        if wait > 0:
+            self._filtered_status_flush_pending = True
+            self._start_transient_task(self._flush_filtered_status_update(wait))
+            return
+        self._filtered_status_last_emit = now
         self._emit_status_update()
+
+    async def _flush_filtered_status_update(self, delay: float) -> None:
+        """Publish the trailing status update for a burst of filtered events.
+
+        Waits out the rest of the interval, then publishes the counters the
+        burst left behind.
+        """
+        await asyncio.sleep(delay)
+        self._filtered_status_flush_pending = False
+        self._filtered_status_last_emit = time.monotonic()
+        self._emit_status_update()
+
     def _should_admit_realtime_event(
         self,
         event_type: str,
