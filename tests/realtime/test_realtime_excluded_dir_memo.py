@@ -7,7 +7,11 @@ file itself, repeating the match that already excludes its directory: about
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
@@ -46,3 +50,33 @@ def test_files_under_an_excluded_directory_skip_per_file_matching(
     assert engine.calls <= 2, engine.calls
 
     assert path_filter.should_index(root / "src" / "app.js")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_libgit2_backend_sees_a_removed_ignore_rule(tmp_path: Path) -> None:
+    """libgit2 rereads .gitignore, so a directory decision must not outlive it."""
+    pytest.importorskip("pygit2")
+    root = tmp_path / "repo"
+    (root / "foo").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    gitignore = root / ".gitignore"
+    gitignore.write_text("foo/\n", encoding="utf-8")
+    cfg = Config(
+        database={"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
+        indexing={
+            "include": ["**/*.py"],
+            "exclude": [],
+            "exclude_sentinel": ".gitignore",
+            "gitignore_backend": "libgit2",
+        },
+        target_dir=root,
+    )
+    path_filter = RealtimePathFilter(config=cfg, root_path=root)
+
+    assert not path_filter.should_index(root / "foo" / "a.py")
+    assert path_filter.excludes_directory(root / "foo")
+
+    gitignore.write_text("# nothing ignored any more\n", encoding="utf-8")
+
+    assert path_filter.should_index(root / "foo" / "b.py")
+    assert not path_filter.excludes_directory(root / "foo")

@@ -83,6 +83,11 @@ class RealtimePathFilter:
         # for the engine it was computed with (see _directory_excluded).
         self._dir_decisions: dict[Path, bool] = {}
         self._dir_decisions_engine: Any | None = None
+        # Kept only when the engine's rules cannot change while it lives. The
+        # libgit2 evaluator rereads .gitignore files, so a kept decision would
+        # outlive an edited rule; it is asked each time instead, and already
+        # applies an excluded parent directory itself.
+        self._keep_dir_decisions = False
         self._settings = settings or RealtimePathFilterSettings.from_config(config)
         self._root = self._resolve_root(config=config, root_path=root_path)
         # The root as an in-tree path (normalized, links not resolved), for
@@ -131,9 +136,10 @@ class RealtimePathFilter:
         if self._engine is None:
             return False
         try:
-            in_tree = self._in_tree_under_root(dir_path)
-            if in_tree is not None:
-                return self._directory_excluded(in_tree)
+            if self._keep_dir_decisions:
+                in_tree = self._in_tree_under_root(dir_path)
+                if in_tree is not None:
+                    return self._directory_excluded(in_tree)
             return self._engine.matches(dir_path, is_dir=True) is not None
         except Exception:
             return False
@@ -156,7 +162,8 @@ class RealtimePathFilter:
         startup scan applies (it never descends into an excluded directory)
         and the rule Git applies (a file cannot be re-included below an
         excluded directory). The kept answers belong to the engine that
-        produced them: a different engine starts from none.
+        produced them: a different engine starts from none. Used only for an
+        engine whose rules are fixed (see ``_keep_dir_decisions``).
 
         ``dir_path`` must come from ``_in_tree_under_root``. Raises whatever
         the engine raises.
@@ -197,6 +204,7 @@ class RealtimePathFilter:
         if not self._engine_initialized and not self._engine_initialization_failed:
             try:
                 from chunkhound.utils.ignore_engine import (
+                    RepoAwareLibgit2Evaluator,
                     build_repo_aware_ignore_engine,
                 )
 
@@ -209,6 +217,9 @@ class RealtimePathFilter:
                     workspace_root_only_gitignore=(
                         settings.workspace_root_only_gitignore
                     ),
+                )
+                self._keep_dir_decisions = not isinstance(
+                    self._engine, RepoAwareLibgit2Evaluator
                 )
                 self._engine_initialized = True
             except Exception as error:
@@ -235,11 +246,12 @@ class RealtimePathFilter:
         if not self._ignore_engine_degraded:
             try:
                 if self._engine is not None:
-                    in_tree = self._in_tree_under_root(file_path)
-                    if in_tree is not None and self._directory_excluded(
-                        in_tree.parent
-                    ):
-                        return False
+                    if self._keep_dir_decisions:
+                        in_tree = self._in_tree_under_root(file_path)
+                        if in_tree is not None and self._directory_excluded(
+                            in_tree.parent
+                        ):
+                            return False
                     if self._engine.matches(file_path, is_dir=False):
                         return False
             except Exception as error:
