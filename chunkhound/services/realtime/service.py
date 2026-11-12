@@ -8,6 +8,7 @@ infrastructure and respects the single-threaded database constraint.
 from __future__ import annotations
 
 import asyncio
+import copy
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -83,6 +84,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _EVENT_PRESSURE_OVERLOADED_EVENTS = 100
     _EVENT_PRESSURE_ELEVATED_COALESCED_UPDATES = 5
     _EVENT_PRESSURE_OVERLOADED_COALESCED_UPDATES = 20
+    # A filtered event publishes status at most this often (see
+    # _emit_filtered_status_update).
+    _FILTERED_STATUS_INTERVAL_SECONDS = 0.5
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
@@ -190,6 +194,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._last_processing_completed_at: str | None = None
         self._last_processing_completed_path: str | None = None
         self._filtered_event_count = 0
+        self._filtered_status_last_emit = float("-inf")
+        self._filtered_status_flush_pending = False
         self._suppressed_duplicate_count = 0
         self._translation_error_count = 0
         self._processing_error_count = 0
@@ -481,6 +487,15 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         except Exception:
             # Never let debug plumbing affect runtime
             pass
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """The realtime health structure as of now, for a status read.
+
+        The status callback publishes a snapshot only when the service records
+        something; between publishes the queue can drain and time can pass, so
+        a reader must not rely on the last published one.
+        """
+        return copy.deepcopy(self._build_health_snapshot())
 
     def _build_health_snapshot(self) -> dict[str, Any]:
         monitoring_active = False

@@ -22,7 +22,7 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler, watchdog_event_filter
+from .events import SimpleEventHandler, forward_to_loop, watchdog_event_filter
 
 
 class RealtimeObserver(Protocol):
@@ -633,6 +633,10 @@ class RealtimeStartupMixin:
         self._next_source_generation = 0
         self._latest_source_generation_by_path.clear()
         self._event_pressure_by_path.clear()
+        # cancel_all() above cancelled any pending trailing filtered-status
+        # publish; the final update below carries its counters.
+        self._filtered_status_flush_pending = False
+        self._filtered_status_last_emit = float("-inf")
         self._active_change_generations.clear()
         self._reserved_follow_up_change_generations.clear()
         self.file_queue = asyncio.PriorityQueue()
@@ -802,8 +806,8 @@ class RealtimeStartupMixin:
             loop,
             root_path=watch_path,
             queue_result_callback=self._handle_queue_result,
-            source_event_callback=self._record_source_event,
-            filtered_event_callback=self._record_filtered_event,
+            source_event_callback=forward_to_loop(loop, self._record_source_event),
+            filtered_event_callback=forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
         )
         observer = _create_watchdog_observer()

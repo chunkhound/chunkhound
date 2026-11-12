@@ -133,6 +133,22 @@ def _enqueue_realtime_event(
         )
 
 
+def forward_to_loop(
+    loop: asyncio.AbstractEventLoop, callback: Callable[[str, Path], None]
+) -> Callable[[str, Path], None]:
+    """Run an observer-thread event callback on the service's event loop.
+
+    The event loop owns the service's event counters, event-pressure state and
+    status snapshots; the watchdog observer calls back from its own thread.
+    call_soon_threadsafe runs callbacks in the order they were scheduled, so a
+    source event is still recorded before the queueing of the same event.
+    """
+
+    def forward(event_type: str, file_path: Path) -> None:
+        loop.call_soon_threadsafe(callback, event_type, file_path)
+
+    return forward
+
 
 @dataclass(frozen=True, slots=True)
 class RealtimeMutation:
