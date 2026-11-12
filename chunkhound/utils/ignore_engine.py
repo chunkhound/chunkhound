@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
@@ -26,9 +26,14 @@ class MatchInfo:
     pattern: str | None = None
 
 
+# A transformed .gitignore line: the root-relative pattern, and whether the
+# .gitignore wrote it as a directory pattern ("foo/", emitted as "foo/**").
+_GitignoreLine = tuple[str, bool]
+
+
 @dataclass(frozen=True)
 class _GitignorePruneState:
-    patterns: tuple[str, ...]
+    patterns: tuple[_GitignoreLine, ...]
     spec: PathSpec | None
     rules: _SpecRules | None = None
 
@@ -77,65 +82,159 @@ def _negation_scope(body: str) -> str:
     return body
 
 
-@dataclass(frozen=True)
-class _SpecRules:
-    """A compiled spec plus what directory decisions need from its patterns.
+# pathspec (0.12) ends a pattern's regex with a tail, the group named ps_d,
+# that makes a match on a directory also match everything beneath it. Git
+# matches a pattern against the path itself, so the exact form drops the tail.
+_PS_D_OPTIONAL_TAIL = "(?:(?P<ps_d>/).*)?"
+_PS_D_DIR_TAIL = "(?P<ps_d>/).*"
+# The .gitignore transform writes a directory pattern "foo/" as "foo/**".
+_DIR_CONTENTS_SUFFIX = "/**"
+_DIR_DECISIONS_MAX = 65536
+_rules_degraded_warned = False
 
-    ``rules`` holds (regex, include, dir_only) per pattern in order; a pattern
-    written with a trailing "/" is dir_only. ``negation_scopes`` holds the
-    literal prefix each negation is confined to (see ``_negation_scope``).
+
+class _PathspecContractError(RuntimeError):
+    """pathspec's compiled patterns no longer look as this module expects."""
+
+
+@dataclass(frozen=True)
+class _Rule:
+    """One pattern in the order it was compiled.
+
+    ``regex`` is pathspec's: it matches a path or anything beneath it.
+    ``exact`` matches the path itself only, as git matches a pattern; None for
+    a pattern that matches nothing. A ``dir_only`` pattern applies only to
+    directories.
+    """
+
+    regex: re.Pattern[str]
+    exact: re.Pattern[str] | None
+    include: bool
+    dir_only: bool
+
+
+@dataclass(frozen=True, eq=False)
+class _SpecRules:
+    """A compiled spec plus what git-exact decisions need from its patterns.
+
+    ``negation_scopes`` holds the literal prefix each negation is confined to
+    (see ``_negation_scope``). ``degraded`` is set when the patterns could not
+    be read; decisions then fall back to pathspec alone and never prune.
+    ``dir_decisions`` memoizes git's answer per directory: the rules never
+    change, so an answer stays valid for the spec's lifetime.
     """
 
     spec: PathSpec
-    rules: tuple[tuple[re.Pattern[str], bool, bool], ...]
+    rules: tuple[_Rule, ...]
     negations: tuple[re.Pattern[str], ...]
     negation_scopes: tuple[str, ...]
+    degraded: bool = False
+    dir_decisions: dict[str, bool] = field(default_factory=dict)
 
 
-def _spec_rules(spec: PathSpec) -> _SpecRules:
-    rules: list[tuple[re.Pattern[str], bool, bool]] = []
+def _exact_regex(pathspec_regex: str) -> re.Pattern[str]:
+    exact = pathspec_regex.replace(_PS_D_OPTIONAL_TAIL, "").replace(_PS_D_DIR_TAIL, "")
+    if "ps_d" in exact:
+        raise _PathspecContractError(f"unexpected pathspec regex {pathspec_regex!r}")
+    return re.compile(exact)
+
+
+def _build_spec_rules(spec: PathSpec, dir_only: Sequence[bool] | None) -> _SpecRules:
+    patterns = list(spec.patterns)
+    if dir_only is not None and len(dir_only) != len(patterns):
+        raise _PathspecContractError(
+            f"{len(patterns)} compiled patterns for {len(dir_only)} lines"
+        )
+    rules: list[_Rule] = []
     negations: list[re.Pattern[str]] = []
     scopes: list[str] = []
-    for pattern in spec.patterns:
-        include = getattr(pattern, "include", None)
-        regex = getattr(pattern, "regex", None)
-        source = getattr(pattern, "pattern", None)
-        if include is None or regex is None or not isinstance(source, str):
-            continue
+    for index, pattern in enumerate(patterns):
+        include = getattr(pattern, "include", _PathspecContractError)
+        regex = getattr(pattern, "regex", _PathspecContractError)
+        source = getattr(pattern, "pattern", _PathspecContractError)
+        if _PathspecContractError in (include, regex, source):
+            raise _PathspecContractError(f"pattern object {pattern!r} lacks fields")
+        if include is None:
+            continue  # a blank or comment line
+        if not isinstance(regex, re.Pattern) or not isinstance(source, str):
+            raise _PathspecContractError(f"pattern object {pattern!r} changed shape")
         body = source[1:] if source.startswith("!") else source
-        rules.append((regex, bool(include), body.endswith("/")))
+        if dir_only is None:
+            # Patterns as written (config excludes): "foo/" is dir-only.
+            is_dir_only = body.endswith("/")
+            exact: re.Pattern[str] | None = _exact_regex(regex.pattern)
+        elif dir_only[index]:
+            # Transformed .gitignore "foo/" arrives as "foo/**": git matches
+            # the directory against "foo" itself.
+            if not body.endswith(_DIR_CONTENTS_SUFFIX):
+                raise _PathspecContractError(f"dir-only line {source!r} lacks /**")
+            base = GitWildMatchPattern(body[: -len(_DIR_CONTENTS_SUFFIX)])
+            is_dir_only = True
+            exact = None if base.regex is None else _exact_regex(base.regex.pattern)
+        else:
+            is_dir_only = False
+            exact = _exact_regex(regex.pattern)
+        rules.append(_Rule(regex, exact, bool(include), is_dir_only))
         if not include:
             negations.append(regex)
             scopes.append(_negation_scope(body))
     return _SpecRules(spec, tuple(rules), tuple(negations), tuple(scopes))
 
 
-def _dir_self_excluded(rules: _SpecRules, rel: str) -> bool | None:
-    """Git's decision for directory ``rel`` itself: last matching pattern wins.
+def _spec_rules(spec: PathSpec, dir_only: Sequence[bool] | None = None) -> _SpecRules:
+    """Read a compiled spec's patterns for directory and re-include decisions.
 
-    The directory is tested as git tests it: a pattern written for directories
-    (trailing "/") sees "rel/", any other pattern sees "rel". So ``foo/`` and
-    ``foo`` match the directory foo, while ``foo/**`` matches only what is
-    inside it. None when no pattern matches.
+    ``dir_only`` flags each compiled line that a .gitignore wrote as a
+    directory pattern; without it, a trailing "/" marks one. If pathspec's
+    pattern objects are not as expected, the result is degraded: files are
+    decided by pathspec alone and no directory is pruned, and this is logged
+    once.
+    """
+    global _rules_degraded_warned
+    try:
+        return _build_spec_rules(spec, dir_only)
+    except Exception as error:
+        if not _rules_degraded_warned:
+            _rules_degraded_warned = True
+            logger.warning(
+                "Ignore rules could not be read from pathspec ({}); directories "
+                "are not pruned and re-includes follow pathspec alone",
+                error,
+            )
+        return _SpecRules(spec, (), (), (), degraded=True)
+
+
+def _exact_decision(rules: _SpecRules, rel: str, is_dir: bool) -> bool | None:
+    """Git's own decision for ``rel``: the last pattern matching it wins.
+
+    None when no pattern matches the path itself.
     """
     decision: bool | None = None
-    for regex, include, dir_only in rules.rules:
-        if regex.match(rel + "/" if dir_only else rel):
-            decision = include
+    for rule in rules.rules:
+        if rule.exact is None or (rule.dir_only and not is_dir):
+            continue
+        if rule.exact.match(rel):
+            decision = rule.include
     return decision
 
 
-def _ancestor_excluded(rules: _SpecRules, rel: str) -> bool:
-    """Whether a directory above ``rel`` is itself excluded.
+def _git_dir_excluded(rules: _SpecRules, rel: str) -> bool:
+    """Whether git excludes directory ``rel``: itself, or a directory above it.
 
-    Git never re-includes a path whose parent directory is excluded, so a
-    negation that matches the path itself cannot bring it back.
+    Git never re-includes anything beneath an excluded directory.
     """
-    parts = rel.split("/")
-    for depth in range(1, len(parts)):
-        if _dir_self_excluded(rules, "/".join(parts[:depth])) is True:
-            return True
-    return False
+    memo = rules.dir_decisions
+    known = memo.get(rel)
+    if known is not None:
+        return known
+    parent = rel.rpartition("/")[0]
+    excluded = (bool(parent) and _git_dir_excluded(rules, parent)) or (
+        _exact_decision(rules, rel, True) is True
+    )
+    if len(memo) >= _DIR_DECISIONS_MAX:
+        memo.clear()
+    memo[rel] = excluded
+    return excluded
 
 
 def _negation_may_match_under(rules: _SpecRules, rel: str) -> bool:
@@ -146,49 +245,75 @@ def _negation_may_match_under(rules: _SpecRules, rel: str) -> bool:
     return False
 
 
+def _contents_covered(rules: _SpecRules, rel: str) -> bool:
+    """Whether the last file pattern matching "rel/" excludes it.
+
+    Such a pattern (``foo/**``, ``**/node_modules/**``) matches everything
+    beneath ``rel``. Directory patterns do not count: they match directories,
+    not the files under them.
+    """
+    under = rel + "/"
+    decision: bool | None = None
+    for rule in rules.rules:
+        if not rule.dir_only and rule.regex.match(under):
+            decision = rule.include
+    return decision is True
+
+
 def _spec_excludes_dir(rules: _SpecRules, rel: str) -> bool:
     """Whether this spec excludes directory ``rel`` and so its whole subtree.
 
     Callers prune the walk on True, so True must mean nothing below ``rel``
     can be included. Two ways to know that:
 
-    - git excludes the directory itself (``foo/``, ``foo``, ``/*``, or a
-      ``foo/**`` that covers a subdirectory), and git never re-includes a
-      path under an excluded directory;
-    - a pattern covers the directory's contents (``foo/**``, or ChunkHound's
-      ``**/node_modules/**`` config excludes) and no negation in the spec can
-      match below it. With such a negation (``foo/**`` then ``!foo/bar.py``)
-      the directory stays walkable and each file is decided on its own.
+    - git excludes the directory, itself or through a directory above it
+      (``foo/``, ``foo``, ``/*``, or a ``foo/**`` that covers a
+      subdirectory), and git never re-includes a path beneath it;
+    - a file pattern covers the directory's contents (``foo/**``, or
+      ChunkHound's ``**/node_modules/**`` config excludes) and no negation in
+      the spec can match below it. With such a negation (``foo/**`` then
+      ``!foo/bar.py``) the directory stays walkable and each file is decided
+      on its own.
     """
-    if not rel or rel == ".":
+    if not rel or rel == "." or rules.degraded:
         return False
-    decision = _dir_self_excluded(rules, rel)
-    if decision is True:
+    if _git_dir_excluded(rules, rel):
         return True
-    if decision is False:
-        # Re-included by a negation: still excluded if an ancestor is.
-        return _ancestor_excluded(rules, rel)
-    return bool(rules.spec.match_file(rel + "/")) and not _negation_may_match_under(
-        rules, rel
-    )
+    return _contents_covered(rules, rel) and not _negation_may_match_under(rules, rel)
 
 
 def _spec_excludes_file(rules: _SpecRules, rel: str) -> bool:
-    if rules.spec.match_file(rel):
+    """Whether this spec excludes file ``rel``.
+
+    Without a negation that matches the file, pathspec's answer is git's. With
+    one, the file is decided as git decides it: by the last pattern matching
+    the file itself, and excluded regardless when a directory above it is. A
+    directory re-include (``foo/**`` then ``!foo/bar/``) re-includes the
+    directory only; ``foo/**`` still matches the files in it.
+    """
+    if rules.degraded or not any(regex.match(rel) for regex in rules.negations):
+        return bool(rules.spec.match_file(rel))
+    if _exact_decision(rules, rel, False) is True:
         return True
-    # A negation re-included the file, or nothing matched it. Only in the first
-    # case can a parent directory still exclude it, as git does for
-    # "foo/" then "!foo/bar.py".
-    if any(regex.match(rel) for regex in rules.negations):
-        return _ancestor_excluded(rules, rel)
-    return False
+    parent = rel.rpartition("/")[0]
+    return bool(parent) and _git_dir_excluded(rules, parent)
 
 
 class IgnoreEngine:
-    def __init__(self, root: Path, compiled_specs: list[tuple[Path, PathSpec]]):
+    def __init__(
+        self,
+        root: Path,
+        compiled_specs: list[tuple[Path, PathSpec]],
+        spec_rules: list[_SpecRules] | None = None,
+    ):
         self.root = root.resolve()
         self._compiled_specs = compiled_specs
-        self._spec_rules = [(src, _spec_rules(spec)) for src, spec in compiled_specs]
+        if spec_rules is None:
+            spec_rules = [_spec_rules(spec) for _src, spec in compiled_specs]
+        self._spec_rules = [
+            (src, rules)
+            for (src, _spec), rules in zip(compiled_specs, spec_rules, strict=True)
+        ]
 
     def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         """Return a match when ``path`` is excluded.
@@ -218,6 +343,14 @@ def _compile_gitwildmatch(patterns: Iterable[str]) -> PathSpec:
             "pathspec is required for IgnoreEngine; please add dependency 'pathspec'"
         )
     return PathSpec.from_lines(GitWildMatchPattern, patterns)
+
+
+def _compile_gitignore_lines(
+    lines: Sequence[_GitignoreLine],
+) -> tuple[PathSpec, _SpecRules]:
+    """Compile transformed .gitignore lines, keeping which were dir patterns."""
+    spec = _compile_gitwildmatch([pattern for pattern, _dir_only in lines])
+    return spec, _spec_rules(spec, [dir_only for _pattern, dir_only in lines])
 
 
 def _collect_global_gitignore_patterns() -> list[str]:
@@ -273,11 +406,14 @@ def build_ignore_engine(
     are applied via git pathspec pushdown in IndexingCoordinator instead.
     """
     compiled: list[tuple[Path, PathSpec]] = []
+    rules: list[_SpecRules] = []
     root = root.resolve()
 
     # Always enforce config_exclude (default excludes) regardless of sources
     if config_exclude:
-        compiled.append((root, _compile_gitwildmatch(config_exclude)))
+        spec = _compile_gitwildmatch(config_exclude)
+        compiled.append((root, spec))
+        rules.append(_spec_rules(spec))
 
     for src in sources:
         if src == "gitignore":
@@ -286,27 +422,31 @@ def build_ignore_engine(
             pre_spec = None
             if config_exclude:
                 pre_spec = _compile_gitwildmatch(config_exclude)
-            pats = _collect_gitignore_patterns(root, pre_spec)
-            if pats:
-                compiled.append((root / ".gitignore", _compile_gitwildmatch(pats)))
+            lines = _collect_gitignore_patterns(root, pre_spec)
+            if lines:
+                spec, spec_rules = _compile_gitignore_lines(lines)
+                compiled.append((root / ".gitignore", spec))
+                rules.append(spec_rules)
         # "chignore" source is no longer supported.
         elif src == "config":
             pats = list(config_exclude or [])
             if pats:
-                compiled.append((root, _compile_gitwildmatch(pats)))
+                spec = _compile_gitwildmatch(pats)
+                compiled.append((root, spec))
+                rules.append(_spec_rules(spec))
 
-    return IgnoreEngine(root, compiled)
+    return IgnoreEngine(root, compiled, rules)
 
 
 def _collect_gitignore_patterns(
     root: Path, pre_exclude_spec: PathSpec | None = None
-) -> list[str]:
+) -> list[_GitignoreLine]:
     """Return root-relative gitwildmatch patterns transformed from .gitignore files.
 
     We walk the directory tree top-down so that root patterns appear before
     child directory patterns; last match still wins in PathSpec.
     """
-    out: list[str] = []
+    out: list[_GitignoreLine] = []
     root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         dpath = Path(dirpath)
@@ -327,7 +467,9 @@ def _collect_gitignore_patterns(
     return out
 
 
-def _read_transformed_gitignore_patterns(root: Path, dir_path: Path) -> list[str]:
+def _read_transformed_gitignore_patterns(
+    root: Path, dir_path: Path
+) -> list[_GitignoreLine]:
     """Load a directory's .gitignore and transform it to root-relative patterns."""
     gi = dir_path / ".gitignore"
     if not gi.exists():
@@ -344,7 +486,7 @@ def _read_transformed_gitignore_patterns(root: Path, dir_path: Path) -> list[str
         return []
     dir_rel = "." if str(rel_from_root) == "." else rel_from_root.as_posix()
 
-    out: list[str] = []
+    out: list[_GitignoreLine] = []
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -367,8 +509,8 @@ def _extend_gitignore_prune_state(
         return base_state
 
     combined = inherited + tuple(local_patterns)
-    spec = _compile_gitwildmatch(combined)
-    return _GitignorePruneState(patterns=combined, spec=spec, rules=_spec_rules(spec))
+    spec, rules = _compile_gitignore_lines(combined)
+    return _GitignorePruneState(patterns=combined, spec=spec, rules=rules)
 
 
 def _detect_repo_roots(
@@ -619,8 +761,11 @@ class RepoAwareIgnoreEvaluator:
             # This preserves Git anchoring semantics and nested inheritance even
             # when the workspace itself is not a Git repository.
             compiled: list[tuple[Path, PathSpec]] = []
+            rules: list[_SpecRules] = []
             if self.config_exclude:
-                compiled.append((self.root, _compile_gitwildmatch(self.config_exclude)))
+                cfg_spec = _compile_gitwildmatch(self.config_exclude)
+                compiled.append((self.root, cfg_spec))
+                rules.append(_spec_rules(cfg_spec))
             try:
                 pre = (
                     _compile_gitwildmatch(self.config_exclude)
@@ -634,8 +779,10 @@ class RepoAwareIgnoreEvaluator:
             except Exception:
                 pats = []
             if pats:
-                compiled.append((self.root / ".gitignore", _compile_gitwildmatch(pats)))
-            self._workspace_engine = IgnoreEngine(self.root, compiled)
+                gi_spec, gi_rules = _compile_gitignore_lines(pats)
+                compiled.append((self.root / ".gitignore", gi_spec))
+                rules.append(gi_rules)
+            self._workspace_engine = IgnoreEngine(self.root, compiled, rules)
         else:
             # Default: do NOT apply workspace .gitignore at all; only config_exclude
             compiled: list[tuple[Path, PathSpec]] = []
@@ -715,11 +862,14 @@ def build_repo_aware_ignore_engine(
     )
 
 
-def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
+def _transform_gitignore_line(dir_rel: str, line: str) -> list[_GitignoreLine]:
     """Transform a .gitignore pattern from a directory into root-relative patterns.
 
     Handles negation (!), anchored (/), and directory-only (trailing /) forms by
     emitting patterns that constrain the match to the originating subtree.
+    Each pattern comes with whether it was a directory pattern: "foo/" is
+    emitted as "foo/**", which matches the same files, and the flag lets
+    directory decisions tell it from a "foo/**" the .gitignore wrote.
     """
     neg = False
     if line.startswith("!"):
@@ -732,17 +882,14 @@ def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
         line = line[:-1]
 
     # Build base (relative to root) for anchored vs unanchored
-    parts: list[str] = []
+    parts: list[_GitignoreLine] = []
 
     def add(p: str) -> None:
         if is_dir_pat:
-            # Keep the trailing "/": it matches the same files as "p/**" but
-            # marks the pattern as one that excludes the directory itself
-            # (see _dir_self_excluded), which "p/**" does not.
-            p = f"{p}/"
+            p = f"{p}/**"
         if neg:
             p = "!" + p
-        parts.append(p)
+        parts.append((p, is_dir_pat))
 
     # Resolve directory prefix with Git semantics
     # Rules (simplified from gitignore docs):

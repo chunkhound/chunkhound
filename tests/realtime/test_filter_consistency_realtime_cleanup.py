@@ -521,9 +521,9 @@ def _git_ignores(root: Path, rel: str) -> bool:
     return proc.returncode == 0
 
 
-# Each case: .gitignore files, then the .py files to create. git decides which
-# of them are ignored; the full scan, the polling walk and event admission must
-# all agree with it.
+# Each case: .gitignore files, then the .py/.md files to create. git decides
+# which of them are ignored; the full scan, the polling walk and event
+# admission must all agree with it.
 _REINCLUDE_CASES = {
     # A contents pattern does not exclude the directory itself, so a later
     # negation re-includes a file inside it.
@@ -548,6 +548,40 @@ _REINCLUDE_CASES = {
         {".gitignore": "/*\n!/src/\n!.gitignore\n"},
         ["src/a.py", "src/pkg/b.py", "other/c.py"],
     ),
+    # Re-including a directory inside a contents pattern re-includes only the
+    # directory: foo/** still matches every file in it.
+    "directory_reinclude_inside_contents": (
+        {".gitignore": "foo/**\n!foo/bar/\n"},
+        ["foo/bar/x.py", "foo/y.py", "a.py"],
+    ),
+    "anchored_directory_reinclude_inside_contents": (
+        {".gitignore": "/a/**\n!/a/b/\n"},
+        ["a/b/x.py", "a/b/d/z.py", "a/c.py", "b.py"],
+    ),
+    "nested_directory_reinclude_inside_contents": (
+        {".gitignore": "/s/**\n", "s/.gitignore": "!/keep/\n"},
+        ["s/keep/a.py", "s/b.py", "a.py"],
+    ),
+    # A directory re-include does not re-include the files a file pattern
+    # excludes in it.
+    "directory_reinclude_of_file_pattern": (
+        {".gitignore": "*.md\n!keep/\n"},
+        ["keep/a.md", "keep/b.py", "c.md"],
+    ),
+    # The whitelist idiom for file types: ignore everything, then re-include
+    # every directory and the .py files.
+    "whitelist_directories_then_type": (
+        {".gitignore": "*\n!*/\n!*.py\n"},
+        ["a.py", "a.md", "d/b.py", "d/c.md", "d/e/f.md"],
+    ),
+    "whitelist_double_star_directories_then_type": (
+        {".gitignore": "*\n!**/\n!*.py\n"},
+        ["top.py", "t.md", "d/a.py", "d/c.md"],
+    ),
+    "whitelist_anchored_double_star_directories_then_type": (
+        {".gitignore": "*\n!/**/\n!*.py\n"},
+        ["top.py", "d/a.py", "d/c.md"],
+    ),
 }
 
 
@@ -559,23 +593,33 @@ async def test_scan_walk_and_admission_agree_with_git_on_reincluded_files(
 ) -> None:
     """A file a negation re-includes is indexed by the full scan, found by the
     polling walk and admitted as an event, exactly when git does not ignore it."""
-    ignore_files, py_files = _REINCLUDE_CASES[case]
+    ignore_files, files = _REINCLUDE_CASES[case]
     root = tmp_path / "repo"
     _git_init(root)
-    for rel, text in {**ignore_files, **{p: "X = 1\n" for p in py_files}}.items():
+    for rel, text in {**ignore_files, **{p: "X = 1\n" for p in files}}.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text, encoding="utf-8")
-    expected = {rel for rel in py_files if not _git_ignores(root, rel)}
+    expected = {rel for rel in files if not _git_ignores(root, rel)}
 
     db_path = tmp_path / "reinclude.duckdb"
-    config = _build_config(root, db_path)
+    includes = ["**/*.py", "**/*.md"]
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={
+            "include": includes,
+            "exclude": [],
+            "exclude_sentinel": ".gitignore",
+            "realtime_backend": "watchdog",
+        },
+    )
     services = create_services(db_path, config)
     services.provider.connect()
     try:
         coordinator = IndexingCoordinator(
             database_provider=services.provider, base_directory=root, config=config
         )
-        discovered = await coordinator._discover_files(root, ["**/*.py"], [])
+        discovered = await coordinator._discover_files(root, includes, [])
         assert {p.relative_to(root).as_posix() for p in discovered} == expected
 
         service = RealtimeIndexingService(services, config)
@@ -586,7 +630,7 @@ async def test_scan_walk_and_admission_agree_with_git_on_reincluded_files(
         handler = SimpleEventHandler(
             event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
         )
-        for rel in py_files:
+        for rel in files:
             handler.on_any_event(
                 SimpleNamespace(
                     event_type="modified", is_directory=False, src_path=str(root / rel)
