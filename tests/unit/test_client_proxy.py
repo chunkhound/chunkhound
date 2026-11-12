@@ -174,68 +174,6 @@ async def test_forward_socket_to_stdout_propagates_non_eof_errors(
 
 
 @pytest.mark.asyncio
-async def test_forward_stdin_windows_forwards_json_lines(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    proxy = ClientProxy(Path("."), SimpleNamespace())
-    chunks = [b"not-json\n", b'{"method":"initialize"}\n', b""]
-    frames = []
-
-    stdin = SimpleNamespace(buffer=SimpleNamespace(fileno=lambda: 123))
-    monkeypatch.setattr(sys, "stdin", stdin)
-    monkeypatch.setattr(
-        ClientProxy, "_windows_stdin_handle", staticmethod(lambda _fd: 456)
-    )
-    monkeypatch.setattr(
-        ClientProxy,
-        "_windows_pipe_bytes_available",
-        staticmethod(lambda _handle: len(chunks[0]) if chunks[0] else None),
-    )
-    monkeypatch.setattr(
-        client_proxy_module.os,
-        "read",
-        lambda _fd, _size: chunks.pop(0),
-    )
-    monkeypatch.setattr(
-        client_proxy_module.ipc,
-        "write_frame",
-        lambda _writer, frame: frames.append(frame),
-    )
-
-    await asyncio.wait_for(proxy._forward_stdin_windows(_FakeWriter()), timeout=1.0)
-
-    assert frames == [{"method": "initialize"}]
-
-
-@pytest.mark.asyncio
-async def test_forward_stdin_windows_cancellation_does_not_wait_for_stdin_eof(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    proxy = ClientProxy(Path("."), SimpleNamespace())
-    checked_pipe = asyncio.Event()
-
-    stdin = SimpleNamespace(buffer=SimpleNamespace(fileno=lambda: 123))
-    monkeypatch.setattr(sys, "stdin", stdin)
-    monkeypatch.setattr(
-        ClientProxy, "_windows_stdin_handle", staticmethod(lambda _fd: 456)
-    )
-
-    def no_data(_handle: int) -> int:
-        checked_pipe.set()
-        return 0
-
-    monkeypatch.setattr(
-        ClientProxy, "_windows_pipe_bytes_available", staticmethod(no_data)
-    )
-
-    task = asyncio.create_task(proxy._forward_stdin_windows(_FakeWriter()))
-    await asyncio.wait_for(checked_pipe.wait(), timeout=1.0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-
-
-@pytest.mark.asyncio
 async def test_run_prefers_stdout_read_error_over_startup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

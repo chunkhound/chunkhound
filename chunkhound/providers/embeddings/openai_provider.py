@@ -41,6 +41,8 @@ from chunkhound.providers.embeddings.shared_utils import (
     validate_runtime_output_dims_config,
 )
 
+from chunkhound.utils.hashing import compute_embedding_space_identity
+
 from .batch_utils import handle_token_limit_error
 
 try:
@@ -374,6 +376,7 @@ class OpenAIEmbeddingProvider:
             rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
         )
         self._max_concurrent_batches = max_concurrent_batches
+        self._embedding_space_generation = 0
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -932,8 +935,21 @@ class OpenAIEmbeddingProvider:
 
     @property
     def base_url(self) -> str:
-        """Base URL for API requests."""
+        """Base URL for non-Azure API requests."""
         return self._base_url or "https://api.openai.com/v1"
+
+    @property
+    def embedding_space_identity(self) -> str:
+        """Opaque identity for the configured OpenAI-compatible model space."""
+        return compute_embedding_space_identity(
+            "openai-v2",
+            str(self._embedding_space_generation),
+            self._azure_endpoint or self.base_url,
+            self._azure_deployment or "",
+            self._api_version or "",
+            self._api_key or "",
+            str(self._client_side_truncation),
+        )
 
     @property
     def timeout(self) -> int:
@@ -1473,6 +1489,15 @@ class OpenAIEmbeddingProvider:
 
     def update_config(self, **kwargs: Any) -> None:
         """Update provider configuration."""
+        identity_keys = {
+            "api_key",
+            "base_url",
+            "model",
+            "output_dims",
+            "client_side_truncation",
+        }
+        if identity_keys & kwargs.keys():
+            self._embedding_space_generation += 1
         next_model = kwargs.get("model", self._model)
         next_base_url = kwargs.get("base_url", self._base_url)
         next_output_dims = self._output_dims

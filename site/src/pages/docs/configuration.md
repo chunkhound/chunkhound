@@ -335,8 +335,8 @@ The delta-only gate above relies on structured error codes returned by `Config.v
 | `embedding_not_configured` | No embedding provider, or the provider is missing required fields for the command. |
 | `mcp_non_loopback_no_auth` | `mcp.host` binds to a non-loopback interface without `mcp.auth_token`. |
 | `mcp_cors_no_auth` | `mcp.cors` is enabled without `mcp.auth_token`. |
-| `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp` / `_quickresearch`. |
-| `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp`/`_quickresearch` commands hit `db_readonly_wrong_command` first.) |
+| `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp`. |
+| `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp` commands hit `db_readonly_wrong_command` first.) |
 
 ## Usage Analytics
 
@@ -652,10 +652,11 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | Atlas Cloud | `atlascloud` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-ai/deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-ai/deepseek-v4-flash`) | Atlas Cloud API. Registry providers require explicit `model`. |
 | Runcrate | `runcrate` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-ai/DeepSeek-V4.1-Flash`) | Must be set explicitly (configurator defaults to `deepseek-ai/DeepSeek-V4.1-Flash`) | Runcrate API. Registry providers require explicit `model`. |
 | cheapaimodel | `cheapaimodel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | cheapaimodel API. Registry providers require explicit `model`. |
+| UberLLM | `uberllm` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | UberLLM API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, and cheapaimodel) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, cheapaimodel, and UberLLM) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
 ### Gateway structured reasoning negotiation
 
@@ -867,6 +868,9 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 
 | Variable | Description |
 |---|---|
+| `CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES` | Max cached chunk vectors for git-history/web search (default `10000`; `0` disables caching, results are identical) |
+| `CHUNKHOUND_VECTOR_CACHE_TTL_SECONDS` | Seconds since last access before a cached vector expires (default `300`) |
+| `CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR` | Candidate pool multiplier for git-history/web search (default `5`) |
 | `CHUNKHOUND_EMBEDDING__PROVIDER` | Embedding provider name |
 | `CHUNKHOUND_EMBEDDING__MODEL` | Embedding model name |
 | `CHUNKHOUND_EMBEDDING__API_KEY` | API key for embedding provider |
@@ -965,7 +969,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DB_EXECUTE_TIMEOUT` | Legacy alias for `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` |
 | `CHUNKHOUND_YAML_ENGINE` | YAML parser engine (`rapid` or `tree`) |
 | `CHUNKHOUND_CONFIG_FILE` | Path to config file (alternative to `--config`) |
-| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Web search subprocess timeout in seconds (default: 600) |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Websearch response deadline in seconds (default: 600). Discovery (DDG) is capped at 60s or a quarter of this, whichever is smaller; fetch+research use the remainder. Cancellation cleanup may outlive the deadline, so a one-shot CLI process can wait briefly during event-loop shutdown. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive or non-finite values fall back to 600. |
 | `CHUNKHOUND_DEBUG` | Enable debug logging |
 | `VOYAGE_API_KEY` | Fallback API key for VoyageAI provider |
 
@@ -1054,7 +1058,7 @@ In the configurator, select **Retrieval → VoyageAI** and open **Customize rera
 
 ### LLM via proxy (Anthropic, OpenAI, and OpenAI-compatible providers)
 
-The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, and cheapaimodel LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, cheapaimodel, and UberLLM LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {
@@ -1226,7 +1230,7 @@ If any of these are missing, the MCP `websearch` tool is not registered (capabil
 
 | Variable | Description |
 |---|---|
-| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Wall-clock timeout (seconds) for the research subprocess. Default: 600. Also returned for malformed values. |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Websearch response deadline (seconds). Default: 600. Discovery is capped at min(60, total/4); fetch and research share the remainder. Cancellation cleanup may outlive the deadline, so a one-shot CLI process can wait briefly during event-loop shutdown. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive, non-finite, or malformed values fall back to 600. |
 
 ### Fixed Constants
 

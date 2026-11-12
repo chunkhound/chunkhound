@@ -1,0 +1,159 @@
+"""Cross-platform stdin line reader / stdout line writer.
+
+Shared by ClientProxy (stdio<->IPC relay) and StdioMCPServer (--no-daemon
+direct SDK serving) so the Windows-safe stdin handling exists in one place.
+Zero chunkhound domain logic, zero mcp imports — pure OS I/O.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import sys
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from typing import Any
+
+_WINDOWS_STDIN_POLL_INTERVAL = 0.01
+_WINDOWS_STDIN_READ_CHUNK_SIZE = 65536
+_WINDOWS_PIPE_CLOSED_ERRORS = {6, 38, 109}  # invalid handle, EOF, broken pipe
+
+
+async def iter_stdin_lines() -> AsyncGenerator[bytes, None]:
+    """Yield raw lines (including trailing \\n) from stdin until EOF."""
+    if sys.platform == "win32":
+        async for line in _iter_stdin_lines_windows():
+            yield line
+    else:
+        async for line in _iter_stdin_lines_unix():
+            yield line
+
+
+def is_object_frame(frame: Any) -> bool:
+    """Skip policy shared by all frame readers: only JSON objects are frames.
+
+    Non-object JSON (e.g. batch arrays) is dropped and the reader keeps going.
+    """
+    return isinstance(frame, dict)
+
+
+async def iter_json_frames() -> AsyncGenerator[dict[str, Any], None]:
+    """Yield JSON-object frames from stdin until EOF.
+
+    Undecodable lines and non-object JSON (e.g. batch arrays) are skipped; this
+    is the one place that owns that policy for stdin transports.
+    """
+    async with contextlib.aclosing(iter_stdin_lines()) as lines:
+        async for line in lines:
+            try:
+                frame = json.loads(line.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if is_object_frame(frame):
+                yield frame
+
+
+async def _iter_stdin_lines_unix() -> AsyncIterator[bytes]:
+    """Unix: true async I/O via connect_read_pipe."""
+    loop = asyncio.get_running_loop()
+    stdin = asyncio.StreamReader()
+    transport, _ = await loop.connect_read_pipe(
+        lambda: asyncio.StreamReaderProtocol(stdin), sys.stdin.buffer
+    )
+    try:
+        while True:
+            line = await stdin.readline()
+            if not line:
+                return
+            yield line
+    finally:
+        transport.close()
+
+
+async def _iter_stdin_lines_windows() -> AsyncIterator[bytes]:
+    """Windows: poll the synchronous pipe so cancellation never waits for EOF."""
+    fd = sys.stdin.buffer.fileno()
+    handle = _windows_stdin_handle(fd)
+    buffer = bytearray()
+
+    while True:
+        available = _windows_pipe_bytes_available(handle)
+        if available is None:
+            if buffer:
+                yield bytes(buffer)
+            return
+        if available == 0:
+            await asyncio.sleep(_WINDOWS_STDIN_POLL_INTERVAL)
+            continue
+
+        chunk = os.read(fd, min(available, _WINDOWS_STDIN_READ_CHUNK_SIZE))
+        if not chunk:
+            if buffer:
+                yield bytes(buffer)
+            return
+
+        buffer.extend(chunk)
+        while True:
+            newline = buffer.find(b"\n")
+            if newline < 0:
+                break
+            yield bytes(buffer[: newline + 1])
+            del buffer[: newline + 1]
+
+
+def _windows_stdin_handle(fd: int) -> int:
+    import importlib
+
+    msvcrt = importlib.import_module("msvcrt")
+    return int(getattr(msvcrt, "get_osfhandle")(fd))
+
+
+def _windows_pipe_bytes_available(handle: int) -> int | None:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    available = ctypes.c_ulong()
+    ok = kernel32.PeekNamedPipe(
+        ctypes.c_void_p(handle),
+        None,
+        0,
+        None,
+        ctypes.byref(available),
+        None,
+    )
+    if ok:
+        return int(available.value)
+    error = int(getattr(ctypes, "get_last_error")())
+    if error in _WINDOWS_PIPE_CLOSED_ERRORS:
+        return None
+    raise OSError(error, "PeekNamedPipe failed")
+
+
+def write_stdout_line(line: bytes) -> None:
+    """Write one line (caller includes trailing \\n) to stdout and flush."""
+    sys.stdout.buffer.write(line)
+    sys.stdout.buffer.flush()
+
+
+async def write_json_frame(frame: dict[str, Any]) -> None:
+    """Write one JSON frame as a line to stdout, off the event loop.
+
+    Callers must serialize writes (serve_connection's write lock does).
+    """
+    import anyio.to_thread
+
+    await anyio.to_thread.run_sync(
+        write_stdout_line, (json.dumps(frame) + "\n").encode()
+    )
+
+
+def make_stdin_frame_reader(
+    frames: AsyncGenerator[dict[str, Any], None],
+) -> Callable[[], Awaitable[dict[str, Any] | None]]:
+    """Adapt an iter_json_frames() generator to a read_frame() callable."""
+
+    async def read_frame() -> dict[str, Any] | None:
+        return await anext(frames, None)
+
+    return read_frame

@@ -600,6 +600,7 @@ def test_vllm_generated_config_passes_research_validation(
         ("atlascloud", "atlascloud", "deepseek-ai/deepseek-v4-flash"),
         ("runcrate", "runcrate", "deepseek-ai/DeepSeek-V4.1-Flash"),
         ("cheapaimodel", "cheapaimodel", "deepseek-v4-1-flash"),
+        ("uberllm", "uberllm", "deepseek/deepseek-v4.1-flash"),
     ],
 )
 def test_every_supported_llm_preset_parses_through_backend_config(
@@ -951,6 +952,7 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
         "atlascloud": "deepseek-ai/deepseek-v4-flash",
         "runcrate": "deepseek-ai/DeepSeek-V4.1-Flash",
         "cheapaimodel": "deepseek-v4-1-flash",
+        "uberllm": "deepseek/deepseek-v4.1-flash",
         "ollama-llm": "qwen3-coder:30b",
         "vllm-llm": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         "opencode-cli": "opencode/deepseek-v4.1-flash",

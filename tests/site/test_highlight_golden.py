@@ -36,12 +36,13 @@ const modes = {
 };
 // Generated assignments keep the corpus complete without hand-picked slots:
 // the catalog is the single source of truth. Each embedding slot walks the LLM
-// catalog as the shard index moves, so one variant offset covers 18 of the 20
-// LLM ids; two offsets (0 and 2) cover all of them. Growing the catalog past
-// that window needs another offset — the `seen` guard below fails loudly.
-const VARIANTS = [0, 2];
+// catalog as the shard index moves. With 18 shells, offsets 0 and 2 cover a
+// 20-id window; the final offset wraps the tail so every (embedding, LLM) pair
+// is exercised. Growing the catalog further needs another offset — the `seen`
+// guard below and the Python pair-coverage test fail loudly.
 const embeddingIds = embeddingProviders.map(provider => provider.id);
 const llmIds = llmProviders.map(provider => provider.id);
+const VARIANTS = [0, 2, llmIds.length - 1];
 function assignmentsFor(variant, shardIndex) {
   const assigned = {};
   embeddingIds.forEach((id, slot) => {
@@ -161,6 +162,7 @@ def test_highlight_corpus_covers_every_embedding_llm_pair() -> None:
         "atlascloud",
         "runcrate",
         "cheapaimodel",
+        "uberllm",
     }
     assert llms == llm_catalog, (
         "golden corpus LLM set diverged from the catalog: "

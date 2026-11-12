@@ -12,7 +12,7 @@ branch's known one-tab leak cannot bleed into the HTML branch's target
 count, regardless of test execution order.
 
 The test resolves Chrome via ``_resolve_chrome_path`` so the same
-explicit-path probe + version check that ``fetch_and_save`` relies on
+explicit-path probe + version check that ``fetch_pages`` relies on
 runs here too — a Chrome <124 raises out of the resolver, matching
 production's fail-loud contract for the silent ``Response.charset``
 parse-failure loop on older Chrome.

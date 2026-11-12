@@ -21,6 +21,7 @@ import {
   ORCAROUTER_SVG,
   REQUESTY_SVG,
   RUNCRATE_SVG,
+  UBERLLM_SVG,
   VERCEL_SVG,
   VLLM_SVG,
   VOYAGEAI_SVG,
@@ -382,6 +383,17 @@ export const llmProviders: ConfiguratorProviderOption[] = [
     requirements: [requirements.cheapaimodelApiKey],
     recommendation:
       "<strong>DeepSeek V4.1 Flash</strong> — a fast, cost-efficient model routed through cheapaimodel.",
+  },
+  {
+    id: "uberllm",
+    name: "UberLLM",
+    svg: UBERLLM_SVG,
+    description: "Recommended model: DeepSeek V4.1 Flash",
+    config: { provider: "uberllm", model: RESEARCH_MODEL },
+    apiKeyPlaceholder: "<YOUR_UBERLLM_API_KEY>",
+    group: "cloud",
+    requirements: [requirements.uberllmApiKey],
+    recommendation: `<strong>DeepSeek V4.1 Flash</strong> (<code>${RESEARCH_MODEL}</code>) — the OpenAI-compatible route through UberLLM.`,
   },
   {
     id: "anthropic",

@@ -20,6 +20,7 @@ import {
   REQUESTY_SVG,
   ROO_CODE_SVG,
   RUNCRATE_SVG,
+  UBERLLM_SVG,
   VERCEL_SVG,
   VLLM_SVG,
   VOYAGEAI_SVG,
@@ -253,5 +254,11 @@ export const requirements = {
     label: "cheapaimodel API key",
     provider: "cheapaimodel",
     svg: CHEAPAIMODEL_SVG,
+  }),
+  uberllmApiKey: apiKeyRequirement({
+    id: "uberllm-api-key",
+    label: "UberLLM API key",
+    provider: "uberllm",
+    svg: UBERLLM_SVG,
   }),
 } satisfies Record<string, ConfiguratorRequirement>;

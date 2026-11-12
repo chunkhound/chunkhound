@@ -103,6 +103,12 @@
       "authUrl": "https://www.runcrate.ai/dashboard/api-keys"
     },
     {
+      "id": "uberllm",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://uberllm.dev/signup"
+    },
+    {
       "id": "vercel",
       "requiresModel": true,
       "customEndpointRequiresModel": true,

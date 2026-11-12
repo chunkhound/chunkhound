@@ -1,4 +1,5 @@
 import os
+from collections.abc import Iterator
 
 import pytest
 from loguru import logger
@@ -74,6 +75,22 @@ def _ignore_user_global_config(tmp_path_factory):
         os.environ.pop("CHUNKHOUND_GLOBAL_CONFIG_FILE", None)
     else:
         os.environ["CHUNKHOUND_GLOBAL_CONFIG_FILE"] = previous
+
+
+@pytest.fixture
+def isolated_mcp_mode() -> Iterator[None]:
+    """Restore CHUNKHOUND_MCP_MODE after tests that run an MCP entry point.
+
+    mcp_command and async_main set it for the process lifetime. Restore it by
+    hand: monkeypatch.delenv records no undo when the variable is unset, so it
+    would let those writes leak into later tests.
+    """
+    saved = os.environ.get("CHUNKHOUND_MCP_MODE")
+    yield
+    if saved is None:
+        os.environ.pop("CHUNKHOUND_MCP_MODE", None)
+    else:
+        os.environ["CHUNKHOUND_MCP_MODE"] = saved
 
 
 @pytest.fixture

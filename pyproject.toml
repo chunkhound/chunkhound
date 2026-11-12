@@ -52,20 +52,18 @@ dependencies = [
     "pydantic>=2.12.0",
     "pydantic-settings>=2.0.0",
     "loguru>=0.6.0",
-    # The MCP server uses the SDK 1.x low-level decorator API. MCP 2.x
-    # replaced it with constructor callbacks, so do not resolve an
-    # incompatible SDK until the server is migrated.
-    "mcp>=1.16.0,<2",
-    # Declared directly (not just pulled in transitively via mcp) because
-    # chunkhound/mcp_server/http_server.py imports their APIs directly.
-    # This adds no install weight beyond mcp's own requirements: mcp>=1.16.0
-    # already depends unconditionally on starlette>=0.27 and uvicorn>=0.31.1
-    # (no extras gating), so every chunkhound install — stdio-only or not —
-    # gets them anyway. Making these "optional" here would not save anyone
-    # an install; it would just let our own version floors drift from what
-    # mcp actually needs.
+    # SDK 2.x, constructor-callback API. All mcp imports live in
+    # chunkhound/mcp_server/base.py (single dispatch point); enforced by
+    # tests/unit/test_mcp_wrapper_sdk_isolation.py.
+    "mcp>=2.3.0,<3",
+    # Used directly by http_server.py; already a hard mcp dependency, no
+    # extra install weight.
     "starlette>=0.48.0",
     "uvicorn>=0.37.0",
+    # Used directly by base.py's serve_connection() and stdio.py's writer;
+    # previously transitive only.
+    "anyio>=4.5.0",
+    "mcp-types>=2.3.0,<3",
     "psutil>=5.8.0",
     "PyYAML>=6.0.0",
     "tiktoken>=0.9.0",
@@ -105,6 +103,9 @@ dependencies = [
     "pymupdf>=1.27.0",
     "rich>=13.0.0",
     "readchar>=4.2.1",
+    # Native per-match timeouts prevent user-supplied search regexes from
+    # monopolizing transient search workers through catastrophic backtracking.
+    "regex>=2025.9.18",
     "scikit-learn>=1.3.0",
     "scipy>=1.7.0",
     "numpy>=1.24.0",
@@ -125,7 +126,10 @@ dependencies = [
     # Response.charset workaround). Bumping requires re-validating the
     # response-event race ordering and the async-handler dispatch path.
     "zendriver==0.15.3",
-    "chunkhound-native>=5.2.0",
+    # 6.1.0 is the first release with AnalyticsRecorder, which
+    # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
+    # command; an older native satisfies a lower bound and then fails there.
+    "chunkhound-native>=6.1.0",
 ]
 
 [project.optional-dependencies]
@@ -283,4 +287,5 @@ dev = [
     "ruff>=0.11.12",
     "types-psutil>=7.0.0.20250601",
     "types-jsonschema>=4.0.0",
+    "types-regex>=2025.11.3.20251106",
 ]
