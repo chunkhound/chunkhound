@@ -64,7 +64,49 @@ class RealtimePipelineMixin:
             event_type=event_type,
             scope="excluded",
         )
+        self._emit_filtered_status_update()
+
+    def _emit_filtered_status_update(self) -> None:
+        """Publish status for a filtered event at most once per interval.
+
+        A filtered event changes only counters, and filtered events arrive in
+        bursts of thousands (an npm install, a junction to node_modules), where
+        building and publishing a full snapshot per event cost more than
+        filtering the event did. The first event after a quiet interval
+        publishes at once; later events in the interval share one trailing
+        publish, so the counters the burst's last event left still reach the
+        status consumer when the burst ends.
+
+        Runs on the event loop, which owns the counters and event-pressure
+        state the snapshot reads. The trailing publish is a transient task, so
+        it also runs on the loop, and stop() cancels it with the others.
+        """
+        if not self._status_callback or self._filtered_status_flush_pending:
+            return
+        now = time.monotonic()
+        wait = (
+            self._filtered_status_last_emit
+            + self._FILTERED_STATUS_INTERVAL_SECONDS
+            - now
+        )
+        if wait > 0:
+            self._filtered_status_flush_pending = True
+            self._start_transient_task(self._flush_filtered_status_update(wait))
+            return
+        self._filtered_status_last_emit = now
         self._emit_status_update()
+
+    async def _flush_filtered_status_update(self, delay: float) -> None:
+        """Publish the trailing status update for a burst of filtered events.
+
+        Waits out the rest of the interval, then publishes the counters the
+        burst left behind.
+        """
+        await asyncio.sleep(delay)
+        self._filtered_status_flush_pending = False
+        self._filtered_status_last_emit = time.monotonic()
+        self._emit_status_update()
+
     def _should_admit_realtime_event(
         self,
         event_type: str,
@@ -1055,6 +1097,11 @@ class RealtimePipelineMixin:
                     continue
 
                 # Layer 3: Event deduplication to prevent redundant processing.
+                # A duplicate is redundant while the path's change is pending
+                # (the queued work reads the latest content), but not while it is
+                # being processed: that run may already have read the file, and
+                # only add_file reserves the follow-up that indexes the newer
+                # write.
                 file_key = str(file_path)
                 current_time = time.time()
 
@@ -1062,11 +1109,22 @@ class RealtimePipelineMixin:
                     last_event_type, last_event_time = self._recent_file_events[
                         file_key
                     ]
+                    mutation_key = str(self._normalize_mutation_path(file_path))
+                    is_write = event_type in ("created", "modified")
                     if (
                         last_event_type == event_type
                         and (current_time - last_event_time)
                         < self._EVENT_DEDUP_WINDOW_SECONDS
+                        and not (
+                            is_write
+                            and mutation_key in self._active_change_generations
+                        )
                     ):
+                        if is_write and mutation_key in self._pending_debounce:
+                            # Still a write: keep the pending debounce horizon
+                            # fresh, as add_file would, so a burst of saves
+                            # is indexed once, after the last one.
+                            self._pending_debounce[mutation_key] = time.monotonic()
                         logger.debug(
                             "Suppressing duplicate "
                             f"{event_type} event for {file_path} "
@@ -1557,9 +1615,6 @@ class RealtimePipelineMixin:
                         self._indexed_files.add(normalized)
                         self._file_condition.notify_all()
 
-                    # Clear event dedup entry so future modifications aren't suppressed
-                    self._recent_file_events.pop(str(file_path), None)
-
                     # If we skipped embeddings, queue for embedding generation
                     if skip_embeddings:
                         await self.add_file(file_path, priority="embed")
@@ -1588,6 +1643,11 @@ class RealtimePipelineMixin:
                     processing_error = error
                 finally:
                     self._record_processing_finished(file_path, completed=completed)
+                    # Clear the event dedup entry whether or not processing
+                    # succeeded: once the path is no longer active, a same-type
+                    # write inside the window would be suppressed, and after a
+                    # failed attempt nothing else would index it.
+                    self._recent_file_events.pop(str(file_path), None)
                     if active_change_path is not None:
                         self._active_change_generations.pop(active_change_path, None)
                         await self._drain_reserved_follow_up_change(

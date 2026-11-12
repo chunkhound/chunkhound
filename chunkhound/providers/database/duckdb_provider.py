@@ -50,6 +50,7 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseTemporarilyUnavailableError,
     _executor_local,
 )
+from chunkhound.utils.path_filter import normalize_path_filter
 from chunkhound.utils.windows_constants import (
     IS_WINDOWS,
     WINDOWS_FILE_HANDLE_DELAY,
@@ -3859,38 +3860,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         Raises:
             ValueError: If path contains dangerous patterns
         """
-        if path_filter is None:
-            return None
-
-        # Remove leading/trailing whitespace
-        normalized = path_filter.strip()
-
-        if not normalized:
-            return None
-
-        # Security checks - prevent directory traversal
-        dangerous_patterns = ["..", "~", "*", "?", "[", "]", "\0", "\n", "\r"]
-        for pattern in dangerous_patterns:
-            if pattern in normalized:
-                raise ValueError(f"Path filter contains forbidden pattern: {pattern}")
-
-        # Normalize path separators to forward slashes
-        normalized = normalized.replace("\\", "/")
-
-        # Remove leading slashes to ensure relative paths
-        normalized = normalized.lstrip("/")
-
-        # Ensure trailing slash for directory patterns.
-        # A file extension is a dot that appears AFTER the first character.
-        # Leading-dot names without a second dot (.github, .env) are directories.
-        # Leading-dot names with an extension (.eslintrc.js, .babelrc.js) are files.
-        if normalized and not normalized.endswith("/"):
-            last = normalized.split("/")[-1]
-            has_file_extension = "." in last[1:]
-            if not has_file_extension:
-                normalized += "/"
-
-        return normalized
+        return normalize_path_filter(path_filter)
 
     @staticmethod
     def _build_path_like_pattern(normalized_path: str) -> str:

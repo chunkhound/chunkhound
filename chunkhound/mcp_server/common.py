@@ -375,6 +375,9 @@ def parse_mcp_arguments(args: dict[str, Any]) -> dict[str, Any]:
     if "limit" in parsed:
         if not isinstance(parsed["limit"], int):
             parsed["limit"] = int(parsed["limit"])
+    if "last_n_commits" in parsed and parsed["last_n_commits"] is not None:
+        if not isinstance(parsed["last_n_commits"], int):
+            parsed["last_n_commits"] = int(parsed["last_n_commits"])
     if "threshold" in parsed and parsed["threshold"] is not None:
         if not isinstance(parsed["threshold"], float):
             parsed["threshold"] = float(parsed["threshold"])

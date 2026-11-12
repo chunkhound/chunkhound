@@ -222,6 +222,7 @@ async def test_command_exiting_zero_via_sys_exit_is_left_unrecorded(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("isolated_mcp_mode")
 async def test_mcp_command_is_not_wrapped_by_the_cli_hook(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
