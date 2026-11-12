@@ -266,12 +266,28 @@ class SimpleEventHandler:
         A path that resolves outside the root (a linked directory whose target
         is elsewhere) cannot be stored under it, and the default startup scan,
         which does not follow directory links, never indexes it either.
+
+        Admission judged the path where it sits; when resolving changes it, the
+        work is done on the target, so the target must pass the same policy:
+        a link ``alias.py -> ignored/secret.py`` must not index secret.py. A
+        delete is not rechecked, so a previously indexed path is still cleaned.
         """
         file_path = Path(normalize_file_path(in_tree))
         if not file_path.is_relative_to(self._root):
             self._record_filtered_event(event_type, in_tree)
             return
+        if file_path != in_tree and not self._target_admitted(event_type, file_path):
+            self._record_filtered_event(event_type, in_tree)
+            return
         self._queue_event(event_type, file_path)
+
+    def _target_admitted(self, event_type: str, target: Path) -> bool:
+        """Whether the resolved target of an admitted path passes the policy."""
+        if event_type == "deleted":
+            return True
+        if event_type == "dir_created":
+            return not self._path_filter.excludes_directory(target)
+        return self._should_admit_event(event_type, target)
 
     def _queue_event(self, event_type: str, file_path: Path) -> None:
         """Queue an event for async processing."""

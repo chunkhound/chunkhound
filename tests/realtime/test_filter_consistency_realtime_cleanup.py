@@ -635,6 +635,64 @@ def test_polling_walk_does_not_enter_excluded_node_modules(tmp_path: Path) -> No
     assert not any("node_modules" in p.parts for p in visited)
 
 
+def _file_symlink(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+
+
+@pytest.mark.asyncio
+async def test_file_alias_to_excluded_target_is_not_queued(tmp_path: Path) -> None:
+    """An included link is indexed as its target, so the target must pass the
+    policy too: a link to a file under node_modules/ is not queued for
+    indexing, while a link to an included file is. A delete is still queued,
+    so a previously indexed path can be cleaned up."""
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "real.py").write_text("R = 1\n", encoding="utf-8")
+    secret = root / "node_modules" / "pkg" / "secret.py"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("S = 1\n", encoding="utf-8")
+    _file_symlink(root / "alias.py", secret)
+    _file_symlink(root / "good.py", root / "src" / "real.py")
+    config = Config(
+        target_dir=root,
+        database={"path": str(tmp_path / "alias.duckdb"), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchdog"},
+    )
+    event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+    handler = SimpleEventHandler(
+        event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
+    )
+
+    for event_type in ("created", "modified"):
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type=event_type,
+                is_directory=False,
+                src_path=str(root / "alias.py"),
+            )
+        )
+    handler.on_any_event(
+        SimpleNamespace(
+            event_type="modified", is_directory=False, src_path=str(root / "good.py")
+        )
+    )
+    handler.on_any_event(
+        SimpleNamespace(
+            event_type="deleted", is_directory=False, src_path=str(root / "alias.py")
+        )
+    )
+    await asyncio.sleep(0)
+
+    queued = []
+    while not event_queue.empty():
+        queued.append(event_queue.get_nowait())
+    assert [event_type for event_type, _path in queued] == ["modified", "deleted"]
+    assert queued[0][1] == (root / "src" / "real.py").resolve()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
