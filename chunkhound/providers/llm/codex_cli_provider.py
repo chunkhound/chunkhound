@@ -115,7 +115,7 @@ class CodexCLIProvider(BaseCLIProvider):
             # discovery fails (no codex binary, unauthenticated, etc.).
             logger.warning(
                 "Codex model discovery failed; falling back to "
-                "%r. Check 'codex debug models' or "
+                "{!r}. Check 'codex debug models' or "
                 "set CHUNKHOUND_CODEX_DEFAULT_MODEL.",
                 CODEX_DEFAULT_SYNTHESIS_MODEL,
             )
