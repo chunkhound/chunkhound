@@ -1523,6 +1523,10 @@ class IndexingCoordinator(BaseService):
                 except Exception:
                     db_meta_map = {}
                 precomputed_hashes: dict[str, str] = {}
+                # (stored path, current st_mtime, confirmed content_hash) per
+                # file confirmed unchanged by hash; its stored mtime is
+                # refreshed so the next run does not hash it again.
+                mtime_refresh: list[tuple[str, float, str]] = []
                 for f in files:
                     try:
                         rel = self._get_relative_path(f).as_posix()
@@ -1593,6 +1597,9 @@ class IndexingCoordinator(BaseService):
                                     # False positive - metadata changed but content didn't
                                     skipped_unchanged += 1
                                     reasons["ok"] += 1
+                                    mtime_refresh.append(
+                                        (rel, float(st.st_mtime), db_hash)
+                                    )
                                 else:
                                     # Content actually changed (or hash unavailable) - reindex
                                     precomputed_hashes[str(f.resolve())] = cur_hash
@@ -1624,10 +1631,20 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
+                mtimes_refreshed = 0
+                if mtime_refresh:
+                    try:
+                        mtimes_refreshed = await self._db.refresh_file_mtimes_async(
+                            mtime_refresh
+                        )
+                    except Exception as e:
+                        # Costs only a re-hash on the next run.
+                        logger.warning(f"Could not refresh stored mtimes: {e}")
                 _t5 = _t.perf_counter()
                 logger.info(
                     f"Change scan: {len(files_to_process)}/{len(files)} to process "
-                    f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
+                    f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged, "
+                    f"{mtimes_refreshed} mtimes refreshed)"
                 )
                 if debug_skip:
                     logger.warning(
@@ -1746,7 +1763,9 @@ class IndexingCoordinator(BaseService):
                 logger.info(
                     f"Diff: 0/{len(files)} changed "
                     f"({rust_plan.work.skipped_by_hash if rust_plan else 0} "
-                    "unchanged-by-hash); Rust pipeline not started"
+                    "unchanged-by-hash, "
+                    f"{rust_plan.work.mtimes_refreshed if rust_plan else 0} "
+                    "mtimes refreshed); Rust pipeline not started"
                 )
 
             elif _use_rust:
@@ -1821,7 +1840,9 @@ class IndexingCoordinator(BaseService):
                 logger.info(
                     f"Diff: {agg_total_files}/{len(files)} changed in "
                     f"{_diff_elapsed * 1000:.0f}ms "
-                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash)"
+                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash, "
+                    f"{rust_plan.work.mtimes_refreshed if rust_plan else 0} "
+                    "mtimes refreshed)"
                 )
                 # Total skipped = discovered files minus those actually processed.
                 # skipped_by_hash only covers mtime-changed-but-hash-matched files;

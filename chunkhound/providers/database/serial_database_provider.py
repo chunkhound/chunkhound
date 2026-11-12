@@ -419,6 +419,24 @@ class SerialDatabaseProvider(ABC):
         """Async variant of update_file."""
         await self._execute_in_db_thread("update_file", file_id, **kwargs)
 
+    def refresh_file_mtimes(self, entries: list[tuple[str, float, str]]) -> int:
+        """Store the mtime of hash-confirmed unchanged files (see the interface)."""
+        if not entries:
+            return 0
+        return cast(
+            int, self._execute_in_db_thread_sync("refresh_file_mtimes", entries)
+        )
+
+    async def refresh_file_mtimes_async(
+        self, entries: list[tuple[str, float, str]]
+    ) -> int:
+        """Async variant of refresh_file_mtimes."""
+        if not entries:
+            return 0
+        return cast(
+            int, await self._execute_in_db_thread("refresh_file_mtimes", entries)
+        )
+
     async def insert_file_async(self, file: File) -> int:
         """Async variant of insert_file."""
         return cast(int, await self._execute_in_db_thread("insert_file", file))

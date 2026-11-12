@@ -204,6 +204,24 @@ class DatabaseProvider(Protocol):
         """Update file record with new values (asynchronous)."""
         ...
 
+    def refresh_file_mtimes(self, entries: list[tuple[str, float, str]]) -> int:
+        """Store the current mtime of files whose bytes were just confirmed
+        unchanged by hash, so the next run does not hash them again.
+
+        Each entry is (stored path, current st_mtime, content_hash just
+        confirmed). Sets modified_time only, and only on rows whose
+        content_hash still equals the confirmed hash, so a concurrent writer
+        that stored new content never gets an older mtime attached to it.
+        Returns the number of rows updated.
+        """
+        ...
+
+    async def refresh_file_mtimes_async(
+        self, entries: list[tuple[str, float, str]]
+    ) -> int:
+        """Asynchronous variant of refresh_file_mtimes."""
+        ...
+
     async def record_skipped_file_async(
         self,
         path: str,
