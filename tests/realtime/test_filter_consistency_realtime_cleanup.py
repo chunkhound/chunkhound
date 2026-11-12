@@ -493,6 +493,107 @@ def test_ignore_engine_error_on_a_new_directory_marks_the_filter_degraded(
     assert path_filter.is_degraded
 
 
+def _git_ignores(root: Path, rel: str) -> bool:
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", rel],
+        cwd=str(root),
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
+# Each case: .gitignore files, then the .py files to create. git decides which
+# of them are ignored; the full scan, the polling walk and event admission must
+# all agree with it.
+_REINCLUDE_CASES = {
+    # A contents pattern does not exclude the directory itself, so a later
+    # negation re-includes a file inside it.
+    "contents_then_negation": (
+        {".gitignore": "foo/**\n!foo/bar.py\n"},
+        ["foo/bar.py", "foo/other.py", "foo/sub/bar.py", "a.py"],
+    ),
+    # The same through a nested .gitignore; src/sub/ itself is ignored by "**",
+    # so its keep.py stays ignored.
+    "nested_everything_then_negation": (
+        {"src/.gitignore": "**\n!keep.py\n"},
+        ["src/keep.py", "src/drop.py", "src/sub/keep.py", "a.py"],
+    ),
+    # A directory pattern excludes the directory: git never re-includes a file
+    # under an excluded directory.
+    "directory_then_negation": (
+        {".gitignore": "foo/\n!foo/bar.py\n"},
+        ["foo/bar.py", "foo/x.py", "a.py"],
+    ),
+    # Git's whitelist idiom: everything at the top but src/.
+    "whitelist": (
+        {".gitignore": "/*\n!/src/\n!.gitignore\n"},
+        ["src/a.py", "src/pkg/b.py", "other/c.py"],
+    ),
+}
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+@pytest.mark.parametrize("case", sorted(_REINCLUDE_CASES))
+@pytest.mark.asyncio
+async def test_scan_walk_and_admission_agree_with_git_on_reincluded_files(
+    tmp_path: Path, case: str
+) -> None:
+    """A file a negation re-includes is indexed by the full scan, found by the
+    polling walk and admitted as an event, exactly when git does not ignore it.
+    A new directory holding such a file is expanded, not dropped."""
+    ignore_files, py_files = _REINCLUDE_CASES[case]
+    root = tmp_path / "repo"
+    _git_init(root)
+    for rel, text in {**ignore_files, **{p: "X = 1\n" for p in py_files}}.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
+    expected = {rel for rel in py_files if not _git_ignores(root, rel)}
+
+    db_path = tmp_path / "reinclude.duckdb"
+    config = _build_config(root, db_path)
+    services = create_services(db_path, config)
+    services.provider.connect()
+    try:
+        coordinator = IndexingCoordinator(
+            database_provider=services.provider, base_directory=root, config=config
+        )
+        discovered = await coordinator._discover_files(root, ["**/*.py"], [])
+        assert {p.relative_to(root).as_posix() for p in discovered} == expected
+
+        service = RealtimeIndexingService(services, config)
+        current_files, _checked, _truncated = service._polling_snapshot(root)
+        assert {p.relative_to(root).as_posix() for p in current_files} == expected
+
+        event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+        handler = SimpleEventHandler(
+            event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
+        )
+        for rel in py_files:
+            handler.on_any_event(
+                SimpleNamespace(
+                    event_type="modified", is_directory=False, src_path=str(root / rel)
+                )
+            )
+        expected_dirs = {Path(rel).parent.as_posix() for rel in expected} - {"."}
+        for rel in expected_dirs:
+            handler.on_any_event(
+                SimpleNamespace(
+                    event_type="created", is_directory=True, src_path=str(root / rel)
+                )
+            )
+        await asyncio.sleep(0)
+        admitted = set()
+        expanded = set()
+        while not event_queue.empty():
+            event_type, path = event_queue.get_nowait()
+            rel_path = path.relative_to(root.resolve()).as_posix()
+            (expanded if event_type == "dir_created" else admitted).add(rel_path)
+        assert admitted == expected
+        assert expanded == expected_dirs
+    finally:
+        services.provider.disconnect()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
