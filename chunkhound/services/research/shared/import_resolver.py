@@ -96,7 +96,11 @@ class ImportResolverService:
             return []
 
         mapping = parser.extractor.mapping
+        # Mappings anchor dotted imports to source_file.parent, so a relative
+        # database path would resolve imports against the process working directory.
         source_file = Path(file_path)
+        if not source_file.is_absolute():
+            source_file = base_dir / source_file
 
         # Resolve each import
         resolved_paths: list[Path] = []
