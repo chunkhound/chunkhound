@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from chunkhound.core.config.config import Config
+from chunkhound.database_factory import create_services
 from chunkhound.services.realtime.events import SimpleEventHandler
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
@@ -60,6 +61,99 @@ async def test_read_only_events_take_no_queue_slot(tmp_path: Path) -> None:
     assert queue.get_nowait() == ("modified", source.resolve())
     assert [r for r in results if not r[2]] == []
     assert [s for s in seen if s[0] != "modified"] == []
+
+
+@pytest.mark.asyncio
+async def test_write_after_an_indexing_read_is_indexed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With reads dropped, two writes reach the consumer as modified, modified.
+
+    The second lands while the first is being processed, after that run read
+    the file, and inside the duplicate-event window. The open and close events
+    that used to separate the two are gone, so only the consumer's rule for a
+    path being processed keeps the second write from being dropped as a
+    duplicate.
+    """
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n")
+    db_path = tmp_path / ".chunkhound" / "test.db"
+    db_path.parent.mkdir()
+    config = Config(
+        target_dir=tmp_path,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["*.py"]},
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+    service = RealtimeIndexingService(services, config)
+
+    processed: list[str] = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_done = asyncio.Event()
+
+    async def process_file(
+        file_path: Path, skip_embeddings: bool = False
+    ) -> dict[str, object]:
+        processed.append(file_path.read_text())
+        if len(processed) == 1:
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_done.set()
+        return {"status": "processed", "chunks": 1, "embeddings": 0}
+
+    add_file = service.add_file
+
+    async def add_file_without_embed(file_path: Path, priority: str = "change") -> bool:
+        if priority == "embed":
+            return True
+        return await add_file(file_path, priority)
+
+    monkeypatch.setattr(services.indexing_coordinator, "process_file", process_file)
+    monkeypatch.setattr(service, "add_file", add_file_without_embed)
+    service._service_state = "running"
+    service._effective_backend = "watchdog"
+    service.monitoring_ready.set()
+    service._monitoring_ready_at = service._utc_now()
+
+    handler = SimpleEventHandler(
+        service.event_queue,
+        config=config,
+        loop=asyncio.get_running_loop(),
+        root_path=tmp_path,
+        queue_result_callback=service._handle_queue_result,
+        source_event_callback=service._record_source_event,
+        filtered_event_callback=service._record_filtered_event,
+        admission_callback=service._should_admit_realtime_event,
+    )
+
+    async def deliver(*event_types: str) -> None:
+        for event_type in event_types:
+            handler.dispatch(_event(event_type, source))
+        await asyncio.sleep(0)  # run the call_soon_threadsafe enqueues
+
+    consumer = asyncio.create_task(service._consume_events())
+    processor = asyncio.create_task(service._process_loop())
+    try:
+        await deliver("opened", "modified", "closed")  # the first write
+        await asyncio.wait_for(first_started.wait(), timeout=5.0)
+        await deliver("opened", "closed_no_write")  # that run's read
+        source.write_text("x = 2\n")
+        await deliver("opened", "modified", "closed")  # the second write
+        await asyncio.wait_for(service.event_queue.join(), timeout=3.0)
+
+        release_first.set()
+        await asyncio.wait_for(second_done.wait(), timeout=5.0)
+        assert processed == ["x = 1\n", "x = 2\n"]
+    finally:
+        release_first.set()
+        for task in (consumer, processor):
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        services.provider.disconnect()
 
 
 def test_watches_are_scheduled_without_read_only_events(
