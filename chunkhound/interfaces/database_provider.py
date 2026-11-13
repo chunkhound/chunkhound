@@ -88,6 +88,26 @@ class DatabaseProvider(Protocol):
         the database file (see `set_rust_pipeline_in_progress`)."""
         ...
 
+    def note_rust_pipeline_progress(self, phase: str) -> None:
+        """Record that the Rust run holding the file reported progress in phase.
+
+        Must not go through the serial executor's queue, which rejects work
+        while the Rust pipeline owns the file.
+        """
+        ...
+
+    def rust_pipeline_progress(self) -> tuple[float, str | None] | None:
+        """Return (seconds since the last progress from any stage, its phase)
+        during a Rust hold, or None when no Rust run holds the file."""
+        ...
+
+    def rust_pipeline_store_phase(self) -> str | None:
+        """Return the phase the store stage last reported during a Rust hold.
+
+        None outside a hold or before the store stage's first report.
+        """
+        ...
+
     def get_base_directory(self) -> Path:
         """Get the base directory for path normalization.
 

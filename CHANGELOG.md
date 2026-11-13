@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **VoyageAI semantic search ranks better** — Search queries are now embedded with Voyage `input_type="query"` instead of `"document"`. Voyage models embed queries and documents differently, and a query embedded as a document was matched as one document against another, which pushed relevant code far down the results. Indexed chunks were always embedded as documents and still are, so no re-index is needed. Other providers are unchanged.
+- **A hung Rust indexing run is reported** — `daemon_status` reads `stalled` (aggregate `degraded`) when a Rust run holds the database with no progress for 10 minutes (22 for a compaction or index-build step, or before the run first writes), instead of `idle` or `initializing`. A hung native run still cannot be stopped from Python; it is reported so it can be restarted.
 
 ## [6.1.0] - 2026-10-20
 

@@ -32,7 +32,7 @@ class DatabaseRustPipelineInProgressError(DatabaseTemporarilyUnavailableError):
     currently owns write access to the database file."""
 
 
-_COMPACTION_OPERATION_TIMEOUT_SECONDS = 660.0
+COMPACTION_OPERATION_TIMEOUT_SECONDS = 660.0
 
 
 # Probability sampling interval for auto-compaction checks.
@@ -145,6 +145,22 @@ class SerialDatabaseExecutor:
         # Same idea, for the window where the Rust pipeline owns write
         # access to the DB file (Python's connection is closed).
         self._rust_pipeline_in_progress = threading.Event()
+        # Heartbeat of the Rust run holding the file: when the hold started,
+        # and the (monotonic time, phase) of the last progress callback from
+        # each stage. The main stage is the main, parse and embed threads; the
+        # store stage is the store thread alone. Written directly, never
+        # through execute/submit, which fast-fail while the Rust flag is set.
+        # The Rust threads write them off the event loop
+        # (note_rust_pipeline_progress); the event loop reads them when it
+        # derives the live status (rust_pipeline_progress,
+        # rust_pipeline_store_phase). No lock: each stage's report is one
+        # attribute store under the GIL, so its time and phase never tear,
+        # and a read can at worst combine one stage's newer report with the
+        # other's previous one, which only changes that one read's idle time
+        # or stall ceiling.
+        self._rust_hold_started_at: float | None = None
+        self._rust_main_progress: tuple[float, str] | None = None
+        self._rust_store_progress: tuple[float, str] | None = None
         self._execute_timeout_seconds = execute_timeout_seconds
 
     def resolve_timeout(self, operation_name: str) -> float:
@@ -158,7 +174,7 @@ class SerialDatabaseExecutor:
         if self._execute_timeout_seconds is not None:
             return self._execute_timeout_seconds
         if operation_name.startswith("compact"):
-            return _COMPACTION_OPERATION_TIMEOUT_SECONDS
+            return COMPACTION_OPERATION_TIMEOUT_SECONDS
         return 30.0
 
     def set_compaction_in_progress(self, active: bool) -> None:
@@ -175,13 +191,59 @@ class SerialDatabaseExecutor:
     def set_rust_pipeline_in_progress(self, active: bool) -> None:
         """Publish Rust-pipeline-owns-the-file state to callers before they enqueue work."""
         if active:
+            self._rust_hold_started_at = time.monotonic()
+            self._rust_main_progress = None
+            self._rust_store_progress = None
             self._rust_pipeline_in_progress.set()
             return
         self._rust_pipeline_in_progress.clear()
+        self._rust_hold_started_at = None
+        self._rust_main_progress = None
+        self._rust_store_progress = None
 
     def is_rust_pipeline_in_progress(self) -> bool:
         """Return True when the Rust pipeline currently owns the database file."""
         return self._rust_pipeline_in_progress.is_set()
+
+    def note_rust_pipeline_progress(self, phase: str) -> None:
+        """Record that the Rust run holding the file reported progress in phase."""
+        # Rust's store thread reports only the write-* phases, and no other
+        # thread does.
+        if phase.startswith("write-"):
+            self._rust_store_progress = (time.monotonic(), phase)
+        else:
+            self._rust_main_progress = (time.monotonic(), phase)
+
+    def rust_pipeline_progress(self) -> tuple[float, str | None] | None:
+        """Return (seconds since the last progress, its phase) during a Rust hold.
+
+        The last progress is the later report of either stage; with no report
+        yet, the idle time counts from the start of the hold and the phase is
+        None. None when no Rust run holds the file.
+        """
+        # Load before checking the flag: the hold's end clears the flag first,
+        # so a flag still set after these loads means they are this hold's.
+        started_at = self._rust_hold_started_at
+        main = self._rust_main_progress
+        store = self._rust_store_progress
+        if started_at is None or not self.is_rust_pipeline_in_progress():
+            return None
+        reports = [report for report in (main, store) if report is not None]
+        if not reports:
+            return time.monotonic() - started_at, None
+        progress_at, phase = max(reports, key=lambda report: report[0])
+        return time.monotonic() - progress_at, phase
+
+    def rust_pipeline_store_phase(self) -> str | None:
+        """Return the phase the store stage last reported during a Rust hold.
+
+        None when no Rust run holds the file or its store thread has not
+        reported yet.
+        """
+        store = self._rust_store_progress
+        if store is None or not self.is_rust_pipeline_in_progress():
+            return None
+        return store[1]
 
     def _raise_if_db_unavailable_before_submit(
         self, operation_name: str, _bypass_rust_pipeline_guard: bool = False

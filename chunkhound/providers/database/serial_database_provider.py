@@ -195,6 +195,18 @@ class SerialDatabaseProvider(ABC):
         """Return True when the Rust pipeline currently owns the database file."""
         return self._executor.is_rust_pipeline_in_progress()
 
+    def note_rust_pipeline_progress(self, phase: str) -> None:
+        """Record that the Rust run holding the file reported progress in phase."""
+        self._executor.note_rust_pipeline_progress(phase)
+
+    def rust_pipeline_progress(self) -> tuple[float, str | None] | None:
+        """Return (seconds since any stage's progress, its phase) in a Rust hold."""
+        return self._executor.rust_pipeline_progress()
+
+    def rust_pipeline_store_phase(self) -> str | None:
+        """Return the phase the store stage last reported during a Rust hold."""
+        return self._executor.rust_pipeline_store_phase()
+
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
         return self._executor.execute_sync(self, operation_name, *args, **kwargs)
