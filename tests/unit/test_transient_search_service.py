@@ -84,13 +84,17 @@ async def test_streams_5000_chunks_into_bounded_top_page() -> None:
         "page_size": 10,
         "has_more": True,
         "next_offset": 10,
-        "total": 5_000,
+        "total": 2_000,
+        "corpus_total": 5_000,
     }
 
     # The last page of this 5,000-chunk corpus sits beyond the pagination
     # window (see test_deep_offset_rejected_beyond_max_result_window): exact
     # deep-offset ranking would require holding the whole corpus in the heap,
     # which defeats the O(K) memory bound this service exists to provide.
+    # `total` therefore advertises only the servable window, so the page count
+    # derived from it never names an unreachable page; `corpus_total` keeps the
+    # unbounded 5,000 so the truncation stays machine-readable.
     with pytest.raises(ValueError, match="offset\\+page_size"):
         await service.search_semantic("query", page_size=10, offset=4_990)
 
@@ -371,6 +375,7 @@ async def test_bulk_search_empty_query_embeddings_match_scalar_empty_results() -
                 "has_more": False,
                 "next_offset": None,
                 "total": 0,
+                "corpus_total": 0,
             },
         ),
         (
@@ -381,6 +386,7 @@ async def test_bulk_search_empty_query_embeddings_match_scalar_empty_results() -
                 "has_more": False,
                 "next_offset": None,
                 "total": 0,
+                "corpus_total": 0,
             },
         ),
     ]
@@ -1643,3 +1649,124 @@ async def test_invalid_transient_regex_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="Invalid regex pattern"):
         await service.search_regex_async("(unclosed")
+
+
+def _overflowing_service() -> TransientSearchService:
+    """A transient source with more qualifying hits than the paging window."""
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code=f"chunk {i}")
+        for i in range(5_000)
+    ]
+    return TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_total_advertises_only_servable_pages() -> None:
+    service = _overflowing_service()
+
+    results, pagination = await service.search_semantic(
+        "query", page_size=100, offset=1_900
+    )
+
+    assert len(results) == 100
+    assert pagination["total"] == 2_000
+    assert pagination["corpus_total"] == 5_000
+    assert pagination["has_more"] is False
+    assert pagination["next_offset"] is None
+    assert all(off + 100 <= 2_000 for off in range(0, pagination["total"], 100))
+
+    # A page straddling the window boundary is still rejected explicitly.
+    with pytest.raises(ValueError, match="offset\\+page_size"):
+        await service.search_semantic("query", page_size=10, offset=1_995)
+
+
+@pytest.mark.asyncio
+async def test_total_rounds_the_window_down_to_whole_pages() -> None:
+    """2000 is not a multiple of 30, so the last advertised page must end at 1980."""
+    service = _overflowing_service()
+
+    _, pagination = await service.search_semantic("query", page_size=30)
+
+    assert pagination["total"] == 1_980
+    assert pagination["corpus_total"] == 5_000
+    last_offset = pagination["total"] - 30
+    assert last_offset + 30 <= 2_000
+
+    results, _ = await service.search_semantic(
+        "query", page_size=30, offset=last_offset
+    )
+    assert len(results) == 30
+
+    with pytest.raises(ValueError, match="offset\\+page_size"):
+        await service.search_semantic("query", page_size=30, offset=1_980)
+
+
+@pytest.mark.asyncio
+async def test_transient_regex_shares_the_servable_total_contract() -> None:
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code="target") for i in range(5_000)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    _, pagination = await service.search_regex_async("target", page_size=100)
+
+    assert pagination["total"] == 2_000
+    assert pagination["corpus_total"] == 5_000
+    assert all(off + 100 <= 2_000 for off in range(0, pagination["total"], 100))
+
+
+@pytest.mark.asyncio
+async def test_hybrid_both_keeps_its_snapshot_bounded_total() -> None:
+    """Both mode is already window-bounded; the contract must not shrink it."""
+    chunks = [
+        make_chunk(f"diff-{index}", file_path=f"diff-{index}.py", code="target")
+        for index in range(500)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "both",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    _, pagination = await service.search_hybrid("query", page_size=300)
+
+    assert pagination["total"] == 500
+    assert pagination["corpus_total"] == 500
+
+
+@pytest.mark.asyncio
+async def test_hybrid_total_advertises_only_servable_pages() -> None:
+    """Hybrid rejects on offset+page_size, so its total must be page-aligned."""
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code="target") for i in range(5_000)
+    ]
+    service = TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    _, pagination = await service.search_hybrid(
+        "query", regex_pattern="target", page_size=30
+    )
+
+    total = pagination["total"]
+    assert total == 1_980
+    assert pagination["corpus_total"] == 2_000
+    assert all(off + 30 <= 2_000 for off in range(0, total, 30))

@@ -345,12 +345,18 @@ def _convert_paths_to_native(results: list[dict[str, Any]]) -> list[dict[str, An
 
 # Type definitions for return values
 class PaginationInfo(TypedDict):
-    """Pagination metadata for search results."""
+    """Pagination metadata for search results.
+
+    ``total`` counts only what the pagination window can serve, so every page
+    derived from it is reachable. ``corpus_total`` is the unbounded match count
+    and may exceed that window.
+    """
 
     offset: int
     page_size: int
     has_more: bool
     total: NotRequired[int | None]
+    corpus_total: NotRequired[int]
     next_offset: NotRequired[int | None]
 
 

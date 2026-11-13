@@ -41,6 +41,11 @@ def _overfetch_factor() -> int:
         return _DEFAULT_OVERFETCH_FACTOR
 
 
+def _servable_window(window: int, page_size: int) -> int:
+    """Largest total whose every derived page keeps offset+page_size in window."""
+    return window // page_size * page_size if page_size else window
+
+
 def _candidate_pool_size(page_size: int) -> int:
     """Bounded heap / DB fetch size for one transient search call.
 
@@ -532,12 +537,15 @@ class TransientSearchService:
         # Only advertise a next page the same call would accept: the next
         # request must keep offset + page_size inside the supported window.
         has_more = offset + page_size < total and offset + 2 * page_size <= window
+        # Round the window down to a whole page so every page derived from
+        # `total` is servable; `corpus_total` keeps the unbounded count.
         return {
             "offset": offset,
             "page_size": page_size,
             "has_more": has_more,
             "next_offset": offset + page_size if has_more else None,
-            "total": total,
+            "total": min(total, _servable_window(window, page_size)),
+            "corpus_total": total,
         }
 
     @staticmethod
@@ -1250,12 +1258,25 @@ class TransientSearchService:
             else min(len(combined), hybrid_window)
         )
         has_more = available > offset + page_size
+        unbounded = len(combined)
+        if self._vector_source == "db":
+            total = unbounded
+        else:
+            # Both mode rejects on offset alone, so its window already bounds
+            # every derived page; other sources reject on offset + page_size.
+            window = (
+                hybrid_window
+                if self._vector_source == "both"
+                else _servable_window(hybrid_window, page_size)
+            )
+            total = min(available, window)
         return combined[offset : offset + page_size], {
             "offset": offset,
             "page_size": page_size,
             "has_more": has_more,
             "next_offset": offset + page_size if has_more else None,
-            "total": available if self._vector_source != "db" else len(combined),
+            "total": total,
+            "corpus_total": unbounded,
         }
 
     async def get_chunk_similarities_async(

@@ -120,6 +120,34 @@ class TestFormatSearchResultsMarkdown:
         )
         assert "next_offset" not in md
 
+    def test_footer_page_count_stays_inside_the_servable_window(self) -> None:
+        md = self._fmt(
+            [_result() for _ in range(100)],
+            pagination=_pagination(
+                offset=1900,
+                page_size=100,
+                total=2000,
+                has_more=False,
+                next_offset=None,
+            ),
+        )
+        assert "Page 20 of 20" in md
+        assert "of 2000" in md
+
+    def test_footer_last_page_when_window_is_not_a_page_multiple(self) -> None:
+        md = self._fmt(
+            [_result() for _ in range(30)],
+            pagination=_pagination(
+                offset=1950,
+                page_size=30,
+                total=1980,
+                has_more=False,
+                next_offset=None,
+            ),
+        )
+        assert "Page 66 of 66" in md
+        assert "of 1980" in md
+
     def test_empty_results_returns_no_results_message(self) -> None:
         md = self._fmt([])
         assert "No results" in md
