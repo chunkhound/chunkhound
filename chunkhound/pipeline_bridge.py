@@ -7,6 +7,7 @@ by Rust.
 
 import atexit
 import functools
+import multiprocessing
 import os
 import threading
 from collections.abc import Callable
@@ -193,8 +194,20 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
     if _parse_pool is None:
         with _parse_pool_lock:
             if _parse_pool is None:
+                # 'spawn' explicitly, not the platform default: on Linux that
+                # is 'fork', and this pool is created from a process that
+                # already runs threads (an MCP server's stdio reader holds
+                # sys.stdin's lock). A forked worker inherits that lock held
+                # and deadlocks in multiprocessing's _close_stdin() before
+                # running any task, so a start-up scan never finishes. The
+                # global start method set by
+                # indexing_coordinator._ensure_mp_start_method() does not
+                # cover this pool: the realtime/MCP path can create it first.
+                # Same choice as batch_processor and the per-file timeout
+                # worker below.
                 pool = ProcessPoolExecutor(
                     max_workers=max(1, max_workers),
+                    mp_context=multiprocessing.get_context("spawn"),
                     initializer=exit_when_parent_dies,
                 )
                 atexit.register(pool.shutdown, cancel_futures=True)
