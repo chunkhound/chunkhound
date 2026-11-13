@@ -36,6 +36,26 @@ class IndexingStats:
     compaction_reduction_pct: float | None = None
 
 
+class DirectoryIndexingError(RuntimeError):
+    """Directory processing returned a failed result.
+
+    ``transient`` is True when the indexing pipeline failed because a parse
+    worker died; the worker pool has been replaced, so processing
+    the directory again can succeed.
+    """
+
+    def __init__(self, result: dict[str, Any]):
+        """Keep the failed result and whether retrying it can help.
+
+        Args:
+            result: The failed result dict from
+                IndexingCoordinator.process_directory().
+        """
+        super().__init__(f"Directory processing failed: {result}")
+        self.result = result
+        self.transient = bool(result.get("transient"))
+
+
 class DirectoryIndexingService:
     """
     Complete directory indexing pipeline extracted from CLI indexer.
@@ -253,7 +273,7 @@ class DirectoryIndexingService:
         )
 
         if result["status"] not in ["complete", "success", "no_files"]:
-            raise RuntimeError(f"Directory processing failed: {result}")
+            raise DirectoryIndexingError(result)
 
         return result
 

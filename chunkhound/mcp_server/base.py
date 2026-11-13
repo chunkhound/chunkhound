@@ -36,7 +36,10 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
     DatabaseRustPipelineInProgressError,
 )
-from chunkhound.services.directory_indexing_service import DirectoryIndexingService
+from chunkhound.services.directory_indexing_service import (
+    DirectoryIndexingError,
+    DirectoryIndexingService,
+)
 from chunkhound.services.realtime import RealtimeStartupStatusTracker
 from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.utils.logging_guard import log_if_not_mcp
@@ -83,6 +86,10 @@ class MCPServerBase(ABC):
     - _register_tools(): Register protocol-specific tool handlers
     - run(): Main server execution loop
     """
+
+    # Waits before each retry of an initial scan that failed transiently (a
+    # parse worker died). Two retries, three attempts in all.
+    _INITIAL_SCAN_RETRY_DELAYS_SECONDS: tuple[float, ...] = (15.0, 60.0)
 
     def __init__(self, config: Config, debug_mode: bool = False, args: Any = None):
         """Initialize base MCP server.
@@ -135,6 +142,10 @@ class MCPServerBase(ABC):
         self._realtime_failure_recorded = False
         self._scan_task: asyncio.Task | None = None
         self._scan_lock = asyncio.Lock()
+        # Both guarded by _scan_lock: the number of scans started, and the
+        # number of the latest scan that succeeded.
+        self._scan_generation = 0
+        self._last_successful_scan_generation = 0
         self._scan_target_path: Path | None = None
         self._startup_failure_message: str | None = None
         self._startup_publish_complete = asyncio.Event()
@@ -794,7 +805,7 @@ class MCPServerBase(ABC):
                     if task is not monitoring_task:
                         task.cancel()
 
-            await self._run_directory_scan(target_path, trigger="initial")
+            await self._run_initial_scan_with_retry(target_path)
             if ready_task in done:
                 initial_scan_completed_monotonic = time.monotonic()
                 initial_scan_total_duration = self._duration_seconds(
@@ -1030,19 +1041,92 @@ class MCPServerBase(ABC):
                 )
                 self._emit_warm_ready_summary_if_ready()
 
+    async def _run_initial_scan_with_retry(self, target_path: Path) -> None:
+        """Run the initial scan, retrying it after a transient failure.
+
+        A scan fails transiently when a parse worker dies. The
+        worker pool is replaced at that point, so a later scan can succeed,
+        but nothing else would scan again until a realtime resync. Retries
+        wait _INITIAL_SCAN_RETRY_DELAYS_SECONDS first, and a retry is skipped
+        when a newer scan has succeeded meanwhile.
+
+        Raises:
+            Exception: A non-transient failure at once, or the last transient
+                failure once every retry has failed. scan_error stays set.
+        """
+        delays = self._INITIAL_SCAN_RETRY_DELAYS_SECONDS
+        daemon_visible = self._realtime_startup_mode() == "daemon"
+        try:
+            await self._run_directory_scan(target_path, trigger="initial")
+            return
+        except DirectoryIndexingError as error:
+            if not error.transient or not delays:
+                raise
+            last_error = error
+        for attempt, delay in enumerate(delays, start=1):
+            failed_generation = self._scan_generation
+            self._timing_log(
+                "initial scan failed transiently; "
+                f"retry {attempt}/{len(delays)} in {delay:.0f}s error={last_error}",
+                daemon_visible=daemon_visible,
+            )
+            await asyncio.sleep(delay)
+            try:
+                await self._run_directory_scan(
+                    target_path,
+                    trigger="initial",
+                    reason=f"retry {attempt}/{len(delays)}",
+                    superseded_after=failed_generation,
+                )
+                return
+            except DirectoryIndexingError as error:
+                if not error.transient:
+                    raise
+                last_error = error
+        raise last_error
+
     async def _run_directory_scan(
         self,
         target_path: Path,
         trigger: str,
         reason: str | None = None,
         no_embeddings: bool = False,
-    ) -> None:
-        """Perform an initial or reconciliation scan without overlapping other scans."""
+        superseded_after: int | None = None,
+    ) -> bool:
+        """Perform an initial or reconciliation scan without overlapping other scans.
+
+        Args:
+            target_path: Directory to scan.
+            trigger: Label for logs ("initial", "realtime_resync").
+            reason: Optional detail for logs.
+            no_embeddings: Skip embedding generation.
+            superseded_after: A scan generation. If a scan started after it
+                has succeeded by the time this one holds the lock, this scan
+                is skipped: that scan already brought the index up to date.
+
+        Returns:
+            True if the scan ran and succeeded, False if it was skipped.
+
+        Raises:
+            Exception: Whatever the scan raised, after recording scan_error.
+        """
         scan_lock_wait_started_monotonic = time.monotonic()
         daemon_visible = self._realtime_startup_mode() == "daemon" and (
             trigger == "initial" or self._warm_ready_window_active()
         )
         async with self._scan_lock:
+            if (
+                superseded_after is not None
+                and self._last_successful_scan_generation > superseded_after
+            ):
+                self._timing_log(
+                    "directory scan skipped: a newer scan succeeded "
+                    f"trigger={trigger} reason={reason or 'none'}",
+                    daemon_visible=daemon_visible,
+                )
+                return False
+            self._scan_generation += 1
+            generation = self._scan_generation
             execution_started_monotonic = time.monotonic()
             lock_wait_duration = self._duration_seconds(
                 scan_lock_wait_started_monotonic,
@@ -1117,6 +1201,8 @@ class MCPServerBase(ABC):
                     f"files={stats.files_processed} chunks={stats.chunks_created}",
                     daemon_visible=daemon_visible,
                 )
+                self._last_successful_scan_generation = generation
+                return True
 
             except Exception as e:
                 self.debug_log(f"{trigger} scan failed: {e}")

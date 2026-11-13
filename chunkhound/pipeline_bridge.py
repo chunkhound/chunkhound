@@ -11,6 +11,7 @@ import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -200,6 +201,43 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
                 atexit.register(pool.shutdown, cancel_futures=True)
                 _parse_pool = pool
     return _parse_pool
+
+
+def _discard_broken_parse_pool(
+    pool: ProcessPoolExecutor, file_paths: list[str]
+) -> None:
+    """Stop sharing a pool whose worker died, so the next batch gets new workers.
+
+    A broken executor fails every later submit, so keeping it as the shared
+    pool would fail every later parse in this process. Logs each worker's pid
+    and exit code and the batch that was in flight; the worker list is read
+    before shutdown(), which drops it. A shutdown error is logged, never
+    raised, so it cannot replace the BrokenProcessPool.
+    """
+    global _parse_pool
+    with _parse_pool_lock:
+        if _parse_pool is pool:
+            _parse_pool = None
+    # _processes is CPython's private worker map; no public API exposes the
+    # workers' pids and exit codes.
+    workers = dict(getattr(pool, "_processes", None) or {})
+    worker_states = ", ".join(
+        f"pid={pid} exitcode={process.exitcode}" for pid, process in workers.items()
+    )
+    shown = ", ".join(file_paths[:3])
+    more = f" (+{len(file_paths) - 3} more)" if len(file_paths) > 3 else ""
+    logger.error(
+        "Parse pool broke: a worker process died. Workers: {}. Batch in flight: "
+        "{} files: {}{}. Discarding the pool; the next batch starts new workers.",
+        worker_states or "none recorded",
+        len(file_paths),
+        shown,
+        more,
+    )
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception as error:
+        logger.warning("Shutting down the broken parse pool failed: {}", error)
 
 
 def parse_file_callback(
@@ -550,6 +588,7 @@ def parse_batch_callback(
     parse_config: Any = None,
     *,
     index_unknown_files: bool = False,
+    on_pool_broken: Callable[[BrokenProcessPool], None] | None = None,
 ) -> list[tuple[str, list[dict], str | None, str | None]]:
     """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
@@ -570,6 +609,14 @@ def parse_batch_callback(
             ParseCallConfig has no such field, so run_rust_pipeline() binds
             this from the resolved indexing config via functools.partial
             rather than it flowing through parse_config.
+        on_pool_broken: Called with the BrokenProcessPool when a worker
+            died during this batch, before the error propagates. Rust turns
+            the error into a plain string, so run_rust_pipeline() binds this
+            to learn that its run failed because of a dead worker.
+
+    Raises:
+        BrokenProcessPool: A pool worker died. The pool has been discarded,
+            so the next call starts new workers.
 
     Returns:
         List of (language, chunks, error, skip_reason) tuples — same order as
@@ -582,7 +629,13 @@ def parse_batch_callback(
     )
     args_list = [(p, cfg) for p in file_paths]
     pool = _get_parse_pool(cfg.parse_thread_pool_size)
-    return list(pool.map(_parse_one_file, args_list))
+    try:
+        return list(pool.map(_parse_one_file, args_list))
+    except BrokenProcessPool as error:
+        if on_pool_broken is not None:
+            on_pool_broken(error)
+        _discard_broken_parse_pool(pool, file_paths)
+        raise
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:
@@ -878,6 +931,10 @@ async def run_rust_pipeline(
     # shared with any other concurrent or past run_rust_pipeline() call. See
     # _EmbedThreadCache's docstring for why that isolation matters.
     embed_cache = _EmbedThreadCache()
+    # Filled by parse_batch_callback on Rust's parse thread when a pool worker
+    # dies; read after pipeline.run() has returned or raised. Per run, so a
+    # concurrent run's broken pool does not mark this one.
+    pool_breaks: list[BrokenProcessPool] = []
 
     # Both the pipeline construction and pipeline.run() raise a plain PyO3
     # PyRuntimeError on failure (see src/pipeline/pipeline.rs), indistinguishable
@@ -892,7 +949,9 @@ async def run_rust_pipeline(
             pipeline.run,
             files=file_entries,
             parse_batch_callback=functools.partial(
-                parse_batch_callback, index_unknown_files=_index_unknown
+                parse_batch_callback,
+                index_unknown_files=_index_unknown,
+                on_pool_broken=pool_breaks.append,
             ),
             embed_batch_callback=(
                 functools.partial(
@@ -919,7 +978,7 @@ async def run_rust_pipeline(
             ),
         )
     except Exception as e:
-        raise RustPipelineError(reason=str(e)) from e
+        raise RustPipelineError(reason=str(e), transient=bool(pool_breaks)) from e
     finally:
         # Close this run's own per-thread httpx clients before the process
         # event loop is torn down. Must not call loop.run_until_complete on
