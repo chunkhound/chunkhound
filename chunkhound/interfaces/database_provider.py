@@ -88,6 +88,10 @@ class DatabaseProvider(Protocol):
         the database file (see `set_rust_pipeline_in_progress`)."""
         ...
 
+    def is_compaction_in_progress(self) -> bool:
+        """Return True while a compaction holds the database file."""
+        ...
+
     def get_base_directory(self) -> Path:
         """Get the base directory for path normalization.
 
