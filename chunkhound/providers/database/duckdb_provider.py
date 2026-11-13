@@ -637,6 +637,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         finally:
             # Close connection
             conn.close()
+            # Closing aborts any open transaction; a stale True would make
+            # later in-op transactional checks skip their own BEGIN/COMMIT.
+            state["transaction_active"] = False
             # Clear thread-local connection
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")

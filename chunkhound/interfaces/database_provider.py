@@ -1,5 +1,6 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -520,6 +521,20 @@ class DatabaseProvider(Protocol):
 
     async def rollback_transaction_async(self) -> None:
         """Rollback the current transaction (asynchronous)."""
+        ...
+
+    async def store_file_result_async(
+        self,
+        file: File,
+        plan_chunks: Callable[[int, list[Chunk]], tuple[list[int], list[Chunk]]],
+    ) -> tuple[int, bool, list[int]]:
+        """Store one parsed file and its chunks as one atomic operation.
+
+        Upserts the file row, then calls ``plan_chunks(file_id, existing_chunks)``
+        for ``(chunk_ids_to_delete, chunks_to_insert)`` and applies both, all in
+        one database submission that commits or rolls back as a unit.
+        Returns ``(file_id, is_existing, inserted_chunk_ids)``.
+        """
         ...
 
     # File Processing Integration

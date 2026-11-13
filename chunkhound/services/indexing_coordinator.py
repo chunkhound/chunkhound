@@ -20,6 +20,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from fnmatch import fnmatch
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -47,6 +48,9 @@ from chunkhound.parsers.chunk_splitter import (
 )
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.providers.database.like_utils import escape_like_pattern
+from chunkhound.providers.database.serial_executor import (
+    DatabaseTemporarilyUnavailableError,
+)
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -98,14 +102,6 @@ def _ensure_mp_start_method() -> None:
 
 def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
     return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
-
-
-class _StatResult:
-    """Lightweight stat-like object used in _store_parsed_results."""
-
-    def __init__(self, size: int, mtime: float) -> None:
-        self.st_size = size
-        self.st_mtime = mtime
 
 
 class _IgnoreMatcher(Protocol):
@@ -1114,79 +1110,29 @@ class IndexingCoordinator(BaseService):
                         )
                 continue
 
-            # Detect language for storage
-            language = result.language
-
-            # Per-file transaction boundaries
+            # The whole file write is ONE provider operation: a transaction that
+            # spans awaits lets a Rust handover close the connection inside it.
             try:
-                await self._db.begin_transaction_async()
-                # Create stat object for _store_file_record
-                file_stat = _StatResult(result.file_size, result.file_mtime)
-                # Extract content hash if available (from parsing result or precomputed)
-                content_hash = getattr(result, "content_hash", None)
-                file_id, is_existing = await self._store_file_record(
-                    result.file_path, file_stat, language, content_hash
+                file_model = File(
+                    path=FilePath(
+                        self._get_relative_path(result.file_path).as_posix()
+                    ),
+                    size_bytes=result.file_size,
+                    mtime=result.file_mtime,
+                    language=result.language,
+                    content_hash=getattr(result, "content_hash", None),
+                )
+                file_id, _, ids = await self._db.store_file_result_async(
+                    file_model, partial(self._plan_chunk_changes, result.chunks)
                 )
 
                 # Track file_id for single-file case
                 file_ids.append(file_id)
-
-                # Convert result chunks to Chunk models using from_dict()
-                new_chunk_models = [
-                    Chunk.from_dict({**chunk_data, "file_id": file_id})
-                    for chunk_data in result.chunks
-                ]
-
-                existing_chunks: list[Chunk]
-                if is_existing:
-                    existing_chunks = cast(
-                        list[Chunk],
-                        await self._db.get_chunks_by_file_id_async(
-                            file_id, as_model=True
-                        ),
-                    )
-                else:
-                    existing_chunks = []
-
-                if existing_chunks:
-                    # Smart diff to preserve embeddings
-                    chunk_diff = self._chunk_cache.diff_chunks(
-                        new_chunk_models, existing_chunks
-                    )
-
-                    # Delete modified/removed chunks
-                    chunks_to_delete = chunk_diff.deleted + chunk_diff.modified
-                    if chunks_to_delete:
-                        chunk_ids_to_delete = [
-                            int(chunk.id)
-                            for chunk in chunks_to_delete
-                            if chunk.id is not None
-                        ]
-                        if chunk_ids_to_delete:
-                            await self._db.delete_chunks_batch_async(
-                                chunk_ids_to_delete
-                            )
-
-                    # Store new/modified chunks (pass models directly)
-                    chunks_to_store = chunk_diff.added + chunk_diff.modified
-                    chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
-                    ids = (
-                        await self._db.insert_chunks_batch_async(chunks_to_store)
-                        if chunks_to_store
-                        else []
-                    )
-                else:
-                    # New file or existing file with no chunks — store all
-                    new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
-                    ids = await self._db.insert_chunks_batch_async(new_chunk_models)
                 logger.debug(f"Batch inserted {len(ids)} chunks for file_id {file_id}")
                 stats["chunk_ids_needing_embeddings"].extend(ids)
                 stats["total_chunks"] += len(ids)
                 # Count this file as processed successfully (stored or updated)
                 stats["total_files"] += 1
-
-                # Commit per-file; threshold-based checkpointing manages WAL compaction
-                await self._db.commit_transaction_async(force_checkpoint=False)
 
                 # Update progress
                 if file_task is not None and self.progress:
@@ -1206,24 +1152,12 @@ class IndexingCoordinator(BaseService):
                             info=_progress_info(stored, skipped, errs, display_chunks),
                         )
 
-            except asyncio.CancelledError:
-                # CancelledError is a BaseException (not Exception) since Python
-                # 3.8, so it skips the `except Exception` branch below. Without
-                # this handler, a task cancellation (e.g. service shutdown)
-                # between begin_transaction_async() and commit_transaction_async()
-                # leaves the DB transaction open, and a later disconnect()'s
-                # mandatory CHECKPOINT fails with "transaction local changes".
-                try:
-                    await self._db.rollback_transaction_async()
-                except Exception:
-                    logger.warning(
-                        "Failed to roll back transaction while cancelling "
-                        f"processing of {result.file_path}",
-                        exc_info=True,
-                    )
+            except DatabaseTemporarilyUnavailableError:
+                # Rejected before it opened anything; callers retry it (the
+                # realtime busy-retry for a single file).
                 raise
             except Exception as e:
-                await self._db.rollback_transaction_async()
+                # The provider operation already rolled back.
                 stats["errors"].append({"file": str(result.file_path), "error": str(e)})
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
@@ -2036,54 +1970,32 @@ class IndexingCoordinator(BaseService):
             logger.warning(f"Failed to compute hash for {rel_path}: {e}")
             return None
 
-    async def _store_file_record(
+    def _plan_chunk_changes(
         self,
-        file_path: Path,
-        file_stat: Any,
-        language: Language,
-        content_hash: str | None = None,
-    ) -> tuple[int, bool]:
-        """Store or update file record in database.
+        chunk_dicts: list[dict[str, Any]],
+        file_id: int,
+        existing_chunks: list[Chunk],
+    ) -> tuple[list[int], list[Chunk]]:
+        """Return (chunk ids to delete, chunks to insert) for one file.
 
-        Executes DB reads (get_file_by_path_async) inside the caller's open
-        transaction.  This is safe under DuckDB MVCC — reads see a consistent
-        snapshot of the data at transaction-start.  The caller is responsible
-        for the surrounding begin_transaction_async / commit_transaction_async.
-
-        Args:
-            file_path: Path to the file
-            file_stat: File stat object with st_size and st_mtime
-            language: Programming language of the file
-            content_hash: Optional content hash for change detection
-
-        Returns:
-            Tuple of (file_id, is_existing) where is_existing indicates
-            whether the file already existed in the database.
+        Pure Python: it runs on the database thread inside the provider's
+        store_file_result operation. Unchanged chunks keep their embeddings.
         """
-        relative_path = self._get_relative_path(file_path)
-        existing_file = cast(
-            dict[str, Any] | None,
-            await self._db.get_file_by_path_async(relative_path.as_posix()),
+        new_chunks = [
+            Chunk.from_dict({**chunk_data, "file_id": file_id})
+            for chunk_data in chunk_dicts
+        ]
+        if not existing_chunks:
+            return [], self._validate_chunk_sizes(new_chunks)
+        chunk_diff = self._chunk_cache.diff_chunks(new_chunks, existing_chunks)
+        delete_ids = [
+            int(chunk.id)
+            for chunk in chunk_diff.deleted + chunk_diff.modified
+            if chunk.id is not None
+        ]
+        return delete_ids, self._validate_chunk_sizes(
+            chunk_diff.added + chunk_diff.modified
         )
-
-        if existing_file:
-            file_id = existing_file["id"]
-            await self._db.update_file_async(
-                file_id,
-                size_bytes=file_stat.st_size,
-                mtime=file_stat.st_mtime,
-                content_hash=content_hash,
-            )
-            return file_id, True
-
-        file_model = File(
-            path=FilePath(relative_path.as_posix()),
-            size_bytes=file_stat.st_size,
-            mtime=file_stat.st_mtime,
-            language=language,
-            content_hash=content_hash,
-        )
-        return await self._db.insert_file_async(file_model), False
 
     async def get_stats(self) -> dict[str, Any]:
         """Get database statistics.
