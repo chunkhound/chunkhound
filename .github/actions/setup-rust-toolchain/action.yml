@@ -8,8 +8,14 @@ description: >
 runs:
   using: composite
   steps:
-    - name: Install Rust stable toolchain
-      uses: dtolnay/rust-toolchain@stable
+    # Pinned to 1.99.1: under Rust 1.100.0 the `cargo test` binaries cannot load
+    # the downloaded libduckdb shared library on any OS. A version-named
+    # toolchain installs with rustup's minimal profile, so rustfmt and clippy
+    # (make rust-check) must be listed.
+    - name: Install Rust toolchain (pinned)
+      uses: dtolnay/rust-toolchain@1.99.1
+      with:
+        components: rustfmt, clippy
 
     - name: Resolve Python interpreter for cache key (Windows uv builds)
       shell: bash
