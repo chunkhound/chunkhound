@@ -918,6 +918,109 @@ class TestRealtimeFunctional:
                     await task
 
     @pytest.mark.asyncio
+    async def test_follow_up_reserved_before_missing_file_check_is_queued(
+        self,
+        realtime_setup,
+        monkeypatch,
+    ):
+        """A follow-up reserved in a change survives its missing-file exit.
+
+        The change is held in the promoted embed pass that runs before the
+        existence check, the file is re-created and its event reserves a
+        follow-up, and the file is missing at the check. The follow-up must
+        still be queued.
+        """
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "missing_at_check.py"
+        target_file.write_text("value = 1\n")
+        processed_contents: list[str] = []
+        follow_up_processed = asyncio.Event()
+        promoted_pass_started = asyncio.Event()
+        release_promoted_pass = asyncio.Event()
+        missing_at_next_check = False
+        overdue_calls = 0
+
+        def overdue_on_first_call() -> list[object]:
+            nonlocal overdue_calls
+            overdue_calls += 1
+            if overdue_calls == 1:
+                return [service._build_mutation("embed", target_file)]
+            return []
+
+        async def held_promoted_pass(overdue: list[object]) -> None:
+            promoted_pass_started.set()
+            await release_promoted_pass.wait()
+
+        original_exists = Path.exists
+
+        def exists_missing_once(path: Path, *args: object, **kwargs: object) -> bool:
+            nonlocal missing_at_next_check
+            if missing_at_next_check and path == target_file:
+                missing_at_next_check = False
+                return False
+            return original_exists(path, *args, **kwargs)
+
+        async def recording_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            processed_contents.append(file_path.read_text())
+            follow_up_processed.set()
+            return {"status": "processed", "chunks": 1, "embeddings": 0}
+
+        original_add_file = service.add_file
+
+        async def skip_embed_follow_up(
+            file_path: Path, priority: str = "change"
+        ) -> bool:
+            if priority == "embed":
+                return True
+            return await original_add_file(file_path, priority)
+
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            recording_process_file,
+        )
+        monkeypatch.setattr(service, "add_file", skip_embed_follow_up)
+        monkeypatch.setattr(service, "_overdue_embed_mutations", overdue_on_first_call)
+        monkeypatch.setattr(service, "_run_promoted_embed_pass", held_promoted_pass)
+        monkeypatch.setattr(Path, "exists", exists_missing_once)
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        async def watcher_event(event_type: str) -> None:
+            service._record_source_event(event_type, target_file)
+            service._record_accepted_event(event_type, target_file)
+            await service.event_queue.put((event_type, target_file))
+
+        consumer_task = asyncio.create_task(service._consume_events())
+        process_task = asyncio.create_task(service._process_loop())
+        service.event_consumer_task = consumer_task
+        service.process_task = process_task
+
+        try:
+            await watcher_event("modified")
+            await asyncio.wait_for(promoted_pass_started.wait(), timeout=3.0)
+
+            target_file.write_text("value = 2\n")
+            await watcher_event("created")
+            await asyncio.wait_for(service.event_queue.join(), timeout=2.0)
+
+            missing_at_next_check = True
+            release_promoted_pass.set()
+            await asyncio.wait_for(follow_up_processed.wait(), timeout=3.0)
+            assert processed_contents == ["value = 2\n"]
+        finally:
+            release_promoted_pass.set()
+            for task in (consumer_task, process_task):
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+    @pytest.mark.asyncio
     async def test_write_after_failed_processing_inside_dedup_window_is_indexed(
         self,
         realtime_setup,

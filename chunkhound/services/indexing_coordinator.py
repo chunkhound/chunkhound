@@ -2225,6 +2225,30 @@ class IndexingCoordinator(BaseService):
             logger.error(f"Failed to remove file {file_path}: {e}")
             return 0
 
+    async def count_chunks_missing_embeddings(
+        self, exclude_patterns: list[str] | None = None
+    ) -> int | None:
+        """Count chunks with no vector for the current provider/model.
+
+        Uses the same query generate_missing_embeddings works from, so the count and
+        the repair can never disagree. None when there is no embedding provider.
+        """
+        if not self._embedding_provider:
+            return None
+        from .embedding_service import EmbeddingService
+
+        service = EmbeddingService(
+            database_provider=self._db,
+            embedding_provider=self._embedding_provider,
+        )
+        ids = await asyncio.to_thread(
+            service._get_chunk_ids_without_embeddings,
+            self._embedding_provider.name,
+            self._embedding_provider.model,
+            exclude_patterns,
+        )
+        return len(ids)
+
     async def generate_missing_embeddings(
         self,
         exclude_patterns: list[str] | None = None,
