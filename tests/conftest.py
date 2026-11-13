@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 
@@ -77,6 +78,16 @@ def _ignore_user_global_config(tmp_path_factory):
         os.environ.pop("CHUNKHOUND_GLOBAL_CONFIG_FILE", None)
     else:
         os.environ["CHUNKHOUND_GLOBAL_CONFIG_FILE"] = previous
+
+
+@pytest.fixture(autouse=True)
+def _clear_transient_diff_chunk_cache() -> Iterator[None]:
+    """Isolate the process-wide diff chunk cache across tests."""
+    yield
+    tools_mod = sys.modules.get("chunkhound.mcp_server.tools")
+    cache = getattr(tools_mod, "_TRANSIENT_DIFF_CHUNK_CACHE", None)
+    if cache is not None:
+        cache.clear()
 
 
 def _discover_free_opencode_models() -> list[str]:
