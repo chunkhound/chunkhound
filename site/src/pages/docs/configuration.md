@@ -1,14 +1,24 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: "Configuration"
-description: "Configure embedding providers, database backends, and indexing behavior."
-order: 2
-section: "manual"
 ---
 
 # Configuration
 
 ChunkHound is configured through a JSON file, environment variables, and CLI flags.
+
+## Local-first and provider boundaries
+
+ChunkHound is a local-first runtime: the CLI, the local database, indexing, and the research pipeline run on your machine. Acquisition, indexing, and research stay local by default. Two boundaries are explicit:
+
+- **Web research always egresses.** `websearch` contacts DuckDuckGo for discovery and fetches the source websites; `fetchurl` contacts the target site. That traffic goes out from your machine and is inherent to web research.
+- **Remote providers receive relevant content.** If you configure remote embedding, reranking, or LLM providers, the content needed for those requests crosses that provider boundary. Local OpenAI-compatible endpoints (Ollama, vLLM) keep the entire workflow on your hardware.
+
+Choose local providers for fully local operation; there is no mandatory hosted ChunkHound service either way.
+
+### Recommended VoyageAI setup
+
+This setup keeps the runtime and index local, but sends relevant content to VoyageAI for embeddings and reranking. Before using it with sensitive content, [opt out under VoyageAI&rsquo;s Terms](https://dashboard.voyageai.com/organization/tos) to prevent future submissions from training or improving its service; Voyage requires a payment method for the opt-out. Choose Ollama or vLLM for local/on-prem processing, or a provider/private deployment whose terms meet your organization&rsquo;s requirements.
 
 ## Configuration File
 
@@ -33,10 +43,11 @@ Example global config (`~/.config/chunkhound/chunkhound.json`):
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-code-4"
+    "model": "voyage-4-lite"
   },
   "llm": {
-    "provider": "anthropic"
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash"
   },
   "indexing": {
     "exclude": ["**/node_modules/**", "**/.git/**", "**/dist/**"]
@@ -102,7 +113,7 @@ Example — project uses its own exclude list (replaces global's list at the raw
   },
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-code-4",
+    "model": "voyage-4-lite",
     "batch_size": 100
   },
   "indexing": {
@@ -114,9 +125,8 @@ Example — project uses its own exclude list (replaces global's list at the raw
     "detect_embedded_sql": true
   },
   "llm": {
-    "provider": "anthropic",
-    "utility_model": "claude-haiku-4-5-20251001",
-    "synthesis_model": "claude-sonnet-4-5-20250929"
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash"
   }
 }
 ```
@@ -311,7 +321,7 @@ This prevents a well-intentioned rule change during a `search` invocation from s
 - **Single attempt.** No retries. No client-side cache.
 - **Recoverable failures** (timeout, transport error, non-2xx response, JSON parse error, envelope validation, `min_chunkhound_version` gate) log a WARNING and the invocation proceeds against whatever is currently on disk. This is intentional — remote-config outages must not brick indexing or search.
 - **Disk-write failures during backup or persist escalate to `sys.exit(1)`** with the target path and errno on stderr. A silent write failure would leave the process running against a stale on-disk copy while advertising success.
-- **`httpx` runs with `trust_env=False`**, so `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `netrc` are ignored on the remote-config fetch. This is deliberate: a hostile `HTTPS_PROXY` could reroute the credentialed request, and a MITM proxy holding a system-trusted CA could terminate the tunnel and read the `Authorization` header. **Operational consequence** — an operator needing a private / internal CA must extend the **system** trust store (e.g. install the CA into `/etc/ssl/certs`, the OS keychain, or the process's baked-in bundle); pointing `SSL_CERT_FILE` at an internal bundle has no effect and the TLS handshake will fail. The failure looks like any other recoverable fetch WARNING ("Remote-config fetch failed"), which can be mistaken for a flaky server rather than an ignored CA bundle.
+- **`httpx` runs with `trust_env=False`**, so `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `netrc` are ignored on the remote-config fetch. This is deliberate: a hostile `HTTPS_PROXY` could reroute the credentialed request, and a MITM proxy holding a trusted CA could terminate the tunnel and read the `Authorization` header. **Operational consequence** — the fetch uses HTTPX's default CA bundle (`certifi.where()`) and exposes no CA setting. Installing a private CA only in the OS trust store may not help; add it to the CA bundle the packaged runtime actually uses, or use a certificate that chains to a public root. `SSL_CERT_FILE` and `SSL_CERT_DIR` have no effect. The failure looks like any other recoverable fetch WARNING ("Remote-config fetch failed"), which can be mistaken for a flaky server rather than an untrusted CA.
 
 ### Startup validation
 
@@ -328,11 +338,137 @@ The delta-only gate above relies on structured error codes returned by `Config.v
 | `db_readonly_wrong_command` | `database.read_only` is `true` for a command other than `mcp`. |
 | `db_readonly_non_duckdb` | During `mcp`, `database.read_only` is `true` with a non-DuckDB provider. (Non-`mcp` commands hit `db_readonly_wrong_command` first.) |
 
+## Usage Analytics
+
+ChunkHound can record opt-in usage events and upload them to an S3-compatible bucket. Analytics is off by default. Recorder construction and upload failures never fail a command: a recorder that cannot start becomes a no-op, and upload failures are logged and dropped. Invalid analytics values are rejected during configuration validation like any other setting, so a bad `anonymize` value or a non-positive interval can still fail startup.
+
+For fleet rollout and the credential policy, see [Enterprise Setup](/docs/enterprise/).
+
+### What is recorded
+
+One `command_summary` event is written per analytics-wrapped CLI command or MCP tool call. CLI coverage is bounded to `index`, `search`, `research`, `websearch`, `fetchurl`, `map`, `autodoc`, and `calibrate`; the `mcp` command records its tool calls instead.
+
+| Field | Meaning |
+|---|---|
+| `type` | Always `command_summary`. |
+| `user` | OS username, salted hash, or `null`, depending on `anonymize`. |
+| `ts` | UTC ISO 8601 timestamp. |
+| `repository` | Repository name from `git remote get-url origin`, or the target directory name. |
+| `os` | Platform name (`Linux`, `Darwin`, `Windows`). |
+| `chunkhound_version` | Client version. |
+| `command` | Command or MCP tool name. |
+| `source` | `cli` or `mcp`. |
+| `duration_ms` | Command duration. |
+| `success` | Whether the command completed successfully. |
+| `action` | Command-specific fields, with sensitive values redacted by default. |
+| `providers` | Per-kind arrays of provider and model totals. |
+| `internal_error_type` | Internal error class name, recorded only when no provider call failed. |
+
+`providers` maps each kind that has calls (`embedding`, `llm`, `reranker`) to an array of entries. Each entry contains `provider`, `model`, `calls`, `fails`, `error_types`, `input_tokens`, and `output_tokens`. A token field is `null` when no call reported it.
+
+`action` carries a small allowlist, not a generic argument dump:
+
+| Command or tool | Fields |
+|---|---|
+| `search` (CLI and MCP) | `query`, `commit_range`, `commit_hash`, `last_n_commits` |
+| `research` / `code_research` | `query` |
+| `websearch` | `query` |
+| `fetchurl` | `url` |
+| `index` | `mode`, `file_count`, `total_chunks` |
+| Other commands | Empty object |
+
+`query`, `question`, and `url` are set to `null` unless `save_sensitive_data` is true. The keys stay present so consumers can see the field existed.
+
+ChunkHound does not record source content, file paths, or full stack traces. It does record repository names, OS, version, command, provider and model names, token counts, commit ranges or hashes, and query text when `save_sensitive_data` is enabled.
+
+### Settings
+
+```json
+{
+  "analytics": {
+    "enabled": false,
+    "anonymize": "full",
+    "save_sensitive_data": false,
+    "s3_endpoint_url": null,
+    "s3_bucket": null,
+    "flush_interval_seconds": 21600,
+    "flush_batch_size": 500,
+    "max_upload_retries": 10
+  }
+}
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master opt-in switch. |
+| `anonymize` | `"full"` | `full` records the OS username, `hashed` records a salted SHA-256 hash, `anonymous` omits the identity. |
+| `save_sensitive_data` | `false` | Record `query`, `question`, and `url` verbatim. Independent of `anonymize`. |
+| `s3_endpoint_url` | `null` | S3-compatible endpoint. Path-style addressing is used. |
+| `s3_bucket` | `null` | Target bucket. |
+| `s3_access_key` | `null` | Access key. Prefer the environment variable below. |
+| `s3_secret_key` | `null` | Secret key. Prefer the environment variable below. |
+| `flush_interval_seconds` | `21600` | Maximum time between flushes (6 hours). |
+| `flush_batch_size` | `500` | Buffered lines that trigger an early flush. |
+| `max_upload_retries` | `10` | Failed upload attempts before the buffer file is dropped. |
+
+There are no analytics CLI flags. Set these values in a config file, the environment, or a remote-config rule.
+
+Environment overrides use `CHUNKHOUND_ANALYTICS__<KEY>`: `CHUNKHOUND_ANALYTICS__ENABLED`, `CHUNKHOUND_ANALYTICS__ANONYMIZE`, `CHUNKHOUND_ANALYTICS__SAVE_SENSITIVE_DATA`, `CHUNKHOUND_ANALYTICS__S3_ENDPOINT_URL`, `CHUNKHOUND_ANALYTICS__S3_BUCKET`, `CHUNKHOUND_ANALYTICS__FLUSH_INTERVAL_SECONDS`, `CHUNKHOUND_ANALYTICS__FLUSH_BATCH_SIZE`, and `CHUNKHOUND_ANALYTICS__MAX_UPLOAD_RETRIES`.
+
+The S3 credentials use dedicated names and never fall back to ambient AWS variables:
+
+- `CHUNKHOUND_AWS_ACCESS_KEY_ID`
+- `CHUNKHOUND_AWS_SECRET_ACCESS_KEY`
+
+### Identity and the salt
+
+`anonymize` controls the identity only. It does not change action content. Enabling analytics without setting `anonymize` records the OS username, because `full` is the default.
+
+- `full` records the OS username.
+- `hashed` computes a SHA-256 hash of the OS username with a per-install random salt. The salt lives at `~/.config/chunkhound/analytics/salt` with `0600` permissions. It is not uploaded. Delete it and the identity changes.
+- `anonymous` records `user: null`. The S3 object key uses the shared literal `anonymous` segment, so anonymous installs are not distinguishable by key.
+
+The repository name is recorded in every mode.
+
+Only the salt is forced to `0600`. The recorder creates `~/.config/chunkhound/analytics/` and its buffer files with the process umask. Managed deployments should restrict the directory and set a restrictive umask, especially when `save_sensitive_data` is true or identity mode is `full`.
+
+### Local buffer and upload
+
+Events are appended to `~/.config/chunkhound/analytics/buffer-<pid>-<timestamp>.jsonl`.
+
+- The active buffer caps at 10 MB. This cap is fixed. Events beyond it are dropped. Total disk use is not capped: pending files can accumulate across runs.
+- A background thread checks once per second. It flushes when the buffer reaches `flush_batch_size`, or when `flush_interval_seconds` has passed with pending lines.
+- A flush uploads one object and starts a new active buffer. With no S3 target, the client keeps buffering locally and does not rotate files.
+- Shutdown performs a best-effort flush with a 3-second bound.
+- Orphaned buffer files from crashed processes are retried on later runs when an S3 target exists. A retained file is uploaded by the next recorder with a target, using that recorder's current endpoint, bucket, repository, and identity for the object key. The event body is not rewritten. Changing destination, repository, identity, or `save_sensitive_data` can therefore move old events to the new destination, produce key metadata that disagrees with the payload, or leave previously recorded text in place.
+
+The object key is:
+
+```text
+analytics/<repository>/<identity>/<YYYY>/<MM>/<DD>/<timestamp>_<hex>.jsonl
+```
+
+The endpoint URL decides the prefix: a trailing slash keeps its path
+(`https://objects.corp.internal/prefix/` lands under `prefix/`), otherwise the
+last segment is replaced. `https://objects.corp.internal/` lands at the bucket root.
+
+Uploads use one SigV4 `PutObject` per flush, `application/x-ndjson`, path-style addressing, and the fixed `us-east-1` region. Failed uploads are retried up to `max_upload_retries`, then the file is dropped. Upload errors are logged; they never fail the host command.
+
+### Failure behavior
+
+| Condition | Behavior |
+|---|---|
+| Analytics disabled | Recorder is a silent no-op. |
+| No S3 target | Local buffer only; the active file caps at 10 MB, but pending files can accumulate. |
+| Invalid S3 endpoint or bucket | Upload disabled with a warning; local buffer only. |
+| Buffer directory cannot be created | Recorder disabled; the command still runs. |
+| Upload fails | Retries, then drops the file. |
+
 ## Embedding Providers
 
 | Provider | Config Value | Env Var | Default Model | Notes |
 |---|---|---|---|---|
-| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` | Set `model` to `voyage-code-4` for code search |
+| VoyageAI | `voyageai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `voyage-3.5` (provider fallback) | Set `model` to `voyage-code-4` for maximum code recall. The configurator emits `voyage-4-lite` + `rerank-3-lite` explicitly |
 | OpenAI | `openai` | `CHUNKHOUND_EMBEDDING__API_KEY` | `text-embedding-3-small` | Widely available |
 
 ### VoyageAI Models
@@ -344,9 +480,9 @@ All models below accept `output_dims` of 256, 512, 1024 (default), or 2048. Chun
 | `voyage-code-4` | 32K | 320K | Code-specialized, built for coding-agent retrieval. Recommended for code search |
 | `voyage-4` | 32K | 320K | General purpose, balanced cost and quality |
 | `voyage-4-large` | 32K | 120K | General purpose, highest retrieval quality |
-| `voyage-4-lite` | 32K | 1M | General purpose, lowest cost and latency |
+| `voyage-4-lite` | 32K | 1M | Configurator recommendation. General purpose, lowest cost and latency |
 | `voyage-code-3` | 32K | 120K | Previous-generation code model |
-| `voyage-3.5` | 32K | 320K | Default. Previous-generation general purpose |
+| `voyage-3.5` | 32K | 320K | Provider fallback when `embedding.model` is unset. Previous-generation general purpose |
 | `voyage-3.5-lite` | 32K | 1M | Previous-generation lite |
 | `voyage-3-large` | 32K | 120K | Previous-generation large |
 | `voyage-finance-2` | 32K | 120K | Finance domain, 1024 dims only |
@@ -375,7 +511,9 @@ Which model and dimensions an index uses is recorded in a small file beside the 
 
 To adopt a new model deliberately, accept the prompt. To change dimensions, or to start clean, delete the database directory and re-index. To stop being asked, set `embedding.model` and `embedding.output_dims` to whatever the index already holds.
 
-When a newer model supersedes the one in use, an interactive `chunkhound index` prints a one-line suggestion. It never acts on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
+For models in the bundled upgrade map, an interactive `chunkhound index` prints a one-line suggestion naming an alternative. This print-only hint does not mean that the suggested model is better for every workload. It never changes the model or re-embeds on its own and does not appear in non-interactive runs. Set `CHUNKHOUND_NO_MODEL_SUGGESTIONS=1` to silence it.
+
+When `embedding.model` is unset, the VoyageAI provider falls back to `voyage-3.5` (and `rerank-2.5` for reranking). The homepage configurator does not rely on that fallback: it recommends and emits `voyage-4-lite` + `rerank-3-lite` explicitly. Existing configs that omit `model` keep the fallback, so nothing changes for them. Omitting `embedding.rerank_model` likewise keeps SDK reranking enabled with the provider default `rerank-2.5`. There is no config flag to switch SDK reranking off on the official endpoint; pointing `embedding` at a custom `base_url` disables it (`supports_reranking()` returns `False` unless a `rerank_url` is set).
 
 ### Embedding Options
 
@@ -386,7 +524,7 @@ When a newer model supersedes the one in use, an interactive `chunkhound index` 
 | `rerank_model` | `string` | `null` | Reranking model name (enables multi-hop reranking) |
 | `rerank_url` | `string` | `null` | Separate rerank endpoint URL (optional when reranking is served from `base_url`) |
 | `rerank_ssl_verify` | `boolean` | `null` | Verify TLS certificates for rerank requests. Inherits `ssl_verify` when unset. |
-| `rerank_format` | `string` | `"auto"` | Reranking API format: `cohere`, `tei`, or `auto` |
+| `rerank_format` | `string` | `"auto"` | Reranking API format: `cohere`, `tei`, `voyage`, or `auto` (`voyage` for native VoyageAI-compatible endpoints such as MongoDB Atlas — uses `top_k` and returns a `data` array) |
 | `rerank_batch_size` | `number` | `null` | Max documents per rerank request |
 | `timeout` | `number` | `30` | Request timeout in seconds |
 | `max_retries` | `number` | `3` | Max retry attempts on failure |
@@ -492,40 +630,43 @@ By default, ChunkHound excludes common noise directories (`node_modules`, `dist`
 
 The LLM provider is used for deep code research (`chunkhound research` and the `code_research` MCP tool).
 
+The `llm` section is configured independently of `embedding`: you can set `llm.provider` with no embedding config (and vice versa), and the two may point at different providers. ChunkHound validates each section separately per command.
+
 | Provider | Config Value | Env Var | Utility Default | Synthesis Default | Notes |
 |---|---|---|---|---|---|
 | Claude Code CLI | `claude-code-cli` | -- | `claude-haiku-4-5-20251001` | `claude-haiku-4-5-20251001` | Uses local Claude Code installation |
 | Codex CLI | `codex-cli` | -- | `codex` | `codex` | Uses local Codex CLI installation |
-| OpenCode CLI | `opencode-cli` | -- | `opencode/grok-code` | `opencode/grok-code` | Uses local OpenCode CLI installation |
-| Anthropic | `anthropic` | `CHUNKHOUND_LLM_API_KEY` | `claude-haiku-4-5-20251001` | `claude-sonnet-4-5-20250929` | Direct API access |
+| OpenCode CLI | `opencode-cli` | -- | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` | Uses local OpenCode CLI installation |
+| Anthropic | `anthropic` | `CHUNKHOUND_LLM_API_KEY` | `claude-haiku-4-5-20251001` | `claude-haiku-4-5-20251001` | Direct API access |
 | OpenAI | `openai` | `CHUNKHOUND_LLM_API_KEY` | `gpt-5-nano` | `gpt-5` | Direct API access |
 | Gemini | `gemini` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly via `CHUNKHOUND_LLM_MODEL` or `llm.model` (configurator defaults to `gemini-3.5-flash`) | Google Gemini API. Migration: `CHUNKHOUND_GEMINI_MODEL` was removed in v4.x — rename to `CHUNKHOUND_LLM_MODEL`. |
 | Grok | `grok` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `grok-4.3`) | Must be set explicitly (configurator defaults to `grok-4.3`) | xAI API. Registry providers require explicit `model`. |
 | DeepSeek | `deepseek` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-flash`) | DeepSeek API. Registry providers require explicit `model`. |
-| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OpenRouter API. Registry providers require explicit `model`. |
-| OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | OrcaRouter API. Registry providers require explicit `model`. |
-| Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Requesty API. Registry providers require explicit `model`. |
-| API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | API Route API. Registry providers require explicit `model`. |
-| Opper | `opper` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Opper API. Registry providers require explicit `model`. |
-| Obscurify.ai | `obscurify-ai` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Obscurify.ai API. Registry providers require explicit `model`. |
-| Atlas Cloud | `atlascloud` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Atlas Cloud API. Registry providers require explicit `model`. |
-| Runcrate | `runcrate` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | Runcrate API. Registry providers require explicit `model`. |
-| cheapaimodel | `cheapaimodel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | cheapaimodel API. Registry providers require explicit `model`. |
-| UberLLM | `uberllm` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | UberLLM API. Registry providers require explicit `model`. |
+| OpenRouter | `openrouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | OpenRouter API. Registry providers require explicit `model`. |
+| Vercel AI Gateway | `vercel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Vercel AI Gateway API. Registry providers require explicit `model`. |
+| OrcaRouter | `orcarouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | Must be set explicitly (configurator defaults to `qwen/qwen3.7-flash`) | OrcaRouter API. Registry providers require explicit `model`. |
+| Requesty | `requesty` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Requesty API. Registry providers require explicit `model`. |
+| API Route | `api-route` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `gemini-3.5-flash`) | Must be set explicitly (configurator defaults to `gemini-3.5-flash`) | API Route API. Registry providers require explicit `model`. |
+| Opper | `opper` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `claude-sonnet-5`) | Must be set explicitly (configurator defaults to `claude-sonnet-5`) | Opper API. Registry providers require explicit `model`. |
+| Obscurify.ai | `obscurify-ai` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4-flash`) | Obscurify.ai API. Registry providers require explicit `model`. |
+| Atlas Cloud | `atlascloud` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-ai/deepseek-v4-flash`) | Must be set explicitly (configurator defaults to `deepseek-ai/deepseek-v4-flash`) | Atlas Cloud API. Registry providers require explicit `model`. |
+| Runcrate | `runcrate` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-ai/DeepSeek-V4.1-Flash`) | Must be set explicitly (configurator defaults to `deepseek-ai/DeepSeek-V4.1-Flash`) | Runcrate API. Registry providers require explicit `model`. |
+| cheapaimodel | `cheapaimodel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | cheapaimodel API. Registry providers require explicit `model`. |
+| UberLLM | `uberllm` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | UberLLM API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 
-When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Requesty, API Route, and Opper) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
+When an OpenAI-compatible LLM provider points at a custom `base_url`, ChunkHound treats it as a generic custom backend. In that mode you must set an explicit model name; ChunkHound does not guess a local default. This applies to `provider: "openai"`, to registry providers (DeepSeek, Grok, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, cheapaimodel, and UberLLM) when routed through a non-canonical endpoint, and to per-role overrides that resolve to those providers.
 
-### OpenRouter structured reasoning negotiation
+### Gateway structured reasoning negotiation
 
-OpenRouter can reject requests that disable reasoning for structured (`response_format` with `json_schema`) calls. ChunkHound probes this once per provider/model and caches the outcome:
+OpenRouter and Vercel AI Gateway can reject requests that disable reasoning for structured (`response_format` with `json_schema`) calls. ChunkHound probes this once per provider/model and caches the outcome:
 
 - **Accepted** (30-day lease): the reasoning-disable payload stays attached to every structured call for that provider/model, so reasoning is disabled there for the lease duration. Non-structured calls (`complete()`), including research synthesis, are unaffected.
 - **Rejected** (24-hour lease): structured calls omit the payload and re-probe once the lease expires. A long-running process enforces the lease in memory, so it re-probes without a restart.
 - **Unknown**: the first structured call optimistically sends the payload; a 400/422 response triggers one unflagged replay.
 
-Negotiation only happens for the built-in canonical OpenRouter endpoint. Setting `llm.base_url` — even to the canonical URL — routes through a generic backend and disables the probe and payload entirely, exactly like a proxy.
+Negotiation only happens for the built-in canonical OpenRouter and Vercel AI Gateway endpoints. Setting `llm.base_url` — even to the canonical URL — routes through a generic backend and disables the probe and payload entirely, exactly like a proxy.
 
 Some models require reasoning and can still return empty `content` after the payload is dropped, so a `rejected` cache entry records only the HTTP outcome. When that happens, ChunkHound raises an error naming the provider, model, and capability state, and research results carry a caller-visible note (a `> **Note:**` blockquote advising a switch of `llm.utility_model`) plus a `metadata.warnings` entry.
 
@@ -584,7 +725,7 @@ For each provider-managed synthesis request, ChunkHound uses this precedence wit
 
 `UNKNOWN` omission capability is handled conservatively: ChunkHound does not assume omission is safe, so it uses a valid sourced declaration or the scalar fallback. This is intentionally not a per-model lookup table.
 
-Built-in DeepSeek, Grok, and OpenRouter configurations at their canonical endpoints authoritatively support omission. Provider-managed DeepSeek and OpenRouter requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on any of these built-ins downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
+Built-in DeepSeek, Grok, OpenRouter, OrcaRouter, Requesty, and Vercel AI Gateway configurations at their canonical endpoints authoritatively support omission. Provider-managed DeepSeek, OpenRouter, OrcaRouter, Requesty, and Vercel AI Gateway requests omit `max_tokens`, and provider-managed Grok Chat Completions requests omit `max_completion_tokens`. Setting a custom `base_url` on any of these built-ins downgrades omission capability to `UNKNOWN`; generic OpenAI-compatible endpoints are also `UNKNOWN` and therefore use a sourced declaration or the configured fallback. An omitted client cap lets the provider apply its own policy—it does not mean output is unlimited.
 
 At research startup, the progress display reports the resolved synthesis request-limit policy using one of these forms (runtime cap values are comma-formatted):
 
@@ -738,7 +879,7 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_EMBEDDING__RERANK_MODEL` | Reranking model name |
 | `CHUNKHOUND_EMBEDDING__RERANK_URL` | Separate rerank endpoint URL |
 | `CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY` | Verify TLS certificates for rerank requests (overrides `ssl_verify`) |
-| `CHUNKHOUND_EMBEDDING__RERANK_FORMAT` | Reranking API format: `cohere`, `tei`, or `auto` |
+| `CHUNKHOUND_EMBEDDING__RERANK_FORMAT` | Reranking API format: `cohere`, `tei`, `voyage`, or `auto` (`voyage` for native VoyageAI-compatible endpoints such as MongoDB Atlas — uses `top_k` and returns a `data` array) |
 | `CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE` | Max documents per rerank request |
 | `CHUNKHOUND_EMBEDDING__TIMEOUT` | Request timeout in seconds (default: 30) |
 | `CHUNKHOUND_EMBEDDING__MAX_RETRIES` | Max retry attempts on failure (default: 3) |
@@ -755,6 +896,16 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` | LanceDB fragment count to trigger optimize |
 | `CHUNKHOUND_REMOTE_CONFIG__URL` | URL to fetch remote configuration on startup (see [Remote Configuration](#remote-configuration)) |
 | `CHUNKHOUND_REMOTE_CONFIG__AUTH_HEADER` | Authorization header for the remote-config fetch; supports `${VAR}` interpolation against the environment at fetch time |
+| `CHUNKHOUND_ANALYTICS__ENABLED` | Opt in to usage analytics (`true`/`1`/`yes`; default: false) |
+| `CHUNKHOUND_ANALYTICS__ANONYMIZE` | Identity mode: `full`, `hashed`, or `anonymous` (default: `full`) |
+| `CHUNKHOUND_ANALYTICS__SAVE_SENSITIVE_DATA` | Record query, question, and URL text verbatim (default: false) |
+| `CHUNKHOUND_ANALYTICS__S3_ENDPOINT_URL` | S3-compatible analytics endpoint |
+| `CHUNKHOUND_ANALYTICS__S3_BUCKET` | Analytics bucket |
+| `CHUNKHOUND_ANALYTICS__FLUSH_INTERVAL_SECONDS` | Maximum time between analytics flushes (default: 21600) |
+| `CHUNKHOUND_ANALYTICS__FLUSH_BATCH_SIZE` | Buffered lines that trigger an early flush (default: 500) |
+| `CHUNKHOUND_ANALYTICS__MAX_UPLOAD_RETRIES` | Failed upload attempts before a buffer file is dropped (default: 10) |
+| `CHUNKHOUND_AWS_ACCESS_KEY_ID` | Analytics S3 access key. Deliberately not `AWS_ACCESS_KEY_ID` |
+| `CHUNKHOUND_AWS_SECRET_ACCESS_KEY` | Analytics S3 secret key. Deliberately not `AWS_SECRET_ACCESS_KEY` |
 | `CHUNKHOUND_LLM_PROVIDER` | LLM provider for research |
 | `CHUNKHOUND_LLM_MODEL` | LLM model shorthand that sets both utility and synthesis roles |
 | `CHUNKHOUND_LLM_UTILITY_MODEL` | LLM model for utility tasks (fast, lower cost) |
@@ -864,7 +1015,7 @@ VoyageAI models are available on the Azure Marketplace and in Microsoft Foundry.
 {
   "embedding": {
     "provider": "voyageai",
-    "model": "voyage-3.5",
+    "model": "voyage-4-lite",
     "api_key": "<YOUR_AZURE_VOYAGE_KEY>",
     "base_url": "https://<your-resource>.services.ai.azure.com/models",
     "ssl_verify": true,
@@ -886,9 +1037,28 @@ Caveats:
 - **Concurrency throttled to 1 by default** when `base_url` is set, to respect Azure serverless rate limits. Override via `max_concurrent_batches` if your SKU permits.
 - **`api_key` still required.** The validator doesn't enforce it when `base_url` is present, but Azure-hosted endpoints still need their own key — supply it.
 
-### LLM via proxy (Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty, API Route, Opper)
+### MongoDB Atlas (Voyage-native reranker)
 
-The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty, API Route, and Opper LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
+MongoDB Atlas exposes a native Voyage-compatible rerank endpoint. Use `rerank_format: "voyage"` (uses `top_k` and returns a `data` array):
+
+```json
+{
+  "embedding": {
+    "provider": "voyageai",
+    "model": "voyage-4-lite",
+    "api_key": "<YOUR_VOYAGE_API_KEY>",
+    "rerank_model": "rerank-3-lite",
+    "rerank_url": "https://<atlas-host>/v1/rerank",
+    "rerank_format": "voyage"
+  }
+}
+```
+
+In the configurator, select **Retrieval → VoyageAI** and open **Customize reranker** to set the Atlas URL, `voyage` format, and rerank model.
+
+### LLM via proxy (Anthropic, OpenAI, and OpenAI-compatible providers)
+
+The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Vercel, Requesty, API Route, Opper, Obscurify.ai, Atlas Cloud, Runcrate, cheapaimodel, and UberLLM LLM providers all forward `base_url` to their SDK. Point them at a gateway like [LiteLLM](https://github.com/BerriAI/litellm) or [OrcaRouter](https://www.orcarouter.ai) to centralize auth, logging, and rate limiting:
 
 ```json
 {
@@ -904,24 +1074,38 @@ The Anthropic, OpenAI, Grok, DeepSeek, OpenRouter, OrcaRouter, Requesty, API Rou
 
 The gateway must preserve each provider's native request/response shape — ChunkHound uses the vendor SDKs, not a generic HTTP client.
 
+Vercel AI Gateway is a first-class provider, and the configurator's default research route selects it with a Vercel AI Gateway API key:
+
+```json
+{
+  "llm": {
+    "provider": "vercel",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "api_key": "<YOUR_VERCEL_API_KEY>"
+  }
+}
+```
+
+Both gateway presets pin `deepseek/deepseek-v4.1-flash`, so switching between them needs no model change. The catalogs list no expiration date for this model, and the gateway documents `max_tokens` as optional, so provider-managed synthesis sends no output cap (catalogs checked 2026-11).
+
 ### Local OpenAI-compatible servers (Ollama, vLLM)
 
 Local inference servers that speak the OpenAI API work via `provider: "openai"` with `base_url` pointing at the local endpoint. No `api_key` is needed for servers that don't enforce auth, but you must set an explicit `model`.
 
 #### Ollama
 
-Ollama provides embeddings, reranking, and LLM inference in a single process. Pull the models you need, then point ChunkHound at the Ollama endpoint:
+Ollama provides embeddings and LLM inference in a single process. Pull the models you need, then point ChunkHound at the Ollama endpoint:
 
 ```bash
-# Embedding + reranker models
-ollama pull qwen3-embedding && ollama pull qwen3-reranker
+# Embedding model
+ollama pull qwen3-embedding
 
 # LLM — pick one
 ollama pull qwen3-coder:30b
 ollama pull gemma4:27b
 ```
 
-Embedding and reranker config (`.chunkhound.json`):
+Embedding config (`.chunkhound.json`):
 
 ```json
 {
@@ -929,14 +1113,12 @@ Embedding and reranker config (`.chunkhound.json`):
     "provider": "openai",
     "model": "qwen3-embedding",
     "base_url": "http://localhost:11434/v1",
-    "ssl_verify": false,
-    "rerank_model": "qwen3-reranker",
-    "rerank_format": "cohere"
+    "ssl_verify": false
   }
 }
 ```
 
-No `rerank_url` is needed — it is auto-derived from `base_url`.
+Ollama does not provide a reranking endpoint. To use research, web search, or fetch, configure an external reranker.
 
 LLM config:
 
@@ -975,15 +1157,20 @@ If your embeddings stay on the official provider but reranking goes to a local H
 
 #### vLLM
 
-vLLM gives you dedicated processes per model, which is better for throughput and lets you serve HuggingFace model IDs directly. When embeddings and reranking are served from the same OpenAI-compatible endpoint, ChunkHound infers the reranker path from `base_url` just like it does for Ollama:
+vLLM gives you dedicated processes per model, which is better for throughput and lets you serve HuggingFace model IDs directly. Run embeddings and reranking as separate services, then point the embedding configuration at both endpoints:
 
 ```bash
-# Embedding + reranker server
+# Embeddings
 vllm serve Qwen/Qwen3-Embedding-0.6B --port 8000
 
-# LLM server
-vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --port 11434
+# Reranker
+vllm serve Qwen/Qwen3-Reranker-0.6B --task score --hf-overrides '{"architectures":["Qwen3ForSequenceClassification"],"classifier_from_token":["no","yes"],"is_original_qwen3_reranker":true}' --port 8001
+
+# LLM
+vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --port 8002
 ```
+
+The original Qwen reranker requires the score task and these Hugging Face overrides to expose vLLM's Cohere-compatible rerank API.
 
 Embedding and reranker config (`.chunkhound.json`):
 
@@ -994,27 +1181,13 @@ Embedding and reranker config (`.chunkhound.json`):
     "model": "Qwen/Qwen3-Embedding-0.6B",
     "base_url": "http://localhost:8000/v1",
     "rerank_model": "Qwen/Qwen3-Reranker-0.6B",
+    "rerank_url": "http://localhost:8001/v1/rerank",
     "rerank_format": "cohere"
   }
 }
 ```
 
-No `rerank_url` is needed when the reranker lives behind the same OpenAI-compatible endpoint. ChunkHound auto-derives `/rerank` from `base_url`.
-
-If you split embeddings and reranking across different services, keep `base_url` pointed at the embedding server and set `rerank_url` explicitly:
-
-```json
-{
-  "embedding": {
-    "provider": "openai",
-    "model": "Qwen/Qwen3-Embedding-0.6B",
-    "base_url": "http://localhost:8025/v1",
-    "rerank_model": "Qwen/Qwen3-Reranker-0.6B",
-    "rerank_url": "http://localhost:8000/rerank",
-    "rerank_format": "cohere"
-  }
-}
-```
+ChunkHound sends Cohere-compatible rerank requests to the explicit reranker endpoint. For another server that genuinely colocates embeddings and reranking, omit `rerank_url` and ChunkHound derives `/rerank` from `base_url`.
 
 LLM config:
 
@@ -1023,7 +1196,7 @@ LLM config:
   "llm": {
     "provider": "openai",
     "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-    "base_url": "http://localhost:11434/v1"
+    "base_url": "http://localhost:8002/v1"
   }
 }
 ```
@@ -1033,6 +1206,8 @@ LLM config:
 ## Web Search
 
 The `websearch` tool searches the web via DuckDuckGo, fetches the top pages, indexes the fetched content in memory, and runs the same deep research pipeline used for local code search. It is available as an MCP tool and as `chunkhound websearch`.
+
+Web research is inherently external: `websearch` contacts DuckDuckGo and the source websites it fetches over the network from your machine. Fetched content is rendered, chunked, and indexed locally. Remote embedding, reranking, or LLM providers receive only the content relevant to their requests; local endpoints (Ollama, vLLM) keep processing local.
 
 ### Requirements
 
@@ -1074,6 +1249,9 @@ The web search tool delegates to the same deep research pipeline as `code_resear
 ## Fetch URL
 
 The `fetchurl` tool fetches a single URL, extracts its content, and returns a focused Markdown answer via one LLM call (short pages) or a rerank+elbow pipeline over page chunks (long pages with a query). It is available as an MCP tool and as `chunkhound fetchurl`. Fetches use the same **zendriver + system Chrome** transport as [Web Search](#web-search) with the same `urllib` fallback — see that section's [Browser Dependency](#browser-dependency) note for Chrome version requirements and fallback behavior.
+
+<!-- "Processed locally" refers to fetching and preparing content, not zero egress. The provider boundaries above govern any subsequent model requests. -->
+Fetching contacts the target site directly from your machine; the fetched content is processed locally.
 
 ### Requirements
 

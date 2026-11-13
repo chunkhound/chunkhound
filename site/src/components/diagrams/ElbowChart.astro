@@ -1,0 +1,97 @@
+---
+import DiagramFigure from "./DiagramFigure.astro";
+
+/**
+ * Why the adaptive cutoff beats a fixed top-k: the kept context budget is
+ * read off the question's own score curve, so it shrinks or grows with the
+ * question instead of being guessed from its size.
+ */
+
+// Descending reranked scores for twelve candidates; index 6 is the elbow.
+const SCORES = [0.95, 0.92, 0.88, 0.86, 0.83, 0.81, 0.78, 0.60, 0.57, 0.54, 0.52, 0.50];
+const ELBOW = 6;
+const KEEP = ELBOW + 1;
+
+// Plot box inside the 640x280 viewBox; margins leave room for axis labels.
+const PAD = { left: 48, right: 20, top: 24, bottom: 44 };
+const inner = { x: PAD.left, y: PAD.top, w: 640 - PAD.left - PAD.right, h: 280 - PAD.top - PAD.bottom };
+const toX = (rank: number) => inner.x + ((rank - 1) / (SCORES.length - 1)) * inner.w;
+const toY = (score: number) => inner.y + (1 - score) * inner.h;
+
+const points = SCORES.map((score, i) => ({ x: toX(i + 1), y: toY(score) }));
+const curve = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+const cutoffX = points[ELBOW].x;
+---
+
+<DiagramFigure
+  caption="The adaptive cutoff"
+  label="Reranked score curve with an elbow cut at seven candidates"
+  description="The reranked score curve drops steeply across the first seven candidates and then flattens, so the cutoff sits at the elbow — the point farthest from a straight line between the first and last scores — keeping seven. A broad question keeps more candidates and a narrow one keeps fewer, with no fixed top-k."
+>
+  <svg
+    class="elbow"
+    viewBox="0 0 640 280"
+    width="100%"
+    height="auto"
+    aria-hidden="true"
+  >
+    <rect class="kept" x={inner.x} y={inner.y} width={cutoffX - inner.x} height={inner.h} />
+    <line class="axis" x1={inner.x} y1={inner.y} x2={inner.x} y2={inner.y + inner.h} />
+    <line class="axis" x1={inner.x} y1={inner.y + inner.h} x2={inner.x + inner.w} y2={inner.y + inner.h} />
+    <polyline class="curve" points={curve} />
+    <line class="cut" x1={cutoffX} y1={inner.y} x2={cutoffX} y2={inner.y + inner.h} />
+    <circle class="dot" cx={points[ELBOW].x} cy={points[ELBOW].y} r="4" />
+    <text class="cut-label" x={cutoffX + 8} y={inner.y + 14}>elbow cut · keep {KEEP}</text>
+    <text class="axis-label mid" x={inner.x + inner.w / 2} y="268">candidates (ranked)</text>
+    <text class="axis-label" x="16" y={inner.y + inner.h / 2} transform={`rotate(-90 16 ${inner.y + inner.h / 2})`}>relevance</text>
+  </svg>
+
+  <p class="d-note">
+    A fixed top-k or a repo-size budget guesses the cutoff from the question's size; the elbow reads the question's own score curve.
+  </p>
+</DiagramFigure>
+
+<style>
+  .elbow {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .kept {
+    fill: var(--primary-bg);
+  }
+
+  .axis {
+    stroke: var(--border-color);
+    stroke-width: 1;
+  }
+
+  .curve {
+    fill: none;
+    stroke: var(--primary);
+    stroke-width: 2;
+    stroke-linejoin: round;
+  }
+
+  .cut {
+    stroke: var(--text-secondary);
+    stroke-width: 1;
+    stroke-dasharray: 4 4;
+  }
+
+  .dot {
+    fill: var(--primary);
+  }
+
+  .axis-label,
+  .cut-label {
+    fill: var(--text-secondary);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+  }
+
+  .mid {
+    text-anchor: middle;
+  }
+</style>

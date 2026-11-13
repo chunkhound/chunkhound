@@ -2,10 +2,13 @@
 
 import pytest
 
+from chunkhound.core.exceptions import RerankEndpointError
 from chunkhound.providers.embeddings.openai_provider import (
     QWEN_MODEL_CONFIG,
     OpenAIEmbeddingProvider,
 )
+from tests.fixtures.rerank_server_manager import RerankServerManager
+from tests.rerank_server import MockRerankResult, MockRerankScenario
 
 
 class TestQwenModelDetection:
@@ -304,6 +307,29 @@ class TestQwenBatchSplitting:
         results = await provider.rerank("test query", [], top_k=10)
         assert results == []
 
+    async def test_rejected_batch_keeps_healthy_batch_results(self):
+        """One rejected batch must degrade to a partial result, not abort."""
+        scenarios = [
+            MockRerankScenario(
+                "query", ["bad"], [], response_format="tei",
+                status_code=400, error="rejected batch",
+            ),
+            MockRerankScenario(
+                "query", ["good"], [MockRerankResult(0, 0.9)],
+                response_format="tei",
+            ),
+        ]
+        async with RerankServerManager(scenarios=scenarios) as manager:
+            provider = OpenAIEmbeddingProvider(
+                api_key="test-key", base_url=manager.base_url, model="m",
+                rerank_url=f"{manager.base_url}/rerank", rerank_model="r",
+                rerank_format="tei", rerank_batch_size=1, retry_attempts=1,
+            )
+            results = await provider.rerank("query", ["bad", "good"])
+            requests = list(manager.requests)
+
+        assert [(result.index, result.score) for result in results] == [(1, 0.9)]
+        assert [request["texts"] for request in requests] == [["bad"], ["good"]]
 
 class TestRerankBatchSizeOverride:
     """Test rerank_batch_size bounded override behavior."""
@@ -462,8 +488,10 @@ class TestRerankErrorHandling:
 
         # Patch httpx.AsyncClient in the provider module (after client is initialized)
         with patch("chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient", return_value=mock_client):
-            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            with pytest.raises(RerankEndpointError) as exc_info:
                 await provider.rerank("test query", ["doc1", "doc2"])
 
-            # Verify it's a 413 error
-            assert exc_info.value.response.status_code == 413
+            # Escaped error names the status, not the raw httpx text.
+            assert "413" in str(exc_info.value)
+            assert exc_info.value.status_code == 413
+            assert exc_info.value.error_type == "HTTPStatusError"

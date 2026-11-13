@@ -16,6 +16,9 @@ from tests.utils.windows_subprocess import get_safe_subprocess_env
 
 ROOT = Path(__file__).resolve().parents[2]
 RESOLVER = ROOT / "scripts" / "resolve_docs_version.sh"
+RESOLVER_RUN = "bash scripts/resolve_docs_version.sh"
+CI_PYTHON_SETUP_USES = "./.github/actions/ci-python-setup"
+CI_PYTHON_SETUP_ACTION = ".github/actions/ci-python-setup/action.yml"
 MUSL_UV_INSTALLER = ROOT / "scripts" / "install_pinned_musl_uv.sh"
 INLINE_RESOLVE_SNIPPET = (
     "CHUNKHOUND_DOCS_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')"
@@ -156,6 +159,29 @@ def _find_step_index(
         if predicate(step):
             return index
     raise AssertionError(f"Could not find step matching {description}")
+
+
+def _setup_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Setup steps a job executes, resolved through the composite action boundary."""
+    steps = cast(list[dict[str, Any]], job["steps"])
+    for step in steps:
+        if step.get("uses") == CI_PYTHON_SETUP_USES:
+            action = _load_workflow(CI_PYTHON_SETUP_ACTION)
+            return cast(list[dict[str, Any]], action["runs"]["steps"])
+    return steps
+
+
+def _resolver_anchor_index(job: dict[str, Any]) -> int:
+    """Job-level step index at which docs version resolution happens."""
+    steps = cast(list[dict[str, Any]], job["steps"])
+    for index, step in enumerate(steps):
+        if step.get("run") == RESOLVER_RUN:
+            return index
+    return _find_step_index(
+        steps,
+        "ci-python-setup composite action step",
+        lambda step: step.get("uses") == CI_PYTHON_SETUP_USES,
+    )
 
 
 def _assert_checkout_uses_full_history(steps: list[dict]) -> None:
@@ -391,20 +417,20 @@ class TestDocsVersionWorkflowContract:
             (".github/workflows/ci.yml", "site-build"),
             (".github/workflows/ci.yml", "site-build-validation"),
             (".github/workflows/ci.yml", "tests"),
+            (".github/workflows/ci.yml", "site-tests"),
         ],
     )
     def test_docs_build_jobs_use_shared_resolver_script(
         self, path: str, job_name: str
     ) -> None:
-        steps = _job_steps(path, job_name)
+        steps = _setup_steps(_job(path, job_name))
         resolve_index = _find_step_index(
             steps,
             "shared docs version resolver step",
-            lambda step: step.get("run") == "bash scripts/resolve_docs_version.sh",
+            lambda step: step.get("run") == RESOLVER_RUN,
         )
-        resolve_step = steps[resolve_index]
 
-        assert resolve_step["run"] == "bash scripts/resolve_docs_version.sh"
+        assert steps[resolve_index]["run"] == RESOLVER_RUN
 
     @pytest.mark.parametrize(
         ("path", "job_name"),
@@ -412,6 +438,7 @@ class TestDocsVersionWorkflowContract:
             (".github/workflows/ci.yml", "site-build"),
             (".github/workflows/ci.yml", "site-build-validation"),
             (".github/workflows/ci.yml", "tests"),
+            (".github/workflows/ci.yml", "site-tests"),
         ],
     )
     def test_docs_build_jobs_checkout_with_full_history(
@@ -438,6 +465,12 @@ class TestDocsVersionWorkflowContract:
                 lambda step: step.get("id") == "tests"
                 and str(step.get("uses", "")).startswith("nick-fields/retry@"),
             ),
+            (
+                "site-tests",
+                "retry-backed site test runner step",
+                lambda step: step.get("id") == "site-tests"
+                and str(step.get("uses", "")).startswith("nick-fields/retry@"),
+            ),
         ],
     )
     def test_docs_version_is_resolved_before_consumer_steps(
@@ -446,14 +479,12 @@ class TestDocsVersionWorkflowContract:
         consumer_description: str,
         consumer_predicate: Callable[[dict], bool],
     ) -> None:
-        steps = _job_steps(".github/workflows/ci.yml", job_name)
-        resolve_index = _find_step_index(
-            steps,
-            "shared docs version resolver step",
-            lambda step: step.get("run") == "bash scripts/resolve_docs_version.sh",
-        )
+        job = _job(".github/workflows/ci.yml", job_name)
+        resolve_index = _resolver_anchor_index(job)
         consumer_index = _find_step_index(
-            steps, consumer_description, consumer_predicate
+            cast("list[dict[str, Any]]", job["steps"]),
+            consumer_description,
+            consumer_predicate,
         )
 
         assert resolve_index < consumer_index
@@ -485,26 +516,35 @@ class TestDocsVersionWorkflowContract:
         assert upload_step["with"]["name"] == "site-dist"
         assert upload_step["with"]["path"] == "site/dist/"
 
-    def test_tests_job_downloads_site_dist_and_uses_existing_build(self) -> None:
-        job = _job(".github/workflows/ci.yml", "tests")
-        steps = cast(list[dict[str, Any]], job["steps"])
-        download_index = _find_step_index(
+    def test_site_tests_job_downloads_site_dist_and_uses_existing_build(self) -> None:
+        job = _job(".github/workflows/ci.yml", "site-tests")
+        steps = cast("list[dict[str, Any]]", job["steps"])
+        download_step = _setup_steps(job)[
+            _find_step_index(
+                _setup_steps(job),
+                "site artifact download step",
+                lambda step: str(step.get("uses", "")).startswith(
+                    "actions/download-artifact@"
+                ),
+            )
+        ]
+        composite_index = _find_step_index(
             steps,
-            "site artifact download step",
-            lambda step: str(step.get("uses", "")).startswith(
-                "actions/download-artifact@"
-            ),
+            "ci-python-setup composite action step",
+            lambda step: step.get("uses") == CI_PYTHON_SETUP_USES,
         )
-        download_step = steps[download_index]
         tests_index = _find_step_index(
             steps,
-            "retry-backed test runner step",
-            lambda step: step.get("id") == "tests"
+            "retry-backed site test runner step",
+            lambda step: step.get("id") == "site-tests"
             and str(step.get("uses", "")).startswith("nick-fields/retry@"),
         )
         tests_step = steps[tests_index]
 
         assert job["needs"] == "site-build"
+        # `site` input enables the site-dist artifact download inside the action.
+        assert steps[composite_index]["with"]["site"] == "true"
+        assert composite_index < tests_index
         assert download_step["with"]["name"] == "site-dist"
         assert download_step["with"]["path"] == "site/dist"
         assert tests_step["env"]["CHUNKHOUND_USE_EXISTING_SITE_DIST"] == "1"
@@ -556,6 +596,7 @@ class TestDocsVersionWorkflowContract:
         assert job["needs"] == [
             "site-build",
             "tests",
+            "site-tests",
             "rust-checks",
             "site-build-validation",
             "watchman-rollout-gate",

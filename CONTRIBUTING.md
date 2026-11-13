@@ -22,6 +22,30 @@ Follow the [Getting Started](https://chunkhound.ai/docs/getting-started/) guide 
 
 Use ChunkHound's built-in Code Research tool to analyze the codebase architecture before making any changes. This tool helps your agent understand existing patterns and identify the minimal changes needed.
 
+### 3. Build the Rust Extension
+
+Install [Rust and Cargo with rustup](https://rustup.rs/). Rust **1.82 or newer** is required; `rust-version` in [`Cargo.toml`](Cargo.toml) is the source of truth.
+
+The published wheel contains a pre-built extension. For changes to Rust code, build your branch locally so tests do not use the published binary:
+
+```bash
+make dev        # Build and install the extension, copy the DuckDB runtime, run smoke tests
+make rust-check # Check Rust formatting and clippy
+make rust-test  # Run Rust unit tests
+```
+
+### 4. Install Site Test Prerequisites
+
+The full suite builds the Astro site and runs browser contracts. Install these prerequisites once:
+
+```bash
+# Node.js >=22.18 is required by site/package.json.
+npm ci --prefix site
+npm exec --prefix site -- playwright install --with-deps chromium
+```
+
+If Node, `site/node_modules`, or Chromium is missing, the site test group skips and names the missing prerequisite. Set `CHUNKHOUND_USE_EXISTING_SITE_DIST=1` to reuse an existing `site/dist` build without rebuilding.
+
 ## Development Workflow
 
 ### Before Writing Any Code
@@ -55,11 +79,14 @@ This ensures your agent:
 Run the full quality gate:
 
 ```bash
-uv run ruff check chunkhound       # lint
+uv run ruff check chunkhound brand # lint
 uv run ruff format chunkhound      # format
 uv run mypy chunkhound             # type check
 uv run pytest tests/test_smoke.py -v -n auto  # smoke tests (mandatory)
+uv run pytest tests/ -v            # full tests, including site contracts
 ```
+
+Site tests need Node.js >=22.18, `npm ci --prefix site`, and Playwright Chromium; see [Install Site Test Prerequisites](#4-install-site-test-prerequisites).
 
 PR description checklist:
 - Explain **why** the change is needed, not what it does

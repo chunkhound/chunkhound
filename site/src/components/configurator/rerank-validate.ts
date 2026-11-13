@@ -1,0 +1,220 @@
+import type {
+  ConfiguratorEmbeddingProviderOption,
+  ConfiguratorRerankFormat,
+} from "./types.ts";
+
+// Shared <p> under the reranker inputs (single id in Configurator.astro).
+export const RERANK_URL_ERROR_ID = "rerank-url-error";
+
+const ABSOLUTE_URL_ERROR = "Use an absolute HTTP(S) URL or a relative path.";
+// Exported so tests can assert the rendered error equals this constant.
+export const PROTOCOL_RELATIVE_ERROR =
+  "Protocol-relative URLs are not supported — use an absolute HTTP(S) URL or a relative path.";
+// Exported so tests can assert the rendered error equals this constant.
+export const INCOMPLETE_URL_ERROR =
+  "That URL is incomplete — use a full HTTP(S) URL such as https://reranker.example.com/rerank.";
+const RELATIVE_NO_BASE_URL_ERROR =
+  "A relative reranker URL requires this retrieval preset to have a base URL.";
+
+// Mirrors Python str.isspace(). JS `\s` omits NEL (U+0085) and C0 separators
+// (U+001C–U+001F) and adds U+FEFF, which Python accepts as URL content, not as
+// whitespace. Keep this class in sync with chunkhound/core/utils/rerank_url.py
+// via the shared acceptance matrix in tests/site/test_configurator_contract.py.
+const PYTHON_WHITESPACE_RE =
+  /[\t\n\v\f\r\x1c-\x1f\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+
+// The select is gated per preset (configurator.ts syncRerankFormatOptions), so
+// this fires only for programmatic or non-JS callers; it keeps the emitted
+// config from carrying a format the selected provider cannot execute.
+export function rerankFormatUnsupportedError(format: string): string {
+  return `The ${format} rerank format is not supported by this retrieval preset.`;
+}
+
+// An http(s)-like scheme that failed to parse is a typo'd URL, not a relative
+// path — say so instead of returning the generic "absolute URL" message.
+function incompleteSchemeUrlError(value: string): string | undefined {
+  if (/^https?:/i.test(value)) return INCOMPLETE_URL_ERROR;
+  if (/^[a-z][a-z\d+.-]*:/i.test(value)) return ABSOLUTE_URL_ERROR;
+  return undefined;
+}
+
+// Canonicalize only valid absolute HTTP(S) URLs; never repair malformed input.
+export function canonicalRerankUrl(value: string): string {
+  value = value.trim();
+  if (rerankUrlValidationError(value, true)) return value;
+  return value.replace(/^https?:/i, (scheme) => scheme.toLowerCase());
+}
+
+export function rerankUrlValidationError(
+  value: string,
+  hasBaseUrl: boolean,
+): string | undefined {
+  // The configurator trims the field before calling here (configurator.ts; the
+  // emitted config trims in builders.ts configWithReranker too); trim again so
+  // a direct caller cannot misread a padded URL as a scheme fault.
+  value = value.trim();
+  if (!value) return undefined;
+  if (PYTHON_WHITESPACE_RE.test(value)) return ABSOLUTE_URL_ERROR;
+  // A backslash has no URL meaning and makes the effective host parser-dependent
+  // (browsers treat it as a path separator, httpx as an authority delimiter), so
+  // reject it — mirroring normalize_rerank_url in the backend.
+  if (value.includes("\\")) return ABSOLUTE_URL_ERROR;
+  // Protocol-relative URLs inherit the page scheme, so the fetch target is
+  // ambiguous — reject them explicitly instead of treating them as relative.
+  if (value.startsWith("//")) return PROTOCOL_RELATIVE_ERROR;
+  try {
+    const protocol = new URL(value).protocol;
+    if (protocol === "http:" || protocol === "https:") {
+      return /^https?:\/\/[^/\\?#\s]+/i.test(value)
+        ? undefined
+        : INCOMPLETE_URL_ERROR;
+    }
+    return ABSOLUTE_URL_ERROR;
+  } catch {
+    const schemeError = incompleteSchemeUrlError(value);
+    if (schemeError) return schemeError;
+  }
+  return hasBaseUrl ? undefined : RELATIVE_NO_BASE_URL_ERROR;
+}
+
+// Exported so select-derived values can be narrowed without a cast.
+export function isRerankFormat(
+  value: string,
+): value is ConfiguratorRerankFormat {
+  return value === "cohere" || value === "tei" || value === "voyage";
+}
+
+export function rerankerState(
+  retrieval: ConfiguratorEmbeddingProviderOption,
+): "included" | "required" {
+  return retrieval.reranker.included ? "included" : "required";
+}
+
+// Single source for the state label: the build-time pre-JS paint
+// (Configurator.astro) and the runtime text updates (configurator.ts)
+// must render the same string or the first JS repaint would flicker.
+export function rerankerStateLabel(state: string): string {
+  return state === "required" ? "Required dependency" : "";
+}
+
+export function rerankerStatus(
+  retrieval: ConfiguratorEmbeddingProviderOption,
+): string {
+  if (!retrieval.reranker.included) {
+    return "Add an external reranker to enable research, web search, and fetch. Semantic search remains available without one.";
+  }
+  return retrieval.reranker.status ?? "Included by this preset.";
+}
+
+export function rerankerSummary(
+  retrieval: ConfiguratorEmbeddingProviderOption,
+): string {
+  return rerankerState(retrieval) === "required"
+    ? "Add external reranker"
+    : "Customize reranker";
+}
+
+export interface EffectiveReranker {
+  format: string;
+  model: string;
+  hasFormat: boolean;
+  requiresModel: boolean;
+  hasModel: boolean;
+}
+
+// Single source for effective reranker settings (explicit pick or preset
+// default), so error text and aria-invalid flags cannot disagree.
+function effectiveReranker(
+  retrieval: ConfiguratorEmbeddingProviderOption,
+  format: string,
+  model: string,
+): EffectiveReranker {
+  const effectiveFormat = String(format || retrieval.config.rerank_format || "");
+  const effectiveModel = String(model || retrieval.config.rerank_model || "");
+  return {
+    format: effectiveFormat,
+    model: effectiveModel,
+    hasFormat: isRerankFormat(effectiveFormat),
+    requiresModel: effectiveFormat === "cohere" || effectiveFormat === "voyage",
+    hasModel: Boolean(effectiveModel),
+  };
+}
+
+export type RerankerErrorField = "url" | "format" | "model";
+
+export interface RerankerValidation {
+  message: string;
+  field: RerankerErrorField;
+}
+
+/**
+ * Mirrors embedding_config.validate_rerank_configuration. UI-only additions:
+ * The select offers explicit formats for active external reranking. Unused
+ * endpoints are tolerated; active endpoints require unambiguous HTTP(S) or
+ * relative paths with a base URL. When reranking is implied but no
+ * URL is given, the URL error fires first, matching the backend's
+ * model_validator, which raises RERANK_BASE_URL_REQUIRED before the shared
+ * validator reaches its model check.
+ * Reranking is implied by a model or TEI format; without a preset base_url
+ * the backend rejects it unless the provider reranks via SDK (VoyageAI).
+ */
+export function rerankerValidationError(
+  retrieval: ConfiguratorEmbeddingProviderOption,
+  url: string,
+  format: string,
+  model: string,
+): RerankerValidation | undefined {
+  url = url.trim();
+  const effective = effectiveReranker(retrieval, format, model);
+  const rerankingImplied = effective.hasModel || effective.format === "tei";
+  // An unused endpoint must not block semantic-search-only configurations.
+  if (!rerankingImplied && !effective.requiresModel) return undefined;
+  const urlError = rerankUrlValidationError(url, Boolean(retrieval.config.base_url));
+  if (urlError) return { message: urlError, field: "url" };
+  if (
+    !url &&
+    rerankingImplied &&
+    !retrieval.config.base_url &&
+    retrieval.config.provider !== "voyageai"
+  ) {
+    return {
+      message: "This preset has no base URL — enter the reranker URL.",
+      field: "url",
+    };
+  }
+  // VoyageAI reranks via SDK: the backend accepts any format/model, so the
+  // UI must not block a valid config the operator can't fix by picking a format.
+  if (retrieval.config.provider === "voyageai" && !url) {
+    return undefined;
+  }
+  return validateRerankerFields(effective, retrieval);
+}
+
+// Format/model checks for configs that cleared the URL checks (URL present,
+// or VoyageAI SDK bypass). Separated so rerankerValidationError stays a linear
+// chain of early returns.
+function validateRerankerFields(
+  effective: EffectiveReranker,
+  retrieval: ConfiguratorEmbeddingProviderOption,
+): RerankerValidation | undefined {
+  if (!effective.hasFormat)
+    return {
+      message: "Choose a rerank format for the external reranker.",
+      field: "format",
+    };
+  if (
+    !retrieval.reranker.formats.includes(
+      effective.format as ConfiguratorRerankFormat,
+    )
+  )
+    return {
+      message: rerankFormatUnsupportedError(effective.format),
+      field: "format",
+    };
+  return effective.requiresModel && !effective.hasModel
+    ? {
+        message: "A Cohere or Voyage reranker requires a model.",
+        field: "model",
+      }
+    : undefined;
+}

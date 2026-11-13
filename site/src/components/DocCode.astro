@@ -3,8 +3,10 @@ import { Code } from 'astro:components';
 import CodeBlock from './CodeBlock.astro';
 import { SHIKI_THEMES } from '../lib/shiki-config.js';
 
+type CodeProps = Parameters<typeof Code>[0];
+
 interface Props {
-    lang?: string;
+    lang?: CodeProps["lang"];
     code: string;
 }
 

@@ -36,6 +36,7 @@ lib/
 !site/src/lib/
 !site/src/lib/*.js
 !site/src/lib/*.ts
+!site/scripts/lib/
 lib64/
 parts/
 sdist/
@@ -335,9 +336,16 @@ site/.astro/
 # Generated — synced from root CHANGELOG.md at build time
 site/src/pages/docs/changelog.md
 
+# Generated — contributor count resolved from the GitHub API at build time
+site/src/lib/contributors.json
+
 # Generated — OG PNGs rendered from SVGs at build time
 site/public/og-image-dark.png
 site/public/og-image-light.png
+
+# Generated — llms.txt substrate built from docs at build time
+site/public/llms.txt
+site/public/llms-full.txt
 
 # Gemini-CLI
 .gemini/settings.json
@@ -346,6 +354,11 @@ site/public/og-image-light.png
 plan.txt
 AGENT_REVIEW.md
 HUMAN_REVIEW.md
+
+# Sticker rendered artifacts — SVG is source of truth, PNGs are local renders
+brand/stickers/*.png
+brand/stickers/.outlined-text.svg
+brand/stickers/.outlined-text-vinyl.svg
 
 # Test artifacts (playwright, vitest, etc.)
 site/test-results/

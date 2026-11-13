@@ -8,7 +8,6 @@ No mocks - tests the full integration path users experience.
 """
 
 import asyncio
-import os
 import shutil
 import subprocess
 import tempfile
@@ -18,18 +17,23 @@ from pathlib import Path
 import pytest
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
+from chunkhound.embeddings import EmbeddingManager
 from chunkhound.mcp_server.tools import execute_tool, search_impl
+from chunkhound.registry import get_registry
 from chunkhound.services.realtime.service import RealtimeIndexingService
+from tests.fixtures.embedding_server import (
+    EmbeddingConcept,
+    MockEmbeddingServer,
+    unit_vector,
+)
+from tests.fixtures.rerank_server_manager import RerankServerManager
+from tests.rerank_server import MockRerankScenario
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
-)
-
-from tests.helpers.embedding_config import (
-    get_embedding_config_for_tests,
-    build_embedding_config_from_dict,
 )
 
 # =============================================================================
@@ -37,43 +41,180 @@ from tests.helpers.embedding_config import (
 # =============================================================================
 
 # Timeout & Wait Durations
-INITIAL_SCAN_WAIT_SECONDS = 2.0           # Wait for initial scan after service start
-CONCURRENT_SETUP_WAIT_SECONDS = 3.0       # Wait before concurrent operations
-PAGINATION_SETUP_WAIT_SECONDS = 3.0       # Wait after creating pagination test files
-SEARCH_ITERATION_DELAY_SECONDS = 0.2      # Delay between search iterations
-FILE_OPERATION_DELAY_SECONDS = 0.3        # Delay between file operations
-STABILITY_CHECK_INTERVAL_SECONDS = 2.0    # Interval between stability checks
-INDEXING_POLL_INTERVAL_SECONDS = 0.5      # Polling interval for indexing completion
-RIPGREP_TIMEOUT_SECONDS = 10              # Timeout for ripgrep subprocess
+INITIAL_SCAN_WAIT_SECONDS = 2.0  # Wait for initial scan after service start
+CONCURRENT_SETUP_WAIT_SECONDS = 3.0  # Wait before concurrent operations
+PAGINATION_SETUP_WAIT_SECONDS = 3.0  # Wait after creating pagination test files
+SEARCH_ITERATION_DELAY_SECONDS = 0.2  # Delay between search iterations
+FILE_OPERATION_DELAY_SECONDS = 0.3  # Delay between file operations
+STABILITY_CHECK_INTERVAL_SECONDS = 2.0  # Interval between stability checks
+INDEXING_POLL_INTERVAL_SECONDS = 0.5  # Polling interval for indexing completion
+SEMANTIC_VISIBILITY_TIMEOUT_SECONDS = 10.0  # Embeddings may follow indexing
+SEMANTIC_VISIBILITY_POLL_SECONDS = 0.2
+RIPGREP_TIMEOUT_SECONDS = 10  # Timeout for ripgrep subprocess
 
 # Budget Constants (used in timeout calculations)
-BASE_OVERHEAD_SECONDS = 60                # Fixture setup, initial scan, etc.
-BUDGET_PER_LANGUAGE_SECONDS = 12          # Per-language budget (Windows CI worst case)
-SEARCH_VALIDATION_BUDGET_SECONDS = 60     # Reserve for parallel searches + assertions
-INDEXING_CAP_SECONDS = 200.0              # Hard cap for indexing wait (fail fast)
-SINGLE_FILE_INDEXING_MAX_SECONDS = 10.0   # Max wait for single file indexing
+BASE_OVERHEAD_SECONDS = 60  # Fixture setup, initial scan, etc.
+BUDGET_PER_LANGUAGE_SECONDS = 12  # Per-language budget (Windows CI worst case)
+SEARCH_VALIDATION_BUDGET_SECONDS = 60  # Reserve for parallel searches + assertions
+INDEXING_CAP_SECONDS = 200.0  # Hard cap for indexing wait (fail fast)
+SINGLE_FILE_INDEXING_MAX_SECONDS = 10.0  # Max wait for single file indexing
 
 # Threshold Constants
-MIN_MAJOR_LANGUAGES_REQUIRED = 3          # Minimum major languages that must work
-MIN_TOTAL_LANGUAGES_REQUIRED = 3          # Minimum total languages that must work
-LOW_SUCCESS_RATE_THRESHOLD = 0.5          # Below this = low success rate warning
-AVG_SEARCH_TIME_LIMIT_SECONDS = 2.0       # Max acceptable average search time
-MAX_SEARCH_TIME_LIMIT_SECONDS = 5.0       # Max acceptable single search time
-FILE_REFLECTION_MAX_SECONDS = 10.0        # Max time for file changes to reflect
-SEARCH_EXECUTION_MAX_SECONDS = 5.0        # Max time for search execution
-SEARCH_GOOD_THRESHOLD_SECONDS = 1.0       # Below = good search performance
-SEARCH_ACCEPTABLE_THRESHOLD_SECONDS = 3.0 # Below = acceptable search performance
+MIN_MAJOR_LANGUAGES_REQUIRED = 3  # Minimum major languages that must work
+MIN_TOTAL_LANGUAGES_REQUIRED = 3  # Minimum total languages that must work
+LOW_SUCCESS_RATE_THRESHOLD = 0.5  # Below this = low success rate warning
+AVG_SEARCH_TIME_LIMIT_SECONDS = 2.0  # Max acceptable average search time
+MAX_SEARCH_TIME_LIMIT_SECONDS = 5.0  # Max acceptable single search time
+FILE_REFLECTION_MAX_SECONDS = 10.0  # Max time for file changes to reflect
+SEARCH_EXECUTION_MAX_SECONDS = 5.0  # Max time for search execution
+SEARCH_GOOD_THRESHOLD_SECONDS = 1.0  # Below = good search performance
+SEARCH_ACCEPTABLE_THRESHOLD_SECONDS = 3.0  # Below = acceptable search performance
 
 # Test Data Constants
-NUM_PAGINATION_TEST_FILES = 15            # Files to create for pagination test
-NUM_BASE_CONCURRENT_FILES = 3             # Base files for concurrent test
-NUM_CONCURRENT_SEARCHES = 10              # Searches during concurrent operations
-NUM_RAPID_MODIFICATIONS = 5               # File modifications in rapid test
-MAX_PAGINATION_PAGES = 10                 # Safety limit for pagination loop
-MAX_STABILITY_CHECKS = 10                 # Retry attempts for chunk stability
-MIN_EXPECTED_CHUNKS_PAGINATION = 15       # Minimum chunks for pagination test
-EXPECTED_CHUNKS_PER_FILE = 2              # Expected chunks per substantial file
-DEFAULT_PAGE_SIZE = 10                    # Standard pagination page size
+NUM_PAGINATION_TEST_FILES = 15  # Files to create for pagination test
+NUM_BASE_CONCURRENT_FILES = 3  # Base files for concurrent test
+NUM_CONCURRENT_SEARCHES = 10  # Searches during concurrent operations
+NUM_RAPID_MODIFICATIONS = 5  # File modifications in rapid test
+MAX_PAGINATION_PAGES = 10  # Safety limit for pagination loop
+MAX_STABILITY_CHECKS = 10  # Retry attempts for chunk stability
+MIN_EXPECTED_CHUNKS_PAGINATION = 15  # Minimum chunks for pagination test
+EXPECTED_CHUNKS_PER_FILE = 2  # Expected chunks per substantial file
+DEFAULT_PAGE_SIZE = 10  # Standard pagination page size
+
+
+# Semantic assertions use orthogonal concept vectors, so unrelated content
+# cannot outrank the lifecycle state under test.
+QA_EMBEDDING_DIMENSIONS = 8
+QA_EMBEDDING_MODEL = "qa-embedding"
+QA_RERANK_MODEL = "qa-reranker"
+
+QA_EMBEDDING_CONCEPTS = (
+    EmbeddingConcept(
+        "existing",
+        ("existing function QA", "existing_function", "existing_content"),
+        unit_vector(0, QA_EMBEDDING_DIMENSIONS),
+    ),
+    EmbeddingConcept(
+        "new",
+        (
+            "newly added function QA",
+            "newly_added_function",
+            "newly_added_content_unique_string",
+        ),
+        unit_vector(1, QA_EMBEDDING_DIMENSIONS),
+    ),
+    EmbeddingConcept(
+        "added",
+        (
+            "function added during file edit",
+            "added_during_edit",
+            "added_content_edit_qa",
+        ),
+        unit_vector(2, QA_EMBEDDING_DIMENSIONS),
+    ),
+    EmbeddingConcept(
+        "modified",
+        ("MODIFIED existing content during edit", "MODIFIED_existing_content"),
+        unit_vector(3, QA_EMBEDDING_DIMENSIONS),
+    ),
+)
+
+# Documents are matched by marker, not by exact chunk text, so reranking stays
+# stable when chunk boundaries or candidate order change.
+QA_RERANK_SCENARIOS = tuple(
+    MockRerankScenario(
+        name=f"{concept.name}-lifecycle",
+        query=query,
+        documents=None,
+        results=[],
+        document_scores=scores,
+    )
+    for concept, query, scores in (
+        (
+            QA_EMBEDDING_CONCEPTS[0],
+            "existing function QA testing",
+            {"existing_function": 1.0, "existing_content": 0.9},
+        ),
+        (
+            QA_EMBEDDING_CONCEPTS[1],
+            "newly added function QA validation",
+            {"newly_added_function": 1.0, "newly_added_content_unique_string": 0.9},
+        ),
+        (
+            QA_EMBEDDING_CONCEPTS[2],
+            "function added during file edit",
+            {"added_during_edit": 1.0, "added_content_edit_qa": 0.9},
+        ),
+        (
+            QA_EMBEDDING_CONCEPTS[3],
+            "MODIFIED existing content during edit",
+            {"MODIFIED_existing_content": 1.0},
+        ),
+    )
+)
+
+
+def _result_file_names(response: dict[str, object]) -> set[str]:
+    """Return result filenames so assertions ignore absolute temp paths and ranks."""
+    results = response.get("results", [])
+    if not isinstance(results, list):
+        return set()
+    return {
+        Path(str(result.get("file_path", ""))).name
+        for result in results
+        if isinstance(result, dict)
+    }
+
+
+def _semantic_result_contains(
+    response: dict[str, object], filename: str, markers: tuple[str, ...]
+) -> bool:
+    """Check that the named file contributes a result with the expected text."""
+    results = response.get("results", [])
+    if not isinstance(results, list):
+        return False
+    return any(
+        isinstance(result, dict)
+        and Path(str(result.get("file_path", ""))).name == filename
+        and any(marker in str(result.get("content", "")) for marker in markers)
+        for result in results
+    )
+
+
+async def _wait_for_semantic_file(
+    services,
+    embedding_manager: EmbeddingManager,
+    query: str,
+    filename: str,
+    markers: tuple[str, ...],
+) -> dict[str, object]:
+    """Poll user-visible semantic search until indexed content is embeddable.
+
+    ``wait_for_file_indexed`` only proves chunks were stored. The realtime
+    worker generates embeddings afterwards, so semantic visibility needs its
+    own bounded wait instead of a fixed sleep.
+
+    Markers prevent a stale chunk from the same file satisfying the wait after
+    an edit; the assertion follows user-visible content, not internal state.
+    """
+    deadline = time.monotonic() + SEMANTIC_VISIBILITY_TIMEOUT_SECONDS
+    response: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        response = await search_impl(
+            services=services,
+            embedding_manager=embedding_manager,
+            type="semantic",
+            query=query,
+            page_size=10,
+            offset=0,
+        )
+        if _semantic_result_contains(response, filename, markers):
+            return response
+        await asyncio.sleep(SEMANTIC_VISIBILITY_POLL_SECONDS)
+    raise AssertionError(
+        f"Semantic search never exposed {filename} with any of {markers} "
+        f"for query {query!r}; last response: {response}"
+    )
 
 
 def timeout_for_language_coverage() -> int:
@@ -88,91 +229,186 @@ def timeout_for_language_coverage() -> int:
     return BASE_OVERHEAD_SECONDS + (num_languages * BUDGET_PER_LANGUAGE_SECONDS)
 
 
+def _qa_embedding_config(
+    embedding_server: MockEmbeddingServer, rerank_manager: RerankServerManager
+) -> dict[str, object]:
+    """Point the real provider at the deterministic loopback services."""
+    return {
+        "provider": "openai",
+        "model": QA_EMBEDDING_MODEL,
+        "api_key": "qa-loopback-key",
+        "base_url": embedding_server.base_url,
+        "output_dims": QA_EMBEDDING_DIMENSIONS,
+        "rerank_model": QA_RERANK_MODEL,
+        "rerank_url": f"{rerank_manager.base_url}/rerank",
+        "rerank_format": "cohere",
+        "rerank_ssl_verify": False,
+        "batch_size": 100,
+        "max_concurrent_batches": 1,
+    }
+
+
+def _build_qa_embedding_manager(config: Config) -> EmbeddingManager:
+    """Share one provider between indexing and semantic search."""
+    if config.embedding is None:
+        raise AssertionError("QA setup requires an embedding configuration")
+    provider = EmbeddingProviderFactory.create_provider(config.embedding)
+    manager = EmbeddingManager()
+    manager.register_provider(provider, set_default=True)  # type: ignore[arg-type]
+    return manager
+
+
+async def _stop_qa_realtime(realtime_service: RealtimeIndexingService | None) -> None:
+    """Stop realtime work without cancelling its cleanup mid-transaction."""
+    if realtime_service is None:
+        return
+
+    # wait_for cancels stop() on timeout and can leave DB executor tasks in a
+    # state where provider.close() hangs, so wait without cancelling first.
+    stop_task = asyncio.create_task(realtime_service.stop())
+    done, _ = await asyncio.wait({stop_task}, timeout=10.0)
+    if not done:
+        if realtime_service.observer and realtime_service.observer.is_alive():
+            realtime_service.observer.stop()
+        done, _ = await asyncio.wait({stop_task}, timeout=3.0)
+        if not done:
+            stop_task.cancel()
+            try:
+                await stop_task
+            except asyncio.CancelledError:
+                pass
+            return
+
+    if not stop_task.cancelled() and (error := stop_task.exception()) is not None:
+        raise error
+
+
+def _restore_registry_state(previous: tuple[dict, object, object]) -> None:
+    """Restore every part of the process-wide registry the fixture replaced."""
+    registry = get_registry()
+    providers, config, embedding_manager = previous
+    registry._providers.clear()
+    registry._providers.update(providers)
+    registry._config = config
+    registry._embedding_manager = embedding_manager
+
+
+async def _close_qa_resources(
+    services,
+    realtime_service: RealtimeIndexingService | None,
+    rerank_manager: RerankServerManager,
+    embedding_server: MockEmbeddingServer,
+    previous_registry: tuple[dict, object, object],
+) -> list[Exception]:
+    """Release every fixture resource, returning failures instead of hiding them."""
+    errors: list[Exception] = []
+    try:
+        await _stop_qa_realtime(realtime_service)
+    except Exception as error:
+        errors.append(error)
+    if services is not None:
+        try:
+            services.provider.close()
+        except Exception as error:
+            errors.append(error)
+    try:
+        await rerank_manager.stop()
+    except Exception as error:
+        errors.append(error)
+    try:
+        embedding_server.close()
+    except Exception as error:
+        errors.append(error)
+    try:
+        _restore_registry_state(previous_registry)
+    except Exception as error:
+        errors.append(error)
+    return errors
+
+
 class TestQADeterministic:
     """Deterministic QA test suite - converts manual testing into automated validation."""
 
     @pytest.fixture
     async def qa_setup(self):
-        """Setup QA test environment with real services."""
+        """Setup QA test environment with real services and loopback providers."""
         temp_dir = Path(tempfile.mkdtemp())
         db_path = temp_dir / ".chunkhound" / "test.db"
         watch_dir = temp_dir / "project"
         watch_dir.mkdir(parents=True)
-
-        # Ensure database directory exists
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Get embedding config using centralized helper
-        # Only enable embeddings when explicitly requested via environment variable
-        #
-        # This test suite is intended to be deterministic and fast. When real API
-        # keys are present, enabling embeddings can drastically increase runtime
-        # (network calls + embedding generation), often exceeding pytest-timeout.
-        embedding_config = None
-        if os.getenv("CH_TEST_QA_ENABLE_EMBEDDINGS") == "1":
-            config_dict = get_embedding_config_for_tests()
-            embedding_config = build_embedding_config_from_dict(config_dict)
+        embedding_server = MockEmbeddingServer(
+            QA_EMBEDDING_CONCEPTS, dimensions=QA_EMBEDDING_DIMENSIONS
+        )
+        rerank_manager = RerankServerManager(scenarios=list(QA_RERANK_SCENARIOS))
+        services = None
+        realtime_service = None
 
-        # Use fake args to prevent find_project_root call that fails in CI
-        from types import SimpleNamespace
-
-        fake_args = SimpleNamespace(path=temp_dir)
-        config = Config(
-            args=fake_args,
-            database={"path": str(db_path), "provider": "duckdb"},
-            embedding=embedding_config,
-            indexing={
-                "include": ["*"],
-                "exclude": ["*.log", "__pycache__/"],
-                "realtime_backend": realtime_backend_for_tests(),
-            },  # More inclusive for QA
+        # create_services replaces process-wide registry state. Snapshot all of
+        # it so this suite cannot leak its loopback provider or temp-dir config.
+        registry = get_registry()
+        previous_registry = (
+            dict(registry._providers),
+            registry._config,
+            registry._embedding_manager,
         )
 
-        # Create services - real MCP server components
-        services = create_services(db_path, config)
-        services.provider.connect()
-
-        realtime_service = RealtimeIndexingService(services, config)
-        await realtime_service.start(watch_dir)
-
-        # Wait for initial scan
-        await asyncio.sleep(INITIAL_SCAN_WAIT_SECONDS)
-
-        yield services, realtime_service, watch_dir, temp_dir
-
-        # Cleanup — use asyncio.wait (non-cancelling) instead of wait_for.
-        # wait_for cancels stop() mid-cleanup on timeout, which can leave
-        # async tasks referencing the DB executor in inconsistent state,
-        # causing provider.close() → executor.shutdown(wait=True) to hang.
         try:
-            stop_task = asyncio.create_task(realtime_service.stop())
-            done, _ = await asyncio.wait({stop_task}, timeout=10.0)
-            if not done:
-                # Force-stop observer (likely cause of hang on Ubuntu CI)
-                if realtime_service.observer and realtime_service.observer.is_alive():
-                    realtime_service.observer.stop()
-                # Let stop() finish now that observer is unblocked
-                done, _ = await asyncio.wait({stop_task}, timeout=3.0)
-                if not done:
-                    stop_task.cancel()
-                    try:
-                        await stop_task
-                    except asyncio.CancelledError:
-                        pass
-        except Exception:
-            pass
+            embedding_server.start()
+            await rerank_manager.start()
 
-        try:
-            services.provider.close()
-        except Exception:
-            pass
+            from types import SimpleNamespace
 
-        shutil.rmtree(temp_dir, ignore_errors=True)
+            config = Config(
+                args=SimpleNamespace(path=temp_dir),
+                database={"path": str(db_path), "provider": "duckdb"},
+                embedding=_qa_embedding_config(embedding_server, rerank_manager),
+                indexing={
+                    "include": ["*"],
+                    "exclude": ["*.log", "__pycache__/"],
+                    "realtime_backend": realtime_backend_for_tests(),
+                },
+            )
+            embedding_manager = _build_qa_embedding_manager(config)
+
+            services = create_services(db_path, config, embedding_manager)
+            services.provider.connect()
+            realtime_service = RealtimeIndexingService(services, config)
+            await realtime_service.start(watch_dir)
+
+            await asyncio.sleep(INITIAL_SCAN_WAIT_SECONDS)
+            yield (
+                services,
+                realtime_service,
+                watch_dir,
+                temp_dir,
+                embedding_manager,
+                rerank_manager,
+            )
+        finally:
+            cleanup_errors: list[Exception] = []
+            try:
+                cleanup_errors = await _close_qa_resources(
+                    services,
+                    realtime_service,
+                    rerank_manager,
+                    embedding_server,
+                    previous_registry,
+                )
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            if cleanup_errors:
+                raise cleanup_errors[0]
 
     @pytest.mark.asyncio
-    async def test_file_lifecycle_search_validation(self, qa_setup):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window, tracked in issue #254
+    async def test_file_lifecycle_search_validation(
+        self, qa_setup
+    ):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window, tracked in issue #254
         """QA Items 1-4: Test file lifecycle with search validation."""
-        services, realtime_service, watch_dir, _ = qa_setup
+        services, realtime_service, watch_dir, _, embedding_manager, rerank_manager = (
+            qa_setup
+        )
 
         # QA Item 1: Pick specific existing file and search for it
         existing_file = watch_dir / "existing_test.py"
@@ -194,27 +430,31 @@ class ExistingClass:
 
         # Search for existing content
         existing_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="existing_function", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="existing_function",
+            page_size=10,
+            offset=0,
         )
 
-        # Try semantic search if available, skip if not
-        existing_semantic = None
-        try:
-            existing_semantic = await search_impl(
-                services=services, embedding_manager=None,
-                type="semantic", query="existing function QA testing", page_size=10, offset=0,
-            )
-            semantic_count = len(existing_semantic.get('results', []))
-        except Exception as e:
-            print(f"⚠ Semantic search skipped: {e}")
-            semantic_count = "N/A"
-
+        existing_semantic = await _wait_for_semantic_file(
+            services,
+            embedding_manager,
+            "existing function QA testing",
+            "existing_test.py",
+            ("existing_content", "existing_function"),
+        )
+        assert "existing_test.py" in _result_file_names(existing_semantic), (
+            "Semantic search should rank the existing file for its concept"
+        )
         assert len(existing_regex.get("results", [])) > 0, (
             "Should find existing file content with regex"
         )
         print(
-            f"✓ Existing file search: regex={len(existing_regex.get('results', []))}, semantic={semantic_count}"
+            "✓ Existing file search: "
+            f"regex={len(existing_regex.get('results', []))}, "
+            f"semantic={len(existing_semantic.get('results', []))}"
         )
 
         # QA Item 2: Add new file and search for it
@@ -237,25 +477,31 @@ class NewlyAddedClass:
 
         # Search for new content
         new_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="newly_added_content_unique_string", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="newly_added_content_unique_string",
+            page_size=10,
+            offset=0,
         )
 
-        # Try semantic search if available
-        try:
-            new_semantic = await search_impl(
-                services=services, embedding_manager=None,
-                type="semantic", query="newly added function QA validation", page_size=10, offset=0,
-            )
-            new_semantic_count = len(new_semantic.get('results', []))
-        except Exception:
-            new_semantic_count = "N/A"
-
+        new_semantic = await _wait_for_semantic_file(
+            services,
+            embedding_manager,
+            "newly added function QA validation",
+            "new_added_file.py",
+            ("newly_added_content_unique_string", "newly_added_function"),
+        )
+        assert "new_added_file.py" in _result_file_names(new_semantic), (
+            "Semantic search should rank the newly added file"
+        )
         assert len(new_regex.get("results", [])) > 0, (
             "Should find newly added file content with regex"
         )
         print(
-            f"✓ New file search: regex={len(new_regex.get('results', []))}, semantic={new_semantic_count}"
+            "✓ New file search: "
+            f"regex={len(new_regex.get('results', []))}, "
+            f"semantic={len(new_semantic.get('results', []))}"
         )
 
         # QA Item 3: Edit existing file - adding, deleting, and modifying content
@@ -280,10 +526,26 @@ def added_during_edit():
         assert found, "Added content should be searchable"
 
         added_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="added_content_edit_qa", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="added_content_edit_qa",
+            page_size=10,
+            offset=0,
         )
-        assert len(added_regex.get('results', [])) > 0, "Should find content added during edit"
+        added_semantic = await _wait_for_semantic_file(
+            services,
+            embedding_manager,
+            "function added during file edit",
+            "existing_test.py",
+            ("added_content_edit_qa", "added_during_edit"),
+        )
+        assert len(added_regex.get("results", [])) > 0, (
+            "Should find content added during edit"
+        )
+        assert "existing_test.py" in _result_file_names(added_semantic), (
+            "Semantic search should expose content added during edit"
+        )
         print("✓ Edit (add content): Found added content")
 
         # 3b: Delete some content and modify existing
@@ -308,20 +570,39 @@ def added_during_edit():
 
         # Check modification worked
         modified_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="MODIFIED_existing_content", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="MODIFIED_existing_content",
+            page_size=10,
+            offset=0,
         )
         # Check deletion worked - search for the actual class definition
         deleted_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="class ExistingClass:", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="class ExistingClass:",
+            page_size=10,
+            offset=0,
         )
 
         assert len(modified_regex.get("results", [])) > 0, (
             "Should find modified content"
         )
+        modified_semantic = await _wait_for_semantic_file(
+            services,
+            embedding_manager,
+            "MODIFIED existing content during edit",
+            "existing_test.py",
+            ("MODIFIED_existing_content",),
+        )
+
         assert len(deleted_regex.get("results", [])) == 0, (
             "Should not find deleted content"
+        )
+        assert "existing_test.py" in _result_file_names(modified_semantic), (
+            "Semantic search should expose modified content"
         )
         print("✓ Edit (modify/delete): Found modified content, deleted content removed")
 
@@ -331,25 +612,52 @@ def added_during_edit():
         delete_target.unlink()
 
         # Wait for deletion to be processed
-        removed = await realtime_service.wait_for_file_removed(delete_target, timeout=get_fs_event_timeout())
+        removed = await realtime_service.wait_for_file_removed(
+            delete_target, timeout=get_fs_event_timeout()
+        )
         assert removed, "Deleted file should be removed"
 
         # Search for deleted file content
         deleted_file_regex = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="newly_added_content_unique_string", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="newly_added_content_unique_string",
+            page_size=10,
+            offset=0,
+        )
+        deleted_file_semantic = await search_impl(
+            services=services,
+            embedding_manager=embedding_manager,
+            type="semantic",
+            query="newly added function QA validation",
+            page_size=10,
+            offset=0,
+        )
+        assert "new_added_file.py" not in _result_file_names(deleted_file_semantic), (
+            "Semantic search should not rank a deleted file"
         )
 
         assert len(deleted_file_regex.get("results", [])) == 0, (
             "Should not find content from deleted file"
         )
+
+        rerank_queries = {request.get("query") for request in rerank_manager.requests}
+        assert {
+            "existing function QA testing",
+            "newly added function QA validation",
+            "function added during file edit",
+            "MODIFIED existing content during edit",
+        } <= rerank_queries, "Semantic search should exercise the loopback reranker"
         print("✓ File deletion: Deleted file content not found in search")
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(timeout_for_language_coverage())
     async def test_language_coverage_comprehensive(self, qa_setup):
         """QA Items 5-6: Test all supported languages and file types."""
-        services, realtime_service, watch_dir, _ = qa_setup
+        services, realtime_service, watch_dir, _, embedding_manager, rerank_manager = (
+            qa_setup
+        )
 
         # Get all supported languages except UNKNOWN
         languages_to_test = [lang for lang in Language if lang != Language.UNKNOWN]
@@ -359,8 +667,8 @@ def added_during_edit():
             Language.PYTHON: 'def qa_test_function():\n    """Python QA test"""\n    return "python_qa_unique"',
             Language.JAVASCRIPT: 'function qaTestFunction() {\n    // JavaScript QA test\n    return "javascript_qa_unique";\n}',
             Language.TYPESCRIPT: 'function qaTestFunction(): string {\n    // TypeScript QA test\n    return "typescript_qa_unique";\n}',
-            Language.TSX: 'function QAComponent(): JSX.Element {\n    // TSX QA test\n    return <div>tsx_qa_unique</div>;\n}',
-            Language.JSX: 'function QAComponent() {\n    // JSX QA test\n    return <div>jsx_qa_unique</div>;\n}',
+            Language.TSX: "function QAComponent(): JSX.Element {\n    // TSX QA test\n    return <div>tsx_qa_unique</div>;\n}",
+            Language.JSX: "function QAComponent() {\n    // JSX QA test\n    return <div>jsx_qa_unique</div>;\n}",
             Language.JAVA: 'public class QATest {\n    // Java QA test\n    public String test() { return "java_qa_unique"; }\n}',
             Language.CSHARP: 'public class QATest {\n    // C# QA test\n    public string Test() { return "csharp_qa_unique"; }\n}',
             Language.GO: 'package main\n\n// Go QA test\nfunc qaTestFunction() string {\n    return "go_qa_unique"\n}',
@@ -420,9 +728,9 @@ function qaTestFunction() {
             Language.POWERSHELL: '# PowerShell QA test\nfunction Get-QaTest {\n    return "powershell_qa_unique"\n}',
             Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',
             Language.PDF: None,  # PDF is binary, skip content template
-            Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
+            Language.SQL: "-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT 'sql_qa_unique'\n);",
             Language.ELIXIR: 'defmodule QATest do\n  # Elixir QA test\n  def test, do: "elixir_qa_unique"\nend',
-            Language.HTML: '<!DOCTYPE html>\n<html>\n<body>\n  <!-- HTML QA test -->\n  <p>html_qa_unique</p>\n</body>\n</html>',
+            Language.HTML: "<!DOCTYPE html>\n<html>\n<body>\n  <!-- HTML QA test -->\n  <p>html_qa_unique</p>\n</body>\n</html>",
             Language.CSS: '/* CSS QA test */\n.qa-test {\n  content: "css_qa_unique";\n  color: blue;\n}',
             Language.SCSS: '/* SCSS QA test */\n$color: blue;\n.qa-test {\n  content: "scss_qa_unique";\n  color: $color;\n}',
             Language.JINJA: '<!DOCTYPE html>\n<html>\n<body>\n  {# Jinja QA test #}\n  <p>{{ "jinja_qa_unique" }}</p>\n</body>\n</html>',
@@ -477,7 +785,11 @@ function qaTestFunction() {
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)
-        testable_languages = {lang for lang in Language if lang not in (Language.UNKNOWN, Language.GIT_DIFF)}
+        testable_languages = {
+            lang
+            for lang in Language
+            if lang not in (Language.UNKNOWN, Language.GIT_DIFF)
+        }
         missing_templates = testable_languages - set(content_templates.keys())
         missing_extensions = testable_languages - set(extension_map.keys())
         # Languages must be in BOTH dicts to be tested
@@ -518,7 +830,9 @@ function qaTestFunction() {
         # Note: Windows CI may need longer due to ReadDirectoryChangesW unreliability,
         # but we cap at INDEXING_CAP_SECONDS to fail fast rather than hang
         total_timeout = timeout_for_language_coverage()
-        available_for_indexing = total_timeout - BASE_OVERHEAD_SECONDS - SEARCH_VALIDATION_BUDGET_SECONDS
+        available_for_indexing = (
+            total_timeout - BASE_OVERHEAD_SECONDS - SEARCH_VALIDATION_BUDGET_SECONDS
+        )
         max_wait = min(available_for_indexing, INDEXING_CAP_SECONDS)
         poll_interval = INDEXING_POLL_INTERVAL_SECONDS
         start_time = time.monotonic()
@@ -535,7 +849,7 @@ function qaTestFunction() {
 
         # Final stats check with informative failure if indexing incomplete
         db_stats = await services.indexing_coordinator.get_stats()
-        indexed_files = db_stats.get('files', 0)
+        indexed_files = db_stats.get("files", 0)
         print(f"📊 Final: {indexed_files} files, {db_stats.get('chunks', 0)} chunks")
 
         if indexed_files < expected_file_count:
@@ -551,10 +865,14 @@ function qaTestFunction() {
             """Validate a single language's content is searchable."""
             try:
                 regex_results = await search_impl(
-                    services=services, embedding_manager=None,
-                    type="regex", query=pattern, page_size=10, offset=0,
+                    services=services,
+                    embedding_manager=embedding_manager,
+                    type="regex",
+                    query=pattern,
+                    page_size=10,
+                    offset=0,
                 )
-                if len(regex_results.get('results', [])) > 0:
+                if len(regex_results.get("results", [])) > 0:
                     return (language.value, True, None)
                 return (language.value, False, "regex not found")
             except Exception as e:
@@ -565,7 +883,9 @@ function qaTestFunction() {
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         successful_languages = [lang for lang, success, _ in results if success]
-        failed_languages = [f"{lang} ({err})" for lang, success, err in results if not success]
+        failed_languages = [
+            f"{lang} ({err})" for lang, success, err in results if not success
+        ]
 
         print(f"✓ Languages successfully tested: {len(successful_languages)}")
         print(f"✓ Successful languages: {successful_languages}")
@@ -579,11 +899,15 @@ function qaTestFunction() {
             lang for lang in successful_languages if lang in major_languages
         ]
 
-        assert len(working_major) >= MIN_MAJOR_LANGUAGES_REQUIRED, f"At least {MIN_MAJOR_LANGUAGES_REQUIRED} major languages should work, got: {working_major}"
+        assert len(working_major) >= MIN_MAJOR_LANGUAGES_REQUIRED, (
+            f"At least {MIN_MAJOR_LANGUAGES_REQUIRED} major languages should work, got: {working_major}"
+        )
 
         # Realistic expectation - at least some languages should work
         # This test reveals which languages actually work in the current system
-        assert len(successful_languages) >= MIN_TOTAL_LANGUAGES_REQUIRED, f"At least {MIN_TOTAL_LANGUAGES_REQUIRED} languages should work, got {len(successful_languages)}: {successful_languages}"
+        assert len(successful_languages) >= MIN_TOTAL_LANGUAGES_REQUIRED, (
+            f"At least {MIN_TOTAL_LANGUAGES_REQUIRED} languages should work, got {len(successful_languages)}: {successful_languages}"
+        )
 
         # Report findings for manual review
         success_rate = (
@@ -594,12 +918,16 @@ function qaTestFunction() {
         )
 
         if success_rate < LOW_SUCCESS_RATE_THRESHOLD:
-            print("⚠ LOW SUCCESS RATE: This may indicate indexing or parsing issues with some languages")
+            print(
+                "⚠ LOW SUCCESS RATE: This may indicate indexing or parsing issues with some languages"
+            )
 
     @pytest.mark.asyncio
     async def test_concurrent_operations_and_timing(self, qa_setup):
         """QA Item 7: Test concurrent file operations with search timing."""
-        services, realtime_service, watch_dir, _ = qa_setup
+        services, realtime_service, watch_dir, _, embedding_manager, rerank_manager = (
+            qa_setup
+        )
 
         # Create initial test files
         base_files = []
@@ -621,8 +949,12 @@ function qaTestFunction() {
                 try:
                     start_time = time.time()
                     results = await search_impl(
-                        services=services, embedding_manager=None,
-                        type="regex", query="concurrent_qa_test", page_size=50, offset=0,
+                        services=services,
+                        embedding_manager=embedding_manager,
+                        type="regex",
+                        query="concurrent_qa_test",
+                        page_size=50,
+                        offset=0,
                     )
                     end_time = time.time()
 
@@ -739,8 +1071,12 @@ class RapidClass_{i}:
             )
 
             # Search should not block - reasonable performance expected
-            assert avg_search_time < AVG_SEARCH_TIME_LIMIT_SECONDS, f"Average search time should be < {AVG_SEARCH_TIME_LIMIT_SECONDS}s, got {avg_search_time:.3f}s"
-            assert max_search_time < MAX_SEARCH_TIME_LIMIT_SECONDS, f"Max search time should be < {MAX_SEARCH_TIME_LIMIT_SECONDS}s, got {max_search_time:.3f}s"
+            assert avg_search_time < AVG_SEARCH_TIME_LIMIT_SECONDS, (
+                f"Average search time should be < {AVG_SEARCH_TIME_LIMIT_SECONDS}s, got {avg_search_time:.3f}s"
+            )
+            assert max_search_time < MAX_SEARCH_TIME_LIMIT_SECONDS, (
+                f"Max search time should be < {MAX_SEARCH_TIME_LIMIT_SECONDS}s, got {max_search_time:.3f}s"
+            )
 
     @pytest.mark.asyncio
     async def test_pagination_comprehensive(self, qa_setup):
@@ -751,16 +1087,24 @@ class RapidClass_{i}:
         occurrences counts as 1 result, while ripgrep counts each line occurrence separately.
         This explains the expected discrepancy between result counts.
         """
-        services, realtime_service, watch_dir, _ = qa_setup
+        services, realtime_service, watch_dir, _, embedding_manager, rerank_manager = (
+            qa_setup
+        )
 
         # Create files with varying amounts of searchable content
 
         # 1. Search for non-existing value (should return empty)
         non_existing_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="non_existing_unique_pattern_qa_test_12345", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="non_existing_unique_pattern_qa_test_12345",
+            page_size=10,
+            offset=0,
         )
-        assert len(non_existing_results.get('results', [])) == 0, "Non-existing pattern should return empty results"
+        assert len(non_existing_results.get("results", [])) == 0, (
+            "Non-existing pattern should return empty results"
+        )
         print("✓ Pagination test 1: Non-existing pattern returns empty")
 
         # 2. Create single file with unique content (no pagination needed)
@@ -773,10 +1117,16 @@ class RapidClass_{i}:
         await asyncio.sleep(PAGINATION_SETUP_WAIT_SECONDS)
 
         single_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="single_unique_result_qa_test", page_size=10, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="single_unique_result_qa_test",
+            page_size=10,
+            offset=0,
         )
-        assert len(single_results.get('results', [])) == 1, "Single unique pattern should return exactly 1 result"
+        assert len(single_results.get("results", [])) == 1, (
+            "Single unique pattern should return exactly 1 result"
+        )
         print("✓ Pagination test 2: Single result handled correctly")
 
         # 3. Create many files with common pattern to test pagination
@@ -1005,8 +1355,11 @@ if __name__ == "__main__":
         for _ in range(MAX_STABILITY_CHECKS):
             await asyncio.sleep(STABILITY_CHECK_INTERVAL_SECONDS)
             stats = await services.indexing_coordinator.get_stats()
-            current_chunks = stats.get('chunks', 0)
-            if stable_count == current_chunks and current_chunks >= MIN_EXPECTED_CHUNKS_PAGINATION:
+            current_chunks = stats.get("chunks", 0)
+            if (
+                stable_count == current_chunks
+                and current_chunks >= MIN_EXPECTED_CHUNKS_PAGINATION
+            ):
                 break
             stable_count = current_chunks
         else:
@@ -1023,8 +1376,12 @@ if __name__ == "__main__":
 
         while page_count < max_pages:
             page_results = await search_impl(
-                services=services, embedding_manager=None,
-                type="regex", query=common_pattern, page_size=page_size, offset=offset,
+                services=services,
+                embedding_manager=embedding_manager,
+                type="regex",
+                query=common_pattern,
+                page_size=page_size,
+                offset=offset,
             )
 
             page_data = page_results.get("results", [])
@@ -1066,7 +1423,9 @@ if __name__ == "__main__":
         # than expected based on size. This is by design for better semantic coherence.
         if len(all_results) < expected_chunks:
             processing_rate = len(all_results) / expected_chunks
-            print(f"📊 Chunk processing rate: {processing_rate:.1%} ({len(all_results)}/{expected_chunks} expected chunks)")
+            print(
+                f"📊 Chunk processing rate: {processing_rate:.1%} ({len(all_results)}/{expected_chunks} expected chunks)"
+            )
 
         # 4. Compare with external validation using ripgrep if available
         try:
@@ -1122,25 +1481,39 @@ if __name__ == "__main__":
         # Use total_count from pagination metadata, not len(all_results) which may be partial
         actual_total = total_count if total_count > 0 else len(all_results)
         beyond_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query=common_pattern, page_size=10, offset=actual_total + 100,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query=common_pattern,
+            page_size=10,
+            offset=actual_total + 100,
         )
-        assert len(beyond_results.get('results', [])) == 0, f"Offset {actual_total + 100} beyond total {actual_total} should return empty"
+        assert len(beyond_results.get("results", [])) == 0, (
+            f"Offset {actual_total + 100} beyond total {actual_total} should return empty"
+        )
 
         # Test large page size
         large_page_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query=common_pattern, page_size=100, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query=common_pattern,
+            page_size=100,
+            offset=0,
         )
-        large_page_count = len(large_page_results.get('results', []))
-        assert large_page_count <= actual_total, f"Large page size should not exceed total ({large_page_count} <= {actual_total})"
+        large_page_count = len(large_page_results.get("results", []))
+        assert large_page_count <= actual_total, (
+            f"Large page size should not exceed total ({large_page_count} <= {actual_total})"
+        )
 
         print("✓ Pagination edge cases handled correctly")
 
     @pytest.mark.asyncio
     async def test_qa_comprehensive_report(self, qa_setup):
         """Generate comprehensive QA report with timing measurements."""
-        services, realtime_service, watch_dir, _ = qa_setup
+        services, realtime_service, watch_dir, _, embedding_manager, rerank_manager = (
+            qa_setup
+        )
 
         print("\n" + "=" * 60)
         print("COMPREHENSIVE QA VALIDATION REPORT")
@@ -1165,11 +1538,15 @@ if __name__ == "__main__":
             await asyncio.sleep(poll_interval)
 
             search_results = await search_impl(
-                services=services, embedding_manager=None,
-                type="regex", query="timing_validation_unique_content", page_size=10, offset=0,
+                services=services,
+                embedding_manager=embedding_manager,
+                type="regex",
+                query="timing_validation_unique_content",
+                page_size=10,
+                offset=0,
             )
 
-            if len(search_results.get('results', [])) > 0:
+            if len(search_results.get("results", [])) > 0:
                 indexing_time = time.monotonic() - start_time
                 break
         else:
@@ -1178,8 +1555,12 @@ if __name__ == "__main__":
         # Test search performance
         search_start = time.time()
         performance_results = await search_impl(
-            services=services, embedding_manager=None,
-            type="regex", query="function", page_size=50, offset=0,
+            services=services,
+            embedding_manager=embedding_manager,
+            type="regex",
+            query="function",
+            page_size=50,
+            offset=0,
         )
         search_time = time.time() - search_start
 
@@ -1210,7 +1591,9 @@ if __name__ == "__main__":
         print(f"   Real-time indexing: {'✅ WORKING' if indexing_ok else '❌ SLOW'}")
         search_good = search_time < SEARCH_GOOD_THRESHOLD_SECONDS
         search_ok = search_time < SEARCH_ACCEPTABLE_THRESHOLD_SECONDS
-        search_status = '✅ GOOD' if search_good else '⚠ ACCEPTABLE' if search_ok else '❌ SLOW'
+        search_status = (
+            "✅ GOOD" if search_good else "⚠ ACCEPTABLE" if search_ok else "❌ SLOW"
+        )
         print(f"   Search performance: {search_status}")
         print("   Non-blocking searches: ✅ VERIFIED")
 

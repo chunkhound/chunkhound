@@ -119,6 +119,58 @@ async def test_mock_rerank_server_supports_tei_and_bare_array_formats() -> None:
 
 @pytest.mark.fast
 @pytest.mark.asyncio
+async def test_mock_rerank_server_scores_documents_by_marker() -> None:
+    """Document-agnostic scenarios score markers so chunking cannot break tests."""
+    scenario = MockRerankScenario(
+        name="marker-scores",
+        query="find the target",
+        documents=None,
+        results=[],
+        document_scores={"target_marker": 0.93},
+    )
+    documents = [
+        "unrelated content",
+        "def target_marker(): pass",
+        "target_marker appears in prose",
+    ]
+
+    async with RerankServerManager(scenarios=[scenario]) as manager:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(
+                f"{manager.base_url}/rerank",
+                json={
+                    "model": "test-model",
+                    "query": "find the target",
+                    "documents": documents,
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "results": [
+                {"index": 1, "relevance_score": 0.93},
+                {"index": 2, "relevance_score": 0.93},
+                {"index": 0, "relevance_score": 0.0},
+            ]
+        }
+        assert manager.requests[0]["documents"] == documents
+
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            truncated = await client.post(
+                f"{manager.base_url}/rerank",
+                json={
+                    "model": "test-model",
+                    "query": "find the target",
+                    "documents": documents,
+                    "top_n": 1,
+                },
+            )
+
+        assert truncated.json() == {"results": [{"index": 1, "relevance_score": 0.93}]}
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
 async def test_rerank_server_manager_stops_cleanly() -> None:
     """Manager should expose a live server only inside its async context."""
     manager = RerankServerManager()

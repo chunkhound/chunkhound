@@ -279,6 +279,8 @@ class TestConfigIntegration:
             1024,
             2048,
         ]
+        # voyage-3.5 carries the general-purpose 320K token batch limit.
+        assert VOYAGE_MODEL_CONFIG[default_model]["max_tokens_per_batch"] == 320_000
 
 
 class TestVoyageSingleDimModels:

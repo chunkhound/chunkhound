@@ -1,0 +1,233 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import DocCode from "../../../components/DocCode.astro";
+import DocsCallout from "../../../components/DocsCallout.astro";
+import WorkflowDemo from "../../../components/WorkflowDemo.astro";
+
+const toc = [
+    { depth: 2 as const, slug: "capabilities", text: "Control the harness" },
+    { depth: 2 as const, slug: "example", text: "Example: implement a spec" },
+    { depth: 2 as const, slug: "design", text: "Design the workflow" },
+    { depth: 2 as const, slug: "code", text: "The workflow" },
+    { depth: 2 as const, slug: "run", text: "Run the example" },
+];
+---
+
+<DocsLayout title="Workflows" toc={toc}>
+    <h1>Workflows in code<span class="title-dot" aria-hidden="true"></span></h1>
+    <p class="lead">
+        A workflow is a JavaScript program that operates the agent harness for
+        you. The <code>workflow.*</code> API gives code many of the same controls
+        you use as an operator: run model turns, change posture, execute commands,
+        manage context, and decide when to stop.
+    </p>
+
+    <WorkflowDemo />
+
+    <h2 id="capabilities">Control the harness</h2>
+    <p>
+        The workflow automation layer gives your code access to the harness,
+        not just to the model. It can carry out operations you would otherwise
+        perform in a Pi session, inspect their results, and use those results to
+        decide what happens next. For example, <code>workflow.new()</code> starts
+        a new session just as entering <code>/new</code> does.
+    </p>
+
+    <h3>Run work</h3>
+    <ul>
+        <li><code>workflow.run(prompt, options?)</code> runs a prompt or skill, optionally returning structured output.</li>
+        <li><code>workflow.classify(request)</code> asks a classifier model typed questions about JSON state.</li>
+        <li><code>workflow.shell(command, options?)</code> runs a shell command and returns its result.</li>
+        <li><code>workflow.readonly(enabled)</code> turns the readonly posture on or off.</li>
+    </ul>
+    <h3>Inspect the session</h3>
+    <ul>
+        <li><code>workflow.state()</code> returns a digest of the current session.</li>
+        <li><code>workflow.entries(&#123; after?, limit? &#125;?)</code> reads compact conversation entries.</li>
+    </ul>
+    <h3>Manage memory and context</h3>
+    <ul>
+        <li><code>workflow.notebookIndex()</code> lists notebook pages and their previews.</li>
+        <li><code>workflow.notebookRead(name)</code> reads a notebook page.</li>
+        <li><code>workflow.notebookWrite(&#123; name, content &#125;)</code> writes a notebook page.</li>
+        <li><code>workflow.notebookTopic()</code> reads the active notebook topic.</li>
+        <li><code>workflow.handoff(direction)</code> hands off to a fresh context while retaining the notebook.</li>
+        <li><code>workflow.new()</code> starts a new session and clears the notebook.</li>
+    </ul>
+
+    <h3>Control the run</h3>
+    <ul>
+        <li><code>workflow.budget()</code> reports run cost and remaining cost and time targets.</li>
+        <li><code>workflow.checkpoint(metadata)</code> marks a safe stop and supplies partial-result metadata.</li>
+        <li><code>workflow.exit(metadata)</code> stops the workflow and records its result.</li>
+    </ul>
+
+    <DocsCallout title="Public preview" variant="warning">
+        <p>
+            The workflow engine and its API are still changing. Expect breaking
+            changes; backward compatibility is not yet provided.
+        </p>
+    </DocsCallout>
+
+    <h2 id="example">Example: implement a spec</h2>
+    <p>
+        This example implements a spec: it finds gaps in the code, plans and
+        applies fixes, and runs tests. We chose this “spec printing” job because
+        turning a spec into working software is the most basic job of a software
+        factory.
+    </p>
+
+    <h2 id="design">Design the workflow</h2>
+    <p>
+        Tests must check observable behavior, not implementation details: a full
+        rewrite should pass the same suite without users noticing a difference.
+        This is a requirement for the suite, not a guarantee the workflow can make.
+    </p>
+    <p>
+        First, the agent detects the test command and returns it as structured
+        output. The workflow runs it directly as a baseline, then repeats a loop:
+        analyze the spec and code, plan fixes, implement them, and run tests.
+        The analysis and plan stay in the conversation for the next step. The
+        loop runs up to its iteration limit; it does not parse the analysis to
+        decide whether the spec is complete.
+    </p>
+    <p>
+        A failed test or the iteration limit stops the workflow for human review.
+        Automatic test repair could weaken the suite or add slop. Checkpoints
+        also let the workflow's TUI apply cost and time targets; these are soft
+        limits, so work can continue until the next checkpoint. A cancel is not a
+        soft stop: it aborts the active turn at once. Passing tests and
+        model-reported findings do not prove the spec is met.
+    </p>
+
+    <h2 id="code">The workflow</h2>
+    <p>
+        Skills and saved prompts can set posture and model routing in their
+        frontmatter. For example, an analysis skill at
+        <code>.pi/skills/analyze-spec/SKILL.md</code> could use a configured
+        <code>review</code> Model Group:
+    </p>
+    <DocCode lang="markdown" code={`---
+name: analyze-spec
+description: Compare a specification with the code and report gaps.
+readonly: true
+model-group: review
+---
+Read the supplied spec and compare it with the code. Report concrete gaps.
+If you cannot read the spec, say so.`} />
+    <p>
+        The workflow below also uses two project prompt templates: <code>/detect-tests</code>
+        finds the full test command (or returns an empty command), and
+        <code>/plan-spec-fixes</code> plans from the analysis. Implementation needs
+        no template: the workflow hands the plan to a successor context. Configure
+        the templates' frontmatter for readonly detection and planning. The planning
+        template must leave files unchanged when the spec cannot be read or there is
+        no actionable plan.
+    </p>
+    <p>
+        Save this file as <code>.pi/workflows/implement-spec.js</code>. The agent
+        selects a test command and the workflow executes it without asking for
+        approval. Run it only in a trusted repository where you accept agent
+        edits and shell commands. Verify that the selected command runs the
+        appropriate suite.
+    </p>
+    <DocCode lang="javascript" code={`return defineWorkflow((workflow) => {
+  // The run argument names the spec. A missing argument is a caller mistake,
+  // so the workflow exits before it spends any model or shell work.
+  const MAX_ROUNDS = 3;
+  const spec = load("intent").trim();
+  if (!spec) return workflow.exit({ reason: "spec-path-missing" });
+
+  // Detection answers through the output tool, so the schema turns the answer
+  // into a value the workflow can trust. Its frontmatter keeps the turn readonly.
+  const detection = workflow.run(
+    "/detect-tests",
+    {
+      output: {
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["command"],
+          properties: { command: { type: "string" } },
+        },
+      },
+    },
+  );
+  const command = detection.output.command.trim();
+  // No command means no round can be verified, so stop before editing anything.
+  if (!command) return workflow.exit({ reason: "test-command-not-found" });
+
+  // Tests may write artifacts, so drop the detection turn's readonly posture.
+  // A red baseline stops for a human before any round spends budget on fixes.
+  workflow.readonly(false);
+  const baseline = workflow.shell(command);
+  if (!baseline.ok) {
+    return workflow.exit({
+      reason: "baseline-tests-failing",
+      command,
+      output: baseline.output,
+    });
+  }
+  // A checkpoint is the only safe exit point: a pending cost or time stop lands
+  // here and salvages this phase with the resolved command.
+  workflow.checkpoint({ phase: "baseline-passed", command });
+
+  // Each round starts from a fresh session so earlier rounds do not bias the
+  // analysis. Cost stays cumulative, and the loop bound keeps spending finite.
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    // A fresh context keeps this round blind to the previous round's verdicts
+    // and repairs, so the analysis starts unbiased.
+    workflow.new();
+
+    // The skill's frontmatter selects a random model from the review group. The
+    // analysis stays in this fresh context for the plan turn to read.
+    workflow.run("/skill:analyze-spec", { input: spec });
+    // Salvage point: a soft target that lands here reports the inspected phase.
+    workflow.checkpoint({ phase: "inspected", round });
+
+    // Planning frontmatter keeps this turn readonly: it writes the plan to the
+    // conversation, never to the tree, so a bad plan cannot touch files.
+    workflow.run("/plan-spec-fixes");
+
+    // Handoff keeps the context small: the plan runs in a successor context
+    // instead of piling onto the analysis. Execution needs writes, so drop the
+    // readonly posture the planning turn left behind.
+    workflow.readonly(false);
+    workflow.handoff("apply the planned fixes");
+
+    // The handoff settles before this call, so the edits are on disk. Run the
+    // same suite directly: a model-written test could weaken the suite.
+    const tests = workflow.shell(command);
+    if (!tests.ok) {
+      return workflow.exit({
+        reason: "tests-failing",
+        round,
+        command,
+        output: tests.output,
+      });
+    }
+    // Salvage point: a soft target that lands here reports the tested phase.
+    workflow.checkpoint({ phase: "tested", round, command });
+  }
+  // Stop at the cap and leave the result for human review. The workflow never
+  // claims the spec is met on its own.
+  return workflow.exit({ reason: "iteration-limit", rounds: MAX_ROUNDS });
+});`} />
+
+    <h2 id="run">Run the example</h2>
+    <p>
+        Install pi-schematic using the <a href="/docs/pi-schematic/">setup guide</a>,
+        configure the skill and prompt templates, and start pi in the repository.
+        Pass the path to an existing spec that the agent can read:
+    </p>
+    <DocCode code="/workflow implement-spec specs/checkout.md" />
+    <p>
+        The argument is available through <code>load("intent")</code>. When the
+        workflow stops, inspect the exit reason and changes. Shell output is
+        visible to you, but is not automatically sent to the model.
+    </p>
+    <p>
+        For the full API, target behavior, and limitations, see the
+        <a href="https://github.com/chunkhound/pi-schematic/blob/main/docs/workflows.md">workflow author contract</a>.
+    </p>
+</DocsLayout>

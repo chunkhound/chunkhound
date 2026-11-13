@@ -1,8 +1,13 @@
-"""Shared HTML parsing helpers for site tests."""
+"""Shared HTML content helpers for site tests."""
 
 from __future__ import annotations
 
 import re
+
+# Banned marketing claim: a fixed "N languages" count drifts from the provider
+# list and overstates coverage. Shared so every surface (hero transcript, built
+# docs) rejects the exact same phrasing.
+NUMERIC_LANGUAGE_CLAIM = re.compile(r"\b\d+\+?\s+languages\b", re.IGNORECASE)
 
 
 def attributes(tag: str) -> dict[str, str]:

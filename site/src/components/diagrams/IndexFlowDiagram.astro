@@ -1,0 +1,86 @@
+---
+import DiagramFigure from "./DiagramFigure.astro";
+import { INDEX_PHASES, INDEX_PIPELINE } from "../../lib/architecture";
+
+/**
+ * Default DuckDB phases and backend scope come from the architecture SSOT.
+ * Ownership tags distinguish native work from Python callbacks.
+ */
+---
+
+<DiagramFigure
+  caption={INDEX_PIPELINE.title}
+  label={`${INDEX_PIPELINE.title}: discovery to compaction`}
+  description={`${INDEX_PIPELINE.description} ${INDEX_PIPELINE.fallback}`}
+>
+  <section class="engine d-band">
+    <header class="engine-head d-band-head">
+      <span class="engine-label d-band-label">{INDEX_PIPELINE.title}</span>
+      <span class="engine-caption d-band-caption">
+        Rust drives the build, HTTP embedding included; parsing runs in Python
+        today.
+      </span>
+    </header>
+    <dl class="phases d-term-list">
+      {INDEX_PHASES.map((phase) => (
+        <div class="phase d-term" data-language={phase.language}>
+          <dt>{phase.title}</dt>
+          <dd>{phase.detail}</dd>
+          <span class="phase-lang">{phase.language}</span>
+        </div>
+      ))}
+    </dl>
+  </section>
+
+  <div class="d-connector" data-tone="accent">
+    {INDEX_PIPELINE.fallback}
+  </div>
+</DiagramFigure>
+
+<style>
+  /* Ownership tag needs its own column, so this band's term rows add a third
+     track on top of the shared .d-term recipe (diagrams.css). Restating gap
+     here (rather than inheriting .d-term's) is what keeps the row spacing: this
+     scoped .phase rule outranks every .d-term declaration, including its
+     mobile stack. */
+  .phase {
+    grid-template-columns: minmax(0, 9rem) 1fr auto;
+    gap: var(--space-1) var(--space-4);
+  }
+
+  /* The Rust-owned phases take the accent; the mixed rows stay neutral. */
+  .phase[data-language="Rust"] dt {
+    color: var(--primary);
+  }
+
+  .phase-lang {
+    color: var(--text-tertiary);
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+    font-variant: small-caps;
+    white-space: nowrap;
+  }
+
+  .phase[data-language="Rust"] .phase-lang {
+    color: var(--primary);
+  }
+
+  @media (max-width: 720px) {
+    /* Title + ownership tag share the first line; the meaning spans below. */
+    .phase {
+      grid-template-columns: 1fr auto;
+    }
+
+    .phase dt {
+      grid-area: 1 / 1;
+    }
+
+    .phase-lang {
+      grid-area: 1 / 2;
+    }
+
+    .phase dd {
+      grid-area: 2 / 1 / 2 / -1;
+    }
+  }
+</style>
