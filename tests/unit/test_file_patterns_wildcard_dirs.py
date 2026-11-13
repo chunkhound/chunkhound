@@ -1,4 +1,4 @@
-import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,6 +8,7 @@ from chunkhound.utils.file_patterns import (
     should_include_file,
     walk_directory_tree,
 )
+from chunkhound.utils.git_discovery import list_repo_files_via_git
 
 
 def test_exclude_double_star_segment_wildcard_venv():
@@ -68,3 +69,35 @@ async def test_walk_directory_tree_prunes_wildcard_dir_segments(tmp_path: Path):
     # Only the src/a.py file should be present
     assert rels == ["src/a.py"], f"unexpected files discovered: {rels}"
 
+
+@pytest.mark.parametrize(
+    ("matcher", "pattern", "relative_path", "expected"),
+    [
+        (should_include_file, "src/**/*.py", "src/main.py", True),
+        (should_include_file, "src/**/*.py", "src/pkg/mod.py", True),
+        (should_include_file, "src/**/*.py", "other/main.py", False),
+        (should_exclude_path, "**/.yarn/cache/**", ".yarn/cache/file.zip", True),
+        (should_exclude_path, "**/.yarn/cache/**", "pkg/.yarn/cache/file.zip", True),
+        (should_exclude_path, "**/public/bundles/**", "public/bundles/app.js", True),
+        (should_exclude_path, "**/public/bundles/**", "public/bundles-x/app.js", False),
+    ],
+)
+def test_directory_globs_match_named_files(
+    matcher, pattern: str, relative_path: str, expected: bool
+) -> None:
+    base = Path("/workspaces/project")
+    assert matcher(base / relative_path, base, [pattern], {}) is expected
+
+
+def test_git_discovery_keeps_files_directly_under_an_anchored_include(tmp_path: Path):
+    repo = tmp_path / "repo"
+    for relative_path in ("src/main.py", "src/pkg/mod.py", "other/nope.py"):
+        path = repo / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("content\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    files, _stats = list_repo_files_via_git(
+        repo, repo, ["**/src/**/*.py"], config_excludes=[]
+    )
+    rels = sorted(path.relative_to(repo).as_posix() for path in files)
+    assert rels == ["src/main.py", "src/pkg/mod.py"], rels
