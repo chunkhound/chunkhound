@@ -22,7 +22,12 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler, forward_to_loop
+from .events import (
+    SimpleEventHandler,
+    forward_to_loop,
+    ignore_windows_last_access,
+    watchdog_event_filter,
+)
 
 
 class RealtimeObserver(Protocol):
@@ -33,6 +38,7 @@ class RealtimeObserver(Protocol):
         event_handler: SimpleEventHandler,
         path: str,
         recursive: bool = ...,
+        event_filter: list[type] | None = ...,
     ) -> Any: ...
 
     def start(self) -> None: ...
@@ -48,6 +54,7 @@ def _create_watchdog_observer() -> RealtimeObserver:
     """Import watchdog only inside the watchdog startup path."""
     from watchdog.observers import Observer
 
+    ignore_windows_last_access()
     return Observer()
 
 
@@ -817,6 +824,7 @@ class RealtimeStartupMixin:
             event_handler,
             str(watch_path),
             recursive=True,  # Use recursive for complete event coverage
+            event_filter=watchdog_event_filter(),
         )
         observer.start()
 
