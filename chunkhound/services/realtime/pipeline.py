@@ -18,7 +18,12 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseTemporarilyUnavailableError,
 )
 
-from .events import RealtimeMutation, SimpleEventHandler, normalize_file_path
+from .events import (
+    RealtimeMutation,
+    SimpleEventHandler,
+    normalize_file_path,
+    watchdog_event_filter,
+)
 
 
 class RealtimePipelineMixin:
@@ -1114,6 +1119,14 @@ class RealtimePipelineMixin:
                             in self._active_change_generations
                         )
                     ):
+                        if event_type in ("created", "modified"):
+                            # Still a write: keep a pending debounce horizon
+                            # fresh, as add_file would. A burst of saves is
+                            # then indexed once, after the last one, and a
+                            # file written without pause once it goes quiet.
+                            pending_key = str(self._normalize_mutation_path(file_path))
+                            if pending_key in self._pending_debounce:
+                                self._pending_debounce[pending_key] = time.monotonic()
                         logger.debug(
                             "Suppressing duplicate "
                             f"{event_type} event for {file_path} "
@@ -1190,6 +1203,7 @@ class RealtimePipelineMixin:
                         self.event_handler,
                         dir_path,
                         recursive=True,  # Keep new directories recursively covered.
+                        event_filter=watchdog_event_filter(),
                     )
                     self.watched_directories.add(dir_path)
                     logger.debug(f"Added recursive watch for new directory: {dir_path}")
