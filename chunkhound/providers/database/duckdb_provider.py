@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import duckdb
 from loguru import logger
@@ -104,6 +104,16 @@ from chunkhound.providers.database.duckdb.schema_constants import (
     VALID_CATALOGS,
     is_hnsw_index,
 )
+
+
+def _guarded_cosine_sql(metric: Literal["similarity", "distance"], dims: int) -> str:
+    """Return SQL scoring stored vector ``e.embedding`` against a ``?`` query vector.
+
+    DuckDB's cosine functions raise on a vector with NULL elements, which is how
+    a NaN vector is stored. TRY() turns that into a NULL score instead, so one
+    malformed vector never fails a whole query; callers must drop NULL scores.
+    """
+    return f"TRY(array_cosine_{metric}(e.embedding, ?::FLOAT[{dims}]))"
 
 
 class DuckDBTransactionConflictError(RuntimeError):
@@ -4243,13 +4253,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         placeholders = ", ".join(["?"] * len(chunk_ids))
         query = f"""
             SELECT e.chunk_id,
-                   array_cosine_similarity(e.embedding, ?::FLOAT[{dims}]) as similarity
+                   {_guarded_cosine_sql("similarity", dims)} as similarity
             FROM {table_name} e
             WHERE e.chunk_id IN ({placeholders})
               AND e.provider = ? AND e.model = ?
         """
         rows = conn.execute(query, [query_embedding, *chunk_ids, provider, model]).fetchall()
-        return {int(row[0]): float(row[1]) for row in rows}
+        # A chunk whose vector cannot be scored is left out, like one with none.
+        return {int(row[0]): float(row[1]) for row in rows if row[1] is not None}
 
     def find_similar_chunks(
         self,
@@ -4351,8 +4362,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
                 return []
 
-            embedding_type = f"FLOAT[{dims}]"
-
             # Use the embedding to find similar chunks
             similarity_metric = "cosine"  # Default for semantic search
             threshold_condition = (
@@ -4379,7 +4388,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     f.path as file_path,
                     f.language,
                     c.metadata,
-                    array_cosine_distance(e.embedding, ?::{embedding_type}) as distance
+                    {_guarded_cosine_sql("distance", dims)} as distance
                 FROM {table_name} e
                 JOIN chunks c ON e.chunk_id = c.id
                 JOIN files f ON c.file_id = f.id
@@ -4388,7 +4397,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 AND c.id != ?
                 {path_condition}
                 {threshold_condition}
-                ORDER BY distance ASC
+                ORDER BY distance ASC NULLS LAST
                 LIMIT ?
             """
 
@@ -4396,7 +4405,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             results = conn.execute(query, params).fetchall()
 
-            # Format results
+            # Unscoreable vectors sort last, so dropping them after the LIMIT
+            # keeps the same rows as filtering first, without scoring twice.
             result_list = [
                 {
                     "chunk_id": result[0],
@@ -4411,6 +4421,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "score": 1.0 - result[9],  # Convert distance to similarity score
                 }
                 for result in results
+                if result[9] is not None
             ]
 
             return result_list
@@ -4458,7 +4469,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Detect dimensions from query embedding (reuse pattern from search_semantic)
             query_dims = len(query_embedding)
             table_name = f"embeddings_{query_dims}"
-            embedding_type = f"FLOAT[{query_dims}]"
 
             # Check if table exists for these dimensions (reuse existing validation pattern)
             if not self._executor_table_exists(conn, state, table_name):
@@ -4494,7 +4504,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     c.end_line,
                     f.path as file_path,
                     f.language,
-                    array_cosine_distance(e.embedding, ?::{embedding_type}) as distance
+                    {_guarded_cosine_sql("distance", query_dims)} as distance
                 FROM {table_name} e
                 JOIN chunks c ON e.chunk_id = c.id
                 JOIN files f ON c.file_id = f.id
@@ -4502,13 +4512,14 @@ class DuckDBProvider(SerialDatabaseProvider):
                 AND e.model = ?
                 {path_condition}
                 {threshold_condition}
-                ORDER BY distance ASC
+                ORDER BY distance ASC NULLS LAST
                 LIMIT ?
             """
 
             results = conn.execute(query, query_params).fetchall()
 
-            # Format results
+            # Unscoreable vectors sort last, so dropping them after the LIMIT
+            # keeps the same rows as filtering first, without scoring twice.
             result_list = [
                 {
                     "chunk_id": result[0],
@@ -4522,6 +4533,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "score": 1.0 - result[8],  # Convert distance to similarity score
                 }
                 for result in results
+                if result[8] is not None
             ]
 
             return result_list
