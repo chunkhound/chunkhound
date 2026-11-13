@@ -20,6 +20,7 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
@@ -272,9 +273,12 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     def _discover_nested_linux_mount_roots(watch_path: Path) -> tuple[Path, ...]:
         return discover_nested_linux_mount_roots(watch_path)
 
-    @staticmethod
-    def _discover_nested_windows_junction_scopes(watch_path: Path) -> Any:
-        return discover_nested_windows_junction_scopes(watch_path)
+    def _discover_nested_windows_junction_scopes(self, watch_path: Path) -> Any:
+        # Judged by the same filter the root scope's events go through.
+        path_filter = RealtimePathFilter(config=self.config, root_path=watch_path)
+        return discover_nested_windows_junction_scopes(
+            watch_path, excludes_directory=path_filter.excludes_directory
+        )
 
     @staticmethod
     def _build_watchman_scope_plan(
@@ -727,7 +731,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         count_event: bool = False,
         count_coalesced: bool = False,
     ) -> None:
-        normalized_path = str(self._normalize_mutation_path(file_path))
+        normalized_path = str(
+            self._normalize_mutation_path(file_path, keep_in_tree_spelling=True)
+        )
         now_monotonic = time.monotonic()
         entry = self._event_pressure_by_path.get(normalized_path)
         if entry is None:

@@ -294,7 +294,7 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
     monkeypatch.setattr(
         realtime_service_module,
         "discover_nested_windows_junction_scopes",
-        lambda target_path: (),
+        lambda target_path, excludes_directory=None: (),
     )
     monkeypatch.setenv(
         "CHUNKHOUND_TEST_WATCHMAN_WATCH_ROOT",
@@ -593,6 +593,7 @@ async def test_watchman_start_preserves_logical_root_for_junction_scope_discover
 
     def discover_junctions(
         target_path: Path,
+        excludes_directory=None,
     ) -> tuple[WatchmanSubscriptionScope, ...]:
         discovery_calls.append(target_path)
         return (
@@ -882,7 +883,7 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
     monkeypatch.setattr(
         realtime_service_module,
         "discover_nested_windows_junction_scopes",
-        lambda target_path: (),
+        lambda target_path, excludes_directory=None: (),
     )
     monkeypatch.setattr(
         realtime_service_module,
@@ -1224,7 +1225,7 @@ async def test_watchman_multi_scope_translation_routes_colliding_subscription_na
     monkeypatch.setattr(
         realtime_service_module,
         "discover_nested_windows_junction_scopes",
-        lambda target_path: (
+        lambda target_path, excludes_directory=None: (
             WatchmanSubscriptionScope(
                 requested_path=logical_a.resolve(),
                 watch_root=physical_a.resolve(),

@@ -365,7 +365,7 @@ class TestRealtimeFunctional:
         )
         monkeypatch.setattr(
             "chunkhound.services.realtime.service.discover_nested_windows_junction_scopes",
-            lambda target_path: (),
+            lambda target_path, excludes_directory=None: (),
         )
 
         service = RealtimeIndexingService(services, config)
