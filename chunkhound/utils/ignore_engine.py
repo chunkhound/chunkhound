@@ -35,6 +35,24 @@ def _empty_gitignore_prune_state() -> _GitignorePruneState:
     return _GitignorePruneState(patterns=(), spec=None)
 
 
+def _in_tree_path(path: Path, root: Path) -> Path:
+    """Return the path ignore rules are evaluated on: where it sits under ``root``.
+
+    A file reached through a symlink or junction inside the tree is matched by
+    its location in the tree, as Git matches it, so ``node_modules/`` still
+    excludes a linked package. Resolving first would match the link's target
+    instead, which lies outside the tree, where no root-relative rule applies.
+    A path that is not lexically under ``root`` (already resolved, or spelled
+    differently) is resolved as before.
+    """
+    in_tree = Path(os.path.abspath(path))
+    try:
+        in_tree.relative_to(root)
+        return in_tree
+    except ValueError:
+        return path.resolve()
+
+
 class IgnoreEngine:
     def __init__(self, root: Path, compiled_specs: list[tuple[Path, PathSpec]]):
         self.root = root.resolve()
@@ -42,10 +60,11 @@ class IgnoreEngine:
 
     def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         # Normalize to root-relative POSIX path
+        located = _in_tree_path(path, self.root)
         try:
-            rel = path.resolve().relative_to(self.root)
+            rel = located.relative_to(self.root)
         except Exception:
-            rel = path.resolve()
+            rel = located
         rel_str = rel.as_posix()
 
         # Evaluate specs in precedence order; first match wins
@@ -489,7 +508,7 @@ class RepoAwareIgnoreEvaluator:
             self._workspace_engine = IgnoreEngine(self.root, compiled)
 
     def _nearest_repo(self, path: Path) -> Path | None:
-        p = path.resolve()
+        p = _in_tree_path(path, self.root)
         for rr in self.repo_roots:
             try:
                 p.relative_to(rr)
@@ -736,7 +755,7 @@ class RepoAwareLibgit2Evaluator:
                     continue
 
     def _nearest_repo(self, path: Path) -> Path | None:
-        p = path.resolve()
+        p = _in_tree_path(path, self.root)
         for rr in self.repo_roots:
             try:
                 p.relative_to(rr)
@@ -755,7 +774,7 @@ class RepoAwareLibgit2Evaluator:
     def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         # Hard exclude via config_exclude first
         try:
-            rel_cfg = path.resolve().relative_to(self.root).as_posix()
+            rel_cfg = _in_tree_path(path, self.root).relative_to(self.root).as_posix()
         except Exception:
             rel_cfg = path.name
         if self._cfg_excluded(rel_cfg, is_dir):
@@ -770,7 +789,7 @@ class RepoAwareLibgit2Evaluator:
 
         # Compute repo-relative path
         try:
-            rel = path.resolve().relative_to(rr).as_posix()
+            rel = _in_tree_path(path, rr).relative_to(rr).as_posix()
         except Exception:
             rel = path.name
 

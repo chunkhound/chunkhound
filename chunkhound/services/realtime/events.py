@@ -169,9 +169,15 @@ class SimpleEventHandler:
         """Handle filesystem events - simple queue operation."""
         # Handle directory creation
         if event.event_type == "created" and event.is_directory:
-            # Queue directory creation for processing
+            # An excluded directory is never walked. Judge it where it sits in
+            # the tree: resolving first would turn a link under node_modules/
+            # into its target outside the root, which no exclude rule matches.
             file_path = Path(normalize_file_path(event.src_path))
             self._record_source_event("dir_created", file_path)
+            if self._path_filter.excludes_directory(Path(event.src_path)):
+                self._record_filtered_event("dir_created", file_path)
+                return
+            # Queue directory creation for processing
             self._queue_event("dir_created", file_path)
             return
 
