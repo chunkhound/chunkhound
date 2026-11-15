@@ -4,10 +4,10 @@
 Mule, true-scale laptop-lid showcases, and the generator scripts. SVG is the
 source of truth; PNGs are rendered artifacts.
 
-> **Status: POC — not final.** This art is exploratory and has no test
-> coverage; expect it to change or move before it ships anywhere public.
-> `make lint` checks these scripts with ruff; they are outside mypy's
-> `chunkhound` scope and have no formatting/type gate.
+> **Status: POC — not final.** This art is exploratory and has no runtime
+> tests; `numfmt.py` has unit tests. Expect it to change or move before it
+> ships anywhere public. `make lint` checks these scripts with ruff; they are
+> outside mypy's `chunkhound` scope and have no formatting/type gate.
 
 ## Files
 
