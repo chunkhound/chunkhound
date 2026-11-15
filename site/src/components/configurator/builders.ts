@@ -20,7 +20,10 @@ import {
 } from "./constants.ts";
 import { editors, findEditor } from "./providers.ts";
 import { requirementLabels } from "./utils.ts";
-import { canonicalRerankUrl } from "./rerank-validate.ts";
+import {
+  canonicalRerankUrl,
+  stripPythonWhitespace,
+} from "./rerank-validate.ts";
 import {
   assembleGuardedJsonWrite,
   assembleJsonWrite,
@@ -108,7 +111,7 @@ function configWithReranker(
 ): ConfigRecord {
   const url = canonicalRerankUrl(reranker?.url ?? "");
   const format = reranker?.format?.trim();
-  const model = reranker?.model?.trim();
+  const model = stripPythonWhitespace(reranker?.model ?? "");
   return {
     ...configWithApiKey(embedding),
     ...(url && { rerank_url: url }),

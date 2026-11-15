@@ -20,8 +20,21 @@ const RELATIVE_NO_BASE_URL_ERROR =
 // (U+001C–U+001F) and adds U+FEFF, which Python accepts as URL content, not as
 // whitespace. Keep this class in sync with chunkhound/core/utils/rerank_url.py
 // via the shared acceptance matrix in tests/site/test_configurator_contract.py.
-const PYTHON_WHITESPACE_RE =
-  /[\t\n\v\f\r\x1c-\x1f\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+const PYTHON_WHITESPACE_CLASS =
+  "\\t\\n\\v\\f\\r\\x1c-\\x1f\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const PYTHON_WHITESPACE_RE = new RegExp(`[${PYTHON_WHITESPACE_CLASS}]`);
+const PYTHON_WHITESPACE_EDGE_RE = new RegExp(
+  `^[${PYTHON_WHITESPACE_CLASS}]+|[${PYTHON_WHITESPACE_CLASS}]+$`,
+  "g",
+);
+
+// The backend normalizes rerank_model with `v.strip() or None`. Strip the same
+// class here, or a NEL/C0-only model looks present in the UI and missing at
+// config load. U+FEFF is deliberately not stripped: Python does not treat it
+// as whitespace.
+export function stripPythonWhitespace(value: string): string {
+  return value.replace(PYTHON_WHITESPACE_EDGE_RE, "");
+}
 
 // The select is gated per preset (configurator.ts syncRerankFormatOptions), so
 // this fires only for programmatic or non-JS callers; it keeps the emitted
@@ -141,7 +154,12 @@ function effectiveReranker(
   model: string,
 ): EffectiveReranker {
   const effectiveFormat = String(format || retrieval.config.rerank_format || "");
-  const effectiveModel = String(model || retrieval.config.rerank_model || "");
+  // Strip before the preset fallback: a whitespace-only override is unset, so
+  // the preset default applies exactly as it does in the emitted config.
+  const explicitModel = stripPythonWhitespace(String(model || ""));
+  const effectiveModel =
+    explicitModel ||
+    stripPythonWhitespace(String(retrieval.config.rerank_model || ""));
   return {
     format: effectiveFormat,
     model: effectiveModel,

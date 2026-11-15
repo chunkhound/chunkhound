@@ -13,7 +13,7 @@ from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 
 
-@pytest.mark.parametrize("model", ["", "   ", "\t\n"])
+@pytest.mark.parametrize("model", ["", "   ", "\t\n", "\u0085", "\u001c", "\u001f"])
 def test_blank_rerank_model_uses_provider_default(model: str) -> None:
     config = EmbeddingConfig(
         provider="voyageai",
@@ -41,11 +41,12 @@ def test_none_rerank_model_uses_provider_default() -> None:
     assert "rerank_model" not in config.get_provider_config()
 
 
-def test_surrounding_whitespace_is_trimmed() -> None:
+@pytest.mark.parametrize("model", ["  rerank-3-lite  ", "\u0085 rerank-3-lite \u001c"])
+def test_surrounding_whitespace_is_trimmed(model: str) -> None:
     config = EmbeddingConfig(
         provider="voyageai",
         model="voyage-3.5",
-        rerank_model="  rerank-3-lite  ",
+        rerank_model=model,
         api_key="test-key",
     )
 
@@ -53,14 +54,15 @@ def test_surrounding_whitespace_is_trimmed() -> None:
     assert config.get_provider_config()["rerank_model"] == "rerank-3-lite"
 
 
-def test_cohere_format_rejects_blank_model() -> None:
+@pytest.mark.parametrize("model", ["   ", "\u0085", "\u001c", "\u001f"])
+def test_cohere_format_rejects_blank_model(model: str) -> None:
     # cohere/voyage need an explicit model; a blank value must fail at load,
     # not later when the factory receives an absent key.
     with pytest.raises(ValueError, match="rerank_model is required"):
         EmbeddingConfig(
             provider="openai",
             rerank_format="cohere",
-            rerank_model="   ",
+            rerank_model=model,
             rerank_url="https://host/rerank",
             api_key="test-key",
         )

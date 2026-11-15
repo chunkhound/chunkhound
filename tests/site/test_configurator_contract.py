@@ -373,6 +373,51 @@ console.log(JSON.stringify(rows.map(([url, preset]) => {{
     return run_tsx_json(script)
 
 
+def _rerank_model_ui_verdicts(
+    models: list[str], preset: str = "openai-embed"
+) -> list[dict]:
+    """Run the site validator and emitter for cohere model inputs."""
+    script = f"""
+import {{
+  buildChunkhoundConfig,
+  embeddingProviders,
+  llmProviders,
+}} from './site/src/components/configurator/index.ts';
+import {{
+  rerankerValidationError,
+}} from './site/src/components/configurator/rerank-validate.ts';
+
+const embedding = embeddingProviders.find((p) => p.id === {json.dumps(preset)});
+const llm = llmProviders.find((provider) => provider.id === 'ollama-llm');
+if (!embedding || !llm) throw new Error('missing provider');
+const models = {json.dumps(models)};
+const reranker = (model) => ({{
+  url: 'https://reranker.example.com/rerank',
+  format: 'cohere',
+  model,
+}});
+console.log(JSON.stringify(models.map((model) => {{
+  const error = rerankerValidationError(
+    embedding,
+    reranker(model).url,
+    'cohere',
+    model,
+  );
+  const embeddingConfig = buildChunkhoundConfig(
+    embedding,
+    llm,
+    reranker(model),
+  ).embedding;
+  return {{
+    model,
+    error: error?.message ?? null,
+    emitted: embeddingConfig.rerank_model ?? null,
+  }};
+}})));
+"""
+    return run_tsx_json(script)
+
+
 def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
     """Active reranking accepts valid scheme casing, not ambiguous URLs."""
     # (url, embedding preset, format, backend accepts, UI accepts)
@@ -465,6 +510,80 @@ def test_ui_rejects_every_python_whitespace_codepoint() -> None:
     assert len(verdicts) == len(whitespace)
     for verdict in verdicts:
         assert verdict["error"] is not None, verdict
+
+
+def test_rerank_model_whitespace_parity(tmp_path, clean_environment) -> None:
+    """A Python-whitespace-only model is unset in the site, as it is in the backend.
+
+    The backend uses str.strip(), which removes NEL (U+0085) and C0 separators
+    that JS trim() keeps. Such a model must fail in the UI exactly as it fails at
+    config load, not be emitted as a valid configuration.
+    """
+    whitespace = [c for c in map(chr, range(0x3100)) if c.isspace()]
+    verdicts = _rerank_model_ui_verdicts(whitespace)
+
+    assert len(verdicts) == len(whitespace)
+    for verdict in verdicts:
+        assert verdict["error"] == "A Cohere or Voyage reranker requires a model.", (
+            verdict
+        )
+        assert verdict["emitted"] is None, verdict
+        config = _build_chunkhound_config(
+            "openai-embed",
+            "ollama-llm",
+            {
+                "url": "https://reranker.example.com/rerank",
+                "format": "cohere",
+                "model": verdict["model"],
+            },
+        )
+        with pytest.raises(ValidationError):
+            Config(target_dir=tmp_path, **config)
+
+
+@pytest.mark.parametrize(
+    ("preset", "default_model"),
+    [("voyageai", "rerank-3-lite"), ("vllm-embed", "Qwen/Qwen3-Reranker-0.6B")],
+)
+def test_preset_rerank_model_fills_whitespace_only_override(
+    tmp_path, clean_environment, preset, default_model
+) -> None:
+    """A whitespace-only override is unset before the preset fallback.
+
+    The emitted config already carries the preset model the backend accepts.
+    """
+    verdicts = _rerank_model_ui_verdicts(["", "\u0085", "\t"], preset)
+    assert len(verdicts) == 3
+    for verdict in verdicts:
+        assert verdict["error"] is None, verdict
+        assert verdict["emitted"] == default_model, verdict
+        config = _build_chunkhound_config(
+            preset, "ollama-llm", {"model": verdict["model"]}
+        )
+        validated = Config(target_dir=tmp_path, **config)
+        assert validated.embedding.rerank_model == default_model
+
+
+def test_internal_python_whitespace_in_model_is_preserved(
+    tmp_path, clean_environment
+) -> None:
+    """Only edges are stripped: Python str.strip() keeps internal whitespace."""
+    model = "\u0085re\u0085rank\u001c"
+    verdicts = _rerank_model_ui_verdicts([model])
+
+    assert verdicts[0]["error"] is None, verdicts[0]
+    assert verdicts[0]["emitted"] == "re\u0085rank"
+    config = _build_chunkhound_config(
+        "openai-embed",
+        "ollama-llm",
+        {
+            "url": "https://reranker.example.com/rerank",
+            "format": "cohere",
+            "model": model,
+        },
+    )
+    validated = Config(target_dir=tmp_path, **config)
+    assert validated.embedding.rerank_model == "re\u0085rank"
 
 
 def test_rerank_url_validator_accepts_padded_canonical_urls() -> None:

@@ -20,6 +20,7 @@ import {
   type ConfiguratorReranker,
   isRerankFormat,
 } from "../components/configurator/index.ts";
+import { stripPythonWhitespace } from "../components/configurator/rerank-validate.ts";
 import { bindRovingKeys } from "./configurator/roving-focus.ts";
 import {
   applyPlatformToCodeBlocks,
@@ -187,7 +188,7 @@ function updateReranker(
 ): ConfiguratorReranker | undefined {
   const url = inputs.url?.value.trim() ?? "";
   const format = inputs.format?.value.trim() ?? "";
-  const model = inputs.model?.value.trim() ?? "";
+  const model = stripPythonWhitespace(inputs.model?.value ?? "");
   const validation = rerankerValidationError(retrieval, url, format, model);
   const error = validation?.message;
   const fields = [inputs.url, inputs.format, inputs.model];
