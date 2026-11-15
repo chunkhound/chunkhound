@@ -57,6 +57,11 @@ def _validate_http_authority(value: str) -> None:
         if not parsed.hostname:
             raise ValueError(RERANK_URL_SCHEME_INVALID)
         _ = parsed.port
+        # Both layers reject raw userinfo brackets: urlsplit's verdict is
+        # patch-level dependent (CVE-2025-0938), while WHATWG accepts them.
+        # `netloc` is unquoted, so %5B/%5D still passes.
+        if any(bracket in parsed.netloc.rpartition("@")[0] for bracket in "[]"):
+            raise ValueError(RERANK_URL_SCHEME_INVALID)
     except ValueError as exc:
         raise ValueError(RERANK_URL_SCHEME_INVALID) from exc
 

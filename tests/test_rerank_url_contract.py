@@ -55,6 +55,12 @@ def test_active_rerank_url_normalizes_scheme_only(provider, scheme):
         r"http://host\@evil/rerank",
         r"http://example.com/a\b",
         r"https://host\evil",
+        # Brackets in userinfo: WHATWG accepts and percent-encodes them, so the
+        # site can emit them. Reject on every CPython patch level or the site
+        # emits a config that fails at load.
+        "https://user:pass[@host/rerank",
+        "https://user[foo]@host/rerank",
+        "https://user[foo]:secret@[::1]/rerank",
     ],
 )
 @pytest.mark.parametrize("active", [False, True])
@@ -66,6 +72,23 @@ def test_only_active_rerank_endpoints_are_validated(provider, url, active):
             EmbeddingConfig(**kwargs)
     else:
         assert EmbeddingConfig(**kwargs).rerank_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://[::1]:8080/rerank", "https://user%5Bfoo%5D@host/rerank"],
+)
+@pytest.mark.parametrize("provider", ["openai", "voyageai"])
+def test_bracketed_rerank_url_forms_are_accepted(provider, url):
+    # Host brackets (IPv6) are valid in urlsplit and WHATWG. Percent-encoded
+    # userinfo brackets stay accepted: WHATWG emits them, reject raw only.
+    config = EmbeddingConfig(
+        provider=provider,
+        rerank_format="tei",
+        rerank_model="test-model",
+        rerank_url=url,
+    )
+    assert config.rerank_url == url
 
 
 @pytest.mark.parametrize("codepoint", ["\u0085", "\u001c", "\u001f", "\t", "\u00a0"])
@@ -562,5 +585,8 @@ async def test_rerank_http_failure_hides_configured_credentials(reranker, provid
     assert "REVIEW_USER" not in message and "REVIEW_SECRET" not in message
     assert f"127.0.0.1:{reranker.port}/rerank" in message
     assert "503" in message
-    assert (excinfo.value.status_code, excinfo.value.error_type) == (503, "HTTPStatusError")
+    assert (excinfo.value.status_code, excinfo.value.error_type) == (
+        503,
+        "HTTPStatusError",
+    )
     assert excinfo.value.__cause__ is None

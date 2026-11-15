@@ -38,6 +38,18 @@ function incompleteSchemeUrlError(value: string): string | undefined {
   return undefined;
 }
 
+// WHATWG percent-encodes userinfo brackets, so `https://user[foo]@host/` parses
+// in the browser. The backend rejects raw userinfo brackets on every CPython
+// patch level, because urlsplit's verdict depends on CVE-2025-0938 fixes: the
+// site must reject them too. Host brackets (IPv6) stay validated by `new URL`.
+function bracketedUserinfoError(value: string): string | undefined {
+  const authority = /^https?:\/\/([^/?#]*)/i.exec(value)?.[1];
+  if (authority === undefined) return undefined;
+  return /[[\]]/.test(authority.slice(0, authority.lastIndexOf("@") + 1))
+    ? INCOMPLETE_URL_ERROR
+    : undefined;
+}
+
 // Canonicalize only valid absolute HTTP(S) URLs; never repair malformed input.
 export function canonicalRerankUrl(value: string): string {
   value = value.trim();
@@ -65,9 +77,8 @@ export function rerankUrlValidationError(
   try {
     const protocol = new URL(value).protocol;
     if (protocol === "http:" || protocol === "https:") {
-      return /^https?:\/\/[^/\\?#\s]+/i.test(value)
-        ? undefined
-        : INCOMPLETE_URL_ERROR;
+      if (!/^https?:\/\/[^/\\?#\s]+/i.test(value)) return INCOMPLETE_URL_ERROR;
+      return bracketedUserinfoError(value);
     }
     return ABSOLUTE_URL_ERROR;
   } catch {

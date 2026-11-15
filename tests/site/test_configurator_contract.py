@@ -391,6 +391,16 @@ def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
         (r"http://host\@evil/rerank", "ollama-embed", "tei", False, False),
         (r"http://example.com/a\b", "ollama-embed", "tei", False, False),
         (r"https://host\evil", "ollama-embed", "tei", False, False),
+        # Brackets in userinfo: WHATWG accepts and percent-encodes them, so the
+        # site could emit them; both layers reject them to keep the verdict
+        # independent of the backend's CPython patch level.
+        ("https://user:pass[@host/rerank", "ollama-embed", "tei", False, False),
+        ("https://user[foo]@host/rerank", "ollama-embed", "tei", False, False),
+        ("https://user[foo]:secret@[::1]/rerank", "ollama-embed", "tei", False, False),
+        # Host brackets (IPv6) remain valid in both.
+        ("https://[::1]:8080/rerank", "ollama-embed", "tei", True, True),
+        # Percent-encoded userinfo brackets are WHATWG's output form: accept.
+        ("https://user%5Bfoo%5D@host/rerank", "ollama-embed", "tei", True, True),
         # Whitespace classes must agree with Python str.isspace(): JS \s omits
         # NEL/C0 and includes U+FEFF, so pin the shared class explicitly.
         ("http://tei.example.com/rer\u0085ank", "ollama-embed", "tei", False, False),
@@ -428,6 +438,20 @@ def test_rerank_url_accept_reject_matrix(tmp_path, clean_environment) -> None:
             with pytest.raises(ValidationError):
                 Config(target_dir=tmp_path, **config)
         assert ui_verdicts[(url, preset)] is ui_ok, label
+
+
+def test_percent_encoded_userinfo_brackets_round_trip(
+    tmp_path, clean_environment
+) -> None:
+    """Site emit and backend load must keep %5B/%5D userinfo unchanged."""
+    url = "https://user%5Bfoo%5D@host/rerank"
+    config = _build_chunkhound_config(
+        "ollama-embed", "ollama-llm", {"url": url, "format": "tei"}
+    )
+
+    assert config["embedding"]["rerank_url"] == url
+    validated = Config(target_dir=tmp_path, **config)
+    assert validated.embedding.rerank_url == url
 
 
 def test_ui_rejects_every_python_whitespace_codepoint() -> None:
