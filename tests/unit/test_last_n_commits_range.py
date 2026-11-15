@@ -88,10 +88,18 @@ def merge_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _files(diff: str) -> set[str]:
+    return {
+        line.split(" b/", 1)[1]
+        for line in diff.splitlines()
+        if line.startswith("diff --git ")
+    }
+
+
 async def test_last_n_matches_head_tilde_n_on_linear_history(linear_repo: Path):
     commit_range = await resolve_last_n_commits_range(5, linear_repo)
 
-    assert commit_range == f"{_git(linear_repo, 'rev-parse', 'HEAD~4')}^..HEAD"
+    assert commit_range == f"{_git(linear_repo, 'rev-parse', 'HEAD~5')}..HEAD"
     diff = await _diff_text(commit_range, linear_repo)
     for kept in ("c3.py", "c4.py", "c5.py", "c6.py", "c7.py"):
         assert f"b/{kept}" in diff
@@ -116,9 +124,83 @@ async def test_last_n_reaches_commits_past_first_parent_depth(merge_repo: Path):
     commit_range = await resolve_last_n_commits_range(5, merge_repo)
 
     diff = await _diff_text(commit_range, merge_repo)
-    assert "b/f1.py" in diff
-    assert "b/f2.py" in diff
-    assert "b/m3.py" in diff
+    # Five of the six commits, with the root commit c1 as the only boundary:
+    # exactly those five commits' changes, nothing from outside the window.
+    assert _files(diff) == {"c2.py", "f1.py", "f2.py", "m3.py"}
+
+
+async def test_window_with_two_boundary_commits_uses_their_common_ancestor(
+    merge_repo: Path,
+):
+    # The first three commits in topological order leave two boundary commits
+    # (f1 on the feature branch, c2 on main). The range then runs from their
+    # common ancestor and covers every commit above it.
+    commit_range = await resolve_last_n_commits_range(3, merge_repo)
+
+    assert commit_range == f"{_git(merge_repo, 'rev-parse', 'main~2')}..HEAD"
+    assert _files(await _diff_text(commit_range, merge_repo)) == {
+        "f1.py",
+        "f2.py",
+        "m3.py",
+    }
+
+
+async def test_window_ignores_commit_dates_when_they_disagree_with_the_graph(
+    tmp_path: Path,
+):
+    # The feature branch is dated after the merge (clock skew). The window is
+    # chosen by topology, so every commit of it is covered and nothing older
+    # than the branch point leaks in.
+    _init(tmp_path)
+    _commit(tmp_path, "a.py", 1)
+    _commit(tmp_path, "b.py", 2)
+    _git(tmp_path, "checkout", "-b", "feature")
+    _commit(tmp_path, "f1.py", 30)
+    _commit(tmp_path, "f2.py", 40)
+    _git(tmp_path, "checkout", "main")
+    _commit(tmp_path, "m1.py", 5)
+    _git(
+        tmp_path,
+        "merge",
+        "--no-ff",
+        "-m",
+        "M",
+        "feature",
+        when=_BASE_TIME + 6 * _DAY,
+    )
+
+    commit_range = await resolve_last_n_commits_range(3, tmp_path)
+
+    # Window {M, m1, f2} has two boundary commits (b and f1); the range runs
+    # from their common ancestor b, so f1 comes along with the window.
+    assert _files(await _diff_text(commit_range, tmp_path)) == {
+        "f1.py",
+        "f2.py",
+        "m1.py",
+    }
+
+
+async def test_shallow_clone_boundary_is_not_treated_as_the_root_commit(
+    linear_repo: Path, tmp_path: Path
+):
+    clone = tmp_path / "shallow"
+    result = subprocess.run(
+        ["git", "clone", "-q", "--depth", "3", linear_repo.as_uri(), str(clone)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    try:
+        commit_range = await resolve_last_n_commits_range(50, clone)
+    finally:
+        logger.remove(sink)
+
+    # c5 is the edge of the fetched history; its own changes are unknown, so
+    # only the commits after it appear, not the whole c5 snapshot.
+    assert _files(await _diff_text(commit_range, clone)) == {"c6.py", "c7.py"}
+    assert any("shallow" in m for m in messages)
 
 
 @pytest.mark.parametrize("object_format", ["sha1", "sha256"])

@@ -81,14 +81,11 @@ async def _read_stdout_chunk(stream: asyncio.StreamReader) -> bytes:
     return await stream.read(_GIT_STDOUT_READ_BYTES)
 
 
-async def _empty_tree_oid(cwd: Path | str) -> str:
-    """Ask Git for the empty-tree ID in this repository's object format."""
+async def _run_git_capture(cwd: Path | str, *args: str) -> tuple[int, bytes, bytes]:
+    """Run one short git command and return ``(returncode, stdout, stderr)``."""
     proc = await asyncio.create_subprocess_exec(
         "git",
-        "hash-object",
-        "-t",
-        "tree",
-        "--stdin",
+        *args,
         cwd=str(cwd),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
@@ -115,8 +112,15 @@ async def _empty_tree_oid(cwd: Path | str) -> str:
         finally:
             await asyncio.gather(communication, return_exceptions=True)
         raise
+    return proc.returncode or 0, stdout, stderr
 
-    if proc.returncode != 0:
+
+async def _empty_tree_oid(cwd: Path | str) -> str:
+    """Ask Git for the empty-tree ID in this repository's object format."""
+    returncode, stdout, stderr = await _run_git_capture(
+        cwd, "hash-object", "-t", "tree", "--stdin"
+    )
+    if returncode != 0:
         error = stderr.decode("utf-8", errors="replace").strip()
         raise ValueError(f"git empty-tree lookup failed: {error}")
     oid = stdout.decode("ascii", errors="replace").strip()
@@ -128,36 +132,23 @@ async def _empty_tree_oid(cwd: Path | str) -> str:
 
 
 async def _rev_list_parents(cwd: Path | str, max_count: int) -> list[list[str]]:
-    """Return ``git rev-list --parents`` rows (commit, *parents) for ``HEAD``."""
-    proc = await asyncio.create_subprocess_exec(
-        "git",
+    """Return ``git rev-list --parents`` rows (commit, *parents) for ``HEAD``.
+
+    ``--topo-order`` keeps every commit ahead of its parents regardless of
+    commit dates, so the first N rows are a clock-skew-proof window.
+    """
+    returncode, stdout, stderr = await _run_git_capture(
+        cwd,
         "rev-list",
+        "--topo-order",
         "--parents",
         f"--max-count={max_count}",
         "HEAD",
-        cwd=str(cwd),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_git_diff_env(),
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
-        )
-    except BaseException:
-        if proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-        await asyncio.gather(proc.wait(), return_exceptions=True)
-        raise
-    if proc.returncode != 0:
+    if returncode != 0:
         error = stderr.decode("utf-8", errors="replace").strip()
         raise ValueError(
-            "last_n_commits could not read the commit history of HEAD "
-            f"(it counts first-parent commits back from HEAD): {error}"
+            f"last_n_commits could not read the commit history of HEAD: {error}"
         )
     return [
         line.split()
@@ -166,13 +157,37 @@ async def _rev_list_parents(cwd: Path | str, max_count: int) -> list[list[str]]:
     ]
 
 
+async def _is_shallow_repository(cwd: Path | str) -> bool:
+    returncode, stdout, _ = await _run_git_capture(
+        cwd, "rev-parse", "--is-shallow-repository"
+    )
+    return (
+        returncode == 0 and stdout.decode("ascii", errors="replace").strip() == "true"
+    )
+
+
+async def _merge_base_octopus(cwd: Path | str, commits: list[str]) -> str | None:
+    """Return the best common ancestor of ``commits``, or None if they share none."""
+    returncode, stdout, _ = await _run_git_capture(
+        cwd, "merge-base", "--octopus", *commits
+    )
+    base = stdout.decode("ascii", errors="replace").strip()
+    return base if returncode == 0 and base else None
+
+
 async def resolve_last_n_commits_range(n: int, cwd: Path | str) -> str:
     """Resolve ``last_n_commits=n`` to a revision range covering the last N commits.
 
     ``HEAD~N`` walks first parents only, so with merge commits it covers more
     than N commits and, past the first-parent depth, does not exist at all.
-    Count the commits git actually reports instead. A request larger than the
-    reachable history is clamped to the full history, with a warning.
+    Instead take the first N commits git reports in topological order and diff
+    HEAD against the commit just below that window.
+
+    The diff is a single two-endpoint (tree) diff, so it is exactly the N
+    commits whenever the window has one boundary commit. When merged branches
+    leave several, the closest common ancestor of them is used, and the range
+    can then include extra commits from those branches. A request larger than
+    the reachable history is clamped to the full history, with a warning.
     """
     rows = await _rev_list_parents(cwd, n)
     if not rows:
@@ -186,12 +201,28 @@ async def resolve_last_n_commits_range(n: int, cwd: Path | str) -> str:
             n,
             len(rows),
         )
-    oldest_commit, *parents = rows[-1]
-    if not parents:
+    window = {row[0] for row in rows}
+    boundary = sorted({p for _, *parents in rows for p in parents if p not in window})
+    if not boundary:
         # The window reaches the root commit, which has no `^`: diff the
         # repository's empty tree against HEAD so the root commit is included.
+        # In a shallow clone the "root" is only the edge of the fetched
+        # history; its own changes are unknown, so diff from it instead.
+        if await _is_shallow_repository(cwd):
+            oldest = next(row[0] for row in reversed(rows) if len(row) == 1)
+            logger.warning(
+                "last_n_commits={} reaches the edge of a shallow clone; "
+                "using the history that is available",
+                n,
+            )
+            return f"{oldest}..HEAD"
         return f"{await _empty_tree_oid(cwd)}..HEAD"
-    return f"{oldest_commit}^..HEAD"
+    if len(boundary) == 1:
+        return f"{boundary[0]}..HEAD"
+    base = await _merge_base_octopus(cwd, boundary)
+    if base is None:
+        return f"{await _empty_tree_oid(cwd)}..HEAD"
+    return f"{base}..HEAD"
 
 
 async def _cleanup_git_diff_process(
