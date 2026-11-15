@@ -186,7 +186,7 @@ def add_git_diff_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         dest="last_n_commits",
-        help="Last N commits (equivalent to HEAD~N..HEAD).",
+        help="Last N commits reachable from HEAD (merge commits count). A value above the available history is clamped to the full history with a warning.",
     )
     parser.add_argument(
         "--vector-source",

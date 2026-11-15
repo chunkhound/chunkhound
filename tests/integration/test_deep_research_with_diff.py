@@ -515,7 +515,13 @@ async def test_semantic_search_returns_changed_code_for_commit_inputs(
         yield FAKE_DIFF
 
     git_diff = MagicMock(side_effect=stream_diff)
-    with patch("chunkhound.core.git_diff.stream_git_diff_fragments", git_diff):
+    with (
+        patch("chunkhound.core.git_diff.stream_git_diff_fragments", git_diff),
+        patch(
+            "chunkhound.core.git_diff.resolve_last_n_commits_range",
+            AsyncMock(return_value="HEAD~5..HEAD"),
+        ),
+    ):
         result = await search_impl(
             services=_make_services(_make_original_search_service()),
             embedding_manager=_make_embedding_manager(),
@@ -646,6 +652,10 @@ async def test_deep_research_last_n_commits_expands_correctly():
         patch(
             "chunkhound.services.research.factory.ResearchServiceFactory.create",
             side_effect=_fake_factory_create,
+        ),
+        patch(
+            "chunkhound.core.git_diff.resolve_last_n_commits_range",
+            AsyncMock(return_value="HEAD~5..HEAD"),
         ),
     ):
         result = await deep_research_impl(

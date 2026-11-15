@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 from typing import TypeVar
 
+from loguru import logger
+
 T = TypeVar("T")
 
 _SAFE_REF = re.compile(r"^[a-zA-Z0-9_.^~/:@{}\-]+\Z")
@@ -123,6 +125,73 @@ async def _empty_tree_oid(cwd: Path | str) -> str:
             f"git empty-tree lookup returned an invalid object ID: {oid!r}"
         )
     return oid
+
+
+async def _rev_list_parents(cwd: Path | str, max_count: int) -> list[list[str]]:
+    """Return ``git rev-list --parents`` rows (commit, *parents) for ``HEAD``."""
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "rev-list",
+        "--parents",
+        f"--max-count={max_count}",
+        "HEAD",
+        cwd=str(cwd),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=_git_diff_env(),
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
+        )
+    except BaseException:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await asyncio.gather(proc.wait(), return_exceptions=True)
+        raise
+    if proc.returncode != 0:
+        error = stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(
+            "last_n_commits could not read the commit history of HEAD "
+            f"(it counts first-parent commits back from HEAD): {error}"
+        )
+    return [
+        line.split()
+        for line in stdout.decode("ascii", errors="replace").splitlines()
+        if line.strip()
+    ]
+
+
+async def resolve_last_n_commits_range(n: int, cwd: Path | str) -> str:
+    """Resolve ``last_n_commits=n`` to a revision range covering the last N commits.
+
+    ``HEAD~N`` walks first parents only, so with merge commits it covers more
+    than N commits and, past the first-parent depth, does not exist at all.
+    Count the commits git actually reports instead. A request larger than the
+    reachable history is clamped to the full history, with a warning.
+    """
+    rows = await _rev_list_parents(cwd, n)
+    if not rows:
+        raise ValueError(
+            f"last_n_commits={n}: HEAD has no commits, so there is no history to diff."
+        )
+    if len(rows) < n:
+        logger.warning(
+            "last_n_commits={} exceeds the {} commits reachable from HEAD; "
+            "using the full history",
+            n,
+            len(rows),
+        )
+    oldest_commit, *parents = rows[-1]
+    if not parents:
+        # The window reaches the root commit, which has no `^`: diff the
+        # repository's empty tree against HEAD so the root commit is included.
+        return f"{await _empty_tree_oid(cwd)}..HEAD"
+    return f"{oldest_commit}^..HEAD"
 
 
 async def _cleanup_git_diff_process(

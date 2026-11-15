@@ -501,7 +501,7 @@ DECISION GUIDE:
 GIT HISTORY SEARCH (type='semantic' only):
 - commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
 - commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
-- last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+- last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history with a warning).
 - vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
 
@@ -541,7 +541,7 @@ SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster,
 GIT HISTORY RESEARCH:
 - commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
 - commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
-- last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+- last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history with a warning).
 - vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
 
@@ -573,10 +573,11 @@ FETCHURL_DESCRIPTION = """Fetch a single URL (HTML or PDF) and return a Markdown
 # =============================================================================
 
 
-def _resolve_commit_range(
+async def _resolve_commit_range(
     commit_range: str | None,
     commit_hash: str | None,
     last_n_commits: int | None,
+    services: DatabaseServices | None = None,
 ) -> str | None:
     """Resolve mutually-exclusive commit inputs to a single git revision range."""
     if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
@@ -590,7 +591,13 @@ def _resolve_commit_range(
     if last_n_commits is not None:
         if last_n_commits <= 0:
             raise ValueError("last_n_commits must be a positive integer.")
-        return f"HEAD~{last_n_commits}..HEAD"
+        if services is None:
+            raise ValueError("last_n_commits needs the indexed repository's services.")
+        from chunkhound.core.git_diff import resolve_last_n_commits_range
+
+        return await resolve_last_n_commits_range(
+            last_n_commits, await _git_cwd_from_services(services)
+        )
     return commit_range
 
 
@@ -715,7 +722,7 @@ async def search_impl(
         offset: Starting offset for pagination
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
         commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
-        last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+        last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history with a warning).
         vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 
     Returns:
@@ -734,8 +741,8 @@ async def search_impl(
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
-    effective_commit_range = _resolve_commit_range(
-        commit_range, commit_hash, last_n_commits
+    effective_commit_range = await _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits, services
     )
 
     if type == "semantic":
@@ -836,7 +843,7 @@ async def deep_research_impl(
         config: Application configuration (optional, defaults to environment config)
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
         commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
-        last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+        last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history with a warning).
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
         previous_query: Prior query for follow-up framing (optional). When set, the synthesis stage frames the answer in the prior topic's context. Does not affect which code is searched or retrieved.
 
@@ -848,8 +855,8 @@ async def deep_research_impl(
     """
     validate_research_prerequisites(embedding_manager, llm_manager)
 
-    effective_commit_range = _resolve_commit_range(
-        commit_range, commit_hash, last_n_commits
+    effective_commit_range = await _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits, services
     )
 
     if effective_commit_range is not None and vector_source != "db":
