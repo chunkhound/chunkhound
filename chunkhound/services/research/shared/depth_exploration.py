@@ -199,6 +199,7 @@ class DepthExplorationService(ProgressEmitterMixin):
                 "files_explored": len(top_files),
                 "queries_generated": 0,
                 "chunks_added": 0,
+                "query_generation_failures": generation_metrics.to_dict(),
             }
 
         # Step 3: Execute unified search for each query (parallel, independent)
@@ -439,7 +440,21 @@ class DepthExplorationService(ProgressEmitterMixin):
             "properties": {
                 "queries": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        # Some models return {"query": ..., "aspect": ...}
+                        # instead of a bare string; accept both and normalize.
+                        "anyOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string"},
+                                    "aspect": {"type": "string"},
+                                },
+                                "required": ["query"],
+                            },
+                        ]
+                    },
                     "minItems": 1,
                     "maxItems": num_queries,
                 }
@@ -485,15 +500,48 @@ Output JSON with queries array."""
                 ),
             )
 
-            queries: list[str] = result.get("queries", [])
+            queries = self._normalize_exploration_queries(
+                result.get("queries", []), file_path
+            )
             logger.debug(
                 f"Generated {len(queries)} exploration queries for {file_path}"
             )
             return queries
 
         except Exception as e:
+            # Surface the failure instead of returning []: the caller records it
+            # in the exploration stats (`query_generation_failures`).
             logger.warning(f"Exploration query generation failed for {file_path}: {e}")
-            return []
+            raise
+
+    @staticmethod
+    def _normalize_exploration_queries(raw_queries: Any, file_path: str) -> list[str]:
+        """Normalize model output to a list of query strings.
+
+        Accepts bare strings and ``{"query": str, "aspect": str}`` objects.
+        Anything without an extractable query string is rejected, so schema
+        drift is never accepted silently.
+        """
+        if not isinstance(raw_queries, list):
+            raise ValueError(
+                f"Exploration queries must be a list, got {type(raw_queries).__name__}"
+            )
+        queries: list[str] = []
+        for index, item in enumerate(raw_queries):
+            if isinstance(item, str):
+                queries.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("query"), str):
+                logger.debug(
+                    f"Coerced object-shaped exploration query {index} for {file_path} "
+                    f"to a string (keys: {sorted(item)})"
+                )
+                queries.append(item["query"])
+            else:
+                raise ValueError(
+                    f"Exploration query {index} has no extractable 'query' string: "
+                    f"{item!r}"
+                )
+        return queries
 
     async def _execute_exploration_queries(
         self,

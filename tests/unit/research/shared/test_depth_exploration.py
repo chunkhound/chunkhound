@@ -495,9 +495,15 @@ class TestGenerateExplorationQueries:
         assert captured["max_completion_tokens"] == 12_345
 
     @pytest.mark.asyncio
-    async def test_returns_empty_on_llm_failure(self, depth_service, fake_llm_provider):
-        """Should return empty list on LLM failure."""
-        # Make LLM raise exception
+    async def test_llm_failure_is_raised_not_returned_as_empty(
+        self, depth_service, fake_llm_provider
+    ):
+        """A failed call must be visible to the caller, not silently become [].
+
+        This replaces `test_returns_empty_on_llm_failure`, which codified the
+        silent empty list: the caller records the failure in the exploration
+        stats (`query_generation_failures`) and can report it.
+        """
         original_complete = fake_llm_provider.complete_structured
 
         async def failing_complete(*args, **kwargs):
@@ -506,15 +512,169 @@ class TestGenerateExplorationQueries:
         fake_llm_provider.complete_structured = failing_complete
 
         try:
+            with pytest.raises(RuntimeError, match="LLM API error"):
+                await depth_service._generate_exploration_queries(
+                    root_query="test query",
+                    fragments=[{"chunk_id": "c1", "content": "code"}],
+                    file_path="test.py",
+                )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+    @pytest.mark.asyncio
+    async def test_accepts_object_shaped_and_plain_string_queries(
+        self, depth_service, fake_llm_provider
+    ):
+        """Objects with a `query` (and optional `aspect`) are normalized to strings."""
+        original_complete = fake_llm_provider.complete_structured
+
+        async def mixed_complete(*args, **kwargs):
+            return {
+                "queries": [
+                    {"query": "How does X work?", "aspect": "Component architecture"},
+                    "plain string",
+                    {"query": "No aspect given"},
+                ]
+            }
+
+        fake_llm_provider.complete_structured = mixed_complete
+
+        try:
             queries = await depth_service._generate_exploration_queries(
                 root_query="test query",
                 fragments=[{"chunk_id": "c1", "content": "code"}],
                 file_path="test.py",
             )
-
-            assert queries == []
         finally:
             fake_llm_provider.complete_structured = original_complete
+
+        assert queries == ["How does X work?", "plain string", "No aspect given"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_queries",
+        [
+            [{"aspect": "no query field"}],
+            [{"query": 42}],
+            ["ok", {"aspect": "second item has no query"}],
+            [None],
+            "not a list",
+        ],
+    )
+    async def test_payload_without_extractable_query_is_rejected(
+        self, depth_service, fake_llm_provider, bad_queries
+    ):
+        original_complete = fake_llm_provider.complete_structured
+
+        async def bad_complete(*args, **kwargs):
+            return {"queries": bad_queries}
+
+        fake_llm_provider.complete_structured = bad_complete
+
+        try:
+            with pytest.raises(ValueError):
+                await depth_service._generate_exploration_queries(
+                    root_query="test query",
+                    fragments=[{"chunk_id": "c1", "content": "code"}],
+                    file_path="test.py",
+                )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+    @pytest.mark.asyncio
+    async def test_schema_accepts_strings_and_query_objects(
+        self, depth_service, fake_llm_provider
+    ):
+        """The structured-output schema must let both shapes through validation."""
+        from jsonschema import Draft202012Validator
+
+        captured = {}
+        original_complete = fake_llm_provider.complete_structured
+
+        async def capturing_complete(*args, **kwargs):
+            captured["schema"] = kwargs["json_schema"]
+            return {"queries": ["q"]}
+
+        fake_llm_provider.complete_structured = capturing_complete
+
+        try:
+            await depth_service._generate_exploration_queries(
+                root_query="test query",
+                fragments=[{"chunk_id": "c1", "content": "code"}],
+                file_path="test.py",
+            )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+        validator = Draft202012Validator(captured["schema"])
+        assert validator.is_valid({"queries": ["plain"]})
+        assert validator.is_valid({"queries": [{"query": "q", "aspect": "a"}]})
+        assert validator.is_valid({"queries": ["plain", {"query": "q"}]})
+        assert not validator.is_valid({"queries": [{"aspect": "no query"}]})
+        assert not validator.is_valid({"queries": [42]})
+
+    @pytest.mark.asyncio
+    async def test_failed_generation_is_counted_in_failure_metrics(
+        self, depth_service, fake_llm_provider
+    ):
+        """Per-file failures reach `FailureMetrics`, which feeds the stats."""
+        original_complete = fake_llm_provider.complete_structured
+
+        async def failing_complete(*args, **kwargs):
+            raise RuntimeError("structured output schema validation failed")
+
+        fake_llm_provider.complete_structured = failing_complete
+
+        try:
+            queries, metrics = await depth_service._generate_all_exploration_queries(
+                root_query="test query",
+                top_files=["a.py", "b.py"],
+                file_to_chunks={
+                    "a.py": [{"chunk_id": "c1", "content": "code"}],
+                    "b.py": [{"chunk_id": "c2", "content": "code"}],
+                },
+            )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+        assert queries == {}
+        assert metrics.total_operations == 2
+        assert metrics.failure_count == 2
+        assert {f.item_description for f in metrics.failures} == {"a.py", "b.py"}
+
+    @pytest.mark.asyncio
+    async def test_stats_report_failures_when_no_queries_were_generated(
+        self, depth_service, fake_llm_provider
+    ):
+        """The early return for 'no queries' must still expose the failures."""
+        original_complete = fake_llm_provider.complete_structured
+
+        async def failing_complete(*args, **kwargs):
+            raise RuntimeError("LLM API error")
+
+        fake_llm_provider.complete_structured = failing_complete
+
+        try:
+            _, stats = await depth_service.explore_coverage_depth(
+                root_query="test query",
+                covered_chunks=[
+                    {
+                        "chunk_id": "c1",
+                        "file_path": "a.py",
+                        "content": "code",
+                        "score": 0.9,
+                    }
+                ],
+                phase1_threshold=0.5,
+            )
+        finally:
+            fake_llm_provider.complete_structured = original_complete
+
+        assert stats["queries_generated"] == 0
+        failures = stats["query_generation_failures"]
+        assert failures["count"] == 1
+        assert failures["total"] == 1
+        assert failures["items"][0]["item"] == "a.py"
 
     @pytest.mark.asyncio
     async def test_handles_empty_queries_response(self, depth_service, fake_llm_provider):
