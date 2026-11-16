@@ -42,7 +42,8 @@ def _overfetch_factor() -> int:
 
 
 def _servable_window(window: int, page_size: int) -> int:
-    """Largest total whose every derived page keeps offset+page_size in window."""
+    """Largest total, rounded down to a multiple of page_size, whose every derived
+    page keeps offset+page_size in window."""
     return window // page_size * page_size if page_size else window
 
 
@@ -533,18 +534,24 @@ class TransientSearchService:
         offset: int,
         total: int,
         window: int = _MAX_RESULT_WINDOW,
+        offset_only: bool = False,
     ) -> dict[str, Any]:
-        # Only advertise a next page the same call would accept: the next
-        # request must keep offset + page_size inside the supported window.
-        has_more = offset + page_size < total and offset + 2 * page_size <= window
+        # Only advertise a next page the same call would accept. A source that
+        # rejects on offset+page_size must fit the whole next page in the window;
+        # one that rejects on offset alone only needs the next offset inside it.
+        next_offset = offset + page_size
+        has_more = next_offset < total and (
+            next_offset < window if offset_only else next_offset + page_size <= window
+        )
         # Round the window down to a whole page so every page derived from
         # `total` is servable; `corpus_total` keeps the unbounded count.
+        servable = window if offset_only else _servable_window(window, page_size)
         return {
             "offset": offset,
             "page_size": page_size,
             "has_more": has_more,
-            "next_offset": offset + page_size if has_more else None,
-            "total": min(total, _servable_window(window, page_size)),
+            "next_offset": next_offset if has_more else None,
+            "total": min(total, servable),
             "corpus_total": total,
         }
 
@@ -1257,27 +1264,24 @@ class TransientSearchService:
             if self._vector_source == "db"
             else min(len(combined), hybrid_window)
         )
-        has_more = available > offset + page_size
         unbounded = len(combined)
         if self._vector_source == "db":
-            total = unbounded
-        else:
-            # Both mode rejects on offset alone, so its window already bounds
-            # every derived page; other sources reject on offset + page_size.
-            window = (
-                hybrid_window
-                if self._vector_source == "both"
-                else _servable_window(hybrid_window, page_size)
+            # DB hybrid counts every match, so the result count is its own window.
+            pagination = self._pagination(
+                page_size, offset, unbounded, window=unbounded, offset_only=True
             )
-            total = min(available, window)
-        return combined[offset : offset + page_size], {
-            "offset": offset,
-            "page_size": page_size,
-            "has_more": has_more,
-            "next_offset": offset + page_size if has_more else None,
-            "total": total,
-            "corpus_total": unbounded,
-        }
+        else:
+            pagination = self._pagination(
+                page_size,
+                offset,
+                available,
+                window=hybrid_window,
+                offset_only=self._vector_source == "both",
+            )
+            # A transient hybrid ranks only a bounded snapshot, so it cannot
+            # report a corpus-wide count.
+            del pagination["corpus_total"]
+        return combined[offset : offset + page_size], pagination
 
     async def get_chunk_similarities_async(
         self,

@@ -348,8 +348,10 @@ class PaginationInfo(TypedDict):
     """Pagination metadata for search results.
 
     ``total`` counts only what the pagination window can serve, so every page
-    derived from it is reachable. ``corpus_total`` is the unbounded match count
-    and may exceed that window.
+    derived from it is reachable, and ``next_offset`` is always a page the same
+    search accepts. ``corpus_total`` is the unbounded match count and may exceed
+    that window; it is present only when the search counted the whole corpus and
+    is omitted for transient hybrid search, which ranks a bounded snapshot.
     """
 
     offset: int

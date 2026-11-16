@@ -1666,6 +1666,20 @@ def _overflowing_service() -> TransientSearchService:
     )
 
 
+def _overflowing_hybrid_service() -> TransientSearchService:
+    """A diff source with more regex-matching hits than the hybrid paging window."""
+    chunks = [
+        make_chunk(f"symbol-{i}", start_line=i + 1, code="target") for i in range(5_000)
+    ]
+    return TransientSearchService(
+        make_original(),
+        stream_chunks(chunks),
+        "diff",
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+
 @pytest.mark.asyncio
 async def test_total_advertises_only_servable_pages() -> None:
     service = _overflowing_service()
@@ -1745,22 +1759,14 @@ async def test_hybrid_both_keeps_its_snapshot_bounded_total() -> None:
     _, pagination = await service.search_hybrid("query", page_size=300)
 
     assert pagination["total"] == 500
-    assert pagination["corpus_total"] == 500
+    # A transient hybrid ranks a bounded snapshot, so it reports no corpus count.
+    assert "corpus_total" not in pagination
 
 
 @pytest.mark.asyncio
 async def test_hybrid_total_advertises_only_servable_pages() -> None:
     """Hybrid rejects on offset+page_size, so its total must be page-aligned."""
-    chunks = [
-        make_chunk(f"symbol-{i}", start_line=i + 1, code="target") for i in range(5_000)
-    ]
-    service = TransientSearchService(
-        make_original(),
-        stream_chunks(chunks),
-        "diff",
-        embedding_manager(),
-        VectorCache(max_entries=0),
-    )
+    service = _overflowing_hybrid_service()
 
     _, pagination = await service.search_hybrid(
         "query", regex_pattern="target", page_size=30
@@ -1768,5 +1774,38 @@ async def test_hybrid_total_advertises_only_servable_pages() -> None:
 
     total = pagination["total"]
     assert total == 1_980
-    assert pagination["corpus_total"] == 2_000
+    assert "corpus_total" not in pagination
     assert all(off + 30 <= 2_000 for off in range(0, total, 30))
+
+
+@pytest.mark.asyncio
+async def test_hybrid_never_advertises_an_unservable_next_offset() -> None:
+    """Following next_offset must always reach a page the same search accepts."""
+    service = _overflowing_hybrid_service()
+
+    # 2000 is not a multiple of 30, so total ends at 1980 while 2000 hits exist:
+    # the page at 1950 is the last one and must not advertise the raising 1980.
+    _, pagination = await service.search_hybrid(
+        "query", regex_pattern="target", page_size=30, offset=1_950
+    )
+
+    assert pagination["total"] == 1_980
+    assert pagination["has_more"] is False
+    assert pagination["next_offset"] is None
+
+    # Walking the advertised pages from the start stays inside the window and
+    # ends exactly at total, here with a page size leaving a larger remainder.
+    offset = 0
+    seen = 0
+    while True:
+        results, pagination = await service.search_hybrid(
+            "query", regex_pattern="target", page_size=300, offset=offset
+        )
+        assert results
+        seen += len(results)
+        if not pagination["has_more"]:
+            assert pagination["next_offset"] is None
+            break
+        offset = pagination["next_offset"]
+        assert offset + 300 <= 2_000
+    assert seen == pagination["total"] == 1_800
