@@ -3967,6 +3967,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             # The ORDER BY/LIMIT never sit over a bare scan of the embeddings
             # table, so DuckDB's VSS optimizer cannot rewrite this into an
             # approximate HNSW index scan.
+            # candidates is MATERIALIZED: the page and the total both read it, so
+            # every embedding is scored once and the total counts exactly the rows
+            # the pages can return.
             similarity = (
                 f"TRY(array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]))"
             )
@@ -3986,7 +3989,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     JOIN files f ON c.file_id = f.id
                     WHERE CONCAT('/', f.path) LIKE ? ESCAPE '\\'
                 ),
-                candidates AS (
+                candidates AS MATERIALIZED (
                     SELECT e.chunk_id, {similarity} AS similarity
                     FROM {table_name} e
                     SEMI JOIN eligible ON e.chunk_id = eligible.chunk_id
@@ -4000,7 +4003,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     FROM {table_name} e
                     WHERE e.provider = ? AND e.model = ?
                 ),
-                candidates AS (
+                candidates AS MATERIALIZED (
                     SELECT scored.chunk_id, scored.similarity
                     FROM scored
                     JOIN chunks c ON scored.chunk_id = c.id
@@ -4011,64 +4014,63 @@ class DuckDBProvider(SerialDatabaseProvider):
             # ordering, so filtering them after the page returns the same rows as
             # filtering before it. Before it, DuckDB pushes the filter down into
             # the embeddings scan, which scores every row there first.
-            page_conditions = ""
+            # The total applies the same filter to the same candidates, so it is
+            # exactly the number of results a caller can page through.
+            keep = "similarity IS NOT NULL"
+            keep_params: list[Any] = []
             if threshold is not None:
-                page_conditions = " AND page.similarity >= ?"
+                keep += " AND similarity >= ?"
+                keep_params.append(threshold)
 
+            # total always yields one row, and the LEFT JOIN keeps it when the
+            # page is empty, so a page past the end still reports the total.
             query = f"""
                 WITH {ranked},
+                total AS (
+                    SELECT COUNT(*) AS total_count
+                    FROM candidates
+                    WHERE {keep}
+                ),
                 page AS (
                     SELECT chunk_id, similarity
                     FROM candidates
                     ORDER BY similarity DESC NULLS LAST
                     LIMIT ? OFFSET ?
+                ),
+                kept AS (
+                    SELECT chunk_id, similarity
+                    FROM page
+                    WHERE {keep}
+                ),
+                hits AS (
+                    SELECT
+                        c.id as chunk_id,
+                        c.symbol,
+                        c.code,
+                        c.chunk_type,
+                        c.start_line,
+                        c.end_line,
+                        f.path as file_path,
+                        f.language,
+                        kept.similarity,
+                        c.metadata
+                    FROM kept
+                    JOIN chunks c ON kept.chunk_id = c.id
+                    JOIN files f ON c.file_id = f.id
                 )
-                SELECT
-                    c.id as chunk_id,
-                    c.symbol,
-                    c.code,
-                    c.chunk_type,
-                    c.start_line,
-                    c.end_line,
-                    f.path as file_path,
-                    f.language,
-                    page.similarity,
-                    c.metadata
-                FROM page
-                JOIN chunks c ON page.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE page.similarity IS NOT NULL{page_conditions}
-                ORDER BY page.similarity DESC
+                SELECT total.total_count, hits.*
+                FROM total
+                LEFT JOIN hits ON TRUE
+                ORDER BY hits.similarity DESC
             """
 
-            # Get total count for pagination
-            # Build count query separately to avoid string replacement issues
-            count_query = f"""
-                SELECT COUNT(*)
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
-            """
-
-            count_params = [provider, model]
-
-            if threshold is not None:
-                count_query += f" AND {similarity} >= ?"
-                count_params.extend([query_embedding, threshold])
-
-            if path_like is not None:
-                count_query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
-                # Directory-boundary-anchored match, consistent with main query
-                count_params.append(path_like)
-
-            total_count = conn.execute(count_query, count_params).fetchone()[0]
-
+            params.extend(keep_params)
             params.extend([page_size, offset])
-            if threshold is not None:
-                params.append(threshold)
+            params.extend(keep_params)
 
-            results = conn.execute(query, params).fetchall()
+            rows = conn.execute(query, params).fetchall()
+            total_count = rows[0][0]
+            results = [row[1:] for row in rows if row[1] is not None]
 
             result_list = [
                 {
