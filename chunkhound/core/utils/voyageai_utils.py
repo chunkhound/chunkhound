@@ -18,4 +18,9 @@ def is_official_voyageai_endpoint(base_url: str | None) -> bool:
         # No base_url means default VoyageAI endpoint
         return True
 
-    return base_url.startswith(OFFICIAL_VOYAGEAI_BASE)
+    # Require an exact host match or a path boundary ("/") after the base so a
+    # look-alike host such as "https://api.voyageai.com.evil.com" is not treated
+    # as official (mirrors is_official_openai_endpoint's spoofing guard).
+    return base_url == OFFICIAL_VOYAGEAI_BASE or base_url.startswith(
+        OFFICIAL_VOYAGEAI_BASE + "/"
+    )

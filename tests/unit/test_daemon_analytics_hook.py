@@ -23,6 +23,7 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.daemon.server import ChunkHoundDaemon
+from tests.utils.mcp_session import call_tool
 
 
 def _read_events(buffer_dir: Path) -> list[dict]:
@@ -70,11 +71,9 @@ async def test_daemon_proxied_tool_call_records_one_command_summary(
 ) -> None:
     instance, buffer_dir = daemon
 
-    result = await instance._handle_tools_call(
-        {"id": 1, "params": {"name": "daemon_status", "arguments": {}}}
-    )
+    result = await call_tool(instance, "daemon_status", {})
 
-    assert result["result"]["isError"] is False
+    assert result.is_error is False
     events = _read_events(buffer_dir)
     assert len(events) == 1
     assert events[0]["command"] == "daemon_status"
@@ -104,8 +103,6 @@ async def test_disabled_analytics_records_nothing_via_the_daemon(
     )
     instance._initialization_complete.set()
 
-    await instance._handle_tools_call(
-        {"id": 1, "params": {"name": "daemon_status", "arguments": {}}}
-    )
+    await call_tool(instance, "daemon_status", {})
 
     assert not buffer_dir.exists()

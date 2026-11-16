@@ -31,7 +31,7 @@ async def test_browser_death_degrades_to_urllib_on_next_attempt(tmp_path):
     browser_sentinel = object()
     calls: list[object | None] = []
 
-    async def fake_fetch(url, browser):
+    async def fake_fetch(url, browser, **kwargs):
         calls.append(browser)
         if len(calls) == 1:
             raise ConnectionClosedError(None, None)
@@ -50,7 +50,7 @@ async def test_browser_death_degrades_to_urllib_on_next_attempt(tmp_path):
         "chunkhound.utils.fetchurl._managed_browser",
         fake_managed_browser,
     ), patch(
-        "chunkhound.utils.fetchurl._validate_url_and_resolve",
+        "chunkhound.utils.fetchurl._validate_ssrf",
         side_effect=_noop_validate,
     ):
         result = await _fetch_with_retry(
@@ -75,7 +75,7 @@ async def test_timeout_does_not_downgrade_browser(tmp_path):
     browser_sentinel = object()
     calls: list[object | None] = []
 
-    async def fake_fetch(url, browser):
+    async def fake_fetch(url, browser, **kwargs):
         calls.append(browser)
         if len(calls) == 1:
             raise asyncio.TimeoutError()
@@ -94,7 +94,7 @@ async def test_timeout_does_not_downgrade_browser(tmp_path):
         "chunkhound.utils.fetchurl._managed_browser",
         fake_managed_browser,
     ), patch(
-        "chunkhound.utils.fetchurl._validate_url_and_resolve",
+        "chunkhound.utils.fetchurl._validate_ssrf",
         side_effect=_noop_validate,
     ):
         result = await _fetch_with_retry(
@@ -121,7 +121,7 @@ async def test_browser_death_on_final_attempt_wraps_into_fetchurl_error(tmp_path
     browser_sentinel = object()
     original = ConnectionClosedError(None, None)
 
-    async def fake_fetch(url, browser):
+    async def fake_fetch(url, browser, **kwargs):
         raise original
 
     @asynccontextmanager
@@ -138,7 +138,7 @@ async def test_browser_death_on_final_attempt_wraps_into_fetchurl_error(tmp_path
         "chunkhound.utils.fetchurl._managed_browser",
         fake_managed_browser,
     ), patch(
-        "chunkhound.utils.fetchurl._validate_url_and_resolve",
+        "chunkhound.utils.fetchurl._validate_ssrf",
         side_effect=_noop_validate,
     ):
         with pytest.raises(FetchUrlError) as exc_info:

@@ -240,13 +240,8 @@ class TestExecuteToolSearchReturnsMarkdown:
                       "line_count", "similarity_percentage"):
             assert field not in result, f"Dropped field '{field}' leaked into MCP output"
 
-    async def test_trim_loop_reduces_oversized_results(self) -> None:
-        """Token-limiting trim loop in execute_tool removes results until under MAX_RESPONSE_TOKENS.
-
-        10 results × 7 000-char content ≈ 70 000 chars → ~23 300 tokens > MAX_RESPONSE_TOKENS
-        (20 000).  The loop trims by 1/4 each pass; after one pass 8 results remain (~18 700
-        tokens < limit).  The response must reflect the trim: fewer blocks and next_offset set.
-        """
+    async def test_trim_loop_preserves_results_and_pagination(self) -> None:
+        """Oversized pages truncate content without changing the requested page."""
         from chunkhound.mcp_server.tools import MAX_RESPONSE_TOKENS, estimate_tokens, execute_tool
 
         large_content = "x" * 7000
@@ -254,7 +249,8 @@ class TestExecuteToolSearchReturnsMarkdown:
             _result(file_path=f"file_{i}.py", content=large_content, symbol=f"func_{i}")
             for i in range(10)
         ]
-        svc = self._make_services(results, _pagination(has_more=False, next_offset=None, total=10))
+        pagination = _pagination(offset=40, page_size=10, total=60, next_offset=50)
+        svc = self._make_services(results, pagination)
 
         result = await execute_tool(
             tool_name="search",
@@ -264,11 +260,10 @@ class TestExecuteToolSearchReturnsMarkdown:
         )
 
         assert isinstance(result, str)
-        result_block_count = result.count("## `")
-        assert result_block_count < 10, (
-            f"Trim loop should have removed results; found {result_block_count} blocks"
-        )
-        assert "next_offset=" in result, "Trimmed response must set next_offset for the caller to page"
+        assert result.count("## `") == 10
+        assert "next_offset=50" in result
+        assert "next_offset=46" not in result
+        assert "[... truncated ...]" in result
         assert estimate_tokens(result) <= MAX_RESPONSE_TOKENS, (
             f"Trim loop must reduce output to within MAX_RESPONSE_TOKENS; "
             f"got {estimate_tokens(result)} tokens"
