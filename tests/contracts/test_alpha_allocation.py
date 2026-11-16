@@ -180,6 +180,17 @@ def test_wrong_checkout_never_tags_untested_source(repos):
     assert git(remote, "tag", "--list") == ""
 
 
+def test_git_failure_reports_remote_error_details(repos):
+    repo, remote, sha = repos
+    missing_remote = repo / "missing-remote.git"
+    git(repo, "remote", "set-url", "origin", str(missing_remote))
+    result = allocate(repo, sha)
+    assert result.returncode != 0
+    assert "Alpha allocation failed" in result.stderr
+    assert "missing-remote.git" in result.stderr
+    assert git(remote, "tag", "--list") == ""
+
+
 def test_remote_rejection_leaves_no_half_allocated_release(repos):
     repo, remote, sha = repos
     hook = remote / "hooks" / "update"

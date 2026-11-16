@@ -27,10 +27,14 @@ BASE_VERSION = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 
 
 def git(*args: str, input_text: str | None = None) -> str:
+    # Git object input requires LF bytes, not Windows text-mode CRLF translation.
     result = subprocess.run(
-        ["git", *args], input=input_text, text=True, capture_output=True, check=True
+        ["git", *args],
+        input=input_text.encode("utf-8") if input_text is not None else None,
+        capture_output=True,
+        check=True,
     )
-    return result.stdout.strip()
+    return result.stdout.decode("utf-8").strip()
 
 
 def remote_tags(remote: str) -> dict[str, str]:
@@ -197,7 +201,10 @@ def main() -> None:
         if git("rev-parse", "HEAD") != args.source_sha:
             raise ValueError("Checkout HEAD must be the exact CI-tested source SHA")
         tag = allocate(base, args.repository, args.run_id, args.source_sha, args.remote)
-    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or b"").decode("utf-8", errors="replace").strip()
+        sys.exit(f"Alpha allocation failed: {error}\n{details}")
+    except (ValueError, OSError) as error:
         sys.exit(f"Alpha allocation failed: {error}")
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a") as stream:

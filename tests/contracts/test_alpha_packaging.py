@@ -50,14 +50,14 @@ def _native_requirement(metadata_text: str) -> Requirement:
 @pytest.mark.parametrize(
     ("version", "alpha", "expected_specifier"),
     [
-        ("6.2.0", False, ">=5.2.0"),
-        ("6.2.0rc1", False, ">=5.2.0"),
-        ("6.2.0a43", False, ">=5.2.0"),
+        ("6.2.0", False, None),
+        ("6.2.0rc1", False, None),
+        ("6.2.0a43", False, None),
         ("6.2.0a43", True, "==6.2.0a43"),
     ],
 )
 def test_release_artifacts_preserve_native_dependency_on_source_rebuild(
-    tmp_path: Path, version: str, alpha: bool, expected_specifier: str
+    tmp_path: Path, version: str, alpha: bool, expected_specifier: str | None
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -65,6 +65,17 @@ def test_release_artifacts_preserve_native_dependency_on_source_rebuild(
         shutil.copy2(ROOT / filename, source / filename)
     shutil.copytree(ROOT / "chunkhound", source / "chunkhound")
     original_config = (source / "pyproject.toml").read_bytes()
+    expected_dependencies = hatch_build.tomllib.loads(original_config.decode())[
+        "tool"
+    ]["hatch"]["metadata"]["hooks"]["custom"]["dependencies"]
+    if expected_specifier is None:
+        native = [
+            Requirement(value)
+            for value in expected_dependencies
+            if canonicalize_name(Requirement(value).name) == "chunkhound-native"
+        ]
+        assert len(native) == 1
+        expected_specifier = str(native[0].specifier)
     environment = _build_environment()
     environment["SETUPTOOLS_SCM_PRETEND_VERSION"] = version
     if alpha:
@@ -98,9 +109,6 @@ def test_release_artifacts_preserve_native_dependency_on_source_rebuild(
         dependencies = persisted["tool"]["hatch"]["metadata"]["hooks"]["custom"][
             "dependencies"
         ]
-        expected_dependencies = hatch_build.tomllib.loads(original_config.decode())[
-            "tool"
-        ]["hatch"]["metadata"]["hooks"]["custom"]["dependencies"]
         if alpha:
             expected_dependencies = [
                 f"chunkhound-native=={version}"
