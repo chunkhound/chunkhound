@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChunkHound CI/CD — Continuous Alpha Releases</title>
+<style>
+:root{color-scheme:light;--ink:#172033;--muted:#526072;--line:#d9e1eb;--blue:#1264d6}
+*{box-sizing:border-box}body{margin:0;background:#f5f7fb;color:var(--ink);font:16px/1.6 system-ui,sans-serif}header{background:linear-gradient(120deg,#102b55,#1264d6);color:white;padding:48px max(24px,calc((100% - 1080px)/2))}h1{font-size:clamp(2rem,5vw,3rem);line-height:1.15;margin:0}header p{max-width:780px}main{max-width:1080px;margin:auto;padding:10px 24px 60px}h2{margin-top:38px}h3{margin-top:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}.card,.note{background:white;border:1px solid var(--line);border-radius:12px;padding:20px}.note{border-left:5px solid var(--blue);margin:24px 0}.card p{margin-bottom:0;color:var(--muted)}code{background:#eaf0f8;color:#152d50;border-radius:4px;padding:2px 5px}pre{background:#10233f;color:#e9f2ff;padding:20px;border-radius:12px;overflow:auto;line-height:1.6}table{width:100%;border-collapse:collapse;background:white}th,td{text-align:left;vertical-align:top;padding:13px;border-bottom:1px solid var(--line)}th{background:#edf3fc}li{margin:7px 0}.small{color:var(--muted);font-size:.93rem}a{color:#1264d6}@media print{header{background:white;color:black}body{background:white}.card,pre,table{break-inside:avoid}}
+</style>
+</head>
+<body>
+<header>
+<h1>ChunkHound CI/CD Architecture</h1>
+<p>Continuous public PyPI alphas from successful main builds, with one shared release implementation and unchanged stable-release behavior.</p>
+<p>Status: agreed design; implementation pending.</p>
+</header>
+<main>
+<h2>Agreed decisions</h2>
+<div class="grid">
+<article class="card"><h3>Production PyPI</h3><p>Keep using public alpha versions as the testing surface. No TestPyPI.</p></article>
+<article class="card"><h3>Next available alpha</h3><p>Each successful main build gets the next available alpha tag. Numbers reflect allocation order, not source commit order.</p></article>
+<article class="card"><h3>Tag is authoritative</h3><p>The explicitly requested, immutable tag determines the release version and source commit. Never let Git choose among tags.</p></article>
+<article class="card"><h3>Simple recovery</h3><p>Use existing manual Actions reruns and PyPI <code>skip-existing</code>. No automatic publication retries or special storage system.</p></article>
+</div>
+<aside class="note"><strong>Stable unchanged means unchanged behavior.</strong> Stable workflow code and shared helpers may be refactored, and OIDC may be reconfigured. Preserve the stable release contract—not the exact file contents.</aside>
+
+<h2>End-to-end flow</h2>
+<pre>Push to protected main
+  → ci.yml validates the exact commit
+      ├─ Documentation deployment (independent path)
+      └─ prepare-alpha: create/reuse tag for github.sha using GITHUB_TOKEN
+           → release-alpha: directly call release-packages.yml
+                → build and validate distributions
+                → publish chunkhound-native first
+                → publish chunkhound second
+
+Manual alpha/beta/RC tag → release-rc.yml wrapper → release-packages.yml
+Published GitHub Release → release.yml wrapper   → release-packages.yml</pre>
+<p>No GitHub App is required. The automatic tag push does not need to trigger another workflow: CI calls the reusable workflow directly.</p>
+
+<h2>Workflow responsibilities</h2>
+<table>
+<thead><tr><th>Component</th><th>Responsibility</th></tr></thead>
+<tbody>
+<tr><td><code>ci.yml</code></td><td>Validation, documentation deployment, alpha preparation, and direct release invocation after successful main pushes.</td></tr>
+<tr><td><code>prepare-alpha</code></td><td>Create/reuse the annotated tag for the tested SHA and output tag/SHA.</td></tr>
+<tr><td><code>release-alpha</code></td><td>Call the shared release workflow using those outputs.</td></tr>
+<tr><td><code>release-packages.yml</code></td><td>Shared reusable builds, validation, native-first publication, and failure alerts.</td></tr>
+<tr><td><code>release-rc.yml</code></td><td>Thin wrapper for manual prerelease tag pushes.</td></tr>
+<tr><td><code>release.yml</code></td><td>Thin wrapper for published GitHub Releases, preserving stable behavior.</td></tr>
+</tbody>
+</table>
+
+<h2>Alpha allocation</h2>
+<p>A reviewed file declares the intended next release line:</p>
+<pre># .github/release-channel.toml
+[alpha]
+base_version = "6.2.0"</pre>
+<p>Inspect remote tags and select the next unused number:</p>
+<pre>Existing: v6.2.0a1, v6.2.0a2
+Next:     v6.2.0a3</pre>
+<p>The configuration guides tag creation only. Once created, the tag is the source of truth. Tag the CI-tested <code>github.sha</code>, not a moving main tip.</p>
+<ul>
+<li><strong>Allocation order is intentional:</strong> an older commit that completes CI later may receive a higher alpha number. No commit-order queue is required.</li>
+<li><strong>Collision-safe creation:</strong> fetch tags, push without force, and refetch/retry if another build claimed the same number.</li>
+<li><strong>Idempotent reruns:</strong> reuse the same build's existing tag. Simultaneous reruns must not create multiple release identities.</li>
+<li><strong>Preserve main builds:</strong> the current shared CI concurrency group can replace pending runs even with <code>cancel-in-progress: false</code>. Allow independent main runs or another non-dropping mechanism. Coordinate Pages deployment separately.</li>
+</ul>
+<table>
+<thead><tr><th>Channel</th><th>Creator</th><th>Example</th><th>Trigger</th></tr></thead>
+<tbody>
+<tr><td>Continuous alpha</td><td>CI</td><td><code>v6.2.0a43</code></td><td>Successful main push build</td></tr>
+<tr><td>Beta / RC</td><td>Maintainer</td><td><code>v6.2.0b1</code> / <code>v6.2.0rc1</code></td><td>Tag push</td></tr>
+<tr><td>Stable</td><td>Maintainer</td><td><code>v6.2.0</code></td><td>Published GitHub Release</td></tr>
+</tbody>
+</table>
+<p>Update the base version through a reviewed PR when moving to the next intended release line. Within one base, alphas sort below beta, RC, and stable versions; testers can install a specific alpha by its exact version.</p>
+
+<h2>Explicit release contract</h2>
+<pre># release-packages.yml
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string</pre>
+<ol>
+<li>Validate the release tag and verify it points to <code>source_sha</code>.</li>
+<li>Check out that source with full history.</li>
+<li>Strip the leading <code>v</code> once to obtain the package version.</li>
+<li>Pass that exact version to both builds and verify the resulting metadata.</li>
+</ol>
+<p>Override Hatch VCS version discovery during the main build:</p>
+<pre>- name: Build main distributions
+  env:
+    SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.prepare.outputs.version }}
+  run: uv build</pre>
+<p>The native build receives the same version through the Cargo patching logic:</p>
+<pre>Requested tag: v6.2.0a43
+Main version:  6.2.0a43
+Cargo version: 6.2.0-a43
+Native wheel:  6.2.0a43</pre>
+<aside class="note"><strong>Do not use caller event context to select the version.</strong> A reusable workflow called from CI still sees the main push. Refactor native-wheel actions, version gates, and alerts to accept the explicit tag/version instead of inferring it from <code>GITHUB_REF_NAME</code>. Multiple tags may point to one SHA; the requested tag always wins.</aside>
+<p>Validate main and native artifact versions, the embedded main version, and the version retained when rebuilding the final sdist. Protect release tags against moving or overwriting.</p>
+
+<h2>Stable-release behavior contract</h2>
+<p>Share code where useful, while preserving:</p>
+<ul>
+<li>The published-GitHub-Release trigger.</li>
+<li>Main/native versions matching the requested tag.</li>
+<li>The existing distribution types and supported platform matrix.</li>
+<li>Existing stable dependency semantics.</li>
+<li>Validation gates and native-first publication.</li>
+<li>Equivalent approval controls, failure alerts, and manual rerun behavior.</li>
+</ul>
+<p>Regression checks should cover this contract, including multiple tags on the same commit. OIDC configuration and implementation may change; externally visible stable behavior must not.</p>
+
+<h2>Permissions and publishing setup</h2>
+<ul>
+<li><code>prepare-alpha</code> uses <code>GITHUB_TOKEN</code> with job-scoped <code>contents: write</code>. No App secret or PAT.</li>
+<li>Tag rules must allow Actions to create alpha tags and <code>alpha-build/**</code> identity tags while protecting both against updates/deletion and retaining stable-tag creation controls. Identity tags point to metadata blobs and do not affect version discovery.</li>
+<li>Release callers grant required <code>contents: read</code>, <code>id-token: write</code>, and <code>issues: write</code>; called jobs narrow permissions.</li>
+<li>Configure PyPI Trusted Publishers for <code>release-packages.yml</code>, which is identified by the OIDC <code>job_workflow_ref</code>, with each matching environment: <code>pypi</code>, <code>pypi-alpha</code>, <code>pypi-native</code>, or <code>pypi-alpha-native</code> on the appropriate project. Old caller-only entries do not authorize these publishing jobs.</li>
+<li>Alpha uploads require no manual approval. Separate alpha environments can preserve stable approval controls.</li>
+</ul>
+
+<h2>Artifact validation and native pairing</h2>
+<p>The shared release workflow preserves distribution builds, clean-install checks, artifact gates, and native failure alerts. Native publication must succeed before the main package is published.</p>
+<p>The proposed alpha dependency contract is:</p>
+<pre>chunkhound==6.2.0a43
+Requires-Dist: chunkhound-native == 6.2.0a43</pre>
+<p>Preserve this alpha pin in both wheels and the final sdist; verify a wheel rebuilt from the sdist retains it. Do not silently change stable dependency semantics.</p>
+
+<h2>CI job guard</h2>
+<pre>prepare-alpha:
+  needs: [tests, rust-checks, site-build-validation,
+          watchman-rollout-gate, native-wheel-smoke-arm64,
+          old-linux-wheel-smoke, native-dev-macos]
+  if: github.event_name == 'push' &amp;&amp; github.ref == 'refs/heads/main'
+  permissions:
+    contents: write
+  # Create/reuse tag; output release_tag and source_sha.
+
+release-alpha:
+  needs: prepare-alpha
+  permissions:
+    contents: read
+    id-token: write
+    issues: write
+  uses: ./.github/workflows/release-packages.yml
+  with:
+    release_tag: ${{ needs.prepare-alpha.outputs.release_tag }}
+    source_sha: ${{ needs.prepare-alpha.outputs.source_sha }}</pre>
+<p>Failed validation skips tagging. PR, merge-queue, and manual CI runs do not allocate alphas. Documentation deployment failures do not block package releases.</p>
+
+<h2>Failures: keep the existing manual recovery</h2>
+<table>
+<thead><tr><th>Failure</th><th>Response</th></tr></thead>
+<tbody>
+<tr><td>CI validation fails</td><td>No tag or publication.</td></tr>
+<tr><td>Tag creation fails</td><td>Fix and manually rerun; reuse a previously created tag.</td></tr>
+<tr><td>Native build, validation, or upload fails</td><td>Main publication stays blocked. Existing alert and manual failed-job reruns apply.</td></tr>
+<tr><td>Main upload fails after native succeeds</td><td>Manually rerun failed publication jobs with existing <code>skip-existing</code>.</td></tr>
+</tbody>
+</table>
+<aside class="note"><strong>No new recovery system.</strong> Use existing Actions artifacts and manual reruns. Prefer rerunning failed publication jobs, which normally reuse built artifacts. A full workflow rerun may rebuild and overwrite Actions artifacts, as today. No automatic publication retry, checksum registry, or special storage is added.</aside>
+<p class="small">Accepted limitation: after a full rebuild of a partially published version, PyPI may retain earlier files while missing files come from the rebuild. This is not a blocker for the first continuous-alpha step.</p>
+
+<h2>Implementation checklist</h2>
+<ol>
+<li>Add the tracked alpha base-version file.</li>
+<li>Add CI preparation/direct release-call jobs with collision-safe allocation and idempotent reruns.</li>
+<li>Ensure main concurrency does not discard builds; coordinate Pages independently.</li>
+<li>Extract shared release logic; make stable/RC wrappers thin callers while preserving stable behavior.</li>
+<li>Pass explicit tag/version/SHA inputs and verify artifact versions.</li>
+<li>Configure release/identity tag protections, reusable-workflow OIDC trust, and approval environments.</li>
+<li>Validate alpha native pairing through wheels and sdist rebuilds; retain stable dependency semantics.</li>
+<li>Document channel rules and existing manual recovery. Add no automatic publication retries or special storage.</li>
+</ol>
+<p class="small">Wiki: <a href="https://github.com/chunkhound/chunkhound/wiki/Continuous-Alpha-CI-CD-Design">Continuous Alpha CI/CD — Design</a></p>
+</main>
+</body>
+</html>

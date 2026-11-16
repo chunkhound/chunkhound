@@ -1,0 +1,4 @@
+# Reviewed target release line for automatic main-build alphas.
+# Existing tags remain authoritative; changing this never retags a rerun.
+[alpha]
+base_version = "6.2.0"
