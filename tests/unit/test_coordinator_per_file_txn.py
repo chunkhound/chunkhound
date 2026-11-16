@@ -54,15 +54,15 @@ def _run_test(db: DuckDBProvider, tmp_path: Path) -> None:
         }
     ]
 
-    # Monkeypatch _store_file_record to fail for bad_file
-    original_store = coord._store_file_record
+    # Make the provider's per-file store fail for bad_file
+    original_store = db.store_file_result_async
 
-    async def _failing_store(path, *args, **kwargs):
-        if Path(path) == bad_file:
+    async def _failing_store(file_model, *args, **kwargs):
+        if str(file_model.path) == "bad.yaml":
             raise RuntimeError("boom")
-        return await original_store(path, *args, **kwargs)
+        return await original_store(file_model, *args, **kwargs)
 
-    coord._store_file_record = _failing_store  # type: ignore[assignment]
+    db.store_file_result_async = _failing_store  # type: ignore[method-assign]
 
     results = [
         _pfr(good_file, good_chunks, ok=True),
