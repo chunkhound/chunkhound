@@ -101,6 +101,12 @@ Update it when moving to the next planned release line. Numbers reflect allocati
 order, not commit order: an older source commit can finish CI later and receive a
 higher alpha number.
 
+Publication order is not guaranteed either. Main CI runs are independent, so
+alpha N+1 can reach PyPI before alpha N, and alpha N may be missing if its
+publication fails. This is accepted. Installers choose the highest version, so
+users still end up on the newest published alpha. Do not assume that PyPI
+upload order or a gap-free sequence matches the tag order.
+
 The allocator atomically creates the release tag and
 `alpha-build/chunkhound/chunkhound/<run-id>`. The identity tag points to a metadata
 blob, not a commit, so it does not influence Git version discovery. Rerunning the
