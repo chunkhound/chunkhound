@@ -135,41 +135,6 @@ async def _prepare_hub_index(
             return HubIndexDecision.STOP
         return HubIndexDecision.CONTINUE_LOCAL
 
-    try:
-        target = installation_target(config)
-        target_absent = automatic_target_absent(target)
-    except HubUnavailable as exc:
-        formatter.error(str(exc))
-        if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
-            return HubIndexDecision.CONTINUE_LOCAL
-        _hub_authorization_guidance(formatter)
-        return HubIndexDecision.STOP
-    except (
-        native.DatabaseBusyError,
-        native.DatabaseInterruptedError,
-        native.DatabaseLayoutError,
-        native.DatabaseFilesystemError,
-    ) as exc:
-        raise installation_failure(exc) from None
-    except OSError:
-        raise HubLocalStateError("Hub local filesystem is unavailable") from None
-
-    if not target_absent:
-        if explicit_trust:
-            try:
-                await fetch_validated_manifest(config)
-            except HubUnavailable as exc:
-                formatter.error(str(exc))
-                if (
-                    _hub_prompts_allowed()
-                    and _choose_hub_failure_action() == "local"
-                ):
-                    return HubIndexDecision.CONTINUE_LOCAL
-                _hub_authorization_guidance(formatter)
-                return HubIndexDecision.STOP
-            _save_hub_trust(config, formatter)
-        return HubIndexDecision.CONTINUE_LOCAL
-
     newly_authorized = explicit_trust
     if not explicit_trust:
         try:
@@ -193,12 +158,35 @@ async def _prepare_hub_index(
             newly_authorized = True
 
     try:
+        target = installation_target(config)
+        target_absent = automatic_target_absent(target)
+    except HubUnavailable as exc:
+        formatter.error(str(exc))
+        if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
+            return HubIndexDecision.CONTINUE_LOCAL
+        _hub_authorization_guidance(formatter)
+        return HubIndexDecision.STOP
+    except (
+        native.DatabaseBusyError,
+        native.DatabaseInterruptedError,
+        native.DatabaseLayoutError,
+        native.DatabaseFilesystemError,
+    ) as exc:
+        raise installation_failure(exc) from None
+    except OSError:
+        raise HubLocalStateError("Hub local filesystem is unavailable") from None
+
+    try:
         if newly_authorized:
             source = await fetch_validated_manifest(config)
             _save_hub_trust(config, formatter)
+            if not target_absent:
+                return HubIndexDecision.CONTINUE_LOCAL
             installed = await pull(config, automatic=True, source=source)
-        else:
+        elif target_absent:
             installed = await pull(config, automatic=True)
+        else:
+            return HubIndexDecision.CONTINUE_LOCAL
     except HubUnavailable as exc:
         formatter.error(str(exc))
         if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":

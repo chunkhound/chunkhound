@@ -253,8 +253,7 @@ def test_trusted_cold_index_installs_but_existing_database_never_requests_hub(
         assert old.returncode == 0, old.stdout + old.stderr
     write_config(project, backend, hub_url, embedding_http.url)
     publish(hub_http, build_database(tmp_path / "published", backend))
-    if initial == "absent":
-        grant_cli_trust(project, project, hub_url)
+    grant_cli_trust(project, project, hub_url)
     embedding_http.requests.clear()
     result = cli(project, "index", project, "--verbose", rust=rust)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -152,14 +152,15 @@ async def test_explicit_trust_without_url_stops_before_target_with_guidance(
 
 
 @pytest.mark.parametrize("aligned", [True, False])
-async def test_existing_database_never_reads_trust_prompts_or_contacts_hub(
+async def test_stored_trust_existing_database_never_prompts_or_contacts_hub(
     config, args, formatter, monkeypatch, tmp_path, aligned
 ):
     target = tmp_path / ("aligned.db" if aligned else "misaligned.db")
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
-    monkeypatch.setattr(run, "is_trusted", _forbid)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
+    monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
@@ -167,9 +168,43 @@ async def test_existing_database_never_reads_trust_prompts_or_contacts_hub(
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
+async def test_untrusted_noninteractive_stops_before_target_inspection(
+    config, args, formatter, monkeypatch
+):
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(run, "installation_target", _forbid)
+    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected"),
+    [("local", "CONTINUE_LOCAL"), ("cancel", "STOP")],
+)
+async def test_untrusted_local_or_cancel_stops_before_target_inspection(
+    config, args, formatter, monkeypatch, choice, expected
+):
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(
+        run.prompts, "prompt_choice", lambda *_args, **_kwargs: choice
+    )
+    monkeypatch.setattr(run, "installation_target", _forbid)
+    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is getattr(run.HubIndexDecision, expected)
+
+
 async def test_unsupported_target_is_safe_failure_without_implicit_fallback(
     config, args, formatter, monkeypatch
 ):
+    args.trust = True
     monkeypatch.setattr(
         run,
         "installation_target",
@@ -198,6 +233,7 @@ async def test_unsupported_target_is_safe_failure_without_implicit_fallback(
 async def test_target_inspection_failures_are_normalized_as_fatal_local_state(
     config, args, formatter, monkeypatch, tmp_path, failure, expected_type
 ):
+    args.trust = True
     target = tmp_path / "chunks.db"
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(
@@ -282,9 +318,11 @@ async def test_untrusted_interactive_trust_validates_saves_and_pulls(
     [("local", "CONTINUE_LOCAL"), ("cancel", "STOP")],
 )
 async def test_untrusted_interactive_local_or_cancel_never_contacts_hub(
-    config, args, formatter, monkeypatch, absent_target, choice, expected
+    config, args, formatter, monkeypatch, choice, expected
 ):
     monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run, "installation_target", _forbid)
+    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(
         run.prompts, "prompt_choice", lambda *_args, **_kwargs: choice
@@ -298,9 +336,11 @@ async def test_untrusted_interactive_local_or_cancel_never_contacts_hub(
 
 
 async def test_untrusted_noninteractive_stops_before_hub_or_local(
-    config, args, formatter, monkeypatch, absent_target
+    config, args, formatter, monkeypatch
 ):
     monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run, "installation_target", _forbid)
+    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
     monkeypatch.setattr(run, "pull", _forbid)
 
@@ -345,12 +385,14 @@ async def test_matching_saved_trust_pulls_without_prevalidated_source(
 
 
 async def test_trust_read_failure_is_fail_closed_and_can_choose_local(
-    config, args, formatter, monkeypatch, absent_target
+    config, args, formatter, monkeypatch
 ):
     def fail_read(*_args):
         raise HubTrustError("raw trust path secret")
 
     monkeypatch.setattr(run, "is_trusted", fail_read)
+    monkeypatch.setattr(run, "installation_target", _forbid)
+    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "local")
     monkeypatch.setattr(run, "pull", _forbid)
