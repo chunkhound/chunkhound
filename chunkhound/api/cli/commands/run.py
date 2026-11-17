@@ -22,6 +22,7 @@ from chunkhound.core.index_format import IndexFormatError
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.daemon.process import pid_alive
 from chunkhound.hub.client import (
+    ValidatedHubSource,
     automatic_target_absent,
     fetch_validated_manifest,
     pull,
@@ -32,7 +33,13 @@ from chunkhound.hub.errors import (
     HubUnavailable,
 )
 from chunkhound.hub.install import installation_failure, installation_target
-from chunkhound.hub.trust import HubTrustError, grant_trust, is_trusted
+from chunkhound.hub.trust import (
+    HubTrustError,
+    checkout_digest,
+    grant_trust,
+    is_trusted,
+    manifest_url_digest,
+)
 from chunkhound.registry import (
     configure_registry,
     create_indexing_coordinator,
@@ -102,12 +109,13 @@ def _hub_authorized_failure_guidance(formatter: RichOutputFormatter) -> None:
     )
 
 
-def _save_hub_trust(config: Config, formatter: RichOutputFormatter) -> None:
-    hub_url = config.hub.url
-    if not hub_url:
-        return
+def _save_hub_trust(
+    checkout: Path,
+    hub_url: str,
+    formatter: RichOutputFormatter,
+) -> None:
     try:
-        grant_trust(config.target_dir or Path.cwd(), hub_url)
+        grant_trust(checkout, hub_url)
     except HubTrustError:
         formatter.warning(
             "Hub manifest was authorized for this index, but future automatic "
@@ -142,10 +150,13 @@ async def _prepare_hub_index(
             return HubIndexDecision.STOP
         return HubIndexDecision.CONTINUE_LOCAL
 
+    authorized_checkout = (config.target_dir or Path.cwd()).expanduser().resolve()
+    authorized_checkout_digest = checkout_digest(authorized_checkout)
+    authorized_url_digest = manifest_url_digest(hub_url)
     newly_authorized = explicit_trust
     if not explicit_trust:
         try:
-            authorized = is_trusted(config.target_dir or Path.cwd(), hub_url)
+            authorized = is_trusted(authorized_checkout, hub_url)
         except HubTrustError:
             formatter.warning(
                 "Hub trust settings could not be read; treating the source as "
@@ -185,8 +196,18 @@ async def _prepare_hub_index(
 
     try:
         if newly_authorized:
-            source = await fetch_validated_manifest(config)
-            _save_hub_trust(config, formatter)
+            source: ValidatedHubSource = await fetch_validated_manifest(config)
+            if (
+                source.checkout_digest != authorized_checkout_digest
+                or source.url_digest != authorized_url_digest
+                or checkout_digest(config.target_dir or Path.cwd())
+                != authorized_checkout_digest
+                or config.hub.url != hub_url
+            ):
+                raise HubUnavailable(
+                    "Validated hub source no longer matches authorized configuration"
+                )
+            _save_hub_trust(authorized_checkout, hub_url, formatter)
             if not target_absent:
                 return HubIndexDecision.CONTINUE_LOCAL
             installed = await pull(config, automatic=True, source=source)

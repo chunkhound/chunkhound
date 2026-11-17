@@ -10,12 +10,13 @@ import chunkhound_native as native
 from chunkhound.api.cli.commands import run
 from chunkhound.api.cli.parsers.run_parser import add_run_subparser
 from chunkhound.core.config.config import Config
+from chunkhound.hub.client import ValidatedHubSource
 from chunkhound.hub.errors import (
     HubInstallationInterrupted,
     HubLocalStateError,
     HubUnavailable,
 )
-from chunkhound.hub.trust import HubTrustError
+from chunkhound.hub.trust import HubTrustError, checkout_digest, manifest_url_digest
 
 pytestmark = pytest.mark.asyncio
 
@@ -80,6 +81,14 @@ def absent_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def _forbid(*_args, **_kwargs):
     raise AssertionError("forbidden boundary was contacted")
+
+
+def _validated_source(checkout: Path, url: str) -> ValidatedHubSource:
+    return ValidatedHubSource(
+        manifest=Mock(),
+        checkout_digest=checkout_digest(checkout),
+        url_digest=manifest_url_digest(url),
+    )
 
 
 async def test_index_parser_accepts_trust() -> None:
@@ -253,7 +262,7 @@ async def test_explicit_trust_existing_database_validates_and_saves_without_pull
 ):
     args.trust = True
     target = tmp_path / "chunks.db"
-    source = object()
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
     fetch = AsyncMock(return_value=source)
@@ -267,6 +276,71 @@ async def test_explicit_trust_existing_database_validates_and_saves_without_pull
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
     fetch.assert_awaited_once_with(config)
     grant.assert_called_once_with(config.target_dir, config.hub.url)
+
+
+@pytest.mark.parametrize("change", ["checkout", "url"])
+async def test_trust_persistence_uses_validated_authorized_identity_during_fetch(
+    config, args, formatter, monkeypatch, tmp_path, change
+):
+    args.trust = True
+    target = tmp_path / "chunks.db"
+    authorized_checkout = config.target_dir.resolve()
+    authorized_url = config.hub.url
+    source = _validated_source(authorized_checkout, authorized_url)
+    changed_checkout = tmp_path / "changed-checkout"
+    changed_checkout.mkdir()
+
+    async def mutate_config_during_fetch(_config):
+        if change == "checkout":
+            config.target_dir = changed_checkout
+        else:
+            config.hub.url = "https://changed.invalid/manifest?secret=changed"
+        return source
+
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    fetch = AsyncMock(side_effect=mutate_config_during_fetch)
+    grant = Mock()
+    monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
+    monkeypatch.setattr(run, "grant_trust", grant)
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    fetch.assert_awaited_once_with(config)
+    grant.assert_not_called()
+    assert "no longer matches" in formatter.text
+    assert authorized_url not in formatter.text
+
+
+async def test_mismatched_validated_capability_stops_before_grant_or_pull(
+    config, args, formatter, monkeypatch, tmp_path
+):
+    args.trust = True
+    target = tmp_path / "chunks.db"
+    mismatched = _validated_source(
+        config.target_dir, "https://other.invalid/manifest?secret=other"
+    )
+    grant = Mock()
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "fetch_validated_manifest", AsyncMock(return_value=mismatched)
+    )
+    monkeypatch.setattr(run, "grant_trust", grant)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    grant.assert_not_called()
+    assert "no longer matches" in formatter.text
+    assert config.hub.url not in formatter.text
 
 
 async def test_existing_database_safe_validation_failure_offers_local_fallback(
@@ -294,7 +368,7 @@ async def test_existing_database_safe_validation_failure_offers_local_fallback(
 async def test_untrusted_interactive_trust_validates_saves_and_pulls(
     config, args, formatter, monkeypatch, absent_target
 ):
-    source = object()
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "trust")
@@ -356,7 +430,7 @@ async def test_explicit_trust_authorizes_without_prompt(
     config, args, formatter, monkeypatch, absent_target
 ):
     args.trust = True
-    source = object()
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "is_trusted", _forbid)
     monkeypatch.setattr(run, "fetch_validated_manifest", AsyncMock(return_value=source))
@@ -408,7 +482,7 @@ async def test_trust_save_failure_warns_but_current_authorized_attempt_proceeds(
     config, args, formatter, monkeypatch, absent_target
 ):
     args.trust = True
-    source = object()
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "fetch_validated_manifest", AsyncMock(return_value=source))
 
     def fail_save(*_args):
