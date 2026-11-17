@@ -89,6 +89,8 @@ class SearchService(BaseService):
         Returns:
             Tuple of (results, pagination_metadata)
         """
+        if not query or not query.strip():
+            raise ValueError("Search query must not be blank")
         try:
             if not self._embedding_provider:
                 raise ValueError(
@@ -329,11 +331,15 @@ class SearchService(BaseService):
                 f"Performing hybrid search: query='{query}', pattern='{regex_pattern}'"
             )
 
+            if not regex_pattern and not query.strip():
+                raise ValueError("Search query must not be blank")
+
             # Perform searches concurrently
             tasks = []
 
             # Semantic search
-            if self._embedding_provider:
+            # A blank query has no embedding; regex-only hybrid still works.
+            if self._embedding_provider and query.strip():
                 semantic_task = asyncio.create_task(
                     self.search_semantic(
                         query,

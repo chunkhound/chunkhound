@@ -34,6 +34,8 @@ from chunkhound.providers.embeddings.shared_utils import (
     apply_client_side_truncation,
     build_dimension_request_param,
     build_runtime_supported_dimensions,
+    ensure_vector_count,
+    require_non_blank_queries,
     validate_embedding_dims,
     validate_positive_output_dims,
     validate_runtime_output_dims_config,
@@ -1084,6 +1086,7 @@ class OpenAIEmbeddingProvider:
         OpenAI-compatible embedding APIs take no query/document input type, so
         queries are embedded exactly like documents.
         """
+        require_non_blank_queries(texts)
         return await self.embed(texts)
 
     async def embed_single(self, text: str) -> list[float]:
@@ -1103,6 +1106,7 @@ class OpenAIEmbeddingProvider:
         current_batch: list[str] = []
         current_tokens = 0
         token_limit = self.get_model_token_limit() - 100  # Safety margin
+        expected_vectors = 0
 
         for text in texts:
             # Handle individual texts that exceed token limit
@@ -1117,6 +1121,7 @@ class OpenAIEmbeddingProvider:
 
                 # Split oversized text and process chunks
                 chunks = self.chunk_text_by_tokens(text, token_limit)
+                expected_vectors += len(chunks)
                 for chunk in chunks:
                     chunk_embedding = await self._embed_batch_internal([chunk])
                     all_embeddings.extend(chunk_embedding)
@@ -1132,12 +1137,16 @@ class OpenAIEmbeddingProvider:
 
             current_batch.append(text)
             current_tokens += text_tokens
+            expected_vectors += 1
 
         # Process remaining batch
         if current_batch:
             batch_embeddings = await self._embed_batch_internal(current_batch)
             all_embeddings.extend(batch_embeddings)
 
+        # Oversized texts are split into several API inputs, so compare against
+        # the number of inputs actually sent rather than len(texts).
+        ensure_vector_count(all_embeddings, range(expected_vectors))
         return all_embeddings
 
     async def embed_streaming(self, texts: list[str]) -> AsyncIterator[list[float]]:
