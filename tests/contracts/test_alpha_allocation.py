@@ -227,7 +227,10 @@ def test_ci_alpha_is_upstream_push_only_and_gated_on_existing_validations():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     jobs = workflow["jobs"]
     prepare = jobs["prepare-alpha"]
-    assert set(prepare["needs"]) == set(jobs["pages-artifact"]["needs"])
+    assert set(prepare["needs"]) == set(jobs["pages-artifact"]["needs"]) - {
+        "site-build",
+        "site-build-validation",
+    }
     assert "pages-artifact" not in prepare["needs"] and "deploy" not in prepare["needs"]
     assert (
         prepare["if"] == "github.repository == 'chunkhound/chunkhound' "
