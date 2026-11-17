@@ -781,6 +781,16 @@ class VoyageAIEmbeddingProvider:
         if not texts:
             return []
 
+        return await embed_preserving_positions(
+            texts,
+            lambda non_blank: self._embed_non_blank_batches(non_blank, batch_size),
+            fallback_dims=self.dims,
+        )
+
+    async def _embed_non_blank_batches(
+        self, texts: list[str], batch_size: int | None
+    ) -> list[list[float]]:
+        """Batch non-blank texts before padding the complete logical batch."""
         effective_batch_size = batch_size or self._batch_size
         max_tokens_per_batch = self._model_config["max_tokens_per_batch"]
 

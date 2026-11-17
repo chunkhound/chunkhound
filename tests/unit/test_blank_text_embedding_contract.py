@@ -60,6 +60,20 @@ async def test_voyage_blank_padding_matches_real_vector_length() -> None:
 
 
 @pytest.mark.asyncio
+async def test_voyage_batch_blank_padding_matches_real_vector_length() -> None:
+    provider, client = _provider(dims=256, model="my-custom-model")
+    texts = ["", "a", " \n", "b", "\t"]
+
+    vectors = await provider.embed_batch(texts, batch_size=1)
+
+    assert len(vectors) == len(texts)
+    assert [len(vector) for vector in vectors] == [256] * len(texts)
+    assert client.received == [["a"], ["b"]]
+    assert vectors[1][0] == 1.0 and vectors[3][0] == 1.0
+    assert all(not any(vectors[i]) for i in (0, 2, 4))
+
+
+@pytest.mark.asyncio
 async def test_voyage_all_blank_makes_no_request() -> None:
     provider, client = _provider()
     assert len(await provider.embed(["", " "])) == 2
