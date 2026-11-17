@@ -235,7 +235,10 @@ def test_ci_alpha_is_upstream_push_only_and_gated_on_existing_validations():
     )
     assert prepare["permissions"] == {"contents": "write"}
     assert jobs["release-alpha"]["uses"] == "./.github/workflows/release-packages.yml"
-    assert jobs["release-alpha"]["with"]["alpha"] is True
+    assert jobs["release-alpha"]["with"]["release_tag"] == (
+        "${{ needs.prepare-alpha.outputs.release_tag }}"
+    )
+    assert "alpha" not in jobs["release-alpha"]["with"]
     assert jobs["release-alpha"]["permissions"] == {
         "contents": "read",
         "id-token": "write",

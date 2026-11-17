@@ -19,4 +19,3 @@ jobs:
     with:
       release_tag: ${{ github.event.release.tag_name }}
       source_sha: ${{ github.sha }}
-      alpha: false

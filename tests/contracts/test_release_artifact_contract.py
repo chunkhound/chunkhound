@@ -95,7 +95,18 @@ def test_publication_gate_rejects_incorrect_embedded_version(tmp_path):
     assert "Embedded main version" in result.stderr
 
 
-def test_requested_tag_wins_when_multiple_tags_point_to_same_commit(tmp_path):
+@pytest.mark.parametrize(
+    ("version", "alpha"),
+    [
+        ("6.2.0a43", "true"),
+        ("6.2.0b1", "false"),
+        ("6.2.0rc1", "false"),
+        ("6.2.0", "false"),
+    ],
+)
+def test_requested_tag_sets_version_and_channel_without_caller_flag(
+    tmp_path, version, alpha
+):
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     subprocess.run(
         [
@@ -116,7 +127,7 @@ def test_requested_tag_wins_when_multiple_tags_point_to_same_commit(tmp_path):
     source = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
     ).strip()
-    for tag in ["v6.2.0a43", "v6.2.0", "v7.0.0"]:
+    for tag in ["v6.2.0a43", "v6.2.0b1", "v6.2.0rc1", "v6.2.0", "v7.0.0"]:
         subprocess.run(["git", "tag", tag], cwd=tmp_path, check=True)
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/release-packages.yml").read_text()
@@ -130,9 +141,8 @@ def test_requested_tag_wins_when_multiple_tags_point_to_same_commit(tmp_path):
     output = tmp_path / "outputs"
     environment = {
         **os.environ,
-        "RELEASE_TAG": "v6.2.0a43",
+        "RELEASE_TAG": f"v{version}",
         "SOURCE_SHA": source,
-        "ALPHA_RELEASE": "true",
         "GITHUB_OUTPUT": str(output),
     }
     result = subprocess.run(
@@ -143,7 +153,9 @@ def test_requested_tag_wins_when_multiple_tags_point_to_same_commit(tmp_path):
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "version=6.2.0a43\n" in output.read_text()
+    assert output.read_text() == (
+        f"version={version}\nsource_sha={source}\nalpha={alpha}\n"
+    )
     environment["SOURCE_SHA"] = "0" * 40
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -164,14 +176,38 @@ def test_release_workflows_keep_native_first_and_isolate_alpha_approvals():
     inputs = shared[True]["workflow_call"]["inputs"]
     assert inputs["release_tag"] == {"required": True, "type": "string"}
     assert inputs["source_sha"] == {"required": True, "type": "string"}
-    assert inputs["alpha"]["default"] is False
+    assert "alpha" not in inputs
     jobs = shared["jobs"]
     assert "publish-native" in jobs["publish"]["needs"]
     assert {"validate-release", "validate-artifacts"} <= set(
         jobs["publish-native"]["needs"]
     )
-    assert "pypi-alpha-native" in jobs["publish-native"]["environment"]
-    assert "pypi-alpha" in jobs["publish"]["environment"]
+    assert jobs["prepare"]["outputs"]["alpha"] == "${{ steps.release.outputs.alpha }}"
+    for job_name in [
+        "build-sdist",
+        "build-runtime-wheels",
+        "validate-artifacts",
+        "publish-native",
+        "publish",
+    ]:
+        assert "prepare" in jobs[job_name]["needs"]
+    for job_name in ["build-sdist", "build-runtime-wheels"]:
+        build = next(
+            step
+            for step in jobs[job_name]["steps"]
+            if "CHUNKHOUND_BUILD_ALPHA_RELEASE" in step.get("env", {})
+        )
+        assert build["env"]["CHUNKHOUND_BUILD_ALPHA_RELEASE"] == (
+            "${{ needs.prepare.outputs.alpha == 'true' && '1' || '' }}"
+        )
+    validation = jobs["validate-artifacts"]["steps"][-1]
+    assert validation["env"]["ALPHA_RELEASE"] == "${{ needs.prepare.outputs.alpha }}"
+    for job_name, suffix in [("publish", ""), ("publish-native", "-native")]:
+        assert jobs[job_name]["environment"] == (
+            "${{ needs.prepare.outputs.alpha == 'true' && "
+            f"'pypi-alpha{suffix}' || 'pypi{suffix}'"
+            " }}"
+        )
     assert jobs["build-native-wheel"]["strategy"]["matrix"]["os"] == [
         "ubuntu-latest",
         "ubuntu-24.04-arm",
@@ -184,7 +220,15 @@ def test_release_workflows_keep_native_first_and_isolate_alpha_approvals():
     ]
     stable = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
     assert stable[True] == {"release": {"types": ["published"]}}
-    assert stable["jobs"]["release"]["with"]["alpha"] is False
+    assert (
+        stable["jobs"]["release"]["uses"] == "./.github/workflows/release-packages.yml"
+    )
+    assert stable["jobs"]["release"]["with"]["release_tag"] == (
+        "${{ github.event.release.tag_name }}"
+    )
+    assert "alpha" not in stable["jobs"]["release"]["with"]
+    prerelease = yaml.safe_load((ROOT / ".github/workflows/release-rc.yml").read_text())
+    assert "alpha" not in prerelease["jobs"]["release"]["with"]
     for job in jobs.values():
         for step in job.get("steps", []):
             if step.get("uses", "").startswith("actions/upload-artifact@"):

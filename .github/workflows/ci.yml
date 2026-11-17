@@ -370,7 +370,6 @@ jobs:
     with:
       release_tag: ${{ needs.prepare-alpha.outputs.release_tag }}
       source_sha: ${{ needs.prepare-alpha.outputs.source_sha }}
-      alpha: true
 
   pages-artifact:
     needs:

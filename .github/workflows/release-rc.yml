@@ -18,7 +18,6 @@ jobs:
     timeout-minutes: 15
     outputs:
       source_sha: ${{ steps.tag.outputs.source_sha }}
-      alpha: ${{ steps.tag.outputs.alpha }}
     steps:
       - name: Checkout tag
         uses: actions/checkout@v6
@@ -40,7 +39,7 @@ jobs:
               raise SystemExit(f"::error::Tag {tag!r} is not a valid PEP 440 pre-release (expected vX.Y.Z(a|b|rc)N)")
           source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"source_sha={source}\nalpha={'true' if match.group(1) == 'a' else 'false'}\n")
+              output.write(f"source_sha={source}\n")
           PYCODE
 
   release:
@@ -53,4 +52,3 @@ jobs:
     with:
       release_tag: ${{ github.ref_name }}
       source_sha: ${{ needs.validate-tag.outputs.source_sha }}
-      alpha: ${{ needs.validate-tag.outputs.alpha == 'true' }}

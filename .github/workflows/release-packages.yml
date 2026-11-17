@@ -1,6 +1,7 @@
 name: Release packages
 
 # All callers pass an immutable tag and the tested commit explicitly.
+# The validated tag alone selects the publication channel.
 on:
   workflow_call:
     inputs:
@@ -10,10 +11,6 @@ on:
       source_sha:
         required: true
         type: string
-      alpha:
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -24,6 +21,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.release.outputs.version }}
+      alpha: ${{ steps.release.outputs.alpha }}
       source_sha: ${{ steps.release.outputs.source_sha }}
     steps:
       - name: Checkout requested source
@@ -39,7 +37,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-          ALPHA_RELEASE: ${{ inputs.alpha }}
         run: |
           uv run --no-project python - <<'PYCODE'
           import os, re, subprocess
@@ -48,8 +45,7 @@ jobs:
           match = re.fullmatch(r"v(\d+\.\d+\.\d+(?:(a|b|rc)\d+)?)", tag)
           if not match:
               raise SystemExit(f"Invalid release tag: {tag!r}")
-          if os.environ["ALPHA_RELEASE"] == "true" and match.group(2) != "a":
-              raise SystemExit("Alpha publication requires an alpha tag")
+          alpha = match.group(2) == "a"
           if not re.fullmatch(r"[0-9a-f]{40}", source):
               raise SystemExit("source_sha must be a full commit SHA")
           resolved = subprocess.check_output(
@@ -60,6 +56,7 @@ jobs:
               raise SystemExit(f"Release tag {tag} does not resolve to requested source {source}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"version={match.group(1)}\nsource_sha={source}\n")
+              output.write(f"alpha={str(alpha).lower()}\n")
           PYCODE
 
   build-sdist:
@@ -80,7 +77,7 @@ jobs:
       - name: Build source distribution
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.prepare.outputs.version }}
-          CHUNKHOUND_BUILD_ALPHA_RELEASE: ${{ inputs.alpha && '1' || '' }}
+          CHUNKHOUND_BUILD_ALPHA_RELEASE: ${{ needs.prepare.outputs.alpha == 'true' && '1' || '' }}
         run: uv build --sdist --out-dir dist
 
       - name: Upload source distribution artifact
@@ -114,7 +111,7 @@ jobs:
         env:
           CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.prepare.outputs.version }}
-          CHUNKHOUND_BUILD_ALPHA_RELEASE: ${{ inputs.alpha && '1' || '' }}
+          CHUNKHOUND_BUILD_ALPHA_RELEASE: ${{ needs.prepare.outputs.alpha == 'true' && '1' || '' }}
         run: uv build --wheel --clear
 
       - name: Upload runtime wheel artifact
@@ -215,7 +212,7 @@ jobs:
             python "$workspace_dir/scripts/smoke_test_native_wheel.py"
 
   validate-artifacts:
-    needs: [build-sdist, build-runtime-wheels, build-native-wheel]
+    needs: [prepare, build-sdist, build-runtime-wheels, build-native-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -234,18 +231,18 @@ jobs:
       - name: Validate all versions and rebuild final sdist
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          ALPHA_RELEASE: ${{ inputs.alpha }}
+          ALPHA_RELEASE: ${{ needs.prepare.outputs.alpha }}
         run: >-
           uv run --no-project --python 3.12 --with packaging
           python scripts/validate_release_artifacts.py
           --dist artifacts --rebuild-sdist
 
   publish:
-    needs: [publish-native, build-sdist, build-runtime-wheels, validate-artifacts]
+    needs: [prepare, publish-native, build-sdist, build-runtime-wheels, validate-artifacts]
     runs-on: ubuntu-latest
     # PyPI trust must name release-packages.yml (the OIDC job_workflow_ref),
     # with the matching environment. Alpha has no approval gate; stable does.
-    environment: ${{ inputs.alpha && 'pypi-alpha' || 'pypi' }}
+    environment: ${{ needs.prepare.outputs.alpha == 'true' && 'pypi-alpha' || 'pypi' }}
     timeout-minutes: 15
     permissions:
       id-token: write  # OIDC Trusted Publishing
@@ -266,14 +263,14 @@ jobs:
           skip-existing: true
 
   publish-native:
-    needs: [build-native-wheel, validate-release, validate-artifacts]
+    needs: [prepare, build-native-wheel, validate-release, validate-artifacts]
     runs-on: ubuntu-latest
     # Separate environment so this job carries an OIDC token scoped to the
     # chunkhound-native PyPI project (each project needs its own trusted-publisher
     # entry referencing this environment name). Native publication is deliberately
     # first so the main package cannot become installable before its required
     # native wheels are available.
-    environment: ${{ inputs.alpha && 'pypi-alpha-native' || 'pypi-native' }}
+    environment: ${{ needs.prepare.outputs.alpha == 'true' && 'pypi-alpha-native' || 'pypi-native' }}
     timeout-minutes: 15
     permissions:
       contents: read
