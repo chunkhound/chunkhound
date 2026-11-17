@@ -18,7 +18,8 @@ ignore     = "0.4"
 # linked dynamically and resolved via a self-relative RPATH/DLL search set up
 # by RUSTFLAGS and scripts/copy_duckdb_runtime.py. The per-platform build
 # recipe lives in the Makefile dev/dev-release targets and
-# .github/actions/build-rust-extension/action.yml.
+# .github/actions/build-rust-extension/action.yml. `cargo test` finds the
+# library through build.rs instead.
 # Pinned to 1.10504.0 (DuckDB core v1.5.4): 1.10505.0 (DuckDB core v1.5.5)
 # changed storage_manager.cpp's checkpoint-failure handling to invalidate a
 # non-initial attached database on error -- that invalidation path itself
@@ -30,6 +31,10 @@ ignore     = "0.4"
 # fixed upstream or compaction's detach/checkpoint sequencing is reworked
 # to avoid it.
 duckdb     = { version = "=1.10504.0" }
+# Direct dependency only so build.rs receives libduckdb-sys's `links` metadata
+# (DEP_DUCKDB_INCLUDE): Cargo passes it to immediate dependents only. Keep it
+# on the same version as duckdb above; a mismatch fails to resolve.
+libduckdb-sys = { version = "=1.10504.0" }
 log        = "0.4"
 pyo3-log   = "0.11"
 rand       = "0.8"

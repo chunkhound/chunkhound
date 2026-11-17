@@ -12,17 +12,24 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import zipfile
 from email.parser import Parser
 from pathlib import Path
 
+# Support direct execution from the downloaded-artifact directory.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.release_tag import parse_release_tag
+
 
 def main() -> None:
     tag = os.environ["RELEASE_TAG"]
-    match = re.fullmatch(r"v(\d+\.\d+\.\d+(?:[a-zA-Z].*)?)", tag)
-    if match is None:
-        raise SystemExit(f"Malformed release tag: {tag!r}")
-    expected_version = match.group(1)
+    try:
+        expected_version = parse_release_tag(tag).version
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     wheels = sorted(Path("dist-native").glob("*.whl"))
     if not wheels:
