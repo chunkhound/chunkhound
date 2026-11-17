@@ -617,6 +617,7 @@ dependencies = [
  "duckdb",
  "httpmock",
  "ignore",
+ "libduckdb-sys",
  "log",
  "pyo3",
  "pyo3-log",
