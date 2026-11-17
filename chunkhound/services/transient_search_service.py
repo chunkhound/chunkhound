@@ -1,0 +1,1278 @@
+"""Streaming semantic search over transient chunks."""
+
+import asyncio
+import heapq
+import math
+import os
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from numbers import Real
+from typing import Any
+
+import numpy as np
+import regex
+from loguru import logger
+
+from chunkhound.services.search_service_protocol import SearchServiceProtocol
+from chunkhound.services.vector_cache import VectorCache
+from chunkhound.utils.path_filter import normalize_path_filter, path_matches_filter
+
+OVERFETCH_FACTOR_ENV = "CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR"
+_DEFAULT_OVERFETCH_FACTOR = 5
+_MIN_OVERFETCH = 50
+# Hard ceiling on (offset + page_size). Deep paging past this raises rather
+# than growing the heap toward the corpus. Both-mode uses overfetch instead.
+_MAX_RESULT_WINDOW = 2000
+# Hybrid position scoring must use one fixed semantic snapshot across pages.
+# Both-mode keeps this below the general paging window so it does not turn
+# every hybrid query into a 2000-hit DB request.
+_HYBRID_BOTH_SNAPSHOT_SIZE = 500
+# Target texts per chunk-embedding request (AGENTS.md: batch at least 100,
+# never above the provider limit). Cache misses accumulate across stream
+# batches until this fills, so cache hits and path filters do not fragment
+# requests.
+_EMBED_BATCH_TARGET = 100
+
+
+def _overfetch_factor() -> int:
+    try:
+        return max(1, int(os.environ.get(OVERFETCH_FACTOR_ENV, "")))
+    except ValueError:
+        return _DEFAULT_OVERFETCH_FACTOR
+
+
+def _candidate_pool_size(page_size: int) -> int:
+    """Bounded heap / DB fetch size for one transient search call.
+
+    Independent of offset so paging the same query keeps a stable pool.
+    Large enough to cover the requested page (and HNSW-style overfetch),
+    small enough that both-mode does not pull the 2000-hit window on a
+    10-result page.
+    """
+    return min(
+        max(page_size, page_size * _overfetch_factor(), _MIN_OVERFETCH),
+        _MAX_RESULT_WINDOW,
+    )
+
+
+# Wall-clock ceiling on a single diff/web search call: streaming the source
+# plus embedding every uncached chunk it yields. This is a circuit breaker
+# against a truly pathological source (an enormous commit range, an embedding
+# backend that's stalled), not a tight SLA -- it's sized generously above the
+# time a legitimate multi-thousand-chunk diff takes to embed sequentially in
+# _TRANSIENT_BATCH_SIZE-sized batches. Without it, removing the old
+# MAX_DIFF_CHUNKS cap traded silent truncation for an unbounded hang: a large
+# enough source could block the calling MCP tool call indefinitely with no
+# actionable error.
+_TRANSIENT_SEARCH_TIMEOUT_SECONDS = 300
+
+ChunkBatchStream = Callable[[], AsyncIterator[list[Any]]]
+
+
+async def _await_pair(first: asyncio.Task[Any], second: asyncio.Task[Any]) -> Any:
+    """Wait for two tasks and cancel the sibling if either fails."""
+    try:
+        return await asyncio.gather(first, second)
+    except BaseException:
+        first.cancel()
+        second.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
+        raise
+
+
+class TransientSearchService:
+    """Overlay bounded, streaming vector search onto a DB search service."""
+
+    def __init__(
+        self,
+        original: SearchServiceProtocol,
+        chunk_stream: ChunkBatchStream,
+        vector_source: str,
+        embedding_manager: Any,
+        vector_cache: VectorCache | None = None,
+        source_revision: str | None = None,
+    ) -> None:
+        if vector_source not in {"db", "diff", "both"}:
+            raise ValueError(f"Unsupported vector_source: {vector_source}")
+        self._original = original
+        self._chunk_stream = chunk_stream
+        self._vector_source = vector_source
+        self._embedding_manager = embedding_manager
+        self._vector_cache = vector_cache if vector_cache is not None else VectorCache()
+        self._source_revision = source_revision
+        self.peak_live_vectors = 0
+
+    def _chunk_to_dict(self, chunk: Any, score: float) -> dict[str, Any]:
+        return {
+            "chunk_id": f"diff:{chunk.file_path}:{chunk.start_line}:{chunk.symbol}",
+            "file_path": chunk.file_path,
+            "content": chunk.code,
+            "start_line": chunk.start_line,
+            "end_line": chunk.end_line,
+            "symbol": chunk.symbol,
+            "language": (
+                chunk.language.value
+                if hasattr(chunk.language, "value")
+                else chunk.language
+            ),
+            "chunk_type": (
+                chunk.chunk_type.value
+                if hasattr(chunk.chunk_type, "value")
+                else chunk.chunk_type
+            ),
+            # Research combines these rows with ordinary DB rows in "both"
+            # mode. Keep provenance on each row so historical diff evidence is
+            # not confused with source that can safely be read from disk.
+            "source_provenance": "transient",
+            "source_revision": self._source_revision,
+            "similarity": score,
+            "score": score,
+        }
+
+    @staticmethod
+    def _normalise(vector: Sequence[float] | np.ndarray) -> np.ndarray:
+        result = np.asarray(vector, dtype=np.float32)
+        norm = np.linalg.norm(result)
+        if norm > 1e-9:
+            result = result / norm
+        return result
+
+    async def _embed_texts(
+        self, texts: list[str], provider: str | None, *, query: bool = False
+    ) -> Any:
+        embed = (
+            self._embedding_manager.embed_query_texts
+            if query
+            else self._embedding_manager.embed_texts
+        )
+        if provider is None:
+            return await embed(texts)
+        return await embed(texts, provider_name=provider)
+
+    def _embed_batch_target(self, provider: str | None) -> int:
+        """Return min(_EMBED_BATCH_TARGET, provider document limit)."""
+        try:
+            limit = self._embedding_manager.get_provider(
+                provider
+            ).get_max_documents_per_batch()
+        except Exception:
+            return _EMBED_BATCH_TARGET
+        if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+            return min(_EMBED_BATCH_TARGET, limit)
+        return _EMBED_BATCH_TARGET
+
+    async def _embed_query_batches(
+        self, queries: list[str], provider: str | None
+    ) -> tuple[list[Any], Any]:
+        """Embed expanded queries within the provider's document-count limit."""
+        embeddings: list[Any] = []
+        expected_result: Any | None = None
+        target = self._embed_batch_target(provider)
+        for start in range(0, len(queries), target):
+            batch = queries[start : start + target]
+            result = await self._embed_texts(batch, provider, query=True)
+            if not result.embeddings:
+                if embeddings:
+                    raise RuntimeError(
+                        "Embedding provider returned an unexpected number of "
+                        "query vectors"
+                    )
+                return [], result
+            if len(result.embeddings) != len(batch):
+                raise RuntimeError(
+                    "Embedding provider returned an unexpected number of query vectors"
+                )
+            if expected_result is None:
+                self._cache_namespace(result)
+                expected_result = result
+            else:
+                expected_namespace = self._cache_namespace(expected_result)
+                self._validate_embedding_result(result, expected_namespace)
+            embeddings.extend(result.embeddings)
+        if expected_result is None:
+            raise RuntimeError("Cannot embed an empty query batch")
+        return embeddings, expected_result
+
+    async def _gated_chunk_batches(
+        self, source_ready: Awaitable[Any] | None
+    ) -> AsyncIterator[list[Any]]:
+        """Start a source promptly, but withhold its first batch until ready.
+
+        Both-mode needs its bounded DB snapshot before it can decide whether a
+        diff location owns a DB result. Prefetching exactly one batch means a
+        source failure can still cancel a stalled DB request without buffering
+        an unbounded diff or scoring chunks before that snapshot is available.
+        """
+        stream = self._chunk_stream()
+        prefetch: asyncio.Task[list[Any] | None] | None = None
+        try:
+            if source_ready is not None:
+                prefetch = asyncio.create_task(anext(stream, None))
+                first_batch, _ = await asyncio.gather(prefetch, source_ready)
+                prefetch = None
+                if first_batch is not None:
+                    yield first_batch
+            async for batch in stream:
+                yield batch
+        finally:
+            if prefetch is not None:
+                prefetch.cancel()
+                await asyncio.gather(prefetch, return_exceptions=True)
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                await aclose()
+
+    async def _vectorized_batches(
+        self,
+        path_prefix: str | None,
+        cache_ns: dict[str, Any],
+        provider: str | None,
+        *,
+        source_ready: Awaitable[Any] | None = None,
+    ) -> AsyncIterator[list[tuple[int, Any, np.ndarray]]]:
+        """Yield ``(ordinal, chunk, unit_vector)`` batches for one stream scan.
+
+        Ordinals follow source order, so callers keep the earlier-chunk tie
+        break no matter when a chunk is scored. Cache hits are yielded at once;
+        misses wait (as chunks only, never vectors) until a full embedding
+        request can be sent, plus one final partial request. Live vectors stay
+        bounded by one stream batch or one embedding request.
+        """
+        target = self._embed_batch_target(provider)
+        pending: list[tuple[int, Any]] = []
+        ordinal = 0
+
+        async def flush() -> list[tuple[int, Any, np.ndarray]]:
+            texts = [chunk.code for _, chunk in pending]
+            embedded = await self._embed_texts(texts, provider)
+            self._validate_embedding_result(embedded, cache_ns)
+            if len(embedded.embeddings) != len(texts):
+                raise RuntimeError(
+                    "Embedding provider returned an unexpected number of vectors"
+                )
+            resolved = []
+            for (index, chunk), vector in zip(pending, embedded.embeddings):
+                self._vector_cache.put(chunk.code, vector, **cache_ns)
+                resolved.append((index, chunk, self._normalise(vector)))
+            pending.clear()
+            return resolved
+
+        async for chunks in self._gated_chunk_batches(source_ready):
+            hits: list[tuple[int, Any, np.ndarray]] = []
+            for chunk in chunks:
+                if path_prefix and not (
+                    chunk.file_path
+                    and path_matches_filter(str(chunk.file_path), path_prefix)
+                ):
+                    continue
+                vector = self._vector_cache.get(chunk.code, **cache_ns)
+                if vector is not None:
+                    hits.append((ordinal, chunk, self._normalise(vector)))
+                else:
+                    pending.append((ordinal, chunk))
+                ordinal += 1
+                if len(pending) >= target:
+                    if hits:
+                        yield hits
+                        hits = []
+                    yield await flush()
+            if hits:
+                yield hits
+        if pending:
+            yield await flush()
+
+    @staticmethod
+    def _cache_namespace(result: Any) -> dict[str, Any]:
+        identity = getattr(result, "embedding_space_identity", None)
+        if not isinstance(identity, str) or not identity:
+            raise RuntimeError(
+                "Embedding result is missing embedding_space_identity; providers "
+                "must stamp the identity used for each request"
+            )
+        return {
+            "provider": result.provider,
+            "model": result.model,
+            "dims": result.dims,
+            "endpoint": identity,
+            "deployment": "",
+        }
+
+    @staticmethod
+    def _validate_embedding_result(result: Any, expected: dict[str, Any]) -> None:
+        actual = TransientSearchService._cache_namespace(result)
+        if actual != expected:
+            raise RuntimeError(
+                "Embedding provider changed embedding space during transient search"
+            )
+
+    async def _search_transient(
+        self,
+        query: str,
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None = None,
+        *,
+        limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        try:
+            return await asyncio.wait_for(
+                self._search_transient_impl(
+                    query,
+                    page_size,
+                    offset,
+                    threshold,
+                    path_filter,
+                    provider,
+                    limit=limit,
+                    candidate_locations=candidate_locations,
+                    diff_owned_locations=diff_owned_locations,
+                    source_ready=source_ready,
+                ),
+                timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Diff/web search timed out after "
+                f"{_TRANSIENT_SEARCH_TIMEOUT_SECONDS}s streaming and embedding "
+                "transient content. Narrow the commit range or query, or use "
+                "vector_source='db' to skip transient embedding."
+            ) from None
+
+    async def _search_transient_impl(
+        self,
+        query: str,
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None = None,
+        *,
+        limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        self.peak_live_vectors = 0
+        query_result = await self._embed_texts([query], provider, query=True)
+        if not query_result.embeddings:
+            return [], self._pagination(page_size, offset, 0)
+        query_vector = self._normalise(query_result.embeddings[0])
+        cache_ns = self._cache_namespace(query_result)
+        path_prefix = normalize_path_filter(path_filter)
+        effective_limit = self._retained_pool_size(limit, page_size, offset)
+        heap: list[tuple[float, int, dict[str, Any]]] = []
+        qualifying_count = 0
+
+        async for batch in self._vectorized_batches(
+            path_prefix, cache_ns, provider, source_ready=source_ready
+        ):
+            self.peak_live_vectors = max(self.peak_live_vectors, len(heap) + len(batch))
+            for ordinal, chunk, vector in batch:
+                score = float(np.dot(vector, query_vector))
+                if threshold is not None and score < threshold:
+                    continue
+                qualifying_count += 1
+                location = (chunk.file_path, chunk.start_line)
+                if (
+                    candidate_locations is not None
+                    and diff_owned_locations is not None
+                    and location in candidate_locations
+                ):
+                    diff_owned_locations.add(location)
+                result = self._chunk_to_dict(chunk, score)
+                # The root is the worst retained rank: lowest score, then
+                # latest source position. Ties in output prefer earlier chunks.
+                entry = (score, -ordinal, result)
+                if len(heap) < effective_limit:
+                    heapq.heappush(heap, entry)
+                elif entry[:2] > heap[0][:2]:
+                    heapq.heapreplace(heap, entry)
+
+        ranked = [
+            entry[2] for entry in sorted(heap, key=lambda item: (-item[0], -item[1]))
+        ]
+        return ranked[offset : offset + page_size], self._pagination(
+            page_size, offset, qualifying_count
+        )
+
+    async def _search_transient_many(
+        self,
+        queries: list[str],
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None,
+        *,
+        limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
+    ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
+        """Score compatible queries during one pass over the transient source."""
+        try:
+            return await asyncio.wait_for(
+                self._search_transient_many_impl(
+                    queries,
+                    page_size,
+                    offset,
+                    threshold,
+                    path_filter,
+                    provider,
+                    limit=limit,
+                    candidate_locations=candidate_locations,
+                    diff_owned_locations=diff_owned_locations,
+                    source_ready=source_ready,
+                ),
+                timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Diff/web search timed out after "
+                f"{_TRANSIENT_SEARCH_TIMEOUT_SECONDS}s streaming and embedding "
+                "transient content. Narrow the commit range or queries, or use "
+                "vector_source='db' to skip transient embedding."
+            ) from None
+
+    async def _search_transient_many_impl(
+        self,
+        queries: list[str],
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None,
+        *,
+        limit: int | None = None,
+        candidate_locations: set[tuple[Any, Any]] | None = None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
+        source_ready: Awaitable[Any] | None = None,
+    ) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
+        if not queries:
+            return []
+        query_embeddings, query_result = await self._embed_query_batches(
+            queries, provider
+        )
+        if not query_embeddings:
+            empty_page = self._pagination(page_size, offset, 0)
+            return [([], dict(empty_page)) for _ in queries]
+        query_vectors = np.stack(
+            [self._normalise(vector) for vector in query_embeddings]
+        )
+        cache_ns = self._cache_namespace(query_result)
+        path_prefix = normalize_path_filter(path_filter)
+        effective_limit = self._retained_pool_size(limit, page_size, offset)
+        heaps: list[list[tuple[float, int, dict[str, Any]]]] = [[] for _ in queries]
+        qualifying_counts = [0] * len(queries)
+        peak_live_vectors = 0
+
+        async for batch in self._vectorized_batches(
+            path_prefix, cache_ns, provider, source_ready=source_ready
+        ):
+            chunk_matrix = np.stack([vector for _, _, vector in batch])
+            scores = chunk_matrix @ query_vectors.T
+            peak_live_vectors = max(
+                peak_live_vectors,
+                sum(len(heap) for heap in heaps) + len(batch),
+            )
+            for chunk_index, (ordinal, chunk, _) in enumerate(batch):
+                location = (chunk.file_path, chunk.start_line)
+                if (
+                    candidate_locations is not None
+                    and diff_owned_locations is not None
+                    and location in candidate_locations
+                ):
+                    diff_owned_locations.add(location)
+                for query_index, heap in enumerate(heaps):
+                    score = float(scores[chunk_index, query_index])
+                    if threshold is not None and score < threshold:
+                        continue
+                    qualifying_counts[query_index] += 1
+                    entry = (score, -ordinal, self._chunk_to_dict(chunk, score))
+                    if len(heap) < effective_limit:
+                        heapq.heappush(heap, entry)
+                    elif entry[:2] > heap[0][:2]:
+                        heapq.heapreplace(heap, entry)
+
+        self.peak_live_vectors = peak_live_vectors
+        outputs = []
+        for heap, total in zip(heaps, qualifying_counts):
+            ranked = [
+                entry[2]
+                for entry in sorted(heap, key=lambda item: (-item[0], -item[1]))
+            ]
+            outputs.append(
+                (
+                    ranked[offset : offset + page_size],
+                    self._pagination(page_size, offset, total),
+                )
+            )
+        return outputs
+
+    @staticmethod
+    def _retained_pool_size(limit: int | None, page_size: int, offset: int) -> int:
+        """Pool size to retain; never smaller than the requested page slice."""
+        needed = offset + page_size
+        if limit is not None:
+            return max(limit, needed)
+        return max(needed, _candidate_pool_size(page_size))
+
+    @staticmethod
+    def _pagination(
+        page_size: int,
+        offset: int,
+        total: int,
+        window: int = _MAX_RESULT_WINDOW,
+    ) -> dict[str, Any]:
+        # Only advertise a next page the same call would accept: the next
+        # request must keep offset + page_size inside the supported window.
+        has_more = offset + page_size < total and offset + 2 * page_size <= window
+        return {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": has_more,
+            "next_offset": offset + page_size if has_more else None,
+            "total": total,
+        }
+
+    @staticmethod
+    def _both_mode_window(page_size: int, offset: int) -> int:
+        """Return the both-mode candidate window, rejecting pages outside it."""
+        snapshot_size = _candidate_pool_size(page_size)
+        if offset + page_size > snapshot_size:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the both-mode "
+                f"candidate window ({snapshot_size}) for page_size={page_size}; "
+                "keep page_size stable and use an offset within that window, "
+                "increase page_size, narrow the query, or use "
+                "vector_source='db' or vector_source='diff'."
+            )
+        return snapshot_size
+
+    async def search_semantic_many(
+        self,
+        queries: list[str],
+        page_size: int = 10,
+        offset: int = 0,
+        threshold: float | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        path_filter: str | None = None,
+        force_strategy: str | None = None,
+        time_limit: float | None = None,
+        result_limit: int | None = None,
+    ) -> list[tuple[list[dict[str, Any]], dict[str, Any]] | BaseException]:
+        """Search compatible queries while scanning transient content once.
+
+        ``time_limit`` only bounds DB multi-hop exploration. It does not bound
+        transient streaming or the combined final rerank.
+        """
+        if not queries:
+            return []
+        if self._vector_source == "db":
+            return await asyncio.gather(
+                *(
+                    self._original.search_semantic(
+                        query=query,
+                        page_size=page_size,
+                        offset=offset,
+                        threshold=threshold,
+                        provider=provider,
+                        model=model,
+                        path_filter=path_filter,
+                        force_strategy=force_strategy,
+                        time_limit=time_limit,
+                        result_limit=result_limit,
+                    )
+                    for query in queries
+                ),
+                return_exceptions=True,
+            )
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+            )
+        if self._vector_source == "diff":
+            transient_results = await self._search_transient_many(
+                queries,
+                page_size,
+                offset,
+                threshold,
+                path_filter,
+                provider,
+                limit=result_limit,
+            )
+            return list(transient_results)
+
+        snapshot_size = self._both_mode_window(page_size, offset)
+        db_tasks = [
+            asyncio.create_task(
+                self._original.search_semantic(
+                    query=query,
+                    page_size=snapshot_size,
+                    offset=0,
+                    threshold=None,
+                    provider=provider,
+                    model=model,
+                    path_filter=path_filter,
+                    force_strategy=force_strategy,
+                    time_limit=time_limit,
+                    result_limit=result_limit,
+                )
+            )
+            for query in queries
+        ]
+        candidate_locations: set[tuple[Any, Any]] = set()
+        diff_owned_locations: set[tuple[Any, Any]] = set()
+
+        async def collect_db_results() -> list[Any]:
+            # Only the bounded DB snapshots contribute ownership locations.
+            # The transient source begins concurrently, but its first batch is
+            # gated on this collection so no diff chunk is scored too early.
+            results = await asyncio.gather(*db_tasks, return_exceptions=True)
+            candidate_locations.update(
+                (result.get("file_path"), result.get("start_line"))
+                for db_result in results
+                if not isinstance(db_result, BaseException)
+                for result in db_result[0]
+            )
+            return results
+
+        db_results_task = asyncio.create_task(collect_db_results())
+        transient_task = asyncio.create_task(
+            self._search_transient_many(
+                queries,
+                snapshot_size,
+                0,
+                None,
+                path_filter,
+                provider,
+                limit=snapshot_size,
+                candidate_locations=candidate_locations,
+                diff_owned_locations=diff_owned_locations,
+                source_ready=db_results_task,
+            )
+        )
+        try:
+            db_results, transient_results = await _await_pair(
+                db_results_task, transient_task
+            )
+        except BaseException:
+            for task in db_tasks:
+                task.cancel()
+            await asyncio.gather(*db_tasks, return_exceptions=True)
+            raise
+
+        outputs: list[tuple[list[dict[str, Any]], dict[str, Any]] | BaseException] = []
+        for query, transient_result, db_result in zip(
+            queries, transient_results, db_results
+        ):
+            if isinstance(db_result, BaseException):
+                outputs.append(db_result)
+                continue
+            try:
+                merged = await self._finalize_both_results(
+                    query=query,
+                    transient_results=transient_result[0],
+                    db_results=db_result[0],
+                    diff_owned_locations=diff_owned_locations,
+                    snapshot_size=snapshot_size,
+                    threshold=threshold,
+                    provider=provider,
+                    force_strategy=force_strategy,
+                )
+            except Exception as error:
+                outputs.append(error)
+                continue
+            available = len(merged)
+            outputs.append(
+                (
+                    merged[offset : offset + page_size],
+                    self._pagination(page_size, offset, available, snapshot_size),
+                )
+            )
+        return outputs
+
+    async def search_semantic(
+        self,
+        query: str,
+        page_size: int = 10,
+        offset: int = 0,
+        threshold: float | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        path_filter: str | None = None,
+        force_strategy: str | None = None,
+        time_limit: float | None = None,
+        result_limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Search semantically across the selected vector sources.
+
+        ``time_limit`` only bounds DB multi-hop exploration. It does not bound
+        transient streaming or the combined final rerank.
+        """
+        if self._vector_source == "db":
+            return await self._original.search_semantic(
+                query=query,
+                page_size=page_size,
+                offset=offset,
+                threshold=threshold,
+                provider=provider,
+                model=model,
+                path_filter=path_filter,
+                force_strategy=force_strategy,
+                time_limit=time_limit,
+                result_limit=result_limit,
+            )
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search "
+                "pagination; narrow the query or commit range, or use "
+                "vector_source='db' for deep pagination over the indexed corpus."
+            )
+        if self._vector_source == "diff":
+            return await self._search_transient(
+                query,
+                page_size,
+                offset,
+                threshold,
+                path_filter,
+                provider,
+                limit=result_limit,
+            )
+
+        # Overfetch-sized heaps from both sources, independent of offset. Reject
+        # pages outside that fixed pool rather than returning a misleading empty
+        # page for an offset that can never be represented by this snapshot.
+        snapshot_size = self._both_mode_window(page_size, offset)
+        merged = await self._search_both_snapshot(
+            query=query,
+            snapshot_size=snapshot_size,
+            threshold=threshold,
+            path_filter=path_filter,
+            provider=provider,
+            model=model,
+            force_strategy=force_strategy,
+            time_limit=time_limit,
+            result_limit=result_limit,
+        )
+        available = len(merged)
+        page = self._pagination(page_size, offset, available, snapshot_size)
+        return merged[offset : offset + page_size], page
+
+    async def _search_both_snapshot(
+        self,
+        *,
+        query: str,
+        snapshot_size: int,
+        threshold: float | None,
+        path_filter: str | None,
+        provider: str | None = None,
+        model: str | None = None,
+        force_strategy: str | None = None,
+        time_limit: float | None = None,
+        result_limit: int | None = None,
+        final_rerank: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Fetch and combine equal bounded snapshots from both sources."""
+        candidate_locations: set[tuple[Any, Any]] = set()
+
+        async def collect_db_results() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            results = await self._original.search_semantic(
+                query=query,
+                page_size=snapshot_size,
+                offset=0,
+                threshold=None,
+                provider=provider,
+                model=model,
+                path_filter=path_filter,
+                force_strategy=force_strategy,
+                time_limit=time_limit,
+                result_limit=result_limit,
+            )
+            candidate_locations.update(
+                (result.get("file_path"), result.get("start_line"))
+                for result in results[0]
+            )
+            return results
+
+        db_task = asyncio.create_task(collect_db_results())
+        # Retain ownership only for locations the bounded DB snapshot can
+        # return, while scanning the complete diff for those owners. The
+        # transient task prefetches one batch immediately, so a source failure
+        # still cancels a stalled DB request.
+        diff_owned_locations: set[tuple[Any, Any]] = set()
+        transient_task = asyncio.create_task(
+            self._search_transient(
+                query,
+                snapshot_size,
+                0,
+                None,
+                path_filter,
+                provider,
+                limit=snapshot_size,
+                candidate_locations=candidate_locations,
+                diff_owned_locations=diff_owned_locations,
+                source_ready=db_task,
+            )
+        )
+        (db_results, _), (transient_results, _) = await _await_pair(
+            db_task, transient_task
+        )
+        if not final_rerank:
+            # Hybrid position fusion intentionally retains its existing source
+            # scoring behavior and larger fixed snapshot.
+            return self._merge(
+                transient_results, db_results, threshold, diff_owned_locations
+            )
+        return await self._finalize_both_results(
+            query=query,
+            transient_results=transient_results,
+            db_results=db_results,
+            diff_owned_locations=diff_owned_locations,
+            snapshot_size=snapshot_size,
+            threshold=threshold,
+            provider=provider,
+            force_strategy=force_strategy,
+        )
+
+    def _uses_final_rerank(
+        self, provider: str | None, force_strategy: str | None
+    ) -> tuple[bool, Any]:
+        embedding_provider = self._embedding_manager.get_provider(provider)
+        supports_reranking = getattr(embedding_provider, "supports_reranking", None)
+        supported = callable(supports_reranking) and supports_reranking() is True
+        return force_strategy != "single_hop" and supported, embedding_provider
+
+    async def _finalize_both_results(
+        self,
+        *,
+        query: str,
+        transient_results: list[dict[str, Any]],
+        db_results: list[dict[str, Any]],
+        diff_owned_locations: set[tuple[Any, Any]],
+        snapshot_size: int,
+        threshold: float | None,
+        provider: str | None,
+        force_strategy: str | None,
+    ) -> list[dict[str, Any]]:
+        """Put retained both-mode candidates onto one validated score scale."""
+        candidates = self._merge(
+            transient_results, db_results, None, diff_owned_locations
+        )
+        use_rerank, embedding_provider = self._uses_final_rerank(
+            provider, force_strategy
+        )
+        if not use_rerank:
+            if threshold is not None:
+                candidates = [
+                    result
+                    for result in candidates
+                    if float(result.get("score", 0.0)) >= threshold
+                ]
+            return candidates[:snapshot_size]
+        if not candidates:
+            return []
+
+        documents = [str(result.get("content", "")) for result in candidates]
+        rerank_results = await embedding_provider.rerank(
+            query=query, documents=documents, top_k=len(documents)
+        )
+        scores: dict[int, float] = {}
+        for rerank_result in rerank_results:
+            index = rerank_result.index
+            score = rerank_result.score
+            if type(index) is not int or not 0 <= index < len(candidates):
+                raise RuntimeError(
+                    "Combined final rerank returned an invalid candidate index"
+                )
+            if index in scores:
+                raise RuntimeError(
+                    "Combined final rerank returned a duplicate candidate index"
+                )
+            if isinstance(score, bool) or not isinstance(score, Real):
+                raise RuntimeError("Combined final rerank returned a non-numeric score")
+            numeric_score = float(score)
+            if not math.isfinite(numeric_score):
+                raise RuntimeError("Combined final rerank returned a non-finite score")
+            scores[index] = numeric_score
+        if set(scores) != set(range(len(candidates))):
+            raise RuntimeError(
+                "Combined final rerank did not score every candidate exactly once"
+            )
+
+        # Build new dictionaries only after complete validation so callers can
+        # never observe a mixture of cosine and reranker scores.
+        ranked = [
+            {**result, "score": scores[index]}
+            for index, result in enumerate(candidates)
+        ]
+        ranked.sort(key=lambda item: float(item["score"]), reverse=True)
+        ranked = ranked[:snapshot_size]
+        if threshold is not None:
+            ranked = [
+                result for result in ranked if float(result["score"]) >= threshold
+            ]
+        return ranked
+
+    @staticmethod
+    def _merge(
+        transient_results: list[dict[str, Any]],
+        db_results: list[dict[str, Any]],
+        threshold: float | None,
+        diff_owned_locations: set[tuple[Any, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        transient_locations: set[tuple[Any, Any]] = set()
+        owned_locations = diff_owned_locations or set()
+        seen_transient_ids: set[str] = set()
+        for result in transient_results:
+            chunk_id = str(result.get("chunk_id", ""))
+            if chunk_id in seen_transient_ids:
+                continue
+            seen_transient_ids.add(chunk_id)
+            transient_locations.add((result.get("file_path"), result.get("start_line")))
+            merged.append(result)
+
+        seen_db_locations: set[tuple[Any, Any]] = set()
+        for raw_result in db_results:
+            result = dict(raw_result)
+            if "distance" in result and "similarity" not in result:
+                result["similarity"] = 1.0 - float(result["distance"])
+            if "similarity" in result and "score" not in result:
+                result["score"] = result["similarity"]
+            location = (result.get("file_path"), result.get("start_line"))
+            if (
+                location in transient_locations
+                or location in owned_locations
+                or location in seen_db_locations
+            ):
+                continue
+            seen_db_locations.add(location)
+            merged.append(result)
+
+        merged.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        if threshold is not None:
+            merged = [
+                result
+                for result in merged
+                if float(result.get("score", 0.0)) >= threshold
+            ]
+        return merged
+
+    def search_regex(
+        self,
+        pattern: str,
+        page_size: int = 10,
+        offset: int = 0,
+        path_filter: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return self._original.search_regex(
+            pattern, page_size=page_size, offset=offset, path_filter=path_filter
+        )
+
+    async def _search_transient_regex(
+        self,
+        pattern: str,
+        page_size: int,
+        offset: int,
+        path_filter: str | None,
+        *,
+        limit: int | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Search streamed chunks without consulting the indexed working tree."""
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+            )
+        try:
+            expression = regex.compile(pattern)
+        except regex.error as exc:
+            raise ValueError(f"Invalid regex pattern {pattern!r}: {exc}") from exc
+        deadline = time.monotonic() + _TRANSIENT_SEARCH_TIMEOUT_SECONDS
+        path_prefix = normalize_path_filter(path_filter)
+        effective_limit = limit if limit is not None else offset + page_size
+        matches: list[dict[str, Any]] = []
+        total = 0
+
+        async def scan() -> None:
+            def scan_batch(chunks: Sequence[Any]) -> None:
+                nonlocal total
+                for chunk in chunks:
+                    path = str(chunk.file_path).replace("\\", "/")
+                    if path_prefix and not path_matches_filter(path, path_prefix):
+                        continue
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    if (
+                        expression.search(
+                            chunk.code, timeout=remaining, concurrent=True
+                        )
+                        is None
+                    ):
+                        continue
+                    total += 1
+                    if len(matches) < effective_limit:
+                        matches.append(self._chunk_to_dict(chunk, 0.0))
+
+            async for chunks in self._chunk_stream():
+                # Off the event loop so the wall-clock timeout can fire.
+                await asyncio.to_thread(scan_batch, chunks)
+
+        try:
+            await asyncio.wait_for(scan(), timeout=_TRANSIENT_SEARCH_TIMEOUT_SECONDS)
+        except (asyncio.TimeoutError, TimeoutError):
+            raise TimeoutError(
+                f"Diff/web regex search timed out after "
+                f"{_TRANSIENT_SEARCH_TIMEOUT_SECONDS}s streaming transient content. "
+                "Narrow the commit range or pattern, or use vector_source='db'."
+            ) from None
+        return matches[offset : offset + page_size], self._pagination(
+            page_size, offset, total
+        )
+
+    async def search_regex_async(
+        self,
+        pattern: str,
+        page_size: int = 10,
+        offset: int = 0,
+        path_filter: str | None = None,
+        query: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if self._vector_source == "db":
+            return await self._original.search_regex_async(
+                pattern,
+                page_size=page_size,
+                offset=offset,
+                path_filter=path_filter,
+                query=query,
+            )
+        if self._vector_source == "diff":
+            return await self._search_transient_regex(
+                pattern, page_size, offset, path_filter
+            )
+        if offset + page_size > _MAX_RESULT_WINDOW:
+            raise ValueError(
+                f"offset+page_size ({offset + page_size}) exceeds the maximum "
+                f"supported window ({_MAX_RESULT_WINDOW}) for diff/web search"
+            )
+
+        snapshot_size = min(
+            max(offset + page_size, _candidate_pool_size(page_size)),
+            _MAX_RESULT_WINDOW,
+        )
+        transient_task = asyncio.create_task(
+            self._search_transient_regex(
+                pattern, snapshot_size, 0, path_filter, limit=snapshot_size
+            )
+        )
+        db_task = asyncio.create_task(
+            self._original.search_regex_async(
+                pattern,
+                page_size=snapshot_size,
+                offset=0,
+                path_filter=path_filter,
+                query=query,
+            )
+        )
+        (transient_results, _), (db_results, _) = await _await_pair(
+            transient_task, db_task
+        )
+        merged = self._merge_regex(transient_results, db_results)
+        return merged[offset : offset + page_size], self._pagination(
+            page_size, offset, len(merged)
+        )
+
+    @staticmethod
+    def _merge_regex(
+        transient_results: list[dict[str, Any]],
+        db_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Merge regex snapshots while treating diff locations as authoritative."""
+        merged = list(transient_results)
+        seen_ids = {str(result.get("chunk_id", "")) for result in transient_results}
+        transient_locations = {
+            (result.get("file_path"), result.get("start_line"))
+            for result in transient_results
+        }
+        for result in db_results:
+            chunk_id = str(result.get("chunk_id", ""))
+            location = (result.get("file_path"), result.get("start_line"))
+            if chunk_id in seen_ids or location in transient_locations:
+                continue
+            seen_ids.add(chunk_id)
+            merged.append(result)
+        return merged
+
+    async def search_hybrid(
+        self,
+        query: str,
+        regex_pattern: str | None = None,
+        page_size: int = 10,
+        offset: int = 0,
+        semantic_weight: float = 0.7,
+        threshold: float | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        from chunkhound.services.search.result_enhancer import ResultEnhancer
+
+        if self._vector_source == "both":
+            logger.warning(
+                "Hybrid search with vector_source='both' may process up to {} "
+                "semantic candidates from each source. This can be slow or fail "
+                "if the configured reranker cannot handle the combined workload.",
+                _HYBRID_BOTH_SNAPSHOT_SIZE,
+            )
+
+        hybrid_window = (
+            _HYBRID_BOTH_SNAPSHOT_SIZE
+            if self._vector_source == "both"
+            else _MAX_RESULT_WINDOW
+        )
+        outside_window = (
+            offset >= hybrid_window
+            if self._vector_source == "both"
+            else offset + page_size > hybrid_window
+        )
+        if self._vector_source != "db" and outside_window:
+            raise ValueError(
+                f"requested page at offset {offset} exceeds the maximum supported "
+                f"window ({hybrid_window}) for diff/web hybrid search"
+            )
+        candidate_limit = offset + page_size + 1
+        # Hybrid ranking uses list position, so every page of a query must
+        # freeze the same semantic/regex lists. Cap at the paging window,
+        # not overfetch(page_size): page_size=1 vs page_size=200 would
+        # otherwise rank overlapping hits differently.
+        transient_snapshot = _MAX_RESULT_WINDOW
+
+        async def frozen_snapshot(
+            fetch: Callable[
+                [int],
+                Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]],
+            ],
+        ) -> list[dict[str, Any]]:
+            if self._vector_source != "db":
+                results, _ = await fetch(transient_snapshot)
+                return results
+            results, pagination = await fetch(candidate_limit)
+            if not pagination.get("has_more"):
+                return results
+
+            initial_total = pagination.get("total")
+            snapshot_size = (
+                initial_total
+                if isinstance(initial_total, int) and initial_total > candidate_limit
+                else candidate_limit * 2
+            )
+            results, _ = await fetch(snapshot_size)
+            return results
+
+        async def fetch_semantic(
+            fetch_size: int,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            if self._vector_source == "db":
+                return await self.search_semantic(
+                    query,
+                    page_size=fetch_size,
+                    offset=0,
+                    threshold=threshold,
+                )
+            if self._vector_source == "both":
+                merged = await self._search_both_snapshot(
+                    query=query,
+                    snapshot_size=_HYBRID_BOTH_SNAPSHOT_SIZE,
+                    threshold=threshold,
+                    path_filter=None,
+                    final_rerank=False,
+                )
+                available = min(len(merged), _HYBRID_BOTH_SNAPSHOT_SIZE)
+                return merged, self._pagination(fetch_size, 0, available)
+            return await self._search_transient(
+                query, fetch_size, 0, threshold, None, limit=fetch_size
+            )
+
+        async def fetch_regex(
+            fetch_size: int,
+        ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            if regex_pattern is None:
+                return [], {"has_more": False, "total": 0}
+            return await self.search_regex_async(
+                regex_pattern, page_size=fetch_size, offset=0
+            )
+
+        semantic_task = asyncio.create_task(frozen_snapshot(fetch_semantic))
+        if regex_pattern is None:
+            semantic_results = await semantic_task
+            regex_results: list[dict[str, Any]] = []
+        else:
+            regex_task = asyncio.create_task(frozen_snapshot(fetch_regex))
+            semantic_results, regex_results = await _await_pair(
+                semantic_task, regex_task
+            )
+        if self._vector_source == "both":
+            # A diff result owns its source location. Preserve regex credit when
+            # the current diff content matched, but do not reintroduce a stale
+            # DB copy under a different chunk ID.
+            diff_by_location = {
+                (result.get("file_path"), result.get("start_line")): result
+                for result in semantic_results
+                if str(result.get("chunk_id", "")).startswith("diff:")
+            }
+            reconciled_regex: list[dict[str, Any]] = []
+            for result in regex_results:
+                location = (result.get("file_path"), result.get("start_line"))
+                semantic_result = diff_by_location.get(location)
+                if semantic_result is None:
+                    reconciled_regex.append(result)
+                elif str(result.get("chunk_id", "")).startswith("diff:"):
+                    reconciled_regex.append(
+                        {**result, "chunk_id": semantic_result["chunk_id"]}
+                    )
+            regex_results = reconciled_regex
+        combined = ResultEnhancer().combine_search_results(
+            semantic_results=semantic_results,
+            regex_results=regex_results,
+            semantic_weight=semantic_weight,
+            limit=len(semantic_results) + len(regex_results),
+        )
+        available = (
+            len(combined)
+            if self._vector_source == "db"
+            else min(len(combined), hybrid_window)
+        )
+        has_more = available > offset + page_size
+        return combined[offset : offset + page_size], {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": has_more,
+            "next_offset": offset + page_size if has_more else None,
+            "total": available if self._vector_source != "db" else len(combined),
+        }
+
+    async def get_chunk_similarities_async(
+        self,
+        chunk_ids: list[int],
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+    ) -> dict[int, float]:
+        return await self._original.get_chunk_similarities_async(
+            chunk_ids, query_embedding, provider, model
+        )
+
+    def get_chunk_context(
+        self, chunk_id: Any, context_lines: int = 5
+    ) -> dict[str, Any]:
+        return self._original.get_chunk_context(chunk_id, context_lines)
+
+    def get_file_chunks(self, file_path: str) -> list[dict[str, Any]]:
+        return self._original.get_file_chunks(file_path)

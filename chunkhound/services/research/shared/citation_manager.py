@@ -38,6 +38,7 @@ Usage:
 
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -114,7 +115,32 @@ class CitationManager:
         # Assign sequential numbers (1-indexed)
         return {file_path: idx + 1 for idx, file_path in enumerate(sorted_files)}
 
-    def format_reference_table(self, file_reference_map: dict[str, int]) -> str:
+    @staticmethod
+    def _source_annotation(
+        file_path: str, chunks: list[dict[str, Any]]
+    ) -> str:
+        """Describe historical revisions represented by one citation path."""
+        matching = [chunk for chunk in chunks if chunk.get("file_path") == file_path]
+        revisions = sorted(
+            {
+                str(chunk["source_revision"])
+                for chunk in matching
+                if chunk.get("source_revision")
+            }
+        )
+        if not revisions:
+            return ""
+        has_current = any(
+            chunk.get("source_provenance") != "transient" for chunk in matching
+        )
+        source_type = "current + historical" if has_current else "historical"
+        return f" — {source_type}: {', '.join(revisions)}"
+
+    def format_reference_table(
+        self,
+        file_reference_map: dict[str, int],
+        chunks: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Format file reference mapping as markdown table for LLM prompt.
 
         Args:
@@ -149,7 +175,8 @@ class CitationManager:
         ]
 
         for file_path, ref_num in sorted_refs:
-            lines.append(f"[{ref_num}] {file_path}")
+            annotation = self._source_annotation(file_path, chunks or [])
+            lines.append(f"[{ref_num}] {file_path}{annotation}")
 
         return "\n".join(lines)
 
@@ -330,8 +357,13 @@ class CitationManager:
                 self.full_path = ""
 
         root = TreeNode("")
+        url_files: list[str] = []
 
         for file_path in sorted(files.keys()):
+            parsed = urlparse(file_path)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                url_files.append(file_path)
+                continue
             parts = file_path.split("/")
             current = root
             path_so_far = []
@@ -369,6 +401,9 @@ class CitationManager:
 
                 # Add chunk info for files
                 if node.is_file:
+                    line += self._source_annotation(
+                        node.full_path, chunks_by_file.get(node.full_path, [])
+                    )
                     if node.full_path in chunks_by_file:
                         file_chunks = chunks_by_file[node.full_path]
                         chunk_count = len(file_chunks)
@@ -410,5 +445,30 @@ class CitationManager:
                 render_node(child, new_prefix, is_last_child)
 
         render_node(root)
+
+        # Web sources are URLs rather than repository paths. Keeping them out
+        # of the filesystem tree preserves the complete, clickable citation
+        # instead of splitting the URL into misleading directory components.
+        for index, file_path in enumerate(url_files):
+            connector = "└── " if index == len(url_files) - 1 else "├── "
+            display_name = f"<{file_path}>"
+            if file_reference_map and file_path in file_reference_map:
+                display_name = f"[{file_reference_map[file_path]}] {display_name}"
+            line = f"{connector}{display_name}"
+            if file_path in chunks_by_file:
+                file_chunks = chunks_by_file[file_path]
+                ranges = [
+                    f"L{chunk.get('start_line', '?')}-{chunk.get('end_line', '?')}"
+                    for chunk in sorted(
+                        file_chunks, key=lambda chunk: chunk.get("start_line", 0)
+                    )
+                ]
+                range_str = ", ".join(ranges[:3])
+                if len(ranges) > 3:
+                    range_str += f", +{len(ranges) - 3} more"
+                line += f" ({len(file_chunks)} chunks: {range_str})"
+            else:
+                line += " (full file)"
+            footer_lines.append(line)
 
         return "\n".join(footer_lines)

@@ -21,7 +21,7 @@ async def test_cancelled_transaction_does_not_raise_on_late_response(
 
     from chunkhound.utils import websearch_core
 
-    # The guard is process-global and idempotent by design — fetch_and_save
+    # The guard is process-global and idempotent by design — fetch_pages
     # calls _install_late_completion_guard on every invocation and the latch
     # short-circuits repeats. Reset the latch so this test exercises the
     # install path even when a prior test already ran it; the patch

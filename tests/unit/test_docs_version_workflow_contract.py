@@ -579,10 +579,8 @@ class TestDocsVersionWorkflowContract:
         workflow = _load_workflow(".github/workflows/ci.yml")
         concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
 
-        assert concurrency["group"] == (
-            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' "
-            "|| github.run_id }}"
-        )
+        # Main builds must not replace each other before allocating an alpha.
+        assert concurrency["group"] == "ci-${{ github.run_id }}"
         assert concurrency["cancel-in-progress"] is False
 
     def test_deploy_job_contract(self) -> None:
@@ -591,7 +589,15 @@ class TestDocsVersionWorkflowContract:
 
         assert job["needs"] == "pages-artifact"
         assert job["if"] == "github.ref == 'refs/heads/main'"
-        assert "concurrency" not in job
+        # Serialize only Pages deployments, not the validation/release builds.
+        concurrency = cast(dict[str, Any], job["concurrency"])
+        assert concurrency["group"] == "chunkhound-pages-deploy"
+        assert concurrency["cancel-in-progress"] is False
+        steps = cast(list[dict[str, Any]], job["steps"])
+        current = next(step for step in steps if step.get("id") == "current")
+        assert '"$current_sha" == "$TESTED_SHA"' in current["run"]
+        deployment = next(step for step in steps if step.get("id") == "deployment")
+        assert deployment["if"] == "steps.current.outputs.deploy == 'true'"
         assert permissions["contents"] == "read"
         assert permissions["pages"] == "write"
         assert permissions["id-token"] == "write"

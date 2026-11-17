@@ -8,6 +8,7 @@ infrastructure and respects the single-threaded database constraint.
 from __future__ import annotations
 
 import asyncio
+import copy
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -76,6 +77,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _EVENT_HISTORY_RETENTION_SECONDS = 10.0
     _EVENT_QUEUE_MAXSIZE = 1000
     _RESYNC_DEBOUNCE_SECONDS = 1.0
+    # Backoff before each retry of a resync whose scan raised.
+    _RESYNC_RETRY_DELAYS_SECONDS: tuple[float, ...] = (5.0, 15.0, 45.0)
     _STALL_THRESHOLD_SECONDS = 30.0
     _EVENT_PRESSURE_WINDOW_SECONDS = 30.0
     _EVENT_PRESSURE_MAX_TRACKED_PATHS = 64
@@ -83,6 +86,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _EVENT_PRESSURE_OVERLOADED_EVENTS = 100
     _EVENT_PRESSURE_ELEVATED_COALESCED_UPDATES = 5
     _EVENT_PRESSURE_OVERLOADED_COALESCED_UPDATES = 20
+    # A filtered event publishes status at most this often (see
+    # _emit_filtered_status_update).
+    _FILTERED_STATUS_INTERVAL_SECONDS = 0.5
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
@@ -190,6 +196,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._last_processing_completed_at: str | None = None
         self._last_processing_completed_path: str | None = None
         self._filtered_event_count = 0
+        self._filtered_status_last_emit = float("-inf")
+        self._filtered_status_flush_pending = False
         self._suppressed_duplicate_count = 0
         self._translation_error_count = 0
         self._processing_error_count = 0
@@ -226,6 +234,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._resync_in_progress = False
         self._resync_request_count = 0
         self._resync_performed_count = 0
+        self._resync_retry_count = 0
+        self._resync_retry_pending = False
         self._last_resync_reason: str | None = None
         self._last_resync_details: dict[str, Any] | None = None
         self._last_resync_requested_at: str | None = None
@@ -431,6 +441,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "debounce_seconds": cls._RESYNC_DEBOUNCE_SECONDS,
                 "request_count": 0,
                 "performed_count": 0,
+                "retry_count": 0,
+                "retry_pending": False,
                 "last_reason": None,
                 "last_details": None,
                 "last_requested_at": None,
@@ -481,6 +493,15 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         except Exception:
             # Never let debug plumbing affect runtime
             pass
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """The realtime health structure as of now, for a status read.
+
+        The status callback publishes a snapshot only when the service records
+        something; between publishes the queue can drain and time can pass, so
+        a reader must not rely on the last published one.
+        """
+        return copy.deepcopy(self._build_health_snapshot())
 
     def _build_health_snapshot(self) -> dict[str, Any]:
         monitoring_active = False
@@ -563,6 +584,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "debounce_seconds": self._RESYNC_DEBOUNCE_SECONDS,
                 "request_count": self._resync_request_count,
                 "performed_count": self._resync_performed_count,
+                "retry_count": self._resync_retry_count,
+                "retry_pending": self._resync_retry_pending,
                 "last_reason": self._last_resync_reason,
                 "last_details": self._last_resync_details,
                 "last_requested_at": self._last_resync_requested_at,

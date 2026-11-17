@@ -151,6 +151,11 @@ def _escape_like_pattern(value: str) -> str:
     return escape_like_pattern(value, escape_quotes=True)
 
 
+def _sql_text(value: str) -> str:
+    """A string literal for a LanceDB SQL filter or expression."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _iter_batches(values: list[int], batch_size: int) -> list[list[int]]:
     """Split a list into fixed-size batches."""
     return [values[idx : idx + batch_size] for idx in range(0, len(values), batch_size)]
@@ -784,6 +789,53 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         except Exception as e:
             logger.error(f"Error updating file {file_id}: {e}")
+
+    def _executor_refresh_file_mtimes(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        entries: list[tuple[str, float, str]],
+    ) -> int:
+        """Executor method for refresh_file_mtimes - runs in DB thread.
+
+        Another process can index the same database (nothing locks the files
+        table across connections), so a row read here may be rewritten before
+        the write. The write is therefore a compare-and-swap: one merge keyed
+        on (path, content_hash, indexed_time) as read. Every write of a file's
+        content or skip state sets a new indexed_time, so the merge matches
+        only a row nobody rewrote since it was read, and stores that row with
+        the new modified_time and nothing else changed. A row rewritten in
+        between keeps that writer's values.
+
+        Lance 0.39 offers no per-row value in a conditional update (it rejects
+        CASE) and fails a merge whose source has fewer columns than the table,
+        so the merge carries the whole row as read.
+        """
+        if not self._files_table:
+            return 0
+        wanted = {  # type: ignore[unreachable]
+            path: (float(mtime), content_hash) for path, mtime, content_hash in entries
+        }
+        in_list = ", ".join(_sql_text(path) for path in wanted)
+        rows = (
+            self._files_table.search()
+            .where(f"path IN ({in_list})")
+            .limit(len(wanted))
+            .to_list()
+        )
+        confirmed = []
+        for row in rows:
+            mtime, content_hash = wanted[row["path"]]
+            if row.get("content_hash") == content_hash:
+                confirmed.append({**row, "modified_time": mtime})
+        if not confirmed:
+            return 0
+        result = (
+            self._files_table.merge_insert(["path", "content_hash", "indexed_time"])
+            .when_matched_update_all()
+            .execute(confirmed)
+        )
+        return int(result.num_updated_rows)
 
     def record_skipped_file(
         self,
@@ -1982,7 +2034,8 @@ class LanceDBProvider(SerialDatabaseProvider):
         LanceDB-specific implementation:
         - Embeddings stored inline in chunks table (no separate embeddings table)
         - Uses native .search() API with vector_column_name parameter
-        - Path filtering deferred (not yet implemented in LanceDB)
+        - Path filtering resolves file ids first and prefilters on them, so
+          out-of-scope neighbors cannot use up the limit
         """
         if self._chunks_table is None:
             raise RuntimeError("Chunks table not initialized")
@@ -2021,23 +2074,28 @@ class LanceDBProvider(SerialDatabaseProvider):
             query = self._chunks_table.search(
                 target_embedding, vector_column_name="embedding"
             )
-            query = query.where(
+            where_clause = (
                 f"provider = '{provider}' AND model = '{model}' "
                 f"AND embedding IS NOT NULL AND id != {chunk_id}"
             )
+
+            if path_filter:
+                if self._files_table is None:
+                    raise RuntimeError("Files table not initialized")
+                clause = self._build_path_like_clause(path_filter.replace("\\", "/"))
+                file_rows = self._files_table.search().where(clause).to_list()
+                if not file_rows:
+                    return []
+                file_ids = ",".join(str(int(row["id"])) for row in file_rows)
+                where_clause += f" AND file_id IN ({file_ids})"
+
+            query = query.where(where_clause, prefilter=True)
 
             # Note: Cannot filter by _distance in WHERE clause - it only exists in results
             # We'll filter after getting results if threshold is specified
             # Request more results than needed if using threshold
             fetch_limit = limit * 3 if threshold is not None else limit
             query = query.limit(fetch_limit)
-
-            # TODO(#107): Path filtering not yet implemented in LanceDB
-            # See https://github.com/chunkhound/chunkhound/issues/107
-            if path_filter:
-                logger.warning(
-                    "Path filtering not yet implemented for LanceDB find_similar_chunks"
-                )
 
             results = query.to_list()
 
