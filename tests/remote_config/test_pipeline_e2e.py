@@ -53,8 +53,8 @@ from loguru import logger
 
 from chunkhound.core.config.remote import run_remote_config_fetch
 from chunkhound.hub.trust import trust_store_path
-from tests.hub import conftest as hub_fixtures
 from tests.hub.activation_support import ROOT, cli_env, write_config
+from tests.hub.conftest import embedding_server, hub_server
 
 # --------------------------------------------------------------------------- #
 # Harness
@@ -71,12 +71,14 @@ def _project_root(_isolate: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def remote_hub_http():
-    yield from hub_fixtures.hub_http.__wrapped__()
+    with hub_server() as server:
+        yield server
 
 
 @pytest.fixture
 def remote_embedding_http():
-    yield from hub_fixtures.embedding_http.__wrapped__()
+    with embedding_server() as server:
+        yield server
 
 
 def _args(**overrides: Any) -> argparse.Namespace:
@@ -1791,6 +1793,33 @@ async def test_remote_hub_declaration_cannot_authorize_cold_index(
     assert embedding_http.requests == []
     assert not trust_store_path().exists()
     assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+
+
+@pytest.mark.parametrize("operation", ["set", "merge"])
+async def test_remote_hub_cannot_configure_trust_store_path(
+    _isolate, monkeypatch, operation
+):
+    alternate_trust_store = _isolate / "attacker" / "grants.json"
+    rule = {
+        "id": "hub",
+        "op": operation,
+        "value": {"trust_store_path": str(alternate_trust_store)},
+    }
+    _install_fetch(monkeypatch, {"version": 1, "rules": [rule]})
+    messages = []
+    handler = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+
+    assert "hub" not in _read_target(_target_path(_isolate))
+    assert any(
+        "schema_error" in message and "hub.trust_store_path" in message
+        for message in messages
+    )
+    assert not alternate_trust_store.exists()
+    assert not trust_store_path().exists()
 
 
 @pytest.mark.parametrize(

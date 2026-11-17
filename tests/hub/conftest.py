@@ -111,8 +111,8 @@ def hub_http() -> Iterator[SimpleNamespace]:
         yield server
 
 
-@pytest.fixture
-def embedding_http() -> Iterator[SimpleNamespace]:
+@contextmanager
+def embedding_server() -> Iterator[SimpleNamespace]:
     state = SimpleNamespace(requests=[], url="")
 
     class Handler(BaseHTTPRequestHandler):
@@ -155,6 +155,12 @@ def embedding_http() -> Iterator[SimpleNamespace]:
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.fixture
+def embedding_http() -> Iterator[SimpleNamespace]:
+    with embedding_server() as server:
+        yield server
 
 
 @pytest.fixture(scope="session")

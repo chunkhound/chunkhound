@@ -144,17 +144,18 @@ new and deleted local files while retaining unchanged base content. Both DuckDB
 and LanceDB support this workflow. DuckDB is recommended; LanceDB remains
 experimental and uses the Python indexing pipeline even when Rust is enabled.
 
-With a hub configured and a usable embedding identity, normal `chunkhound index`
-may automatically download and replace an absent or embedding-misaligned local
-index before ordinary indexing. An aligned index makes no hub request. MCP,
-search, simulation, ignore checking and no-embeddings indexing never initiate
-pulls. Configuring a URL does not itself perform a download, but it **enables
-this automatic replacement on a later normal index command**.
+With an authorized hub source and a usable embedding identity, normal
+`chunkhound index` may automatically download a base only when the local
+database is absent. Declaring `hub.url` is not authorization, and an existing
+database is never replaced automatically, including when its embedding model
+is misaligned. MCP, search, simulation, ignore checking and no-embeddings
+indexing never initiate pulls. Use explicit `chunkhound pull` when you intend
+to replace an existing database.
 
-**Replacement can discard local index work and require re-indexing.** Format
-and checksum validation do not establish publisher content freshness. Pull
-alone does not reconcile a base with your checkout or repair arbitrary stale
-publisher rows; ordinary indexing performs the local overlay.
+**Explicit replacement can discard local index work and require re-indexing.**
+Format and checksum validation do not establish publisher content freshness.
+Pull alone does not reconcile a base with your checkout or repair arbitrary
+stale publisher rows; ordinary indexing performs the local overlay.
 
 ```json
 {
@@ -194,8 +195,9 @@ This budget differs from HTTP's 60-second inactivity limit, manifest's
 10-second request budget, and archive extraction limits. Size/hash checks remain
 required. The cooperative deadline cannot forcibly interrupt synchronous disk
 work and is not an extraction time limit. Timeout cleans staging under normal
-cleanup rules, never installing an unverified candidate. Automatic pull may
-continue local indexing; explicit pull fails. Diagnostics name the effective
+cleanup rules, never installing an unverified candidate. Explicit pull fails;
+a failed authorized automatic hub use also stops a noninteractive index rather
+than silently continuing with local indexing. Diagnostics name the effective
 duration/setting, never URLs/credentials. Resume applies only within this
 invocation, not across invocations.
 
@@ -324,13 +326,13 @@ unvalidated NFS/SMB or cross-host behavior are outside the guarantee. Stop older
 ChunkHound and third-party database clients that do not participate in
 coordination before pulling.
 
-## Hub databases and source authorization
+### Source authorization
 
 A project can declare a published database manifest with `hub.url`. ChunkHound
 resolves that URL in this order: `CHUNKHOUND_HUB__URL` from the environment,
 then an explicitly selected `--config` file, then the project's
-`.chunkhound.json`, and finally the global config. An empty environment value or
-an explicit JSON `null` disables a lower-priority hub URL.
+`.chunkhound.json`, and finally the global config. At any layer, a present
+higher-priority blank or JSON `null` URL disables all lower-priority hub URLs.
 
 A declaration is not authorization. A repository, global config, environment
 variable, explicitly selected config, or remote-configuration rule may select a

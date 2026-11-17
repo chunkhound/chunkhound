@@ -190,7 +190,9 @@ async def _prepare_hub_index(
         native.DatabaseLayoutError,
         native.DatabaseFilesystemError,
     ) as exc:
-        raise installation_failure(exc) from None
+        error = installation_failure(exc)
+        formatter.error(str(error))
+        raise error from None
     except OSError:
         raise HubLocalStateError("Hub local filesystem is unavailable") from None
 

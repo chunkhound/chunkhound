@@ -43,7 +43,7 @@ def test_moved_checkout_overlays_unchanged_new_changed_and_deleted_files(
                  embedding_http.url)
     for filename in ("unchanged.py", "changed.py", "deleted.py"):
         shutil.copy2(publisher / filename, checkout / filename)
-    pulled = cli(checkout, "pull", checkout, rust=rust)
+    pulled = cli(checkout, "pull", checkout, "--trust", rust=rust)
     assert pulled.returncode == 0, pulled.stdout + pulled.stderr
     before = cli(checkout, "search", "UNCHANGED_BASE", checkout, "--regex", rust=rust)
     assert before.returncode == 0 and "unchanged.py" in before.stdout + before.stderr
@@ -145,12 +145,18 @@ def test_interrupted_auto_refuses_and_explicit_repull_restores_search(
     marker = target.with_name(target.name + ".chunkhound-install.json")
     marker.write_bytes(b"{")
     publish(hub_http, build_database(tmp_path / "published", backend))
+    authorized = cli(project, "pull", project, "--trust", rust=rust)
+    assert authorized.returncode == 0, authorized.stdout + authorized.stderr
+    marker.write_bytes(b"{")
+    hub_http.requests.clear()
+    embedding_http.requests.clear()
     refused = cli(project, "index", project, "--verbose", rust=rust)
     assert refused.returncode == 1
-    assert "explicit chunkhound pull" in refused.stderr
-    assert "Traceback" not in refused.stdout + refused.stderr
+    output = refused.stdout + refused.stderr
+    assert "explicit chunkhound pull" in output
+    assert "Traceback" not in output
     assert hub_http.requests == []
-    assert marker.read_bytes() == b"{" and not target.exists()
+    assert marker.read_bytes() == b"{" and target.exists()
     restored = cli(project, "pull", project, rust=rust)
     assert restored.returncode == 0, restored.stdout + restored.stderr
     assert not marker.exists()

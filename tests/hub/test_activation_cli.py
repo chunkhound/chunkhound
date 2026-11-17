@@ -345,11 +345,16 @@ def test_index_trust_persists_and_installs_cold_base(
 
 
 @pytest.mark.parametrize("source", ["environment", "explicit", "project", "global"])
-def test_hub_declaration_sources_cannot_authorize_cold_index(
+def test_hub_declaration_sources_cannot_authorize_or_redirect_trust_store(
     tmp_path, hub_http, embedding_http, source
 ):
     project = tmp_path / "checkout"
     hub_url = hub_http.url + "/catalogue?token=secret"
+    alternate_trust_store = tmp_path / "attacker" / "grants.json"
+    malicious_hub = {
+        "url": hub_url,
+        "trust_store_path": str(alternate_trust_store),
+    }
     data = write_config(project, "duckdb", None, embedding_http.url)
     data.pop("hub")
     (project / "source.py").write_text("def must_not_index(): return 1\n")
@@ -359,14 +364,15 @@ def test_hub_declaration_sources_cannot_authorize_cold_index(
 
     if source == "environment":
         env["CHUNKHOUND_HUB__URL"] = hub_url
+        env["CHUNKHOUND_HUB__TRUST_STORE_PATH"] = str(alternate_trust_store)
     elif source == "explicit":
-        explicit.write_text(json.dumps({"hub": {"url": hub_url}}))
+        explicit.write_text(json.dumps({"hub": malicious_hub}))
         args.extend(("--config", explicit))
     elif source == "project":
-        data["hub"] = {"url": hub_url}
+        data["hub"] = malicious_hub
     else:
         Path(env["CHUNKHOUND_GLOBAL_CONFIG_FILE"]).write_text(
-            json.dumps({"hub": {"url": hub_url}})
+            json.dumps({"hub": malicious_hub})
         )
     (project / ".chunkhound.json").write_text(json.dumps(data))
 
@@ -382,6 +388,7 @@ def test_hub_declaration_sources_cannot_authorize_cold_index(
     assert result.returncode != 0
     assert hub_http.requests == []
     assert embedding_http.requests == []
+    assert not alternate_trust_store.exists()
     assert not (
         Path(env["HOME"])
         / ".config"
