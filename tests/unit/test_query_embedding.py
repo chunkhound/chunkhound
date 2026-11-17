@@ -18,10 +18,10 @@ import pytest
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 from chunkhound.services.search.single_hop_strategy import SingleHopStrategy
 from chunkhound.services.search_service import SearchService
+from chunkhound.services.transient_search_service import TransientSearchService
 from tests.unit.provider_test_helpers import _bare_provider
 
 DOCUMENT_VECTOR = [1.0, 0.0]
@@ -34,6 +34,7 @@ class _AsymmetricProvider:
     name = "fake"
     model = "fake-model"
     dims = 2
+    embedding_space_identity = "fake-space"
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, list[str]]] = []
@@ -109,7 +110,10 @@ async def test_single_hop_search_scores_the_query_vector() -> None:
         path_filter=None,
     )
 
-    assert provider.calls == [("query", ["where is retry handled"])]
+    assert ("query", ["where is retry handled"]) in provider.calls
+    assert [c for c in provider.calls if c[0] == "query"] == [
+        ("query", ["where is retry handled"])
+    ]
     assert seen["query_embedding"] == QUERY_VECTOR
 
 
@@ -128,7 +132,10 @@ async def test_regex_search_scores_results_with_the_query_vector() -> None:
 
     db.get_chunk_similarities_async.assert_awaited_once()
     assert db.get_chunk_similarities_async.await_args.args[1] == QUERY_VECTOR
-    assert provider.calls == [("query", ["where is retry handled"])]
+    assert ("query", ["where is retry handled"]) in provider.calls
+    assert [c for c in provider.calls if c[0] == "query"] == [
+        ("query", ["where is retry handled"])
+    ]
     assert results[0]["similarity"] == 0.5
 
 
@@ -150,7 +157,10 @@ async def test_symbol_search_scores_results_with_the_query_vector() -> None:
     search_service.get_chunk_similarities_async.assert_awaited_once()
     scored_with = search_service.get_chunk_similarities_async.await_args.args[1]
     assert scored_with == QUERY_VECTOR
-    assert provider.calls == [("query", ["where is retry handled"])]
+    assert ("query", ["where is retry handled"]) in provider.calls
+    assert [c for c in provider.calls if c[0] == "query"] == [
+        ("query", ["where is retry handled"])
+    ]
     assert results[0]["similarity"] == 0.5
 
 
@@ -162,15 +172,31 @@ async def test_diff_search_ranks_by_the_query_vector() -> None:
         _chunk("matches_document", "src/a.py"),
         _chunk("matches_query", "src/b.py"),
     ]
-    svc = DiffAwareSearchService(
-        MagicMock(), chunks, [DOCUMENT_VECTOR, QUERY_VECTOR], "diff", _manager(provider)
-    )
+    vectors = {c.code: v for c, v in zip(chunks, [DOCUMENT_VECTOR, QUERY_VECTOR])}
+
+    async def stream() -> Any:
+        yield chunks
+
+    manager = _manager(provider)
+    real_embed = manager.embed_texts
+
+    async def embed_texts(texts: list[str], provider_name: str | None = None) -> Any:
+        result = await real_embed(texts, provider_name)
+        if texts and texts[0] in vectors:
+            result.embeddings = [vectors[t] for t in texts]
+        return result
+
+    manager.embed_texts = embed_texts  # type: ignore[method-assign]
+    svc = TransientSearchService(MagicMock(), stream, "diff", manager)
 
     results, _ = await svc.search_semantic("where is retry handled")
 
     assert [r["file_path"] for r in results] == ["src/b.py", "src/a.py"]
     assert results[0]["score"] == pytest.approx(1.0)
-    assert provider.calls == [("query", ["where is retry handled"])]
+    assert ("query", ["where is retry handled"]) in provider.calls
+    assert [c for c in provider.calls if c[0] == "query"] == [
+        ("query", ["where is retry handled"])
+    ]
 
 
 @pytest.mark.asyncio

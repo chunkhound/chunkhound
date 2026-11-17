@@ -1091,8 +1091,7 @@ class DaemonDiscovery:
         # stdio. The daemon writes to a log file, not to a client —
         # inheriting that flag would silence log_if_not_mcp call sites in
         # duckdb / realtime / compaction code paths, exactly where
-        # diagnostics matter. Mirrors the scrub pattern used for the
-        # _quickresearch subprocess in chunkhound.mcp_server.tools.
+        # diagnostics matter. 
         env.pop("CHUNKHOUND_MCP_MODE", None)
 
         # Route daemon stdout/stderr to a log file so startup failures are
