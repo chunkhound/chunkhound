@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from chunkhound.core.config.config import Config
+from chunkhound.hub.trust import checkout_digest, manifest_url_digest
 from tests.hub.artifacts import pack_database
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,7 +59,13 @@ def cli_env(project, rust="0"):
         for key, value in os.environ.items()
         if not key.startswith(("CHUNKHOUND_", "OPENAI_", "VOYAGE_"))
     }
+    home = project.parent / "home"
+    home.mkdir(parents=True, exist_ok=True)
     env.update(
+        HOME=str(home),
+        PYTHONPATH=os.pathsep.join(
+            filter(None, (str(ROOT), env.get("PYTHONPATH", "")))
+        ),
         UV_NO_SYNC="1",
         UV_PROJECT=str(ROOT),
         CHUNKHOUND_GLOBAL_CONFIG_FILE=str(global_config),
@@ -68,7 +75,18 @@ def cli_env(project, rust="0"):
         CHUNKHOUND_NO_RICH="1",
         NO_COLOR="1",
     )
+    if os.name == "nt":
+        env["USERPROFILE"] = str(home)
     return env
+
+
+def cli_is_trusted(project, checkout, hub_url):
+    path = project.parent / "home" / ".config" / "chunkhound" / "hub-trust.json"
+    if not path.exists():
+        return False
+    store = json.loads(path.read_text(encoding="utf-8"))
+    grants = store.get("grants", {})
+    return manifest_url_digest(hub_url) in grants.get(checkout_digest(checkout), [])
 
 
 def cli(project, *args, rust="0"):

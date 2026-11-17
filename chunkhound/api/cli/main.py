@@ -238,6 +238,12 @@ async def async_main() -> None:
     if args.command == "mcp":
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
+    if args.command == "pull" and getattr(args, "forget_trust", False):
+        from .commands.pull import forget_trust_command
+
+        forget_trust_command(args)
+        return
+
     _daemon_startup_breadcrumb(args, "startup tracking began mode=daemon")
     config_validation_started = time.monotonic()
     _daemon_startup_breadcrumb(args, "phase started: cli_config_validation")

@@ -7,7 +7,14 @@ import pytest
 
 import chunkhound_native as native
 from chunkhound.hub.inspect import inspect_database
-from tests.hub.activation_support import ROOT, cli, cli_env, publish, write_config
+from tests.hub.activation_support import (
+    ROOT,
+    cli,
+    cli_env,
+    cli_is_trusted,
+    publish,
+    write_config,
+)
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import snapshot
 
@@ -46,6 +53,166 @@ def test_explicit_relative_version_is_installed_and_searchable(
     ]
     assert "token=secret" not in result.stdout + result.stderr
     assert "/catalogue?" not in result.stdout + result.stderr
+    assert not cli_is_trusted(
+        project, project, hub_http.url + "/catalogue?token=secret"
+    )
+
+
+def test_pull_trust_is_saved_after_manifest_before_compatibility_selection(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    publish(
+        hub_http,
+        build_database(tmp_path / "published", model="wrong-model"),
+        model="wrong-model",
+    )
+
+    result = cli(project, "pull", project, "--trust")
+
+    assert result.returncode == 1
+    assert cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests == [("/catalogue?token=secret", None)]
+
+
+def test_pull_trust_invalid_manifest_saves_nothing(tmp_path, hub_http, embedding_http):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    hub_http.resources["/catalogue?token=secret"] = b"{}"
+
+    result = cli(project, "pull", project, "--trust")
+
+    assert result.returncode == 1
+    assert not cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests == [("/catalogue?token=secret", None)]
+
+
+def test_pull_trust_survives_artifact_failure(tmp_path, hub_http, embedding_http):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    _, route = publish(hub_http, build_database(tmp_path / "published"))
+    hub_http.resources[route] = b"corrupt artifact"
+
+    result = cli(project, "pull", project, "--trust")
+
+    assert result.returncode == 1
+    assert cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests[0] == ("/catalogue?token=secret", None)
+    assert any(request[0] == route for request in hub_http.requests[1:])
+
+
+def test_pull_trust_save_failure_warns_but_current_pull_proceeds(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    publish(hub_http, build_database(tmp_path / "published"))
+    script = r"""
+import importlib
+import sys
+sys.path.insert(0, sys.argv.pop(1))
+from chunkhound.api.cli.main import main
+from chunkhound.hub.trust import HubTrustError
+pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+def fail_grant(checkout, manifest_url):
+    raise HubTrustError("raw trust failure secret")
+pull_module.grant_trust = fail_grant
+sys.argv = ["chunkhound", *sys.argv[1:]]
+main()
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(ROOT), "pull", str(project), "--trust"],
+        cwd=project,
+        env=cli_env(project),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    text = result.stdout + result.stderr
+    assert result.returncode == 0, text
+    assert "future automatic hub use was not enabled" in text
+    assert "raw trust failure secret" not in text
+    assert not cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests == [
+        ("/catalogue?token=secret", None),
+        ("/base.tar.gz?token=secret", None),
+    ]
+
+
+def test_pull_trust_flags_are_mutually_exclusive(tmp_path):
+    result = cli(tmp_path, "pull", "--trust", "--forget-trust")
+    assert result.returncode == 2
+    assert "not allowed with argument --trust" in result.stderr
+
+
+def test_forget_trust_rejects_relative_version_without_config(tmp_path):
+    result = cli(tmp_path, "pull", "--forget-trust", "--version", "-1")
+    assert result.returncode == 1
+    assert "--version cannot be used with --forget-trust" in result.stderr
+
+
+def test_forget_trust_is_offline_idempotent_and_preserves_database(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    publish(hub_http, build_database(tmp_path / "published"))
+    trusted = cli(project, "pull", project, "--trust")
+    assert trusted.returncode == 0, trusted.stdout + trusted.stderr
+    assert cli_is_trusted(project, project, hub_url)
+    target = project / ".chunkhound" / "db" / "chunks.db"
+    before = snapshot(target.parent)
+    (project / ".chunkhound.json").write_text("not valid json", encoding="utf-8")
+    sentinel = tmp_path / "remote-config-called"
+    script = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv.pop(1))
+import chunkhound.api.cli.utils.config_factory as config_factory
+from chunkhound.api.cli.main import main
+sentinel = Path(sys.argv.pop(1))
+async def fail_if_called(args, command):
+    sentinel.write_text("called")
+    raise AssertionError("remote config fetch must not run")
+config_factory.run_remote_config_fetch = fail_if_called
+sys.argv = ["chunkhound", *sys.argv[1:]]
+main()
+"""
+    hub_http.requests.clear()
+
+    first = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT),
+            str(sentinel),
+            "pull",
+            str(project),
+            "--forget-trust",
+        ],
+        cwd=project,
+        env=cli_env(project),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    second = cli(project, "pull", project, "--forget-trust")
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert not sentinel.exists()
+    assert not cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests == []
+    assert snapshot(target.parent) == before
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
@@ -73,8 +240,11 @@ def test_auto_installs_before_drift_pinning_and_aligned_makes_no_request(
     result = cli(project, "index", project, "--verbose", rust=rust)
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(hub_http.requests) == (0 if initial == "aligned" else 2)
-    target = project / ".chunkhound" / "db" / (
-        "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
+    target = (
+        project
+        / ".chunkhound"
+        / "db"
+        / ("chunks.db" if backend == "duckdb" else "lancedb.lancedb")
     )
     assert {g.model for g in inspect_database(target, backend).groups} == {"hub-test"}
     assert all(request["model"] == "hub-test" for request in embedding_http.requests)
@@ -229,16 +399,23 @@ def test_zero_is_not_a_relative_version(tmp_path):
     assert cli(tmp_path, "pull", "--version", "0").returncode == 2
 
 
-@pytest.mark.parametrize("boundary,mode", [
-    ("initial", "index"), ("recheck", "index"),
-    ("candidate", "index"), ("candidate", "pull"),
-])
+@pytest.mark.parametrize(
+    "boundary,mode",
+    [
+        ("initial", "index"),
+        ("recheck", "index"),
+        ("candidate", "index"),
+        ("candidate", "pull"),
+    ],
+)
 def test_cli_reader_failure_has_sanitized_exit_without_fallback(
     tmp_path, hub_http, embedding_http, boundary, mode
 ):
     project = tmp_path / "checkout"
     write_config(
-        project, "duckdb", hub_http.url + "/catalogue?token=secret",
+        project,
+        "duckdb",
+        hub_http.url + "/catalogue?token=secret",
         embedding_http.url,
     )
     (project / "local.py").write_text("def must_not_index(): return 42\n")
@@ -254,6 +431,7 @@ def test_cli_reader_failure_has_sanitized_exit_without_fallback(
     retained_root = json.dumps({"version": 1, "indexed_root_path": project.as_posix()})
     sidecar.write_text(retained_root)
     if boundary == "recheck":
+
         def install_race_winner(route):
             if route.startswith("/base.tar.gz"):
                 lease = native.acquire_install_lease(str(target), "duckdb")
@@ -263,9 +441,10 @@ def test_cli_reader_failure_has_sanitized_exit_without_fallback(
                     lease.close()
                 sidecar.write_text(retained_root)
                 before.append(snapshot(target))
+
         hub_http.before_get = install_race_winner
     report = tmp_path / "cli-reader-report.json"
-    script = r'''
+    script = r"""
 import json
 import sys
 from pathlib import Path
@@ -322,26 +501,42 @@ finally:
     for workspace in held_workspaces:
         workspace.cleanup()
 raise outcome
-'''
+"""
     result = subprocess.run(
         [
-            sys.executable, "-c", script, str(ROOT), boundary, str(target),
-            str(report), mode, str(project),
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT),
+            boundary,
+            str(target),
+            str(report),
+            mode,
+            str(project),
         ],
-        cwd=project, env=cli_env(project), capture_output=True, text=True,
+        cwd=project,
+        env=cli_env(project),
+        capture_output=True,
+        text=True,
         timeout=180,
     )
     text = result.stdout + result.stderr
     assert report.exists(), text
     assert json.loads(report.read_text()) == {
-        "actual_exit": 1, "retained_then_retried": True,
+        "actual_exit": 1,
+        "retained_then_retried": True,
     }
     assert result.returncode == 1, text
     assert text.count("Cannot close hub database inspection reader") == 1
     for forbidden in (
-        "REVIEW_SECRET", "raw-close-detail", "raw-reader-detail",
-        "Traceback", "Full error details", "continuing local indexing",
-        "identity is unreadable", "token=secret",
+        "REVIEW_SECRET",
+        "raw-close-detail",
+        "raw-reader-detail",
+        "Traceback",
+        "Full error details",
+        "continuing local indexing",
+        "identity is unreadable",
+        "token=secret",
     ):
         assert forbidden not in text
     assert snapshot(target) == before[0]
