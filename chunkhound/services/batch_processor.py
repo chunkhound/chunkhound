@@ -34,6 +34,7 @@ def _dbg_log(msg: str) -> None:
 
 
 from chunkhound.parsers.parser_factory import create_parser_for_language
+from chunkhound.utils.parent_watch import exit_when_parent_dies
 
 
 @dataclass
@@ -61,6 +62,7 @@ def _parse_file_worker(
     Using a dedicated process lets us enforce a strict wall-clock timeout by
     terminating the child when exceeded, without risking stuck threads.
     """
+    exit_when_parent_dies()
     try:
         # Local imports to keep worker picklable and light
         from pathlib import Path as _Path

@@ -196,7 +196,7 @@ async def test_voyageai_embed_success_records_token_usage(open_command) -> None:
         return_value=_FakeEmbedResult([[0.1, 0.2, 0.3]], total_tokens=7)
     )
 
-    await provider._embed_single_batch_locked(["hello"])
+    await provider._embed_single_batch_locked(["hello"], "document")
     end_command(recorder, handle, True)
 
     embedding = _read_events(buffer_dir)[-1]["providers"]["embedding"][0]
@@ -217,7 +217,7 @@ async def test_voyageai_embed_failure_records_a_failed_provider_call(
     provider._client.embed = MagicMock(side_effect=RuntimeError("connection reset"))
 
     with pytest.raises(Exception):
-        await provider._embed_single_batch_locked(["hello"])
+        await provider._embed_single_batch_locked(["hello"], "document")
     end_command(recorder, handle, False)
 
     embedding = _read_events(buffer_dir)[-1]["providers"]["embedding"][0]

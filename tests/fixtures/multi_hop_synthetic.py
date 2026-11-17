@@ -75,6 +75,9 @@ class DeterministicEmbeddingProvider:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._query_vectors.get(text, [0.0]) for text in texts]
 
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        return await self.embed(texts)
+
     async def embed_single(self, text: str) -> list[float]:
         return self._query_vectors.get(text, [0.0])
 
