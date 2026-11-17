@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Removed `DiffAwareSearchService`** — The unused preloaded-vector git-diff search facade is gone; use `TransientSearchService`, which git-history search already uses.
 
 ### Fixed
+- **Semantic search totals match the results you can page through** — With a stored embedding that has NULL elements (what a NaN vector is stored as) in scope, DuckDB semantic search skipped that row but still counted it, so `total` and `has_more` overstated the results and could offer a page that came back empty. The total is now computed from the same scored rows as the page. Searches with a `threshold` also no longer score every embedding twice.
 - **VoyageAI semantic search ranks better** — Search queries are now embedded with Voyage `input_type="query"` instead of `"document"`. Voyage models embed queries and documents differently, and a query embedded as a document was matched as one document against another, which pushed relevant code far down the results. Indexed chunks were always embedded as documents and still are, so no re-index is needed. Other providers are unchanged.
 
 ## [6.1.0] - 2026-10-20
