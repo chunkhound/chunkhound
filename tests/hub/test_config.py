@@ -5,18 +5,76 @@ import pytest
 
 from chunkhound.core.config.config import Config
 
+HUB_URL_ENV = "CHUNKHOUND_HUB__URL"
 
-def test_committed_full_url_overrides_env_without_remote_scrub(tmp_path, monkeypatch):
-    monkeypatch.setenv("CHUNKHOUND_HUB__URL", "https://env.invalid/catalogue?a=1")
-    url = "https://team.invalid/custom/catalogue?signature=secret&branch=main"
-    (tmp_path / ".chunkhound.json").write_text(json.dumps({"hub": {"url": url}}))
-    config = Config(target_dir=tmp_path, skip_layers={"global", "config_file", "cli"})
-    assert config.hub.url == url
-    (tmp_path / ".chunkhound.json").unlink()
-    config = Config(target_dir=tmp_path, skip_layers={"global", "config_file", "cli"})
-    assert config.hub.url == "https://env.invalid/catalogue?a=1"
-    monkeypatch.setenv("CHUNKHOUND_HUB__URL", "")
-    config = Config(target_dir=tmp_path, skip_layers={"global", "config_file", "cli"})
+
+def test_hub_url_uses_project_specific_precedence(tmp_path, monkeypatch):
+    global_file = tmp_path / "global.json"
+    global_file.write_text(json.dumps({"hub": {"url": "https://global.invalid/m"}}))
+    monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_file))
+    (tmp_path / ".chunkhound.json").write_text(
+        json.dumps({"hub": {"url": "https://project.invalid/m"}})
+    )
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text(json.dumps({"hub": {"url": "https://explicit.invalid/m"}}))
+
+    global_config = Config(
+        target_dir=tmp_path,
+        skip_layers={"local_config", "config_file", "cli"},
+    )
+    assert global_config.hub.url == "https://global.invalid/m"
+
+    project = Config(target_dir=tmp_path, skip_layers={"config_file", "cli"})
+    assert project.hub.url == "https://project.invalid/m"
+
+    selected = Config(
+        target_dir=tmp_path,
+        args=argparse.Namespace(config=str(explicit)),
+        skip_layers={"cli"},
+    )
+    assert selected.hub.url == "https://explicit.invalid/m"
+
+    monkeypatch.setenv(HUB_URL_ENV, "https://env.invalid/m?token=secret")
+    runtime = Config(
+        target_dir=tmp_path,
+        args=argparse.Namespace(config=str(explicit)),
+        skip_layers={"cli"},
+    )
+    assert runtime.hub.url == "https://env.invalid/m?token=secret"
+
+    monkeypatch.setenv(HUB_URL_ENV, "")
+    disabled = Config(
+        target_dir=tmp_path,
+        args=argparse.Namespace(config=str(explicit)),
+        skip_layers={"cli"},
+    )
+    assert disabled.hub.url is None
+
+
+def test_project_hub_url_null_disables_global_url(tmp_path, monkeypatch):
+    global_file = tmp_path / "global.json"
+    global_file.write_text(json.dumps({"hub": {"url": "https://global.invalid/m"}}))
+    monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_file))
+    (tmp_path / ".chunkhound.json").write_text(json.dumps({"hub": {"url": None}}))
+
+    config = Config(target_dir=tmp_path, skip_layers={"config_file", "cli"})
+
+    assert config.hub.url is None
+
+
+def test_explicit_hub_url_null_disables_project_url(tmp_path):
+    (tmp_path / ".chunkhound.json").write_text(
+        json.dumps({"hub": {"url": "https://project.invalid/m"}})
+    )
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text(json.dumps({"hub": {"url": None}}))
+
+    config = Config(
+        target_dir=tmp_path,
+        args=argparse.Namespace(config=str(explicit)),
+        skip_layers={"global", "cli"},
+    )
+
     assert config.hub.url is None
 
 
