@@ -2,8 +2,8 @@ name: 'Build native wheel'
 description: >
   Build the chunkhound_native release wheel via `maturin build --release
   --auditwheel repair` and smoke-test that it actually imports. Shared by
-  release.yml and release-rc.yml, which previously each carried their own
-  byte-identical copy of this step, plus ci.yml's native-wheel-smoke-arm64,
+  release-packages.yml (called by release.yml, release-rc.yml, and CI),
+  plus ci.yml's native-wheel-smoke-arm64,
   native-dev-macos, watchman-runtime-validation (Linux/Windows), and
   watchman-rollout-gate jobs (all with skip-tag-version-patch: true, since a
   CI branch/PR ref has no release tag to derive a version from). Published
@@ -24,6 +24,13 @@ description: >
   calling job has already checked out the repo and installed `uv`.
 
 inputs:
+  release-tag:
+    description: >
+      Explicit requested release tag (for example v6.2.0a43). Release callers
+      must pass this; omitted input falls back to GITHUB_REF_NAME for legacy
+      callers. Non-release smoke builds may skip the version patch entirely.
+    required: false
+    default: ''
   out-dir:
     description: Directory where the repaired native wheel is written.
     required: false
@@ -32,7 +39,7 @@ inputs:
     description: >
       Set to "true" for non-release callers (e.g. a CI smoke build) where
       GITHUB_REF_NAME isn't a release tag. Leaving this false (the default)
-      preserves the original behavior for release.yml/release-rc.yml: a
+      requires a valid explicit release-tag (or legacy GITHUB_REF_NAME): a
       malformed/missing tag crashes the build loudly instead of silently
       publishing the Cargo.toml placeholder version.
     required: false
@@ -77,34 +84,18 @@ runs:
         key: manylinux_2_31-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: manylinux_2_31-${{ runner.arch }}-${{ env.MANYLINUX_RUST_TOOLCHAIN }}-cargo-
 
-    - name: Patch Cargo.toml version from git tag
+    - name: Patch Cargo.toml version from requested tag
       shell: bash
+      env:
+        REQUESTED_RELEASE_TAG: ${{ inputs.release-tag }}
+        SKIP_TAG_VERSION_PATCH: ${{ inputs.skip-tag-version-patch }}
       run: |
-        # maturin build has no --set-version flag; it reads the wheel version from
-        # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
-        # before any pre-release suffix) while the git tag uses PEP 440 (no
-        # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
-        # Cargo version via pep440_rs, which normalizes the hyphenated form to
-        # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
-        if [[ "${{ inputs.skip-tag-version-patch }}" != "true" ]]; then
-          export TAG_VERSION="${GITHUB_REF_NAME#v}"
-          uv run --no-project --python 3.12 python - <<'PYEOF'
-        import os, re, pathlib
-
-        tag_version = os.environ["TAG_VERSION"]
-        m = re.match(r"^(\d+\.\d+\.\d+)([a-zA-Z].*)?$", tag_version)
-        if not m:
-            raise SystemExit(
-                f"GITHUB_REF_NAME {tag_version!r} is not a PEP 440 release tag; "
-                "refusing to build/publish an unversioned wheel. Pass "
-                "skip-tag-version-patch: true for non-release callers."
-            )
-        cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
-        path = pathlib.Path("Cargo.toml")
-        text = path.read_text()
-        new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
-        path.write_text(new_text)
-        PYEOF
+        # maturin reads Cargo.toml; the shared tag helper converts PEP 440
+        # to Cargo's hyphenated prerelease version before the build.
+        if [[ "$SKIP_TAG_VERSION_PATCH" != "true" ]]; then
+          release_tag="${REQUESTED_RELEASE_TAG:-$GITHUB_REF_NAME}"
+          uv run --no-project --python 3.12 python scripts/release_tag.py \
+            patch-cargo --tag "$release_tag"
         fi
 
     - name: Build native wheel (Linux, manylinux_2_31 container)
