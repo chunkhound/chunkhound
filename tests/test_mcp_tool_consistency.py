@@ -1184,6 +1184,51 @@ def test_no_tool_definitions_list():
     )
 
 
+async def _invoke_call_tool(server, name: str, arguments: dict):
+    """Call a tool through the server's public serve_connection() session."""
+    from tests.utils.mcp_session import call_tool
+
+    return await call_tool(server, name, arguments)
+
+
+@pytest.mark.asyncio
+async def test_server_call_tool_returns_call_tool_result_with_is_error() -> None:
+    """on_call_tool must report tool failures via CallToolResult.is_error,
+    not by raising, matching the daemon's existing error contract."""
+    from unittest.mock import MagicMock
+
+    import mcp.types as types
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+
+    server = StdioMCPServer(config=MagicMock())
+    server._initialization_complete.set()
+
+    result = await _invoke_call_tool(server, "search", {})  # missing required args
+
+    assert isinstance(result, types.CallToolResult)
+    assert result.is_error is True
+    assert result.content
+
+
+@pytest.mark.asyncio
+async def test_server_list_tools_returns_list_tools_result() -> None:
+    from unittest.mock import MagicMock
+
+    import mcp.types as types
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+    from tests.utils.mcp_session import list_tools
+
+    server = StdioMCPServer(config=MagicMock())
+    server._initialization_complete.set()
+
+    result = await list_tools(server)
+
+    assert isinstance(result, types.ListToolsResult)
+    assert any(t.name == "search" for t in result.tools)
+
+
 @pytest.mark.asyncio
 async def test_non_db_tools_do_not_trigger_provider_connect() -> None:
     """daemon_status/websearch must not conflate MCP sessions with DB opens."""
@@ -1245,8 +1290,6 @@ async def test_unknown_stdio_tool_returns_unknown_without_connect_attempt() -> N
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 
-    from mcp.types import CallToolRequest
-
     from chunkhound.mcp_server.stdio import StdioMCPServer
 
     server = StdioMCPServer(config=MagicMock())
@@ -1256,18 +1299,11 @@ async def test_unknown_stdio_tool_returns_unknown_without_connect_attempt() -> N
         side_effect=DatabaseCompactionInProgressError("busy")
     )
 
-    handler = server.server.request_handlers[CallToolRequest]
-    response = await handler(
-        CallToolRequest(
-            method="tools/call",
-            params={"name": "__missing_tool__", "arguments": {}},
-            id=1,
-        )
-    )
+    response = await _invoke_call_tool(server, "__missing_tool__", {})
 
     server.ensure_tool_services.assert_not_awaited()
-    assert response.root.isError is True
-    payload = _tool_error_payload(response.root.content[0].text)
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload["message"] == "Unknown tool: __missing_tool__"
 
 
@@ -1292,16 +1328,11 @@ async def test_unknown_daemon_tool_returns_unknown_without_connect_attempt() -> 
         side_effect=DatabaseCompactionInProgressError("busy")
     )
 
-    response = await daemon._handle_tools_call(
-        {
-            "id": "1",
-            "params": {"name": "__missing_tool__", "arguments": {}},
-        }
-    )
+    response = await _invoke_call_tool(daemon, "__missing_tool__", {})
 
     daemon.ensure_tool_services.assert_not_awaited()
-    assert response["result"]["isError"] is True
-    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload["message"] == "Unknown tool: __missing_tool__"
 
 
@@ -1324,16 +1355,12 @@ async def test_daemon_handle_tools_call_skips_connect_for_non_db_tools() -> None
     connect_mock = AsyncMock()
     daemon._connect_provider = connect_mock
 
-    msg = {
-        "id": "1",
-        "params": {"name": "daemon_status", "arguments": {}},
-    }
     with patch(
         "chunkhound.mcp_server.common.handle_tool_call",
         new_callable=AsyncMock,
         return_value=[],
     ):
-        await daemon._handle_tools_call(msg)
+        await _invoke_call_tool(daemon, "daemon_status", {})
 
     connect_mock.assert_not_awaited()
 
@@ -1344,8 +1371,6 @@ async def test_stdio_tool_call_surfaces_compaction_busy_payload() -> None:
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 
-    from mcp.types import CallToolRequest
-
     from chunkhound.mcp_server.stdio import StdioMCPServer
 
     server = StdioMCPServer(config=MagicMock())
@@ -1355,17 +1380,12 @@ async def test_stdio_tool_call_surfaces_compaction_busy_payload() -> None:
         side_effect=DatabaseCompactionInProgressError("busy")
     )
 
-    handler = server.server.request_handlers[CallToolRequest]
-    response = await handler(
-        CallToolRequest(
-            method="tools/call",
-            params={"name": "search", "arguments": {"type": "regex", "query": "x"}},
-            id=1,
-        )
+    response = await _invoke_call_tool(
+        server, "search", {"type": "regex", "query": "x"}
     )
 
-    assert response.root.isError is True
-    payload = _tool_error_payload(response.root.content[0].text)
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload == {
         "type": "DatabaseCompactionInProgressError",
         "message": "busy",
@@ -1377,38 +1397,32 @@ async def test_stdio_tool_call_surfaces_generic_tool_failure_payload() -> None:
     """Stdio MCP clients should receive serialized unexpected tool failures."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from mcp.types import CallToolRequest
-
     from chunkhound.mcp_server.stdio import StdioMCPServer
 
     server = StdioMCPServer(config=MagicMock())
     server._initialization_complete.set()
 
-    handler = server.server.request_handlers[CallToolRequest]
     with patch(
         "chunkhound.mcp_server.common.execute_tool",
         new_callable=AsyncMock,
         side_effect=RuntimeError("boom"),
     ):
-        response = await handler(
-            CallToolRequest(
-                method="tools/call",
-                params={"name": "daemon_status", "arguments": {}},
-                id=1,
-            )
-        )
+        response = await _invoke_call_tool(server, "daemon_status", {})
 
-    assert response.root.isError is True
-    payload = _tool_error_payload(response.root.content[0].text)
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload == {"type": "RuntimeError", "message": "boom"}
 
 
 @pytest.mark.asyncio
 async def test_stdio_tool_call_uses_error_content_when_success_precedes_error() -> None:
-    """Stdio transport must raise the actual error-bearing content item."""
+    """Stdio transport must flag is_error and preserve the error-bearing
+    content item in place (SDK 2.x's CallToolResult.content keeps the full
+    mixed list in original order; it does not collapse to a single raised
+    error like the old SDK 1.x call_tool() decorator did)."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from mcp.types import CallToolRequest, TextContent
+    from mcp.types import TextContent
 
     from chunkhound.mcp_server.stdio import StdioMCPServer
 
@@ -1423,21 +1437,15 @@ async def test_stdio_tool_call_uses_error_content_when_success_precedes_error() 
         ),
     ]
 
-    handler = server.server.request_handlers[CallToolRequest]
     with patch(
         "chunkhound.mcp_server.base.handle_tool_call",
         new=AsyncMock(return_value=mixed_contents),
     ):
-        response = await handler(
-            CallToolRequest(
-                method="tools/call",
-                params={"name": "daemon_status", "arguments": {}},
-                id=1,
-            )
-        )
+        response = await _invoke_call_tool(server, "daemon_status", {})
 
-    assert response.root.isError is True
-    payload = _tool_error_payload(response.root.content[0].text)
+    assert response.is_error is True
+    assert len(response.content) == 2
+    payload = _tool_error_payload(response.content[1].text)
     assert payload == {"type": "RuntimeError", "message": "second"}
 
 
@@ -1462,15 +1470,12 @@ async def test_daemon_tool_call_marks_compaction_busy_as_error() -> None:
         side_effect=DatabaseCompactionInProgressError("busy")
     )
 
-    response = await daemon._handle_tools_call(
-        {
-            "id": "1",
-            "params": {"name": "search", "arguments": {"type": "regex", "query": "x"}},
-        }
+    response = await _invoke_call_tool(
+        daemon, "search", {"type": "regex", "query": "x"}
     )
 
-    assert response["result"]["isError"] is True
-    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload == {
         "type": "DatabaseCompactionInProgressError",
         "message": "busy",
@@ -1498,15 +1503,10 @@ async def test_daemon_tool_call_marks_generic_tool_failure_as_error() -> None:
         new_callable=AsyncMock,
         side_effect=RuntimeError("boom"),
     ):
-        response = await daemon._handle_tools_call(
-            {
-                "id": "1",
-                "params": {"name": "daemon_status", "arguments": {}},
-            }
-        )
+        response = await _invoke_call_tool(daemon, "daemon_status", {})
 
-    assert response["result"]["isError"] is True
-    payload = _tool_error_payload(response["result"]["content"][0]["text"])
+    assert response.is_error is True
+    payload = _tool_error_payload(response.content[0].text)
     assert payload == {"type": "RuntimeError", "message": "boom"}
 
 
@@ -1522,8 +1522,7 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
 
     import httpx
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp.types import CallToolRequest
+    from mcp.client.streamable_http import streamable_http_client
 
     from chunkhound.daemon import ipc
     from chunkhound.daemon.client_proxy import ClientProxy
@@ -1663,42 +1662,26 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
             stdio_server.llm_manager = llm_manager
             stdio_server._scan_progress = dict(scan_progress)
             stdio_server._initialization_complete.set()
-            stdio_handler = stdio_server.server.request_handlers[CallToolRequest]
 
-            stdio_status_before = await stdio_handler(
-                CallToolRequest(
-                    method="tools/call",
-                    params={"name": "daemon_status", "arguments": {}},
-                    id="stdio-status-before",
-                )
+            stdio_status_before = await _invoke_call_tool(
+                stdio_server, "daemon_status", {}
             )
-            stdio_truncated = await stdio_handler(
-                CallToolRequest(
-                    method="tools/call",
-                    params={
-                        "name": "code_research",
-                        "arguments": {"query": truncation_marker},
-                    },
-                    id="stdio-truncated",
-                )
+            stdio_truncated = await _invoke_call_tool(
+                stdio_server, "code_research", {"query": truncation_marker}
             )
-            stdio_status_after = await stdio_handler(
-                CallToolRequest(
-                    method="tools/call",
-                    params={"name": "daemon_status", "arguments": {}},
-                    id="stdio-status-after",
-                )
+            stdio_status_after = await _invoke_call_tool(
+                stdio_server, "daemon_status", {}
             )
-            assert stdio_truncated.root.isError is True
+            assert stdio_truncated.is_error is True
             assert (
-                _tool_error_payload(stdio_truncated.root.content[0].text)
+                _tool_error_payload(stdio_truncated.content[0].text)
                 == expected_error
             )
-            assert stdio_status_before.root.isError is False
-            assert stdio_status_after.root.isError is False
+            assert stdio_status_before.is_error is False
+            assert stdio_status_after.is_error is False
             assert (
-                stdio_status_before.root.content[0].text
-                == stdio_status_after.root.content[0].text
+                stdio_status_before.content[0].text
+                == stdio_status_after.content[0].text
             )
 
             # Direct HTTP server via in-process ASGI and the SDK's SSE client.
@@ -1718,14 +1701,10 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                     transport=transport, base_url="http://chunkhound.test"
                 ) as http_client:
                     health_before = (await http_client.get("/health")).json()
-                    async with streamablehttp_client(
+                    async with streamable_http_client(
                         "http://chunkhound.test/mcp",
-                        httpx_client_factory=lambda **kwargs: httpx.AsyncClient(
-                            transport=transport,
-                            base_url="http://chunkhound.test",
-                            **kwargs,
-                        ),
-                    ) as (read_stream, write_stream, _):
+                        http_client=http_client,
+                    ) as (read_stream, write_stream):
                         async with ClientSession(
                             read_stream, write_stream
                         ) as http_session:
@@ -1735,7 +1714,7 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                             )
                     health_after = (await http_client.get("/health")).json()
 
-            assert http_truncated.isError is True
+            assert http_truncated.is_error is True
             assert _tool_error_payload(http_truncated.content[0].text) == expected_error
             assert health_before == health_after
             assert health_after["status"] == "ready"
@@ -1783,15 +1762,44 @@ async def test_synthesis_truncation_propagates_through_common_and_daemon(
                             "method": "tools/call",
                             "params": {"name": name, "arguments": arguments},
                         }
-                        await proxy._write_stdin_line(
-                            writer, (json.dumps(request) + "\n").encode()
-                        )
+                        # ClientProxy._write_stdin_line() was folded directly
+                        # into _forward_stdin_to_socket(). replicate its parse-and-forward
+                        # logic here to drive one request at a time.
+                        ipc.write_frame(writer, request)
+                        await writer.drain()
                         response = await asyncio.wait_for(
                             ipc.read_frame(reader), timeout=5.0
                         )
                         assert response["id"] == request_id
                         assert "error" not in response
                         return response["result"]
+
+                    # The daemon now dispatches tools/call through the real
+                    # SDK session (serve_connection()), which gates every
+                    # non-exempt method behind a completed initialize
+                    # handshake.
+                    init_request = {
+                        "jsonrpc": "2.0",
+                        "id": "daemon-initialize",
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": {"name": "test-client", "version": "1.0.0"},
+                        },
+                    }
+                    ipc.write_frame(writer, init_request)
+                    await writer.drain()
+                    init_response = await asyncio.wait_for(
+                        ipc.read_frame(reader), timeout=5.0
+                    )
+                    assert init_response["id"] == "daemon-initialize"
+                    assert "error" not in init_response
+                    ipc.write_frame(
+                        writer,
+                        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    )
+                    await writer.drain()
 
                     daemon_status_before = await daemon_stdio_call(
                         "daemon-status-before", "daemon_status", {}
@@ -1875,19 +1883,14 @@ async def test_daemon_tool_call_propagates_mixed_content_error_flag() -> None:
     ]
 
     with patch(
-        "chunkhound.mcp_server.common.handle_tool_call",
+        "chunkhound.mcp_server.base.handle_tool_call",
         new=AsyncMock(return_value=mixed_contents),
     ):
-        response = await daemon._handle_tools_call(
-            {
-                "id": "1",
-                "params": {"name": "daemon_status", "arguments": {}},
-            }
-        )
+        response = await _invoke_call_tool(daemon, "daemon_status", {})
 
-    assert response["result"]["isError"] is True
-    assert len(response["result"]["content"]) == 2
-    payload = _tool_error_payload(response["result"]["content"][1]["text"])
+    assert response.is_error is True
+    assert len(response.content) == 2
+    payload = _tool_error_payload(response.content[1].text)
     assert payload == {"type": "RuntimeError", "message": "second"}
 
 
@@ -1953,7 +1956,7 @@ def test_search_enum_restricted_without_embeddings():
     assert daemon_status_tool is not None, "daemon_status tool should be in list"
 
     # Verify the type enum is restricted to regex only
-    type_schema = search_tool.inputSchema["properties"]["type"]
+    type_schema = search_tool.input_schema["properties"]["type"]
     assert type_schema["enum"] == ["regex"], (
         f"Expected ['regex'] without embeddings, got {type_schema['enum']}"
     )
