@@ -37,27 +37,9 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          uv run --no-project python - <<'PYCODE'
-          import os, re, subprocess
-          tag = os.environ["RELEASE_TAG"]
-          source = os.environ["SOURCE_SHA"]
-          match = re.fullmatch(r"v(\d+\.\d+\.\d+(?:(a|b|rc)\d+)?)", tag)
-          if not match:
-              raise SystemExit(f"Invalid release tag: {tag!r}")
-          alpha = match.group(2) == "a"
-          if not re.fullmatch(r"[0-9a-f]{40}", source):
-              raise SystemExit("source_sha must be a full commit SHA")
-          resolved = subprocess.check_output(
-              ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"], text=True
-          ).strip()
-          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-          if resolved != source or head != source:
-              raise SystemExit(f"Release tag {tag} does not resolve to requested source {source}")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"version={match.group(1)}\nsource_sha={source}\n")
-              output.write(f"alpha={str(alpha).lower()}\n")
-          PYCODE
+        run: >-
+          uv run --no-project python scripts/release_tag.py validate
+          --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
 
   build-sdist:
     needs: prepare
@@ -187,29 +169,9 @@ jobs:
         uses: astral-sh/setup-uv@v3
 
       - name: Validate combined wheel installation
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          main_wheels=(main-dist/*.whl)
-          native_wheels=(native-dist/*.whl)
-          if [[ ${#main_wheels[@]} -ne 1 ]]; then
-            echo "Expected exactly one matching main wheel, found ${#main_wheels[@]}"
-            exit 1
-          fi
-          if [[ ${#native_wheels[@]} -ne 1 ]]; then
-            echo "Expected exactly one matching native wheel, found ${#native_wheels[@]}"
-            exit 1
-          fi
-
-          uv python install 3.12
-          workspace_dir="$(pwd)"
-          validation_dir="$(mktemp -d)"
-          cd "$validation_dir"
-          uv run --no-project --python 3.12 \
-            --with "$workspace_dir/main-dist"/*.whl \
-            --with "$workspace_dir/native-dist"/*.whl \
-            python "$workspace_dir/scripts/smoke_test_native_wheel.py"
+        run: >-
+          uv run --no-project python scripts/validate_release_wheels.py
+          --main-dist main-dist --native-dist native-dist
 
   validate-artifacts:
     needs: [prepare, build-sdist, build-runtime-wheels, build-native-wheel]

@@ -10,8 +10,8 @@ from __future__ import annotations
 import argparse
 import ast
 import os
-import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -20,6 +20,12 @@ from pathlib import Path
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name, parse_wheel_filename
+
+# Support direct execution from any working directory, including sdist tests.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.release_tag import parse_release_tag
 
 
 def check_metadata(text: str, name: str, version: str, alpha: bool) -> None:
@@ -144,12 +150,13 @@ def main() -> None:
     parser.add_argument("--dist", type=Path, default=Path("artifacts"))
     parser.add_argument("--rebuild-sdist", action="store_true")
     args = parser.parse_args()
-    match = re.fullmatch(r"v(\d+\.\d+\.\d+(?:(a|b|rc)\d+)?)", os.environ["RELEASE_TAG"])
-    if not match:
-        raise SystemExit("Invalid RELEASE_TAG")
-    version = match.group(1)
+    try:
+        release = parse_release_tag(os.environ["RELEASE_TAG"])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    version = release.version
     alpha = os.environ.get("ALPHA_RELEASE", "false") == "true"
-    if alpha and match.group(2) != "a":
+    if alpha and not release.alpha:
         raise SystemExit("Alpha publication requires an alpha tag")
     wheels = sorted(args.dist.glob("*.whl"))
     names = {check_wheel(wheel, version, alpha) for wheel in wheels}

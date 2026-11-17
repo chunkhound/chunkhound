@@ -90,32 +90,12 @@ runs:
         REQUESTED_RELEASE_TAG: ${{ inputs.release-tag }}
         SKIP_TAG_VERSION_PATCH: ${{ inputs.skip-tag-version-patch }}
       run: |
-        # maturin build has no --set-version flag; it reads the wheel version from
-        # Cargo.toml's [package] version. Cargo requires strict SemVer (a hyphen
-        # before any pre-release suffix) while the git tag uses PEP 440 (no
-        # hyphen, e.g. 5.2.0a3) -- convert before patching. maturin parses the
-        # Cargo version via pep440_rs, which normalizes the hyphenated form to
-        # the same PEP 440 version, so the wheel still ends up as 5.2.0a3.
+        # maturin reads Cargo.toml; the shared tag helper converts PEP 440
+        # to Cargo's hyphenated prerelease version before the build.
         if [[ "$SKIP_TAG_VERSION_PATCH" != "true" ]]; then
           release_tag="${REQUESTED_RELEASE_TAG:-$GITHUB_REF_NAME}"
-          export TAG_VERSION="${release_tag#v}"
-          uv run --no-project --python 3.12 python - <<'PYEOF'
-        import os, re, pathlib
-
-        tag_version = os.environ["TAG_VERSION"]
-        m = re.fullmatch(r"(\d+\.\d+\.\d+)((?:a|b|rc)\d+)?", tag_version)
-        if not m:
-            raise SystemExit(
-                f"Requested tag version {tag_version!r} is not a PEP 440 release tag; "
-                "refusing to build/publish an unversioned wheel. Pass "
-                "skip-tag-version-patch: true for non-release callers."
-            )
-        cargo_version = f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
-        path = pathlib.Path("Cargo.toml")
-        text = path.read_text()
-        new_text = re.sub(r'(?m)^version = ".*"', f'version = "{cargo_version}"', text, count=1)
-        path.write_text(new_text)
-        PYEOF
+          uv run --no-project --python 3.12 python scripts/release_tag.py \
+            patch-cargo --tag "$release_tag"
         fi
 
     - name: Build native wheel (Linux, manylinux_2_31 container)

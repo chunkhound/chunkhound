@@ -30,17 +30,9 @@ jobs:
         shell: bash
         env:
           TAG_TO_VALIDATE: ${{ github.ref_name }}
-        run: |
-          uv run --no-project python - <<'PYCODE'
-          import os, re, subprocess
-          tag = os.environ["TAG_TO_VALIDATE"]
-          match = re.fullmatch(r'v\d+\.\d+\.\d+(a|b|rc)\d+', tag)
-          if not match:
-              raise SystemExit(f"::error::Tag {tag!r} is not a valid PEP 440 pre-release (expected vX.Y.Z(a|b|rc)N)")
-          source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"source_sha={source}\n")
-          PYCODE
+        run: >-
+          uv run --no-project python scripts/release_tag.py validate
+          --tag "$TAG_TO_VALIDATE" --prerelease-only
 
   release:
     needs: validate-tag

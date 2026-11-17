@@ -129,36 +129,35 @@ def test_requested_tag_sets_version_and_channel_without_caller_flag(
     ).strip()
     for tag in ["v6.2.0a43", "v6.2.0b1", "v6.2.0rc1", "v6.2.0", "v7.0.0"]:
         subprocess.run(["git", "tag", tag], cwd=tmp_path, check=True)
-    workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/release-packages.yml").read_text()
-    )
-    step = next(
-        step
-        for step in workflow["jobs"]["prepare"]["steps"]
-        if step.get("id") == "release"
-    )
-    script = step["run"].split("<<'PYCODE'\n", 1)[1].split("\nPYCODE", 1)[0]
     output = tmp_path / "outputs"
     environment = {
         **os.environ,
-        "RELEASE_TAG": f"v{version}",
-        "SOURCE_SHA": source,
         "GITHUB_OUTPUT": str(output),
     }
+    command = [
+        sys.executable,
+        str(ROOT / "scripts/release_tag.py"),
+        "validate",
+        "--tag",
+        f"v{version}",
+        "--source-sha",
+        source,
+    ]
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        command,
         cwd=tmp_path,
         env=environment,
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert output.read_text() == (
-        f"version={version}\nsource_sha={source}\nalpha={alpha}\n"
-    )
-    environment["SOURCE_SHA"] = "0" * 40
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert outputs["version"] == version
+    assert outputs["source_sha"] == source
+    assert outputs["alpha"] == alpha
+    command[-1] = "0" * 40
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        command,
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -229,6 +228,27 @@ def test_release_workflows_keep_native_first_and_isolate_alpha_approvals():
     assert "alpha" not in stable["jobs"]["release"]["with"]
     prerelease = yaml.safe_load((ROOT / ".github/workflows/release-rc.yml").read_text())
     assert "alpha" not in prerelease["jobs"]["release"]["with"]
+    prepare = next(
+        step for step in jobs["prepare"]["steps"] if step.get("id") == "release"
+    )
+    assert "scripts/release_tag.py validate" in prepare["run"]
+    assert '--tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"' in prepare["run"]
+    tag_gate = prerelease["jobs"]["validate-tag"]["steps"][-1]
+    assert "scripts/release_tag.py validate" in tag_gate["run"]
+    assert '--tag "$TAG_TO_VALIDATE" --prerelease-only' in tag_gate["run"]
+    native_action = yaml.safe_load(
+        (ROOT / ".github/actions/build-native-wheel/action.yml").read_text()
+    )
+    patch = next(
+        step
+        for step in native_action["runs"]["steps"]
+        if step["name"] == "Patch Cargo.toml version from requested tag"
+    )
+    assert "scripts/release_tag.py" in patch["run"]
+    assert 'patch-cargo --tag "$release_tag"' in patch["run"]
+    wheel_gate = jobs["validate-release"]["steps"][-1]
+    assert "scripts/validate_release_wheels.py" in wheel_gate["run"]
+    assert "--main-dist main-dist --native-dist native-dist" in wheel_gate["run"]
     for job in jobs.values():
         for step in job.get("steps", []):
             if step.get("uses", "").startswith("actions/upload-artifact@"):
