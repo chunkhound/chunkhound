@@ -324,16 +324,15 @@ jobs:
 
   prepare-alpha:
     needs:
-      - site-build
       - tests
       - rust-checks
-      - site-build-validation
       - watchman-rollout-gate
       - native-wheel-smoke-arm64
       - old-linux-wheel-smoke
       - native-dev-macos
     # Forks, PRs, merge queues and dispatches never allocate production tags.
-    # Pages deployment is intentionally not a release prerequisite.
+    # Pages deployment and docs-site validation are intentionally not release
+    # prerequisites.
     if: github.repository == 'chunkhound/chunkhound' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10

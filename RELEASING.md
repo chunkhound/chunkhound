@@ -45,6 +45,13 @@ is a distinct PyPI project published by the reusable workflow's `publish-native`
 Add these entries before enabling the new workflows. Existing publisher entries for
 old workflow filenames do not authorize the reusable publishing jobs.
 
+Both publishing steps disable optional attestations while retaining OIDC Trusted
+Publishing. Attestations identify the caller workflow (for example, `ci.yml`),
+but PyPI authenticates the reusable `release-packages.yml` workflow. PyPI rejects
+that mismatch with `400 Invalid attestations`. Keep attestations disabled until
+this reusable-workflow limitation is resolved; do not change the publisher's
+workflow filename to the caller to work around it.
+
 **Each project's trusted publisher must only claim the environment name its own jobs actually
 declare.** An overly broad "any environment" entry on `chunkhound` will intercept the OIDC token
 exchange meant for `chunkhound-native` (or vice versa) — the upload then fails with a `403 Invalid
