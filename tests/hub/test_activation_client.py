@@ -34,7 +34,12 @@ from chunkhound.hub.errors import (
 )
 from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.manifest import configured_key
-from chunkhound.hub.trust import grant_trust, trust_store_path
+from chunkhound.hub.trust import (
+    checkout_digest,
+    grant_trust,
+    manifest_url_digest,
+    trust_store_path,
+)
 from chunkhound.providers.database import ownership
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
@@ -107,6 +112,47 @@ async def test_validated_source_is_bound_to_checkout_and_exact_url(
     assert hub_http.requests == []
 
 
+async def test_validated_source_binding_is_snapshotted_before_fetch(
+    tmp_path, hub_http, monkeypatch
+):
+    first_checkout = tmp_path / "first-checkout"
+    second_checkout = tmp_path / "second-checkout"
+    first_checkout.mkdir()
+    second_checkout.mkdir()
+    checkout = tmp_path / "checkout"
+    checkout.symlink_to(first_checkout, target_is_directory=True)
+    config = config_for(checkout, hub_http)
+    publish(hub_http, build_database(tmp_path / "published"))
+    captured_url = config.hub.url
+    captured_checkout_digest = checkout_digest(checkout)
+    captured_url_digest = manifest_url_digest(captured_url)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    fetched_urls = []
+
+    async def delayed_fetch(url):
+        fetched_urls.append(url)
+        entered.set()
+        await release.wait()
+        return hub_http.resources["/catalogue?token=secret"]
+
+    monkeypatch.setattr(hub_client, "fetch_manifest", delayed_fetch)
+    task = asyncio.create_task(fetch_validated_manifest(config))
+    await entered.wait()
+    config.hub.url += "&changed=true"
+    checkout.unlink()
+    checkout.symlink_to(second_checkout, target_is_directory=True)
+    release.set()
+
+    source = await task
+
+    assert fetched_urls == [captured_url]
+    assert source.checkout_digest == captured_checkout_digest
+    assert source.url_digest == captured_url_digest
+    assert source.checkout_digest != checkout_digest(checkout)
+    assert source.url_digest != manifest_url_digest(config.hub.url)
+
+
 async def test_validated_source_authorizes_without_reading_malformed_store(
     tmp_path, hub_http, monkeypatch
 ):
@@ -145,14 +191,14 @@ async def test_automatic_local_filesystem_failure_is_fatal(
     config = config_for(tmp_path / "checkout", hub_http)
     grant_trust(config.target_dir, config.hub.url)
     target = config.database.get_db_path()
-    original_exists = Path.exists
+    original_lstat = Path.lstat
 
     def fail_target(path):
         if path == target:
             raise OSError("private-path?secret")
-        return original_exists(path)
+        return original_lstat(path)
 
-    monkeypatch.setattr(Path, "exists", fail_target)
+    monkeypatch.setattr(Path, "lstat", fail_target)
     with pytest.raises(HubLocalStateError, match="local filesystem"):
         await pull(config, automatic=True)
     assert hub_http.requests == []
@@ -354,20 +400,20 @@ async def test_repeated_cancellation_waits_for_install_and_workspace_cleanup(
         threading.Event(),
         threading.Event(),
     )
-    original_exists = Path.exists
+    original_lstat = Path.lstat
 
     def block_exclusive_recheck(path):
         # Deterministic filesystem boundary, after initial trigger and download.
         if path == target and downloaded.is_set() and not entered.is_set():
             entered.set()
             assert release.wait(20)
-        return original_exists(path)
+        return original_lstat(path)
 
     def mark_download(route):
         if route.startswith("/base.tar.gz"):
             downloaded.set()
 
-    monkeypatch.setattr(Path, "exists", block_exclusive_recheck)
+    monkeypatch.setattr(Path, "lstat", block_exclusive_recheck)
     hub_http.before_get = mark_download
     task = asyncio.create_task(pull(config, automatic=True))
     try:
@@ -522,7 +568,7 @@ async def test_two_pulls_and_cold_provider_never_observe_partial_install(
         threading.Event(),
         threading.Event(),
     )
-    original_exists = Path.exists
+    original_lstat = Path.lstat
 
     def mark_download(route):
         if route.startswith("/base.tar.gz"):
@@ -532,10 +578,10 @@ async def test_two_pulls_and_cold_provider_never_observe_partial_install(
         if path == target and downloaded.is_set() and not entered.is_set():
             entered.set()
             assert release.wait(20)
-        return original_exists(path)
+        return original_lstat(path)
 
     hub_http.before_get = mark_download
-    monkeypatch.setattr(Path, "exists", pause_exclusive_recheck)
+    monkeypatch.setattr(Path, "lstat", pause_exclusive_recheck)
     first = asyncio.create_task(pull(config, automatic=True))
     cls = DuckDBProvider if backend == "duckdb" else LanceDBProvider
     opener = cls(target, base_directory=config.target_dir)
@@ -584,20 +630,20 @@ def test_asyncio_shutdown_waits_for_install_and_workspace_cleanup(
         threading.Event(),
         threading.Event(),
     )
-    original_exists = Path.exists
+    original_lstat = Path.lstat
     failures = []
 
     def block_exclusive_recheck(path):
         if path == target and downloaded.is_set() and not entered.is_set():
             entered.set()
             assert release.wait(20)
-        return original_exists(path)
+        return original_lstat(path)
 
     def mark_download(route):
         if route.startswith("/base.tar.gz"):
             downloaded.set()
 
-    monkeypatch.setattr(Path, "exists", block_exclusive_recheck)
+    monkeypatch.setattr(Path, "lstat", block_exclusive_recheck)
     hub_http.before_get = mark_download
 
     def probe(loop, task, remaining):

@@ -55,13 +55,16 @@ class ValidatedHubSource:
 
 
 async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
-    if not config.hub.url:
+    url = config.hub.url
+    if not url:
         raise HubUnavailable("No hub manifest URL configured")
     checkout = config.target_dir or Path.cwd()
+    checkout_binding = checkout_digest(checkout)
+    url_binding = manifest_url_digest(url)
     return ValidatedHubSource(
-        manifest=parse_manifest(await fetch_manifest(config.hub.url)),
-        checkout_digest=checkout_digest(checkout),
-        url_digest=manifest_url_digest(config.hub.url),
+        manifest=parse_manifest(await fetch_manifest(url)),
+        checkout_digest=checkout_binding,
+        url_digest=url_binding,
     )
 
 
@@ -111,7 +114,15 @@ def automatic_target_absent(
 ) -> bool:
     """Return true only for an unambiguous absent target under ownership."""
     with ownership_scope(target, ownership):
-        return not target.exists()
+        try:
+            target.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            raise HubLocalStateError(
+                "Hub local filesystem is unavailable"
+            ) from None
+        return False
 
 
 async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
@@ -137,7 +148,7 @@ async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
 def automatic_pull_eligible(
     config: Config, *, mcp_mode: bool, no_embeddings: bool
 ) -> bool:
-    """Policy only: local identity/ownership inspection decides replacement."""
+    """Return whether automatic cold installation may be considered."""
     return (
         not mcp_mode
         and not no_embeddings
