@@ -19,7 +19,6 @@ not grow the pattern further without discussion.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import random
 import re
 import socket
@@ -47,6 +46,7 @@ from chunkhound.services.prompts import fetchurl as fetchurl_prompts
 from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
 )
+from chunkhound.utils.ssrf import validate_url as _validate_ssrf
 from chunkhound.utils.websearch_core import (
     _managed_browser,
     fetch_url_to_content,
@@ -64,8 +64,14 @@ __all__ = [
 ]
 
 
-class FetchUrlError(Exception):
-    """Raised by fetchurl for SSRF rejection, missing PyMuPDF, or unexpected kind."""
+class FetchUrlError(ValueError):
+    """Raised by fetchurl for missing PyMuPDF, unexpected kind, or other
+    fetchurl-local failures — deliberately NOT an SSRF type, because it
+    also covers non-SSRF failures. SSRF rejections from the shared
+    validator propagate as ``SsrfBlockedError`` and are caught alongside
+    ``FetchUrlError`` at the CLI and MCP boundaries (see
+    ``api/cli/commands/fetchurl.py`` and ``mcp_server/tools.py``).
+    """
 
 
 def _wrap(url: str, answer: str) -> str:
@@ -124,50 +130,12 @@ def _derive_page_title(
     return _normalize_title(candidate)
 
 
-async def _validate_url_and_resolve(url: str) -> None:
-    """SSRF pre-check. Rejects non-http(s), missing host, and private IPs.
-
-    DNS lookup runs in a worker thread — cold-cache getaddrinfo can
-    block for hundreds of ms and would stall the event loop if called
-    directly from this coroutine.
-
-    Out of scope: full DNS-rebind defence. urllib and Chrome re-resolve the
-    hostname independently on the actual fetch, so a resolver that returned
-    a public IP here could still return a private IP at fetch time. Closing
-    that gap requires pinning the resolved IP through the fetch, which the
-    fetch stack does not currently support.
-    """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise FetchUrlError(f"Unsupported URL scheme: {parsed.scheme!r}")
-    hostname = parsed.hostname
-    if hostname is None:
-        raise FetchUrlError(f"URL has no hostname: {url!r}")
-
-    try:
-        addrs = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
-    except socket.gaierror as e:
-        raise FetchUrlError(f"DNS resolution failed for {hostname!r}: {e}") from e
-
-    for family, _type, _proto, _canon, sockaddr in addrs:
-        ip_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            continue
-        if (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise FetchUrlError(
-                f"Blocked address {ip_str!r} for {hostname!r} "
-                f"(loopback/private/link-local/reserved/multicast/unspecified)"
-            )
-
+# The shared ``chunkhound.utils.ssrf`` validator is called directly in
+# ``_fetch_with_retry`` below; its ``SsrfBlockedError`` propagates
+# unchanged and is caught alongside ``FetchUrlError`` at the CLI/MCP
+# boundaries. Out of scope, as before: full DNS-rebind defence (urllib
+# and Chrome re-resolve independently), and validated redirects —
+# fetchurl validates only the initial URL (see chunkhound issue #478).
 
 def _classify_and_raise_if_terminal(e: BaseException) -> None:
     """Re-raise ``e`` if non-retryable; return silently if retryable.
@@ -256,7 +224,9 @@ async def _fetch_with_retry(
     the loop downgrades to urllib, so ``max_retries=3`` with an attempt-0
     browser death yields two remaining urllib attempts, not three.
     """
-    await _validate_url_and_resolve(url)
+    # SSRF pre-check. Rejections propagate as ``SsrfBlockedError``,
+    # which the CLI and MCP boundaries catch alongside ``FetchUrlError``.
+    await _validate_ssrf(url)
 
     async with _managed_browser(warning_callback) as managed_browser:
         # Rebindable local: on a browser-fatal exception we set this to None
@@ -270,7 +240,16 @@ async def _fetch_with_retry(
                 delay = random.uniform(0, min(8.0, 0.5 * (2**attempt)))
                 await asyncio.sleep(delay)
             try:
-                return await fetch_url_to_content(url, browser)
+                # Explicit opt-out: fetchurl already pre-validated the
+                # URL above. Letting fetch_url_to_content's secure
+                # default run as well would re-validate on every retry.
+                # Consequence, tracked in chunkhound issue #478:
+                # fetchurl therefore still validates only the initial
+                # URL — its redirects are unchecked, unlike websearch's
+                # hop-by-hop validation.
+                return await fetch_url_to_content(
+                    url, browser, validate_ssrf=False
+                )
             except Exception as e:
                 if browser is not None and _is_browser_fatal(e):
                     if warning_callback:

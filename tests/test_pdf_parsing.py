@@ -10,6 +10,9 @@ This module tests the PDF parsing implementation to verify:
 6. Basic PDF parsing integrates with ChunkHound's universal parser
 """
 
+import subprocess
+import sys
+
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -98,6 +101,21 @@ class TestPDFMapping:
         # PDF doesn't use tree-sitter nodes, so names should be empty
         assert mapping.extract_function_name(None, "") == ""
         assert mapping.extract_class_name(None, "") == ""
+
+    def test_importing_parser_mappings_does_not_import_pymupdf(self):
+        """`import pymupdf` loads an ONNX layout model when pymupdf-layout is
+        installed, and every parse worker imports all mappings. PyMuPDF must load
+        only when a PDF is parsed."""
+        code = (
+            "import sys\n"
+            "import chunkhound.parsers.mappings\n"
+            "import chunkhound.parsers.mappings.pdf\n"
+            "print('pymupdf' in sys.modules)\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+        assert out.stdout.strip() == "False"
 
 
 class TestPDFParsingWithPyMuPDF:

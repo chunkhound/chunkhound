@@ -20,6 +20,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from fnmatch import fnmatch
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -47,6 +48,9 @@ from chunkhound.parsers.chunk_splitter import (
 )
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.providers.database.like_utils import escape_like_pattern
+from chunkhound.providers.database.serial_executor import (
+    DatabaseTemporarilyUnavailableError,
+)
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -59,12 +63,14 @@ from chunkhound.utils.file_patterns import (
 )
 from chunkhound.utils.hashing import compute_file_hash
 from chunkhound.utils.logging_guard import log_if_not_mcp
+from chunkhound.utils.parent_watch import exit_when_parent_dies
 
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
 from .progress_utils import _update_speed_field
 from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
+from .rust_incremental_precheck import RustRunPlan, plan_rust_run
 
 # Lazy multiprocessing start-method guard — applied once before pool creation.
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
@@ -96,14 +102,6 @@ def _ensure_mp_start_method() -> None:
 
 def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
     return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
-
-
-class _StatResult:
-    """Lightweight stat-like object used in _store_parsed_results."""
-
-    def __init__(self, size: int, mtime: float) -> None:
-        self.st_size = size
-        self.st_mtime = mtime
 
 
 class _IgnoreMatcher(Protocol):
@@ -572,8 +570,20 @@ class IndexingCoordinator(BaseService):
                     )
                 self._root_identity_validated = True
 
-            # Use batch processor with single file for consistency
-            single_file: list[tuple[Path, str | None]] = [(file_path, None)]
+            # Use batch processor with single file for consistency. Pass the
+            # content hash: a None here is stored as content_hash = NULL, which
+            # stops the next directory scan's hash-confirm from skipping this
+            # file when only its mtime moves (checkout, branch switch, copied
+            # index), so the whole file is re-parsed and re-embedded. A path
+            # that is gone (realtime delete race) keeps None, so the batch
+            # processor reports it as before instead of compute_file_hash
+            # raising ValueError here.
+            content_hash = (
+                self._compute_hash_with_fallback(file_path)
+                if Path(file_path).is_file()
+                else None
+            )
+            single_file: list[tuple[Path, str | None]] = [(file_path, content_hash)]
             parsed_results = await self._process_files_in_batches(single_file)
 
             if not parsed_results:
@@ -823,7 +833,9 @@ class IndexingCoordinator(BaseService):
         # Process batches in parallel using ProcessPoolExecutor
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers, initializer=exit_when_parent_dies
+        ) as executor:
             # Submit all batches for concurrent processing
             # Pass config for structured file size filtering (JSON/YAML/TOML)
             timeout_s = timeout_s_probe
@@ -1098,79 +1110,29 @@ class IndexingCoordinator(BaseService):
                         )
                 continue
 
-            # Detect language for storage
-            language = result.language
-
-            # Per-file transaction boundaries
+            # The whole file write is ONE provider operation: a transaction that
+            # spans awaits lets a Rust handover close the connection inside it.
             try:
-                await self._db.begin_transaction_async()
-                # Create stat object for _store_file_record
-                file_stat = _StatResult(result.file_size, result.file_mtime)
-                # Extract content hash if available (from parsing result or precomputed)
-                content_hash = getattr(result, "content_hash", None)
-                file_id, is_existing = await self._store_file_record(
-                    result.file_path, file_stat, language, content_hash
+                file_model = File(
+                    path=FilePath(
+                        self._get_relative_path(result.file_path).as_posix()
+                    ),
+                    size_bytes=result.file_size,
+                    mtime=result.file_mtime,
+                    language=result.language,
+                    content_hash=getattr(result, "content_hash", None),
+                )
+                file_id, _, ids = await self._db.store_file_result_async(
+                    file_model, partial(self._plan_chunk_changes, result.chunks)
                 )
 
                 # Track file_id for single-file case
                 file_ids.append(file_id)
-
-                # Convert result chunks to Chunk models using from_dict()
-                new_chunk_models = [
-                    Chunk.from_dict({**chunk_data, "file_id": file_id})
-                    for chunk_data in result.chunks
-                ]
-
-                existing_chunks: list[Chunk]
-                if is_existing:
-                    existing_chunks = cast(
-                        list[Chunk],
-                        await self._db.get_chunks_by_file_id_async(
-                            file_id, as_model=True
-                        ),
-                    )
-                else:
-                    existing_chunks = []
-
-                if existing_chunks:
-                    # Smart diff to preserve embeddings
-                    chunk_diff = self._chunk_cache.diff_chunks(
-                        new_chunk_models, existing_chunks
-                    )
-
-                    # Delete modified/removed chunks
-                    chunks_to_delete = chunk_diff.deleted + chunk_diff.modified
-                    if chunks_to_delete:
-                        chunk_ids_to_delete = [
-                            int(chunk.id)
-                            for chunk in chunks_to_delete
-                            if chunk.id is not None
-                        ]
-                        if chunk_ids_to_delete:
-                            await self._db.delete_chunks_batch_async(
-                                chunk_ids_to_delete
-                            )
-
-                    # Store new/modified chunks (pass models directly)
-                    chunks_to_store = chunk_diff.added + chunk_diff.modified
-                    chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
-                    ids = (
-                        await self._db.insert_chunks_batch_async(chunks_to_store)
-                        if chunks_to_store
-                        else []
-                    )
-                else:
-                    # New file or existing file with no chunks — store all
-                    new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
-                    ids = await self._db.insert_chunks_batch_async(new_chunk_models)
                 logger.debug(f"Batch inserted {len(ids)} chunks for file_id {file_id}")
                 stats["chunk_ids_needing_embeddings"].extend(ids)
                 stats["total_chunks"] += len(ids)
                 # Count this file as processed successfully (stored or updated)
                 stats["total_files"] += 1
-
-                # Commit per-file; threshold-based checkpointing manages WAL compaction
-                await self._db.commit_transaction_async(force_checkpoint=False)
 
                 # Update progress
                 if file_task is not None and self.progress:
@@ -1190,24 +1152,12 @@ class IndexingCoordinator(BaseService):
                             info=_progress_info(stored, skipped, errs, display_chunks),
                         )
 
-            except asyncio.CancelledError:
-                # CancelledError is a BaseException (not Exception) since Python
-                # 3.8, so it skips the `except Exception` branch below. Without
-                # this handler, a task cancellation (e.g. service shutdown)
-                # between begin_transaction_async() and commit_transaction_async()
-                # leaves the DB transaction open, and a later disconnect()'s
-                # mandatory CHECKPOINT fails with "transaction local changes".
-                try:
-                    await self._db.rollback_transaction_async()
-                except Exception:
-                    logger.warning(
-                        "Failed to roll back transaction while cancelling "
-                        f"processing of {result.file_path}",
-                        exc_info=True,
-                    )
+            except DatabaseTemporarilyUnavailableError:
+                # Rejected before it opened anything; callers retry it (the
+                # realtime busy-retry for a single file).
                 raise
             except Exception as e:
-                await self._db.rollback_transaction_async()
+                # The provider operation already rolled back.
                 stats["errors"].append({"file": str(result.file_path), "error": str(e)})
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
@@ -1507,6 +1457,10 @@ class IndexingCoordinator(BaseService):
                 except Exception:
                     db_meta_map = {}
                 precomputed_hashes: dict[str, str] = {}
+                # (stored path, current st_mtime, confirmed content_hash) per
+                # file confirmed unchanged by hash; its stored mtime is
+                # refreshed so the next run does not hash it again.
+                mtime_refresh: list[tuple[str, float, str]] = []
                 for f in files:
                     try:
                         rel = self._get_relative_path(f).as_posix()
@@ -1577,6 +1531,9 @@ class IndexingCoordinator(BaseService):
                                     # False positive - metadata changed but content didn't
                                     skipped_unchanged += 1
                                     reasons["ok"] += 1
+                                    mtime_refresh.append(
+                                        (rel, float(st.st_mtime), db_hash)
+                                    )
                                 else:
                                     # Content actually changed (or hash unavailable) - reindex
                                     precomputed_hashes[str(f.resolve())] = cur_hash
@@ -1608,10 +1565,20 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
                 files_to_process = files_to_process_with_hashes
+                mtimes_refreshed = 0
+                if mtime_refresh:
+                    try:
+                        mtimes_refreshed = await self._db.refresh_file_mtimes_async(
+                            mtime_refresh
+                        )
+                    except Exception as e:
+                        # Costs only a re-hash on the next run.
+                        logger.warning(f"Could not refresh stored mtimes: {e}")
                 _t5 = _t.perf_counter()
                 logger.info(
                     f"Change scan: {len(files_to_process)}/{len(files)} to process "
-                    f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged)"
+                    f"in {(_t5 - _t4) * 1000:.0f}ms ({skipped_unchanged} unchanged, "
+                    f"{mtimes_refreshed} mtimes refreshed)"
                 )
                 if debug_skip:
                     logger.warning(
@@ -1620,10 +1587,31 @@ class IndexingCoordinator(BaseService):
                         f"mtime_eps={mtime_eps} files_to_process={len(files_to_process)} total={len(files)}"
                     )
 
+            # Phase 2.6 (Rust only): decide on Python's own connection whether
+            # the Rust run has anything to write, BEFORE the database is handed
+            # to Rust -- the handoff refuses every reader until Rust returns.
+            # See chunkhound/services/rust_incremental_precheck.py.
+            rust_plan: RustRunPlan | None = None
+            rust_do_cleanup = do_cleanup
+            if _use_rust and not force_reindex:
+                from chunkhound.pipeline_bridge import rust_mtime_epsilon
+
+                rust_plan = await plan_rust_run(
+                    self._db,
+                    files,
+                    directory,
+                    rust_mtime_epsilon(self.config),
+                    do_cleanup=do_cleanup,
+                    files_to_process=files_to_process,
+                )
+                files_to_process = rust_plan.files_to_process
+                rust_do_cleanup = rust_plan.do_cleanup
+            skip_rust = rust_plan is not None and rust_plan.skip
+
             # Phase 3: Parse + Store
             parse_task: TaskID | None = None
             store_task: TaskID | None = None
-            if self.progress:
+            if self.progress and not skip_rust:
                 # For the Rust pipeline, `files_to_process` is the full
                 # discovered-file list (line 1453) — Rust's own diff phase
                 # narrows it down internally, and the first "parse" callback
@@ -1693,7 +1681,28 @@ class IndexingCoordinator(BaseService):
 
             # ── Rust path (CHUNKHOUND_USE_RUST=1) ─────────────────
             # Detected at top of process_directory to gate cleanup + change detection.
-            if _use_rust:
+            if skip_rust:
+                # Nothing to write or remove: the database is never handed to
+                # Rust, so readers are never refused. Rust's store-thread open()
+                # would also have recreated HNSW indexes a crashed earlier run
+                # left missing -- keep that recovery here (idempotent).
+                await self._db.ensure_all_hnsw_indexes_async()
+                if _diff_task is not None and self.progress:
+                    checked = max(len(files), 1)
+                    self.progress.reset(_diff_task, total=checked, start=True)
+                    self.progress.update(
+                        _diff_task, completed=checked, info="no changes"
+                    )
+                skipped_unchanged = len(files)
+                logger.info(
+                    f"Diff: 0/{len(files)} changed "
+                    f"({rust_plan.work.skipped_by_hash if rust_plan else 0} "
+                    "unchanged-by-hash, "
+                    f"{rust_plan.work.mtimes_refreshed if rust_plan else 0} "
+                    "mtimes refreshed); Rust pipeline not started"
+                )
+
+            elif _use_rust:
                 # The Rust pipeline handles parse → embed → write in one call.
                 from chunkhound.services.rust_pipeline_runner import (
                     run_rust_indexing_phase,
@@ -1715,7 +1724,7 @@ class IndexingCoordinator(BaseService):
                     files_to_process=_normalize_to_path_tuples(files_to_process),
                     directory=directory,
                     force_reindex=force_reindex,
-                    do_cleanup=do_cleanup,
+                    do_cleanup=rust_do_cleanup,
                     diff_task=_diff_task,
                     parse_task=parse_task,
                 )
@@ -1765,7 +1774,9 @@ class IndexingCoordinator(BaseService):
                 logger.info(
                     f"Diff: {agg_total_files}/{len(files)} changed in "
                     f"{_diff_elapsed * 1000:.0f}ms "
-                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash)"
+                    f"({rust_result.files_skipped_unchanged} unchanged-by-hash, "
+                    f"{rust_plan.work.mtimes_refreshed if rust_plan else 0} "
+                    "mtimes refreshed)"
                 )
                 # Total skipped = discovered files minus those actually processed.
                 # skipped_by_hash only covers mtime-changed-but-hash-matched files;
@@ -1980,54 +1991,32 @@ class IndexingCoordinator(BaseService):
             logger.warning(f"Failed to compute hash for {rel_path}: {e}")
             return None
 
-    async def _store_file_record(
+    def _plan_chunk_changes(
         self,
-        file_path: Path,
-        file_stat: Any,
-        language: Language,
-        content_hash: str | None = None,
-    ) -> tuple[int, bool]:
-        """Store or update file record in database.
+        chunk_dicts: list[dict[str, Any]],
+        file_id: int,
+        existing_chunks: list[Chunk],
+    ) -> tuple[list[int], list[Chunk]]:
+        """Return (chunk ids to delete, chunks to insert) for one file.
 
-        Executes DB reads (get_file_by_path_async) inside the caller's open
-        transaction.  This is safe under DuckDB MVCC — reads see a consistent
-        snapshot of the data at transaction-start.  The caller is responsible
-        for the surrounding begin_transaction_async / commit_transaction_async.
-
-        Args:
-            file_path: Path to the file
-            file_stat: File stat object with st_size and st_mtime
-            language: Programming language of the file
-            content_hash: Optional content hash for change detection
-
-        Returns:
-            Tuple of (file_id, is_existing) where is_existing indicates
-            whether the file already existed in the database.
+        Pure Python: it runs on the database thread inside the provider's
+        store_file_result operation. Unchanged chunks keep their embeddings.
         """
-        relative_path = self._get_relative_path(file_path)
-        existing_file = cast(
-            dict[str, Any] | None,
-            await self._db.get_file_by_path_async(relative_path.as_posix()),
+        new_chunks = [
+            Chunk.from_dict({**chunk_data, "file_id": file_id})
+            for chunk_data in chunk_dicts
+        ]
+        if not existing_chunks:
+            return [], self._validate_chunk_sizes(new_chunks)
+        chunk_diff = self._chunk_cache.diff_chunks(new_chunks, existing_chunks)
+        delete_ids = [
+            int(chunk.id)
+            for chunk in chunk_diff.deleted + chunk_diff.modified
+            if chunk.id is not None
+        ]
+        return delete_ids, self._validate_chunk_sizes(
+            chunk_diff.added + chunk_diff.modified
         )
-
-        if existing_file:
-            file_id = existing_file["id"]
-            await self._db.update_file_async(
-                file_id,
-                size_bytes=file_stat.st_size,
-                mtime=file_stat.st_mtime,
-                content_hash=content_hash,
-            )
-            return file_id, True
-
-        file_model = File(
-            path=FilePath(relative_path.as_posix()),
-            size_bytes=file_stat.st_size,
-            mtime=file_stat.st_mtime,
-            language=language,
-            content_hash=content_hash,
-        )
-        return await self._db.insert_file_async(file_model), False
 
     async def get_stats(self) -> dict[str, Any]:
         """Get database statistics.
@@ -2520,7 +2509,9 @@ class IndexingCoordinator(BaseService):
         # Process subtrees in parallel
         _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers, initializer=exit_when_parent_dies
+        ) as executor:
             futures = []
             for subtree in top_level_items:
                 # Filter precomputed repo roots to those under this subtree

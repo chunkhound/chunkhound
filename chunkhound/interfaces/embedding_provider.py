@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 # Import and re-export exceptions for convenience
 from chunkhound.core.exceptions.embedding import (
@@ -39,7 +39,17 @@ class EmbeddingConfig:
     client_side_truncation: bool = False
 
 
-class EmbeddingProvider(Protocol):
+@runtime_checkable
+class EmbeddingSpaceIdentityProvider(Protocol):
+    """Provider contract for safe cross-request vector caching."""
+
+    @property
+    def embedding_space_identity(self) -> str:
+        """Opaque identity covering all settings that select an embedding space."""
+        ...
+
+
+class EmbeddingProvider(EmbeddingSpaceIdentityProvider, Protocol):
     """Abstract protocol for embedding providers.
 
     Defines the interface that all embedding implementations must follow.
@@ -114,6 +124,28 @@ class EmbeddingProvider(Protocol):
 
         Returns:
             List of embedding vectors (one per input text)
+
+        Raises:
+            EmbeddingError: If embedding generation fails
+        """
+        ...
+
+    async def embed_query(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for search queries.
+
+        Every place that embeds a search query to compare against indexed chunk
+        vectors calls this, never ``embed``. Some models embed queries and
+        documents asymmetrically (Voyage's ``input_type``): chunks are indexed
+        as documents, and a query embedded as a document ranks as a
+        document-vs-document match, which can push the right chunk far down
+        the list. A provider whose model makes no such distinction delegates
+        to ``embed``.
+
+        Args:
+            texts: List of query strings to embed
+
+        Returns:
+            List of embedding vectors (one per input query)
 
         Raises:
             EmbeddingError: If embedding generation fails
