@@ -8,7 +8,12 @@ __getattr__.
 
 from typing import TYPE_CHECKING
 
-from .base import MCPServerBase
+from chunkhound.utils.blas_threads import limit_blas_threads
+
+# First, before .base imports numpy: the chunkhound-mcp script enters here.
+limit_blas_threads()
+
+from .base import MCPServerBase  # noqa: E402
 
 if TYPE_CHECKING:  # type checkers only; avoid runtime hard deps
     from .http_server import HttpMCPServer as _HttpMCPServer  # noqa: F401
