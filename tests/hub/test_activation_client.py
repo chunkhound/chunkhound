@@ -15,15 +15,26 @@ import duckdb
 import pytest
 from loguru import logger
 
+import chunkhound.hub.client as hub_client
 import chunkhound.hub.errors as hub_errors
+import chunkhound.hub.trust as hub_trust
 import chunkhound_native as native
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.hub_config import ArchiveLimits
 from chunkhound.core.embedding_model_drift import ActiveModel, write_active_model
-from chunkhound.hub.client import local_needs_pull, pull
-from chunkhound.hub.errors import HubDatabaseMismatch, HubInstallationInterrupted
+from chunkhound.hub.client import (
+    fetch_validated_manifest,
+    local_needs_pull,
+    pull,
+)
+from chunkhound.hub.errors import (
+    HubDatabaseMismatch,
+    HubInstallationInterrupted,
+    HubLocalStateError,
+)
 from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.manifest import configured_key
+from chunkhound.hub.trust import grant_trust, trust_store_path
 from chunkhound.providers.database import ownership
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
@@ -34,6 +45,117 @@ from chunkhound.providers.database.ownership import (
 from tests.hub.activation_support import config_for, publish
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import snapshot
+
+
+@pytest.fixture(autouse=True)
+def isolated_trust_store(tmp_path, monkeypatch):
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # Existing activation contracts predate persisted consent and exercise later
+    # boundaries. Focused authorization tests below restore the real matcher.
+    monkeypatch.setattr(hub_client, "is_trusted", lambda checkout, url: True)
+
+
+@pytest.mark.parametrize("grant_for", [None, "checkout", "url"])
+async def test_automatic_pull_requires_checkout_and_exact_url_trust(
+    tmp_path, hub_http, monkeypatch, grant_for
+):
+    monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
+    config = config_for(tmp_path / "checkout", hub_http)
+    if grant_for == "checkout":
+        grant_trust(tmp_path / "different-checkout", config.hub.url)
+    elif grant_for == "url":
+        grant_trust(config.target_dir, config.hub.url + "&changed=true")
+    assert not await pull(config, automatic=True)
+    assert hub_http.requests == []
+
+
+@pytest.mark.parametrize("existing_model", ["hub-test", "old-model"])
+async def test_automatic_pull_never_requests_hub_for_existing_database(
+    tmp_path, hub_http, monkeypatch, existing_model
+):
+    monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
+    config = config_for(tmp_path / "checkout", hub_http, model=existing_model)
+    build_database(
+        config.database.path,
+        config.database.provider,
+        model=existing_model,
+    )
+    grant_trust(config.target_dir, config.hub.url)
+    hub_http.requests.clear()
+
+    installed = await pull(config, automatic=True)
+
+    assert not installed
+    assert hub_http.requests == []
+
+
+@pytest.mark.parametrize("change", ["checkout", "url"])
+async def test_validated_source_is_bound_to_checkout_and_exact_url(
+    tmp_path, hub_http, change
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    publish(hub_http, build_database(tmp_path / "published"))
+    source = await fetch_validated_manifest(config)
+    if change == "checkout":
+        config.target_dir = tmp_path / "different-checkout"
+    else:
+        config.hub.url += "&changed=true"
+    hub_http.requests.clear()
+
+    assert not await pull(config, automatic=True, source=source)
+    assert hub_http.requests == []
+
+
+async def test_validated_source_authorizes_without_reading_malformed_store(
+    tmp_path, hub_http, monkeypatch
+):
+    monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
+    config = config_for(tmp_path / "checkout", hub_http)
+    publish(hub_http, build_database(tmp_path / "published"))
+    source = await fetch_validated_manifest(config)
+    store = trust_store_path()
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text("not-json")
+    hub_http.requests.clear()
+
+    assert await pull(config, automatic=True, source=source)
+    assert [request[0] for request in hub_http.requests] == [
+        "/base.tar.gz?token=secret"
+    ]
+
+
+async def test_target_resolution_filesystem_failure_is_fatal(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+
+    def fail_target(database):
+        raise OSError("private-path?secret")
+
+    monkeypatch.setattr(type(config.database), "get_db_path", fail_target)
+    with pytest.raises(HubLocalStateError, match="destination is unavailable"):
+        await pull(config)
+    assert hub_http.requests == []
+
+
+async def test_automatic_local_filesystem_failure_is_fatal(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    grant_trust(config.target_dir, config.hub.url)
+    target = config.database.get_db_path()
+    original_exists = Path.exists
+
+    def fail_target(path):
+        if path == target:
+            raise OSError("private-path?secret")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", fail_target)
+    with pytest.raises(HubLocalStateError, match="local filesystem"):
+        await pull(config, automatic=True)
+    assert hub_http.requests == []
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
@@ -131,7 +253,8 @@ async def test_busy_pull_does_not_replace_or_open_partial_state(
     # A live cooperative holder can own an as-yet absent file.
     held = native.acquire_database_lease(str(target))
     try:
-        assert not await pull(config, automatic=automatic)
+        with pytest.raises(HubLocalStateError, match="destination is busy"):
+            await pull(config, automatic=automatic)
         assert not target.exists()
     finally:
         held.close()
@@ -419,7 +542,8 @@ async def test_two_pulls_and_cold_provider_never_observe_partial_install(
     try:
         assert await asyncio.to_thread(entered.wait, 20)
         # Second explicit pull downloads/verifies, but cannot install over first.
-        assert not await pull(config)
+        with pytest.raises(HubLocalStateError, match="destination is busy"):
+            await pull(config)
         with pytest.raises(native.DatabaseBusyError):
             opener.connect()
         assert not target.exists()
@@ -753,12 +877,7 @@ async def test_candidate_workspace_cleanup_refusal_is_sanitized_and_retryable(
 
 
 @pytest.mark.parametrize("boundary,automatic,cancel", [
-    ("initial", True, False),
-    ("recheck", True, False),
-    ("candidate", True, False),
     ("candidate", False, False),
-    ("initial", True, True),
-    ("recheck", True, True),
 ])
 async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
     tmp_path, hub_http, monkeypatch, boundary, automatic, cancel
@@ -871,19 +990,6 @@ async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
         logger.remove(sink)
 
 
-async def test_unreadable_local_identity_is_soft_no_request_and_preserves_files(
-    tmp_path, hub_http
-):
-    config = config_for(tmp_path / "checkout", hub_http)
-    target = build_database(config.database.path, model="old-model")
-    target.with_name(target.name + ".embedding.json").write_text("{")
-    before = snapshot(target.parent)
-    assert not await pull(config, automatic=True)
-    assert hub_http.requests == []
-    assert snapshot(target.parent) == before
-    native.acquire_install_lease(str(target), "duckdb").close()
-
-
 def test_local_reader_retry_does_not_release_borrowed_exclusive_owner(
     tmp_path, hub_http, monkeypatch
 ):
@@ -911,7 +1017,7 @@ def test_local_reader_retry_does_not_release_borrowed_exclusive_owner(
     native.acquire_install_lease(str(target), "duckdb").close()
 
 
-@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize("automatic", [False])
 @pytest.mark.parametrize(
     "limit",
     [

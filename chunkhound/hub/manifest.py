@@ -74,11 +74,14 @@ class Selected:
     version: Version
 
 
-def select_manifest(raw: bytes, key: MatchKey, rel: str) -> Selected:
+def parse_manifest(raw: bytes) -> Manifest:
     try:
-        manifest = Manifest.model_validate_json(raw)
+        return Manifest.model_validate_json(raw)
     except ValidationError:
         raise HubUnavailable("Hub manifest is invalid or unsupported") from None
+
+
+def select_manifest(manifest: Manifest, key: MatchKey, rel: str) -> Selected:
     variants = [entry for entry in manifest.embeddings if entry.key() == key]
     if len(variants) != 1:
         logger.warning(

@@ -8,7 +8,11 @@ from loguru import logger
 import chunkhound_native as native
 from chunkhound.core.config.config import Config
 from chunkhound.hub.artifact import PreparationState
-from chunkhound.hub.errors import HubInstallationInterrupted, HubUnavailable
+from chunkhound.hub.errors import (
+    HubInstallationInterrupted,
+    HubLocalStateError,
+    HubUnavailable,
+)
 from chunkhound.providers.database.ownership import DatabaseOwnership
 
 
@@ -19,7 +23,9 @@ def installation_target(config: Config) -> Path:
         raise HubUnavailable("Hub pull requires a writable directory-layout database")
     try:
         target = database.get_db_path()
-    except (OSError, ValueError):
+    except OSError:
+        raise HubLocalStateError("Hub database destination is unavailable") from None
+    except ValueError:
         raise HubUnavailable("Hub database destination is unavailable") from None
     # get_db_path is authoritative, including legacy files and .db suffix rules.
     # The configured single-file chunks.db is NOT a directory-layout install.
@@ -31,17 +37,21 @@ def installation_target(config: Config) -> Path:
     return target
 
 
-def installation_failure(exc: Exception) -> HubUnavailable | HubInstallationInterrupted:
+def installation_failure(
+    exc: Exception,
+) -> HubLocalStateError | HubInstallationInterrupted:
     if isinstance(exc, native.DatabaseInterruptedError):
         return HubInstallationInterrupted(
             "Hub installation was interrupted; run explicit chunkhound pull again. "
             "Local work may require re-indexing"
         )
     if isinstance(exc, native.DatabaseBusyError):
-        return HubUnavailable("Hub destination is busy; stop database users and retry")
+        return HubLocalStateError(
+            "Hub destination is busy; stop database users and retry"
+        )
     if isinstance(exc, native.DatabaseLayoutError):
-        return HubUnavailable("Hub database installation layout is unsupported")
-    return HubUnavailable("Hub installation filesystem is unavailable")
+        return HubLocalStateError("Hub database installation layout is unsafe")
+    return HubLocalStateError("Hub installation filesystem is unavailable")
 
 
 def install_candidate(

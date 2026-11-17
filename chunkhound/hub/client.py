@@ -2,6 +2,7 @@
 
 import asyncio
 import contextvars
+from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
@@ -18,6 +19,7 @@ from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
     HubDatabaseMismatch,
     HubInstallationInterrupted,
+    HubLocalStateError,
     HubReaderCloseError,
     HubUnavailable,
     safe_label,
@@ -28,14 +30,40 @@ from chunkhound.hub.install import (
     installation_failure,
     installation_target,
 )
-from chunkhound.hub.manifest import MatchKey, configured_key, select_manifest
+from chunkhound.hub.manifest import (
+    Manifest,
+    MatchKey,
+    configured_key,
+    parse_manifest,
+    select_manifest,
+)
 from chunkhound.hub.transport import fetch_manifest
+from chunkhound.hub.trust import checkout_digest, is_trusted, manifest_url_digest
 from chunkhound.providers.database.ownership import (
     DatabaseOwnership,
     DatabaseReaderCloseError,
     ownership_scope,
 )
 from chunkhound.utils.async_worker import await_worker_completion
+
+
+@dataclass(frozen=True)
+class ValidatedHubSource:
+    manifest: Manifest
+    checkout_digest: str
+    url_digest: str
+
+
+async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
+    if not config.hub.url:
+        raise HubUnavailable("No hub manifest URL configured")
+    checkout = config.target_dir or Path.cwd()
+    return ValidatedHubSource(
+        manifest=parse_manifest(await fetch_manifest(config.hub.url)),
+        checkout_digest=checkout_digest(checkout),
+        url_digest=manifest_url_digest(config.hub.url),
+    )
+
 
 _NATIVE_ERRORS = (
     native.DatabaseBusyError,
@@ -77,6 +105,15 @@ def local_needs_pull(
         ) != (key.provider, key.model, key.dims)
 
 
+def automatic_target_absent(
+    target: Path,
+    ownership: DatabaseOwnership | None = None,
+) -> bool:
+    """Return true only for an unambiguous absent target under ownership."""
+    with ownership_scope(target, ownership):
+        return not target.exists()
+
+
 async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
     """Drain actual completion, preserving fatal hub outcomes over cancellation."""
     try:
@@ -116,6 +153,7 @@ async def _pull(
     *,
     mcp_mode: bool,
     no_embeddings: bool,
+    source: ValidatedHubSource | None = None,
 ) -> bool:
     if automatic and not automatic_pull_eligible(
         config, mcp_mode=mcp_mode, no_embeddings=no_embeddings
@@ -125,14 +163,24 @@ async def _pull(
         raise HubUnavailable("No hub manifest URL configured")
     target = installation_target(config)
     key = configured_key(config)  # Offline; do not let drift pinning run first.
+    checkout = config.target_dir or Path.cwd()
+    if source is not None and (
+        source.checkout_digest != checkout_digest(checkout)
+        or source.url_digest != manifest_url_digest(config.hub.url)
+    ):
+        raise HubUnavailable("Validated hub source no longer matches configuration")
+    if automatic and source is None:
+        if not is_trusted(checkout, config.hub.url):
+            return False
     if automatic:
         # Keep actual executor completion private: shutdown cancels Tasks, not threads.
         worker = asyncio.get_running_loop().run_in_executor(
-            None, contextvars.copy_context().run, local_needs_pull, target, key
+            None, contextvars.copy_context().run, automatic_target_absent, target
         )
         if not await _await_pull_worker(worker):
             return False
-    selected = select_manifest(await fetch_manifest(config.hub.url), key, rel)
+    validated = source if source is not None else await fetch_validated_manifest(config)
+    selected = select_manifest(validated.manifest, key, rel)
     logger.bind(hub_client=True).info(
         "Pulling hub base project={} identity={} embedding={} version={} revision={} "
         "built={} index_root={} artifact=index.tar.gz bytes={}",
@@ -161,7 +209,9 @@ async def _pull(
                 key.db_provider,
                 state,
                 should_install=(
-                    lambda ownership: local_needs_pull(target, key, ownership=ownership)
+                    lambda ownership: automatic_target_absent(
+                        target, ownership=ownership
+                    )
                 )
                 if automatic
                 else None,
@@ -185,6 +235,7 @@ async def pull(
     *,
     mcp_mode: bool = False,
     no_embeddings: bool = False,
+    source: ValidatedHubSource | None = None,
 ) -> bool:
     try:
         try:
@@ -194,6 +245,7 @@ async def pull(
                 automatic,
                 mcp_mode=mcp_mode,
                 no_embeddings=no_embeddings,
+                source=source,
             )
         except DatabaseReaderCloseError as exc:
             raise HubReaderCloseError(exc) from None
@@ -201,7 +253,12 @@ async def pull(
             # Initial ordinary inspection can fail before install.py is entered.
             raise installation_failure(exc) from None
         except OSError:
-            raise HubUnavailable("Hub local filesystem is unavailable") from None
+            raise HubLocalStateError("Hub local filesystem is unavailable") from None
+    except HubLocalStateError:
+        logger.bind(hub_client=True).error(
+            "Hub local installation state is unsafe; local indexing was not started"
+        )
+        raise
     except HubReaderCloseError as exc:
         logger.bind(hub_client=True).error("{}", str(exc))
         raise

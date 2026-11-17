@@ -21,6 +21,10 @@ class HubInstallationInterrupted(RuntimeError):  # noqa: N818 - public hub categ
     """Installation may be incomplete; ordinary opens and automatic fallback stop."""
 
 
+class HubLocalStateError(RuntimeError):
+    """Local installation state is unsafe or ambiguous; do not fall back."""
+
+
 class HubReaderCloseError(RuntimeError):
     """Fatal inspection shutdown failure retaining the original safe retry."""
 
@@ -52,6 +56,7 @@ FATAL_HUB_ERRORS: tuple[type[Exception], ...] = (
     HubDatabaseMismatch,
     HubInstallationInterrupted,
     HubReaderCloseError,
+    HubLocalStateError,
 )
 
 

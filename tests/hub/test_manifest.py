@@ -12,7 +12,12 @@ from loguru import logger
 from chunkhound.core.config.config import Config
 from chunkhound.core.index_format import INDEX_FORMAT_VERSION
 from chunkhound.hub.errors import HubUnavailable
-from chunkhound.hub.manifest import MatchKey, configured_key, select_manifest
+from chunkhound.hub.manifest import (
+    MatchKey,
+    configured_key,
+    parse_manifest,
+    select_manifest,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -56,10 +61,29 @@ def catalogue() -> dict[str, Any]:
     }
 
 
+def test_valid_manifest_parses_before_variant_compatibility():
+    raw = catalogue()
+    raw["embeddings"][0]["model"] = "different-model"
+    manifest = parse_manifest(json.dumps(raw).encode())
+    assert manifest.project_id == "team"
+    with pytest.raises(HubUnavailable, match="No unique published base"):
+        select_manifest(
+            manifest,
+            MatchKey("duckdb", "openai", "hub-test", 8, 1),
+            "latest",
+        )
+
+
+def test_invalid_manifest_cannot_reach_selection():
+    with pytest.raises(HubUnavailable, match="invalid or unsupported"):
+        parse_manifest(b"not-json")
+
+
 def test_selects_exact_key_and_keeps_artifact_url_opaque():
     raw = json.dumps(catalogue()).encode()
     key = MatchKey("duckdb", "openai", "hub-test", 8, 1)
-    selected = select_manifest(raw, key, "latest")
+    manifest = parse_manifest(raw)
+    selected = select_manifest(manifest, key, "latest")
     assert selected.version.artifact.url == "https://cdn.invalid/object?token=secret"
     assert "token=secret" not in repr(selected)
     for wrong in [
@@ -70,10 +94,10 @@ def test_selects_exact_key_and_keeps_artifact_url_opaque():
         MatchKey("duckdb", "openai", "hub-test", 8, 2),
     ]:
         with pytest.raises(HubUnavailable):
-            select_manifest(raw, wrong, "latest")
+            select_manifest(manifest, wrong, "latest")
     for rel in ["-1", "-2", "0", "build-id"]:
         with pytest.raises(HubUnavailable):
-            select_manifest(raw, key, rel)
+            select_manifest(manifest, key, rel)
 
 
 @pytest.mark.parametrize("rel", ["latest", "-1", "-2"])
@@ -88,7 +112,9 @@ def test_selects_requested_retained_version_without_walking(rel):
         versions.append(version)
     raw["embeddings"][0]["versions"] = versions
     selected = select_manifest(
-        json.dumps(raw).encode(), MatchKey("duckdb", "openai", "hub-test", 8, 1), rel
+        parse_manifest(json.dumps(raw).encode()),
+        MatchKey("duckdb", "openai", "hub-test", 8, 1),
+        rel,
     )
     assert selected.version.revision == rel
 
@@ -118,7 +144,7 @@ def test_manifest_declines_unknown_ambiguous_or_nonopaque_contract(fault):
         versions.extend(copy.deepcopy(versions[0]) for _ in range(3))
     with pytest.raises(HubUnavailable):
         select_manifest(
-            json.dumps(raw).encode(),
+            parse_manifest(json.dumps(raw).encode()),
             MatchKey("duckdb", "openai", "hub-test", 8, 1),
             "latest",
         )
@@ -147,7 +173,7 @@ def test_invalid_wire_values_are_not_coerced(level, field, value):
     target[level][field] = value
     with pytest.raises(HubUnavailable, match="invalid or unsupported"):
         select_manifest(
-            json.dumps(raw).encode(),
+            parse_manifest(json.dumps(raw).encode()),
             MatchKey("duckdb", "openai", "hub-test", 8, 1),
             "latest",
         )
@@ -163,7 +189,7 @@ def test_diagnostic_metadata_does_not_choose_the_variant():
     other["model"] = "different"
     raw["embeddings"].insert(0, other)
     selected = select_manifest(
-        json.dumps(raw).encode(),
+        parse_manifest(json.dumps(raw).encode()),
         MatchKey("duckdb", "openai", "hub-test", 8, 1),
         "latest",
     )
@@ -182,7 +208,9 @@ def test_manifest_diagnostics_do_not_expose_urls_or_query_secrets(malformed):
     try:
         with pytest.raises(HubUnavailable) as error:
             select_manifest(
-                payload, MatchKey("duckdb", "openai", "hub-test", 8, 1), "latest"
+                parse_manifest(payload),
+                MatchKey("duckdb", "openai", "hub-test", 8, 1),
+                "latest",
             )
     finally:
         logger.remove(sink)

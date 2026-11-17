@@ -20,7 +20,7 @@ import pytest
 from chunkhound.core.config.hub_config import ArchiveLimits
 from chunkhound.hub.artifact import extract, prepare, verify_candidate
 from chunkhound.hub.errors import HubDatabaseMismatch, HubUnavailable
-from chunkhound.hub.manifest import MatchKey, select_manifest
+from chunkhound.hub.manifest import MatchKey, parse_manifest, select_manifest
 from chunkhound.hub.transport import CHUNK, RESERVE
 from tests.hub.artifacts import (
     build_database,
@@ -45,7 +45,7 @@ def selected_archive(archive, hub_http, backend="duckdb"):
         "sha256": hashlib.sha256(body).hexdigest(),
     }
     return select_manifest(
-        json.dumps(raw).encode(),
+        parse_manifest(json.dumps(raw).encode()),
         MatchKey(backend, "openai", "hub-test", 8, 1),
         "latest",
     )
@@ -213,7 +213,7 @@ def test_candidate_mismatch_is_fatal_without_mutation(tmp_path, backend, defect)
         else:
             shutil.rmtree(path / "chunks.lance")
     selected = select_manifest(
-        json.dumps(catalogue()).encode(),
+        parse_manifest(json.dumps(catalogue()).encode()),
         MatchKey("duckdb", "openai", "hub-test", 8, 1),
         "latest",
     )
@@ -234,7 +234,7 @@ def test_candidate_case_variant_format_is_fatal(tmp_path, version):
         conn.execute("DROP TABLE schema_version")
         conn.execute('CREATE TABLE "ScHeMa_VeRsIoN" AS SELECT ? AS version', [version])
     selected = select_manifest(
-        json.dumps(catalogue()).encode(),
+        parse_manifest(json.dumps(catalogue()).encode()),
         MatchKey("duckdb", "openai", "hub-test", 8, 1),
         "latest",
     )
@@ -250,7 +250,7 @@ def test_candidate_requires_physical_storage(tmp_path, table, external):
     path = build_database(tmp_path / "published")
     replace_with_view(path, table, external)
     selected = select_manifest(
-        json.dumps(catalogue()).encode(),
+        parse_manifest(json.dumps(catalogue()).encode()),
         MatchKey("duckdb", "openai", "hub-test", 8, 1),
         "latest",
     )
@@ -278,7 +278,7 @@ def test_downloaded_generated_contract_columns_are_fatal(tmp_path, table, column
     path = build_database(tmp_path / "published")
     replace_with_generated_column(path, table, column)
     selected = select_manifest(
-        json.dumps(catalogue()).encode(),
+        parse_manifest(json.dumps(catalogue()).encode()),
         MatchKey("duckdb", "openai", "hub-test", 8, 1),
         "latest",
     )
@@ -295,7 +295,7 @@ def test_candidate_dominant_identity_is_exact_despite_collation(tmp_path, collat
     path = build_database(tmp_path / "published")
     collate_identities(path, collation)
     selected = select_manifest(
-        json.dumps(catalogue()).encode(),
+        parse_manifest(json.dumps(catalogue()).encode()),
         MatchKey("duckdb", "openai", "hub-test", 8, 1),
         "latest",
     )
