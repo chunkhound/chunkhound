@@ -22,6 +22,7 @@ from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipeline
 from chunkhound.core.types.common import FileId
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.parsers.parser_factory import create_parser_for_language
+from chunkhound.utils.parent_watch import exit_when_parent_dies
 
 if TYPE_CHECKING:
     import asyncio
@@ -192,7 +193,10 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
     if _parse_pool is None:
         with _parse_pool_lock:
             if _parse_pool is None:
-                pool = ProcessPoolExecutor(max_workers=max(1, max_workers))
+                pool = ProcessPoolExecutor(
+                    max_workers=max(1, max_workers),
+                    initializer=exit_when_parent_dies,
+                )
                 atexit.register(pool.shutdown, cancel_futures=True)
                 _parse_pool = pool
     return _parse_pool
@@ -429,6 +433,7 @@ def _parse_file_worker_for_timeout(
     detection + the binary guard + the config-file size gate) instead of
     parsing directly.
     """
+    exit_when_parent_dies()
     try:
         lang, chunks, skip = parse_file_callback(
             file_path,
@@ -674,6 +679,19 @@ def _cfg_or(obj: Any, attr: str, default: _T, cast: Callable[[Any], _T]) -> _T:
     return cast(value)
 
 
+def rust_mtime_epsilon(config: Any) -> float:
+    """Return the mtime tolerance, in seconds, the Rust differ uses for *config*.
+
+    The single reader of ``indexing.mtime_epsilon_seconds`` for the Rust
+    pipeline and for anything that must agree with its diff (the incremental
+    precheck in chunkhound/services/rust_incremental_precheck.py). An explicit
+    ``0.0`` is honoured as an exact match; only a missing or None value falls
+    back to 0.01.
+    """
+    indexing_cfg = getattr(config, "indexing", None) if config else None
+    return _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
+
+
 async def run_rust_pipeline(
     files_to_process: list[tuple[Path, str | None]],
     *,
@@ -729,7 +747,7 @@ async def run_rust_pipeline(
     per_file_timeout_min = _cfg_or(
         indexing_cfg, "per_file_timeout_min_size_kb", 128, int
     )
-    mtime_eps = _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
+    mtime_eps = rust_mtime_epsilon(config)
     detect_sql = bool(getattr(indexing_cfg, "detect_embedded_sql", True))
     # Rust's config_file_size_threshold_kb is a u32 — a negative value (the
     # documented "<=0 disables the gate" convention, see batch_processor.py)
