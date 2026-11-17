@@ -143,6 +143,80 @@ def test_invalid_store_fails_closed_and_is_not_overwritten(
     assert store.read_text() == payload
 
 
+@pytest.mark.parametrize(
+    ("operation_name", "expected_message"),
+    [
+        ("is_trusted", "Hub trust store cannot be read safely"),
+        ("grant_trust", "Hub trust store cannot be updated safely"),
+        ("forget_checkout_trust", "Hub trust store cannot be updated safely"),
+    ],
+)
+def test_trust_store_path_failures_are_sanitized(
+    operation_name: str,
+    expected_message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    grant_trust(tmp_path / "original", "https://hub.invalid/original")
+    store = trust_store_path()
+    original_text = store.read_text()
+    secret_path = tmp_path / "secret-home"
+
+    def fail_trust_store_path() -> Path:
+        raise OSError(f"must not escape: {secret_path}")
+
+    monkeypatch.setattr(trust_module, "trust_store_path", fail_trust_store_path)
+    operation = getattr(trust_module, operation_name)
+
+    with pytest.raises(HubTrustError) as caught:
+        if operation_name == "forget_checkout_trust":
+            operation(tmp_path / "checkout")
+        else:
+            operation(tmp_path / "checkout", "https://hub.invalid/manifest")
+
+    assert str(caught.value) == expected_message
+    assert str(secret_path) not in str(caught.value)
+    assert store.read_text() == original_text
+
+
+@pytest.mark.parametrize(
+    ("operation_name", "expected_message"),
+    [
+        ("is_trusted", "Hub trust store cannot be read safely"),
+        ("grant_trust", "Hub trust store cannot be updated safely"),
+        ("forget_checkout_trust", "Hub trust store cannot be updated safely"),
+    ],
+)
+def test_checkout_resolution_failures_are_sanitized_without_overwriting(
+    operation_name: str,
+    expected_message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    grant_trust(tmp_path / "original", "https://hub.invalid/original")
+    store = trust_store_path()
+    original_text = store.read_text()
+    secret_path = tmp_path / "secret-checkout"
+
+    def fail_resolve(self: Path, strict: bool = False) -> Path:
+        raise OSError(f"must not escape: {secret_path}")
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+    operation = getattr(trust_module, operation_name)
+
+    with pytest.raises(HubTrustError) as caught:
+        if operation_name == "forget_checkout_trust":
+            operation(secret_path)
+        else:
+            operation(secret_path, "https://hub.invalid/manifest")
+
+    assert str(caught.value) == expected_message
+    assert str(secret_path) not in str(caught.value)
+    assert store.read_text() == original_text
+
+
 def test_unreadable_store_path_has_sanitized_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

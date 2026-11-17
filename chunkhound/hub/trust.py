@@ -69,8 +69,8 @@ def _validate_store(value: object) -> dict[str, object]:
 
 
 def _read_store() -> dict[str, object]:
-    path = trust_store_path()
     try:
+        path = trust_store_path()
         with path.open(encoding="utf-8") as handle:
             return _validate_store(json.load(handle))
     except FileNotFoundError:
@@ -126,10 +126,10 @@ def _release_lock(handle: BinaryIO) -> None:
 
 @contextmanager
 def _locked_store() -> Generator[None, None, None]:
-    path = trust_store_path()
     handle: BinaryIO | None = None
     acquired = False
     try:
+        path = trust_store_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = _open_lock(path.with_name("hub-trust.lock"))
         _acquire_lock(handle)
@@ -150,8 +150,8 @@ def _locked_store() -> Generator[None, None, None]:
 
 
 def _write_store(store: dict[str, object]) -> None:
-    path = trust_store_path()
     try:
+        path = trust_store_path()
         write_json_atomically(
             path,
             store,
@@ -168,11 +168,16 @@ def _write_store(store: dict[str, object]) -> None:
 
 def is_trusted(checkout: Path, manifest_url: str) -> bool:
     """Return whether the exact URL is granted for the canonical checkout."""
-    store = _read_store()
-    grants = cast(dict[str, list[str]], store["grants"])
-    return manifest_url_digest(manifest_url) in grants.get(
-        checkout_digest(checkout), []
-    )
+    try:
+        store = _read_store()
+        grants = cast(dict[str, list[str]], store["grants"])
+        return manifest_url_digest(manifest_url) in grants.get(
+            checkout_digest(checkout), []
+        )
+    except HubTrustError:
+        raise
+    except Exception as exc:
+        raise HubTrustError(_READ_ERROR) from exc
 
 
 def grant_trust(checkout: Path, manifest_url: str) -> None:
