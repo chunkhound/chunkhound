@@ -2961,6 +2961,75 @@ class TestRustPipelineGuard:
         )
         assert file_id > 0
 
+    def test_handover_after_first_write_submission_succeeds(
+        self,
+        file_backed_db: DuckDBProvider,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The resync handover can land right after a realtime file
+        write's first executor submission. The write must not leave a
+        transaction open across that point, so the release succeeds and the
+        file is stored."""
+        import asyncio
+
+        from chunkhound.services.batch_processor import ParsedFileResult
+
+        monkeypatch.setattr(
+            "chunkhound.providers.database.serial_executor.COMPACT_SAMPLE_INTERVAL", 0
+        )
+        db = file_backed_db
+        coord = IndexingCoordinator(database_provider=db, base_directory=tmp_path)
+        result = ParsedFileResult(
+            file_path=tmp_path / "handover.yaml",
+            chunks=[
+                {
+                    "symbol": "a",
+                    "code": "x: 1",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "chunk_type": "key_value",
+                    "language": Language.YAML.value,
+                }
+            ],
+            language=Language.YAML,
+            file_size=4,
+            file_mtime=0.0,
+            status="ok",
+            error=None,
+            content_hash=None,
+        )
+
+        original_submit = db._execute_in_db_thread
+        handover: dict[str, Any] = {}
+
+        async def _submit_then_hand_over(operation_name: str, *a: Any, **k: Any):
+            value = await original_submit(operation_name, *a, **k)
+            if not handover:
+                handover["after"] = operation_name
+                db.set_rust_pipeline_in_progress(True)
+                try:
+                    db.release_for_rust_pipeline()
+                    handover["error"] = None
+                except DatabaseError as e:
+                    handover["error"] = e
+                with pytest.raises(DatabaseRustPipelineInProgressError):
+                    db.get_file_by_path("handover.yaml")
+            return value
+
+        monkeypatch.setattr(db, "_execute_in_db_thread", _submit_then_hand_over)
+        try:
+            stats = asyncio.run(coord._store_parsed_results([result]))
+        finally:
+            db.set_rust_pipeline_in_progress(False)
+            db.connect()
+
+        assert handover["error"] is None, handover
+        assert stats["total_files"] == 1 and not stats["errors"]
+        record = db.get_file_by_path("handover.yaml")
+        assert record is not None
+        assert len(db.get_chunks_by_file_id(record["id"])) == 1
+
 
 class TestCheckpointFailureSurfaces:
     """A checkpoint failure during disconnect must raise, not just be logged.
