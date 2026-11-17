@@ -326,8 +326,7 @@ async def pull(
     except HubUnavailable as exc:
         logger.bind(hub_client=True).log(
             "INFO" if automatic else "ERROR",
-            "Hub pull unavailable: {}{}",
+            "Hub pull unavailable: {}",
             str(exc),
-            "; continuing local indexing" if automatic else "",
         )
         return False

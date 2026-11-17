@@ -95,6 +95,13 @@ def _hub_authorization_guidance(formatter: RichOutputFormatter) -> None:
     )
 
 
+def _hub_authorized_failure_guidance(formatter: RichOutputFormatter) -> None:
+    formatter.info(
+        "No usable hub database was obtained from the authorized source. "
+        "Rerun interactively and choose local indexing, or disable hub.url and rerun."
+    )
+
+
 def _save_hub_trust(config: Config, formatter: RichOutputFormatter) -> None:
     hub_url = config.hub.url
     if not hub_url:
@@ -164,7 +171,7 @@ async def _prepare_hub_index(
         formatter.error(str(exc))
         if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
             return HubIndexDecision.CONTINUE_LOCAL
-        _hub_authorization_guidance(formatter)
+        _hub_authorized_failure_guidance(formatter)
         return HubIndexDecision.STOP
     except (
         native.DatabaseBusyError,
@@ -191,14 +198,14 @@ async def _prepare_hub_index(
         formatter.error(str(exc))
         if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
             return HubIndexDecision.CONTINUE_LOCAL
-        _hub_authorization_guidance(formatter)
+        _hub_authorized_failure_guidance(formatter)
         return HubIndexDecision.STOP
 
     if installed:
         return HubIndexDecision.HUB_INSTALLED
     if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
         return HubIndexDecision.CONTINUE_LOCAL
-    _hub_authorization_guidance(formatter)
+    _hub_authorized_failure_guidance(formatter)
     return HubIndexDecision.STOP
 
 

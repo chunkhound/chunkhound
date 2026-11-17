@@ -455,6 +455,68 @@ async def test_authorized_safe_failure_requires_explicit_local_fallback(
     assert config.hub.url not in formatter.text
 
 
+async def test_authorized_noninteractive_failure_has_distinct_local_guidance(
+    config, args, formatter, monkeypatch, absent_target
+):
+    args.trust = True
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(
+        run,
+        "fetch_validated_manifest",
+        AsyncMock(side_effect=HubUnavailable("sanitized unavailable")),
+    )
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    assert formatter.messages == [
+        ("error", "sanitized unavailable"),
+        (
+            "info",
+            "No usable hub database was obtained from the authorized source. "
+            "Rerun interactively and choose local indexing, or disable hub.url "
+            "and rerun.",
+        ),
+    ]
+    assert "not trusted" not in formatter.text
+    assert "--trust" not in formatter.text
+    assert config.hub.url not in formatter.text
+
+
+async def test_authorized_interactive_failure_offers_exact_local_fallback(
+    config, args, formatter, monkeypatch, absent_target
+):
+    args.trust = True
+    prompts_seen = []
+
+    def choose(message, *, choices, default):
+        prompts_seen.append((message, choices, default))
+        return "local"
+
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(run.prompts, "prompt_choice", choose)
+    monkeypatch.setattr(
+        run,
+        "fetch_validated_manifest",
+        AsyncMock(side_effect=HubUnavailable("sanitized unavailable")),
+    )
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
+    assert prompts_seen == [
+        (
+            "The configured hub could not provide a usable database",
+            ("local", "cancel"),
+            "cancel",
+        )
+    ]
+    assert formatter.messages == [("error", "sanitized unavailable")]
+    assert "not trusted" not in formatter.text
+    assert "--trust" not in formatter.text
+    assert config.hub.url not in formatter.text
+
+
 async def test_authorized_pull_failure_can_fall_back_only_interactively(
     config, args, formatter, monkeypatch, absent_target
 ):

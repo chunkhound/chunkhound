@@ -96,7 +96,7 @@ async def test_pull_timeout_uses_config_and_cleans_workspace(
     assert list(config.database.path.glob(".chunkhound-pull-*")) == []
     text = "\n".join(messages)
     assert "0.05" in text and "hub.download_timeout_seconds" in text
-    assert ("continuing local indexing" in text) is automatic
+    assert "continuing local indexing" not in text
     assert "token=secret" not in text
 
 
