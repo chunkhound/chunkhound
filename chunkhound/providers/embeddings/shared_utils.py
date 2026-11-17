@@ -33,8 +33,17 @@ def chunk_text_by_words(text: str, max_tokens: int) -> list[str]:
     return chunks
 
 
+# Sent in place of blank input, so the provider still returns one vector per text.
+EMPTY_TEXT_PLACEHOLDER = "[EMPTY]"
+
+
 def validate_text_input(texts: list[str]) -> list[str]:
-    """Validate and preprocess texts before embedding."""
+    """Validate and preprocess texts before embedding.
+
+    Returns one text per input, in order. Blank texts become
+    ``EMPTY_TEXT_PLACEHOLDER`` instead of being dropped, because dropping one
+    shifts every later vector and breaks the one-vector-per-text contract.
+    """
     if not texts:
         return []
 
@@ -42,9 +51,7 @@ def validate_text_input(texts: list[str]) -> list[str]:
     for text in texts:
         if not isinstance(text, str):
             raise ValueError(f"Text must be string, got {type(text)}")
-        if not text.strip():
-            continue  # Skip empty texts
-        validated.append(text.strip())
+        validated.append(text.strip() or EMPTY_TEXT_PLACEHOLDER)
 
     return validated
 

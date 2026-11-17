@@ -1506,3 +1506,68 @@ class TestVoyageQueryInputType:
 
         assert await p.embed_query([]) == []
         p._client.embed.assert_not_called()
+
+
+class TestVoyageBlankInputs:
+    """One vector per input text, even when some texts are blank."""
+
+    @staticmethod
+    def _indexed_client(provider: VoyageAIEmbeddingProvider) -> MagicMock:
+        """Fake API that returns a vector tagged with each text's position."""
+        provider._client.embed = MagicMock(
+            side_effect=lambda **kw: _FakeEmbedResult(
+                [[float(i)] * 1024 for i, _ in enumerate(kw["texts"])]
+            )
+        )
+        return provider._client.embed
+
+    @pytest.mark.asyncio
+    async def test_embed_keeps_one_vector_per_text_with_a_blank_between(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3")
+        embed = self._indexed_client(p)
+
+        result = await p.embed(["alpha", "   \n", "beta"])
+
+        assert len(result) == 3
+        _, kwargs = embed.call_args
+        assert kwargs["texts"][0] == "alpha"
+        assert kwargs["texts"][2] == "beta"
+        assert kwargs["texts"][1].strip() != ""  # the API never sees blank input
+
+    @pytest.mark.asyncio
+    async def test_embed_whitespace_only_input_returns_a_vector(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3")
+        self._indexed_client(p)
+
+        assert len(await p.embed(["  "])) == 1
+
+    @pytest.mark.asyncio
+    async def test_embed_query_whitespace_only_returns_a_vector(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3")
+        embed = self._indexed_client(p)
+
+        assert len(await p.embed_query(["\t "])) == 1
+        assert embed.call_args.kwargs["input_type"] == "query"
+
+    @pytest.mark.asyncio
+    async def test_blank_in_a_full_batch_survives_the_embedding_manager(self):
+        from chunkhound.embeddings import EmbeddingManager
+
+        p = _make_provider(api_key="test-key", model="voyage-code-3", batch_size=100)
+        self._indexed_client(p)
+        manager = EmbeddingManager()
+        manager.register_provider(p, set_default=True)
+        texts = [f"chunk {i}" for i in range(100)]
+        texts[41] = " " * 1500
+
+        result = await manager.embed_texts(texts)
+
+        assert len(result.embeddings) == 100
+
+    @pytest.mark.asyncio
+    async def test_non_string_input_is_still_rejected(self):
+        p = _make_provider(api_key="test-key", model="voyage-code-3")
+        self._indexed_client(p)
+
+        with pytest.raises(ValueError, match="must be string"):
+            await p.embed(["ok", 3])  # type: ignore[list-item]
