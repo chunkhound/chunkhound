@@ -2,6 +2,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,7 @@ from tests.hub.activation_support import (
     write_config,
 )
 from tests.hub.artifacts import build_database
+from tests.hub.conftest import hub_server
 from tests.hub.test_index_format import snapshot
 
 
@@ -340,6 +342,92 @@ def test_index_trust_persists_and_installs_cold_base(
     search = cli(project, "search", "local_overlay", project, "--regex")
     assert search.returncode == 0, search.stdout + search.stderr
     assert "local.py" in search.stdout + search.stderr
+
+
+@pytest.mark.parametrize("source", ["environment", "explicit", "project", "global"])
+def test_hub_declaration_sources_cannot_authorize_cold_index(
+    tmp_path, hub_http, embedding_http, source
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    data = write_config(project, "duckdb", None, embedding_http.url)
+    data.pop("hub")
+    (project / "source.py").write_text("def must_not_index(): return 1\n")
+    explicit = tmp_path / "explicit.json"
+    args: list[str | Path] = ["index", project]
+    env = cli_env(project)
+
+    if source == "environment":
+        env["CHUNKHOUND_HUB__URL"] = hub_url
+    elif source == "explicit":
+        explicit.write_text(json.dumps({"hub": {"url": hub_url}}))
+        args.extend(("--config", explicit))
+    elif source == "project":
+        data["hub"] = {"url": hub_url}
+    else:
+        Path(env["CHUNKHOUND_GLOBAL_CONFIG_FILE"]).write_text(
+            json.dumps({"hub": {"url": hub_url}})
+        )
+    (project / ".chunkhound.json").write_text(json.dumps(data))
+
+    result = subprocess.run(
+        [sys.executable, "-m", "chunkhound.api.cli.main", *map(str, args)],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode != 0
+    assert hub_http.requests == []
+    assert embedding_http.requests == []
+    assert not (
+        Path(env["HOME"])
+        / ".config"
+        / "chunkhound"
+        / "hub-trust.json"
+    ).exists()
+    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+
+
+def test_trusted_manifest_delegates_artifact_redirect_chain(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    source = build_database(tmp_path / "published")
+    manifest, origin_route = publish(hub_http, source)
+    archive = hub_http.resources.pop(origin_route)
+
+    with hub_server() as artifact_http:
+        delegated_route = "/delegated.tar.gz?artifact-token=secret"
+        final_route = "/objects/base.tar.gz?artifact-token=secret"
+        artifact_http.redirects[delegated_route] = artifact_http.url + final_route
+        artifact_http.resources[final_route] = archive
+        artifact = manifest["embeddings"][0]["versions"][0]["artifact"]
+        artifact["url"] = artifact_http.url + delegated_route
+        hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
+
+        result = cli(project, "index", project, "--trust")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert hub_http.requests == [("/catalogue?token=secret", None)]
+    assert artifact_http.requests == [
+        (delegated_route, None),
+        (final_route, None),
+    ]
+    assert len(archive) == artifact["bytes"]
+    assert hashlib.sha256(archive).hexdigest() == artifact["sha256"]
+    assert cli_is_trusted(project, project, hub_url)
+    assert {
+        group.model
+        for group in inspect_database(
+            project / ".chunkhound" / "db" / "chunks.db", "duckdb"
+        ).groups
+    } == {"hub-test"}
+    assert "token=secret" not in result.stdout + result.stderr
 
 
 def test_untrusted_no_prompt_index_stops_before_hub_or_embedding(

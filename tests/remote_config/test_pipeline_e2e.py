@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,9 @@ import pytest
 from loguru import logger
 
 from chunkhound.core.config.remote import run_remote_config_fetch
+from chunkhound.hub.trust import trust_store_path
+from tests.hub import conftest as hub_fixtures
+from tests.hub.activation_support import ROOT, cli_env, write_config
 
 # --------------------------------------------------------------------------- #
 # Harness
@@ -62,6 +67,16 @@ def _project_root(_isolate: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = _isolate / "pipeline-project"
     (project / ".git").mkdir(parents=True)
     monkeypatch.chdir(project)
+
+
+@pytest.fixture
+def remote_hub_http():
+    yield from hub_fixtures.hub_http.__wrapped__()
+
+
+@pytest.fixture
+def remote_embedding_http():
+    yield from hub_fixtures.embedding_http.__wrapped__()
 
 
 def _args(**overrides: Any) -> argparse.Namespace:
@@ -1716,6 +1731,66 @@ async def test_pipeline_skips_fetch_for_internal_subprocess_commands(
         assert len(fake.calls) == prior, (
             f"{command!r} must skip fetch; got calls={fake.calls}"
         )
+
+
+@pytest.mark.parametrize("operation", ["set", "merge"])
+async def test_remote_hub_declaration_cannot_authorize_cold_index(
+    _isolate,
+    monkeypatch,
+    remote_hub_http,
+    remote_embedding_http,
+    operation,
+):
+    hub_http = remote_hub_http
+    embedding_http = remote_embedding_http
+    project = _isolate / "checkout"
+    project_data = write_config(project, "duckdb", None, embedding_http.url)
+    project_data.pop("hub")
+    (project / ".chunkhound.json").write_text(
+        json.dumps(project_data), encoding="utf-8"
+    )
+    (project / "source.py").write_text(
+        "def must_not_index(): return 1\n", encoding="utf-8"
+    )
+
+    child_env = cli_env(project)
+    child_env.pop("CHUNKHOUND_GLOBAL_CONFIG_FILE")
+    monkeypatch.setenv("HOME", child_env["HOME"])
+    monkeypatch.setenv("USERPROFILE", child_env["HOME"])
+    rule = {
+        "id": "hub",
+        "op": operation,
+        "value": {"url": hub_http.url + "/catalogue?token=secret"},
+    }
+    _install_fetch(monkeypatch, {"version": 1, "rules": [rule]})
+
+    await run_remote_config_fetch(
+        _args(remote_config_url="http://127.0.0.1:1/config.json"), "search"
+    )
+
+    persisted = json.loads((Path.home() / ".chunkhound.json").read_text())
+    assert persisted["hub"]["url"] == (
+        hub_http.url + "/catalogue?token=secret"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "chunkhound.api.cli.main", "index", str(project)],
+        cwd=project,
+        env={
+            **child_env,
+            "PYTHONPATH": os.pathsep.join(
+                (str(ROOT), child_env.get("PYTHONPATH", ""))
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode != 0
+    assert hub_http.requests == []
+    assert embedding_http.requests == []
+    assert not trust_store_path().exists()
+    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
 
 
 @pytest.mark.parametrize(

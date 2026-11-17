@@ -324,6 +324,44 @@ unvalidated NFS/SMB or cross-host behavior are outside the guarantee. Stop older
 ChunkHound and third-party database clients that do not participate in
 coordination before pulling.
 
+## Hub databases and source authorization
+
+A project can declare a published database manifest with `hub.url`. ChunkHound
+resolves that URL in this order: `CHUNKHOUND_HUB__URL` from the environment,
+then an explicitly selected `--config` file, then the project's
+`.chunkhound.json`, and finally the global config. An empty environment value or
+an explicit JSON `null` disables a lower-priority hub URL.
+
+A declaration is not authorization. A repository, global config, environment
+variable, explicitly selected config, or remote-configuration rule may select a
+source, but none of them grants permission to contact it. ChunkHound manages
+that permission in its user trust file; the file's format is not a supported
+user-editing interface.
+
+For a new checkout with no database:
+
+- `chunkhound pull .` is a one-time explicit download. It does not authorize
+  future automatic hub use.
+- `chunkhound pull . --trust` and `chunkhound index . --trust` first fetch and
+  structurally validate the manifest, then persist authorization for the exact
+  canonical checkout and exact manifest URL. Moving or recloning the checkout,
+  or changing the manifest URL (including its query string), requires trust
+  again.
+- An interactive `chunkhound index .` offers `trust`, `local`, or `cancel`
+  before starting a full local index. The local choice contacts no hub.
+- A noninteractive index stops if hub authorization or authorized hub use
+  fails. It does not silently build a potentially expensive local index.
+- `chunkhound pull . --forget-trust` removes that checkout/source grant
+  offline. It does not contact the hub or delete an installed database.
+
+Once a manifest is trusted, it may delegate its artifact to another HTTP(S)
+URL and through normal redirects without another authorization prompt. Artifact
+size and checksum verification, redirect restrictions, archive extraction
+limits, database compatibility checks, and safe installation rules still
+apply. Automatic hub use is cold-start only: ChunkHound never replaces an
+existing database automatically. Use an explicit `pull` to request
+replacement.
+
 ## Remote Configuration
 
 For fleet-wide deployments, ChunkHound can fetch a configuration envelope from an operator-controlled HTTPS endpoint (or `http://` to a loopback host for local development) at the start of every invocation, apply a list of rules to the on-disk global config, and seed the discovery-layer `remote_config.url` / `auth_header` into the global config file on the first successful fetch so subsequent runs continue fetching without needing the CLI flag or environment variable that triggered the initial run.
