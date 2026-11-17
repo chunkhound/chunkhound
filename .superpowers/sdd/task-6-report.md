@@ -89,7 +89,7 @@ All Python commands used:
 - `tests/remote_config/test_pipeline_e2e.py`
 
 ### Commit
-- `2794560f` (`fix(hub): close task 6 consent review gaps`).
+- Implementation and verification commit: `ad9c0a87` (`fix(hub): close task 6 consent review gaps`).
 
 ### Remaining concerns
 - The mandated focused suite still reports one Google GenAI deprecation and 11 existing AsyncMock coroutine warnings; no test failures remain.
