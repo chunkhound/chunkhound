@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.embedding_dimensions import configured_embedding_dims
 from chunkhound.core.index_format import INDEX_FORMAT_VERSION
 from chunkhound.hub.errors import HubUnavailable, safe_label
+from chunkhound.utils.http_redirects import http_destination_ok
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,13 @@ class Artifact(WireModel):
     url: str = Field(repr=False)
     bytes: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        if not http_destination_ok(value):
+            raise ValueError("artifact URL is unsupported")
+        return value
 
 
 class Version(WireModel):

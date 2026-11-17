@@ -150,9 +150,14 @@ async def _prepare_hub_index(
             return HubIndexDecision.STOP
         return HubIndexDecision.CONTINUE_LOCAL
 
-    authorized_checkout = (config.target_dir or Path.cwd()).expanduser().resolve()
-    authorized_checkout_digest = checkout_digest(authorized_checkout)
-    authorized_url_digest = manifest_url_digest(hub_url)
+    try:
+        authorized_checkout = (config.target_dir or Path.cwd()).expanduser().resolve()
+        authorized_checkout_digest = checkout_digest(authorized_checkout)
+        authorized_url_digest = manifest_url_digest(hub_url)
+    except OSError:
+        checkout_error = HubLocalStateError("Hub checkout identity is unavailable")
+        formatter.error(str(checkout_error))
+        raise checkout_error from None
     newly_authorized = explicit_trust
     if not explicit_trust:
         try:
@@ -193,17 +198,30 @@ async def _prepare_hub_index(
         error = installation_failure(exc)
         formatter.error(str(error))
         raise error from None
+    except FATAL_HUB_ERRORS as exc:
+        formatter.error(str(exc))
+        raise
     except OSError:
-        raise HubLocalStateError("Hub local filesystem is unavailable") from None
+        filesystem_error = HubLocalStateError("Hub local filesystem is unavailable")
+        formatter.error(str(filesystem_error))
+        raise filesystem_error from None
 
+    authorization_in_progress = newly_authorized
     try:
         if newly_authorized:
             source: ValidatedHubSource = await fetch_validated_manifest(config)
+            try:
+                current_checkout_digest = checkout_digest(
+                    config.target_dir or Path.cwd()
+                )
+            except OSError:
+                raise HubLocalStateError(
+                    "Hub checkout identity is unavailable"
+                ) from None
             if (
                 source.checkout_digest != authorized_checkout_digest
                 or source.url_digest != authorized_url_digest
-                or checkout_digest(config.target_dir or Path.cwd())
-                != authorized_checkout_digest
+                or current_checkout_digest != authorized_checkout_digest
                 or config.hub.url != hub_url
             ):
                 raise HubUnavailable(
@@ -212,6 +230,7 @@ async def _prepare_hub_index(
             _save_hub_trust(authorized_checkout, hub_url, formatter)
             if not target_absent:
                 return HubIndexDecision.CONTINUE_LOCAL
+            authorization_in_progress = False
             installed = await pull(config, automatic=True, source=source)
         elif target_absent:
             installed = await pull(config, automatic=True)
@@ -223,6 +242,10 @@ async def _prepare_hub_index(
             return HubIndexDecision.CONTINUE_LOCAL
         _hub_authorized_failure_guidance(formatter)
         return HubIndexDecision.STOP
+    except FATAL_HUB_ERRORS as exc:
+        if authorization_in_progress:
+            formatter.error(str(exc))
+        raise
 
     if installed:
         return HubIndexDecision.HUB_INSTALLED

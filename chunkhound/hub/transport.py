@@ -14,7 +14,11 @@ import httpx
 
 from chunkhound.hub.errors import HubUnavailable
 from chunkhound.hub.manifest import Artifact
-from chunkhound.utils.http_redirects import RedirectChain, RedirectError
+from chunkhound.utils.http_redirects import (
+    RedirectChain,
+    RedirectError,
+    http_destination_ok,
+)
 
 MANIFEST_LIMIT = 4 * 1024 * 1024
 CHUNK = 1024 * 1024
@@ -27,11 +31,7 @@ for name in ("httpx", "httpcore"):
 
 
 def url_scheme_ok(url: str) -> bool:
-    try:
-        parts = urlsplit(url)
-        return parts.scheme in {"http", "https"} and parts.hostname is not None
-    except ValueError:
-        return False
+    return http_destination_ok(url)
 
 
 def require_space(directory: Path, needed: int) -> None:
@@ -40,20 +40,10 @@ def require_space(directory: Path, needed: int) -> None:
 
 
 def _validate_hub_destination(url: str, previous: str | None) -> None:
-    try:
-        parts = urlsplit(url)
-        valid = (
-            parts.scheme in {"http", "https"}
-            and bool(parts.hostname)
-            and parts.username is None
-        )
-        _ = parts.port
-    except ValueError:
-        valid = False
-    if not valid:
+    if not http_destination_ok(url):
         raise RedirectError("Hub URL must use HTTP or HTTPS without userinfo")
     if previous is not None:
-        if urlsplit(previous).scheme == "https" and parts.scheme == "http":
+        if urlsplit(previous).scheme == "https" and urlsplit(url).scheme == "http":
             raise RedirectError("Hub redirect cannot downgrade HTTPS to HTTP")
 
 

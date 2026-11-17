@@ -67,6 +67,12 @@ async def test_automatic_pull_requires_checkout_and_exact_url_trust(
 ):
     monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
     config = config_for(tmp_path / "checkout", hub_http)
+
+    def forbidden_boundary(*_args, **_kwargs):
+        pytest.fail("untrusted source reached a hub target/config boundary")
+
+    monkeypatch.setattr(hub_client, "installation_target", forbidden_boundary)
+    monkeypatch.setattr(hub_client, "configured_key", forbidden_boundary)
     if grant_for == "checkout":
         grant_trust(tmp_path / "different-checkout", config.hub.url)
     elif grant_for == "url":
@@ -97,7 +103,7 @@ async def test_automatic_pull_never_requests_hub_for_existing_database(
 
 @pytest.mark.parametrize("change", ["checkout", "url"])
 async def test_validated_source_is_bound_to_checkout_and_exact_url(
-    tmp_path, hub_http, change
+    tmp_path, hub_http, monkeypatch, change
 ):
     config = config_for(tmp_path / "checkout", hub_http)
     publish(hub_http, build_database(tmp_path / "published"))
@@ -108,8 +114,30 @@ async def test_validated_source_is_bound_to_checkout_and_exact_url(
         config.hub.url += "&changed=true"
     hub_http.requests.clear()
 
+    def forbidden_boundary(*_args, **_kwargs):
+        pytest.fail("mismatched capability reached a hub target/config boundary")
+
+    monkeypatch.setattr(hub_client, "installation_target", forbidden_boundary)
+    monkeypatch.setattr(hub_client, "configured_key", forbidden_boundary)
+
     assert not await pull(config, automatic=True, source=source)
     assert hub_http.requests == []
+
+
+async def test_fetch_validated_manifest_normalizes_checkout_resolution_failure(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+
+    def fail_checkout(_checkout):
+        raise OSError("raw checkout path?token=secret")
+
+    monkeypatch.setattr(hub_client, "checkout_digest", fail_checkout)
+
+    with pytest.raises(HubLocalStateError) as caught:
+        await fetch_validated_manifest(config)
+
+    assert str(caught.value) == "Hub checkout identity is unavailable"
 
 
 async def test_validated_source_binding_is_snapshotted_before_fetch(
@@ -153,6 +181,39 @@ async def test_validated_source_binding_is_snapshotted_before_fetch(
     assert source.url_digest != manifest_url_digest(config.hub.url)
 
 
+async def test_supplied_source_revalidates_identity_after_absence_wait(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    publish(hub_http, build_database(tmp_path / "published"))
+    source = await fetch_validated_manifest(config)
+    hub_http.requests.clear()
+    target = config.database.get_db_path()
+    entered, release = threading.Event(), threading.Event()
+    original_lstat = Path.lstat
+
+    def suspend_absence_check(path):
+        if path == target and not entered.is_set():
+            entered.set()
+            assert release.wait(20)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", suspend_absence_check)
+    task = asyncio.create_task(pull(config, automatic=True, source=source))
+    try:
+        assert await asyncio.to_thread(entered.wait, 20)
+        config.hub.url += "&changed=true"
+        release.set()
+
+        assert not await task
+        assert hub_http.requests == []
+        assert not target.exists()
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
 async def test_automatic_pull_retains_authorized_identity_across_absence_wait(
     tmp_path, hub_http, monkeypatch
 ):
@@ -194,6 +255,73 @@ async def test_automatic_pull_retains_authorized_identity_across_absence_wait(
             await task
 
 
+async def test_initial_trust_read_failure_is_fatal_before_hub_boundaries(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+
+    def fail_trust(_checkout, _url):
+        raise hub_trust.HubTrustError("raw trust path?token=secret")
+
+    def forbidden_boundary(*_args, **_kwargs):
+        pytest.fail("failed authorization reached a hub target/config boundary")
+
+    monkeypatch.setattr(hub_client, "is_trusted", fail_trust)
+    monkeypatch.setattr(hub_client, "installation_target", forbidden_boundary)
+    monkeypatch.setattr(hub_client, "configured_key", forbidden_boundary)
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    try:
+        with pytest.raises(hub_errors.FATAL_HUB_ERRORS):
+            await pull(config, automatic=True)
+    finally:
+        logger.remove(sink)
+
+    assert messages == [
+        "Hub source authorization could not be verified; automatic hub use was "
+        "not started"
+    ]
+    assert "raw trust path" not in "\n".join(messages)
+    assert hub_http.requests == []
+
+
+async def test_concurrent_second_trust_read_failure_is_fatal_without_request(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+    calls = 0
+
+    def fail_second_read(_checkout, _url):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise hub_trust.HubTrustError("raw changed trust path?token=secret")
+        return True
+
+    monkeypatch.setattr(hub_client, "is_trusted", fail_second_read)
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    try:
+        with pytest.raises(hub_errors.FATAL_HUB_ERRORS):
+            await pull(config, automatic=True)
+    finally:
+        logger.remove(sink)
+
+    assert calls == 2
+    assert messages == [
+        "Hub source authorization could not be verified; automatic hub use was "
+        "not started"
+    ]
+    assert "raw changed trust path" not in "\n".join(messages)
+    assert hub_http.requests == []
+
+
 async def test_validated_source_authorizes_without_reading_malformed_store(
     tmp_path, hub_http, monkeypatch
 ):
@@ -212,6 +340,39 @@ async def test_validated_source_authorizes_without_reading_malformed_store(
     ]
 
 
+async def test_checkout_resolution_failure_is_fatal_before_hub_boundaries(
+    tmp_path, hub_http, monkeypatch
+):
+    config = config_for(tmp_path / "checkout", hub_http)
+
+    def fail_checkout(_checkout):
+        raise OSError("raw checkout path?token=secret")
+
+    def forbidden_boundary(*_args, **_kwargs):
+        pytest.fail("checkout failure reached a hub target/config boundary")
+
+    monkeypatch.setattr(hub_client, "checkout_digest", fail_checkout)
+    monkeypatch.setattr(hub_client, "installation_target", forbidden_boundary)
+    monkeypatch.setattr(hub_client, "configured_key", forbidden_boundary)
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    try:
+        with pytest.raises(HubLocalStateError) as caught:
+            await pull(config, automatic=True)
+    finally:
+        logger.remove(sink)
+
+    assert str(caught.value) == "Hub checkout identity is unavailable"
+    assert messages == [
+        "Hub local installation state is unsafe; local indexing was not started"
+    ]
+    assert "raw checkout path" not in "\n".join(messages)
+    assert hub_http.requests == []
+
+
 async def test_target_resolution_filesystem_failure_is_fatal(
     tmp_path, hub_http, monkeypatch
 ):
@@ -221,8 +382,20 @@ async def test_target_resolution_filesystem_failure_is_fatal(
         raise OSError("private-path?secret")
 
     monkeypatch.setattr(type(config.database), "get_db_path", fail_target)
-    with pytest.raises(HubLocalStateError, match="destination is unavailable"):
-        await pull(config)
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("hub_client", False),
+    )
+    try:
+        with pytest.raises(HubLocalStateError, match="destination is unavailable"):
+            await pull(config)
+    finally:
+        logger.remove(sink)
+    assert messages == [
+        "Hub local installation state is unsafe; local indexing was not started"
+    ]
+    assert "private-path" not in "\n".join(messages)
     assert hub_http.requests == []
 
 

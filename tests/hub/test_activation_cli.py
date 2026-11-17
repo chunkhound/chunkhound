@@ -1,12 +1,18 @@
+import argparse
 import hashlib
+import importlib
 import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from loguru import logger
 
 import chunkhound_native as native
+from chunkhound.hub.client import ValidatedHubSource
+from chunkhound.hub.errors import HubLocalStateError
 from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.trust import checkout_digest, manifest_url_digest
 from tests.hub.activation_support import (
@@ -14,6 +20,7 @@ from tests.hub.activation_support import (
     cli,
     cli_env,
     cli_is_trusted,
+    config_for,
     publish,
     write_config,
 )
@@ -94,6 +101,194 @@ def test_pull_trust_is_saved_after_manifest_before_compatibility_selection(
     assert result.returncode == 1
     assert cli_is_trusted(project, project, hub_url)
     assert hub_http.requests == [("/catalogue?token=secret", None)]
+
+
+async def test_pull_trust_checkout_identity_failure_is_sanitized_once(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    raw = "raw checkout path?token=secret"
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+
+    def fail_digest(_checkout):
+        raise OSError(raw)
+
+    monkeypatch.setattr(pull_module, "checkout_digest", fail_digest)
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", AsyncMock())
+    args = argparse.Namespace(trust=True, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert messages == ["Hub checkout identity is unavailable"]
+    assert raw not in "\n".join(messages)
+    pull_module.fetch_validated_manifest.assert_not_awaited()
+
+
+async def test_pull_trust_manifest_binding_failure_is_sanitized_once(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    raw = "raw checkout path?token=secret"
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+
+    async def fail_fetch(_config):
+        try:
+            raise OSError(raw)
+        except OSError as cause:
+            raise HubLocalStateError("Hub checkout identity is unavailable") from cause
+
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fail_fetch)
+    args = argparse.Namespace(trust=True, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert messages == ["Hub checkout identity is unavailable"]
+    assert raw not in "\n".join(messages)
+
+
+async def test_pull_trust_post_fetch_identity_failure_is_sanitized_once(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    captured_url = config.hub.url
+    source = ValidatedHubSource(
+        manifest=Mock(),
+        checkout_digest=checkout_digest(checkout),
+        url_digest=manifest_url_digest(captured_url),
+    )
+    raw = "raw post-fetch checkout path?token=secret"
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    digest_calls = 0
+
+    def fail_revalidation(current_checkout):
+        nonlocal digest_calls
+        digest_calls += 1
+        if digest_calls == 2:
+            raise OSError(raw)
+        return checkout_digest(current_checkout)
+
+    monkeypatch.setattr(
+        pull_module, "fetch_validated_manifest", AsyncMock(return_value=source)
+    )
+    monkeypatch.setattr(pull_module, "checkout_digest", fail_revalidation)
+    monkeypatch.setattr(pull_module, "grant_trust", Mock())
+    args = argparse.Namespace(trust=True, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert messages == ["Hub checkout identity is unavailable"]
+    assert raw not in "\n".join(messages)
+    pull_module.grant_trust.assert_not_called()
+
+
+@pytest.mark.parametrize("change", ["checkout", "url"])
+async def test_pull_trust_revalidates_captured_identity_before_grant_or_artifact(
+    tmp_path, hub_http, monkeypatch, change
+):
+    first_checkout = tmp_path / "first-checkout"
+    second_checkout = tmp_path / "second-checkout"
+    first_checkout.mkdir()
+    second_checkout.mkdir()
+    config = config_for(first_checkout, hub_http)
+    captured_url = config.hub.url
+    source = ValidatedHubSource(
+        manifest=Mock(),
+        checkout_digest=checkout_digest(first_checkout),
+        url_digest=manifest_url_digest(captured_url),
+    )
+
+    async def fetch_and_mutate(_config):
+        if change == "checkout":
+            config.target_dir = second_checkout
+        else:
+            config.hub.url += "&changed=true"
+        return source
+
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    grant = Mock()
+    artifact_pull = AsyncMock(return_value=True)
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fetch_and_mutate)
+    monkeypatch.setattr(pull_module, "grant_trust", grant)
+    monkeypatch.setattr(pull_module, "pull", artifact_pull)
+    args = argparse.Namespace(trust=True, path=first_checkout, version="latest")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert grant.call_count == 0
+    artifact_pull.assert_not_awaited()
+    assert messages == [
+        "Hub pull unavailable: Validated hub source no longer matches authorized "
+        "configuration"
+    ]
+    assert captured_url not in "\n".join(messages)
+
+
+@pytest.mark.parametrize(
+    "artifact_url",
+    [
+        "index.tar.gz",
+        "file:///tmp/index.tar.gz",
+        "https://user:secret@cdn.invalid/index.tar.gz",
+        "https://cdn.invalid:bad/index.tar.gz",
+    ],
+)
+def test_pull_trust_unsupported_artifact_destination_saves_nothing(
+    tmp_path, hub_http, embedding_http, artifact_url
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    manifest, _ = publish(hub_http, build_database(tmp_path / "published"))
+    manifest["embeddings"][0]["versions"][0]["artifact"]["url"] = artifact_url
+    hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
+
+    result = cli(project, "pull", project, "--trust")
+
+    text = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "invalid or unsupported" in text
+    assert not cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests == [("/catalogue?token=secret", None)]
+    assert "Traceback" not in text
 
 
 def test_pull_trust_invalid_manifest_saves_nothing(tmp_path, hub_http, embedding_http):

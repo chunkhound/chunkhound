@@ -5,8 +5,14 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.hub.client import fetch_validated_manifest, pull
-from chunkhound.hub.errors import FATAL_HUB_ERRORS, HubUnavailable
-from chunkhound.hub.trust import HubTrustError, forget_checkout_trust, grant_trust
+from chunkhound.hub.errors import FATAL_HUB_ERRORS, HubLocalStateError, HubUnavailable
+from chunkhound.hub.trust import (
+    HubTrustError,
+    checkout_digest,
+    forget_checkout_trust,
+    grant_trust,
+    manifest_url_digest,
+)
 
 
 def forget_trust_command(args: argparse.Namespace) -> None:
@@ -20,25 +26,60 @@ def forget_trust_command(args: argparse.Namespace) -> None:
 
 
 async def pull_command(args: argparse.Namespace, config: Config) -> None:
+    pre_client_fatal = False
     try:
         source = None
         if args.trust:
+            pre_client_fatal = True
+            try:
+                authorized_checkout = (
+                    config.target_dir or Path(args.path)
+                ).expanduser().resolve()
+                authorized_checkout_digest = checkout_digest(authorized_checkout)
+            except OSError:
+                pre_client_fatal = True
+                raise HubLocalStateError(
+                    "Hub checkout identity is unavailable"
+                ) from None
+            authorized_url = config.hub.url
+            if not authorized_url:
+                raise HubUnavailable("No hub manifest URL configured")
+            authorized_url_digest = manifest_url_digest(authorized_url)
             source = await fetch_validated_manifest(config)
-            hub_url = config.hub.url
-            if hub_url:
-                try:
-                    grant_trust(config.target_dir or Path(args.path), hub_url)
-                except HubTrustError:
-                    logger.warning(
-                        "Hub manifest was authorized for this pull, but future "
-                        "automatic hub use was not enabled"
-                    )
+            try:
+                current_checkout_digest = checkout_digest(
+                    config.target_dir or Path(args.path)
+                )
+            except OSError:
+                raise HubLocalStateError(
+                    "Hub checkout identity is unavailable"
+                ) from None
+            if (
+                source.checkout_digest != authorized_checkout_digest
+                or source.url_digest != authorized_url_digest
+                or current_checkout_digest != authorized_checkout_digest
+                or config.hub.url != authorized_url
+            ):
+                raise HubUnavailable(
+                    "Validated hub source no longer matches authorized configuration"
+                )
+            try:
+                grant_trust(authorized_checkout, authorized_url)
+            except HubTrustError:
+                logger.warning(
+                    "Hub manifest was authorized for this pull, but future "
+                    "automatic hub use was not enabled"
+                )
+        pre_client_fatal = False
         installed = await pull(config, rel=args.version, source=source)
     except HubUnavailable as exc:
         logger.error("Hub pull unavailable: {}", str(exc))
         raise SystemExit(1) from None
-    except FATAL_HUB_ERRORS:
-        # The hub already logged a sanitized error; no CLI traceback/causes.
+    except FATAL_HUB_ERRORS as exc:
+        # Client fatal outcomes are already logged; pre-client identity failures
+        # are formatted here exactly once.
+        if pre_client_fatal:
+            logger.error("{}", str(exc))
         raise SystemExit(1) from None
     if not installed:
         raise SystemExit(1)

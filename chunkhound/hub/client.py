@@ -17,6 +17,7 @@ from chunkhound.core.embedding_model_drift import (
 from chunkhound.hub.artifact import PreparationState, prepare
 from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
+    HubAuthorizationError,
     HubDatabaseMismatch,
     HubInstallationInterrupted,
     HubLocalStateError,
@@ -38,7 +39,12 @@ from chunkhound.hub.manifest import (
     select_manifest,
 )
 from chunkhound.hub.transport import fetch_manifest
-from chunkhound.hub.trust import checkout_digest, is_trusted, manifest_url_digest
+from chunkhound.hub.trust import (
+    HubTrustError,
+    checkout_digest,
+    is_trusted,
+    manifest_url_digest,
+)
 from chunkhound.providers.database.ownership import (
     DatabaseOwnership,
     DatabaseReaderCloseError,
@@ -69,11 +75,12 @@ async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
     if not url:
         raise HubUnavailable("No hub manifest URL configured")
     checkout = config.target_dir or Path.cwd()
-    return await _fetch_bound_manifest(
-        url,
-        checkout_digest(checkout),
-        manifest_url_digest(url),
-    )
+    try:
+        checkout_binding = checkout_digest(checkout)
+        url_binding = manifest_url_digest(url)
+    except OSError:
+        raise HubLocalStateError("Hub checkout identity is unavailable") from None
+    return await _fetch_bound_manifest(url, checkout_binding, url_binding)
 
 
 _NATIVE_ERRORS = (
@@ -178,26 +185,31 @@ async def _pull(
         config, mcp_mode=mcp_mode, no_embeddings=no_embeddings
     ):
         return False
-    if not config.hub.url:
+    url = config.hub.url
+    if not url:
         raise HubUnavailable("No hub manifest URL configured")
-    target = installation_target(config)
-    key = configured_key(config)  # Offline; do not let drift pinning run first.
     checkout = config.target_dir or Path.cwd()
+    try:
+        authorized_checkout_digest = checkout_digest(checkout)
+        authorized_url_digest = manifest_url_digest(url)
+    except OSError:
+        raise HubLocalStateError("Hub checkout identity is unavailable") from None
     if source is not None and (
-        source.checkout_digest != checkout_digest(checkout)
-        or source.url_digest != manifest_url_digest(config.hub.url)
+        source.checkout_digest != authorized_checkout_digest
+        or source.url_digest != authorized_url_digest
     ):
         raise HubUnavailable("Validated hub source no longer matches configuration")
-    authorized_checkout_digest = None
-    authorized_url = None
-    authorized_url_digest = None
     if automatic and source is None:
-        authorized_checkout = checkout.expanduser().resolve()
-        authorized_checkout_digest = checkout_digest(authorized_checkout)
-        authorized_url = config.hub.url
-        authorized_url_digest = manifest_url_digest(authorized_url)
-        if not is_trusted(authorized_checkout, authorized_url):
-            return False
+        try:
+            if not is_trusted(checkout, url):
+                return False
+        except HubTrustError:
+            raise HubAuthorizationError(
+                "Hub source authorization could not be verified; automatic hub "
+                "use was not started"
+            ) from None
+    target = installation_target(config)
+    key = configured_key(config)  # Offline; do not let drift pinning run first.
     if automatic:
         # Keep actual executor completion private: shutdown cancels Tasks, not threads.
         worker = asyncio.get_running_loop().run_in_executor(
@@ -206,26 +218,52 @@ async def _pull(
         if not await _await_pull_worker(worker):
             return False
     if source is not None:
-        validated = source
-    elif automatic:
-        assert authorized_checkout_digest is not None
-        assert authorized_url is not None
-        assert authorized_url_digest is not None
+        try:
+            current_checkout_digest = checkout_digest(
+                config.target_dir or Path.cwd()
+            )
+        except OSError:
+            raise HubLocalStateError("Hub checkout identity is unavailable") from None
         if (
-            checkout_digest(config.target_dir or Path.cwd())
-            != authorized_checkout_digest
-            or config.hub.url != authorized_url
+            current_checkout_digest != authorized_checkout_digest
+            or config.hub.url != url
         ):
             return False
+        validated = source
+    elif automatic:
+        try:
+            current_checkout_digest = checkout_digest(
+                config.target_dir or Path.cwd()
+            )
+        except OSError:
+            raise HubLocalStateError("Hub checkout identity is unavailable") from None
+        if (
+            current_checkout_digest != authorized_checkout_digest
+            or config.hub.url != url
+        ):
+            return False
+        try:
+            if not is_trusted(config.target_dir or Path.cwd(), url):
+                return False
+        except HubTrustError:
+            raise HubAuthorizationError(
+                "Hub source authorization could not be verified; automatic hub "
+                "use was not started"
+            ) from None
         validated = await _fetch_bound_manifest(
-            authorized_url,
+            url,
             authorized_checkout_digest,
             authorized_url_digest,
         )
+        try:
+            current_checkout_digest = checkout_digest(
+                config.target_dir or Path.cwd()
+            )
+        except OSError:
+            raise HubLocalStateError("Hub checkout identity is unavailable") from None
         if (
-            checkout_digest(config.target_dir or Path.cwd())
-            != authorized_checkout_digest
-            or config.hub.url != authorized_url
+            current_checkout_digest != authorized_checkout_digest
+            or config.hub.url != url
         ):
             return False
     else:
@@ -304,6 +342,9 @@ async def pull(
             raise installation_failure(exc) from None
         except OSError:
             raise HubLocalStateError("Hub local filesystem is unavailable") from None
+    except HubAuthorizationError as exc:
+        logger.bind(hub_client=True).error("{}", str(exc))
+        raise
     except HubLocalStateError:
         logger.bind(hub_client=True).error(
             "Hub local installation state is unsafe; local indexing was not started"

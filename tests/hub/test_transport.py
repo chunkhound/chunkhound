@@ -253,7 +253,13 @@ async def test_initial_and_redirect_urls_are_validated_without_secret_diagnostic
         if operation == "manifest":
             await fetch_manifest(url)
         else:
-            await download(artifact_at(hub_http, url=url), tmp_path / "download.part")
+            artifact = artifact_at(hub_http)
+            unsafe_artifact = Artifact.model_construct(
+                url=url,
+                bytes=artifact.bytes,
+                sha256=artifact.sha256,
+            )
+            await download(unsafe_artifact, tmp_path / "download.part")
     if redirect:
         # httpx may reject Location while constructing next_request even with
         # follow_redirects=False. That protocol error may use the retry budget,

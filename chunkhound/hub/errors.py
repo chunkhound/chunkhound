@@ -25,6 +25,10 @@ class HubLocalStateError(RuntimeError):
     """Local installation state is unsafe or ambiguous; do not fall back."""
 
 
+class HubAuthorizationError(RuntimeError):
+    """Hub authorization state could not be verified safely; do not fall back."""
+
+
 class HubReaderCloseError(RuntimeError):
     """Fatal inspection shutdown failure retaining the original safe retry."""
 
@@ -53,6 +57,7 @@ class HubReaderCloseError(RuntimeError):
 
 
 FATAL_HUB_ERRORS: tuple[type[Exception], ...] = (
+    HubAuthorizationError,
     HubDatabaseMismatch,
     HubInstallationInterrupted,
     HubReaderCloseError,

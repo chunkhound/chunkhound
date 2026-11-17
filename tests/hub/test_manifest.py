@@ -79,6 +79,23 @@ def test_invalid_manifest_cannot_reach_selection():
         parse_manifest(b"not-json")
 
 
+@pytest.mark.parametrize(
+    "artifact_url",
+    [
+        "index.tar.gz",
+        "file:///tmp/index.tar.gz",
+        "https://user:secret@cdn.invalid/index.tar.gz",
+        "https://cdn.invalid:bad/index.tar.gz",
+    ],
+)
+def test_manifest_rejects_unsupported_artifact_destination(artifact_url):
+    raw = catalogue()
+    raw["embeddings"][0]["versions"][0]["artifact"]["url"] = artifact_url
+
+    with pytest.raises(HubUnavailable, match="invalid or unsupported"):
+        parse_manifest(json.dumps(raw).encode())
+
+
 def test_selects_exact_key_and_keeps_artifact_url_opaque():
     raw = json.dumps(catalogue()).encode()
     key = MatchKey("duckdb", "openai", "hub-test", 8, 1)
@@ -133,11 +150,7 @@ def test_manifest_declines_unknown_ambiguous_or_nonopaque_contract(fault):
     elif fault == "missing-rel":
         raw["embeddings"][0]["versions"] = []
     elif fault == "relative-url":
-        versions[0]["artifact"] = {
-            "path": "index.tar.gz",
-            "bytes": 99,
-            "sha256": "a" * 64,
-        }
+        versions[0]["artifact"]["url"] = "index.tar.gz"
     elif fault == "duplicate-rel":
         versions.append(copy.deepcopy(versions[0]))
     else:

@@ -58,7 +58,11 @@ def _validate_store(value: object) -> dict[str, object]:
     if not isinstance(grants, dict):
         raise ValueError("trust store grants must be an object")
     for checkout, digests in grants.items():
-        if not isinstance(checkout, str) or not isinstance(digests, list):
+        if (
+            not isinstance(checkout, str)
+            or _DIGEST_PATTERN.fullmatch(checkout) is None
+            or not isinstance(digests, list)
+        ):
             raise ValueError("invalid trust store grant")
         if any(
             not isinstance(digest, str) or _DIGEST_PATTERN.fullmatch(digest) is None

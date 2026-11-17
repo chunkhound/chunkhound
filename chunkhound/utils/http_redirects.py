@@ -11,6 +11,22 @@ class RedirectError(ValueError):
     """A redirect refused with URL-free diagnostic text."""
 
 
+def http_destination_ok(url: str) -> bool:
+    """Return whether a URL is an absolute safe HTTP(S) destination."""
+    try:
+        parts = urlsplit(url)
+        valid = (
+            parts.scheme in {"http", "https"}
+            and bool(parts.hostname)
+            and parts.username is None
+            and parts.password is None
+        )
+        _ = parts.port
+        return valid
+    except ValueError:
+        return False
+
+
 def url_origin(url: str) -> tuple[str, str | None, int | None]:
     parts = urlsplit(url)
     port = parts.port if parts.port is not None else _DEFAULT_PORTS.get(parts.scheme)

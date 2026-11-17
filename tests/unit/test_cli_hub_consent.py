@@ -255,6 +255,70 @@ async def test_target_inspection_failures_are_normalized_as_fatal_local_state(
 
     with pytest.raises(expected_type):
         await run._prepare_hub_index(args, config, formatter)
+    assert "raw local path" not in formatter.text
+
+
+async def test_checkout_identity_resolution_failure_is_normalized(
+    config, args, formatter, monkeypatch
+):
+    raw = "raw checkout path?token=secret"
+
+    def fail_resolve(_checkout):
+        raise OSError(raw)
+
+    monkeypatch.setattr(run, "checkout_digest", fail_resolve)
+
+    with pytest.raises(HubLocalStateError) as caught:
+        await run._prepare_hub_index(args, config, formatter)
+
+    assert str(caught.value) == "Hub checkout identity is unavailable"
+    assert raw not in str(caught.value)
+
+
+async def test_run_command_formats_checkout_failure_once_without_raw_cause(
+    config, args, monkeypatch
+):
+    raw = "raw checkout path?token=secret"
+    formatter = Mock()
+
+    def fail_digest(_checkout):
+        raise OSError(raw)
+
+    monkeypatch.setattr(run, "checkout_digest", fail_digest)
+    monkeypatch.setattr(run, "RichOutputFormatter", lambda verbose: formatter)
+    args.verbose = False
+    args.db = config.database.path
+    monkeypatch.setattr(run, "_validate_run_arguments", lambda *_args: True)
+
+    with pytest.raises(SystemExit) as stopped:
+        await run.run_command(args, config)
+
+    assert stopped.value.code == 1
+    formatter.error.assert_called_once_with("Hub checkout identity is unavailable")
+    assert raw not in str(formatter.method_calls)
+
+
+async def test_run_command_does_not_duplicate_preformatted_fatal_error(
+    config, args, monkeypatch
+):
+    message = "Hub installation was interrupted; retry explicit pull"
+    failure = HubInstallationInterrupted(message)
+    formatter = Mock()
+    monkeypatch.setattr(run, "RichOutputFormatter", lambda verbose: formatter)
+    monkeypatch.setattr(
+        run,
+        "_prepare_hub_index",
+        AsyncMock(side_effect=failure),
+    )
+    args.verbose = False
+    args.db = config.database.path
+    monkeypatch.setattr(run, "_validate_run_arguments", lambda *_args: True)
+
+    with pytest.raises(SystemExit) as stopped:
+        await run.run_command(args, config)
+
+    assert stopped.value.code == 1
+    formatter.error.assert_not_called()
 
 
 async def test_explicit_trust_existing_database_validates_and_saves_without_pull(
@@ -341,6 +405,61 @@ async def test_mismatched_validated_capability_stops_before_grant_or_pull(
     grant.assert_not_called()
     assert "no longer matches" in formatter.text
     assert config.hub.url not in formatter.text
+
+
+async def test_post_fetch_checkout_failure_is_formatted_once(
+    config, args, formatter, monkeypatch, tmp_path
+):
+    args.trust = True
+    target = tmp_path / "chunks.db"
+    source = _validated_source(config.target_dir, config.hub.url)
+    digest_calls = 0
+
+    def fail_revalidation(checkout):
+        nonlocal digest_calls
+        digest_calls += 1
+        if digest_calls == 2:
+            raise OSError("raw post-fetch checkout path?token=secret")
+        return checkout_digest(checkout)
+
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run,
+        "fetch_validated_manifest",
+        AsyncMock(return_value=source),
+    )
+    monkeypatch.setattr(run, "checkout_digest", fail_revalidation)
+
+    with pytest.raises(HubLocalStateError):
+        await run._prepare_hub_index(args, config, formatter)
+
+    assert formatter.messages == [
+        ("error", "Hub checkout identity is unavailable")
+    ]
+    assert "raw post-fetch checkout path" not in formatter.text
+
+
+async def test_manifest_binding_fatal_failure_is_formatted_before_run_exit(
+    config, args, formatter, monkeypatch, tmp_path
+):
+    args.trust = True
+    target = tmp_path / "chunks.db"
+    failure = HubLocalStateError("Hub checkout identity is unavailable")
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run,
+        "fetch_validated_manifest",
+        AsyncMock(side_effect=failure),
+    )
+
+    with pytest.raises(HubLocalStateError):
+        await run._prepare_hub_index(args, config, formatter)
+
+    assert formatter.messages == [
+        ("error", "Hub checkout identity is unavailable")
+    ]
 
 
 async def test_existing_database_safe_validation_failure_offers_local_fallback(
