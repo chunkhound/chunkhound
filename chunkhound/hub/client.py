@@ -54,17 +54,25 @@ class ValidatedHubSource:
     url_digest: str
 
 
+async def _fetch_bound_manifest(
+    url: str, checkout_binding: str, url_binding: str
+) -> ValidatedHubSource:
+    return ValidatedHubSource(
+        manifest=parse_manifest(await fetch_manifest(url)),
+        checkout_digest=checkout_binding,
+        url_digest=url_binding,
+    )
+
+
 async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
     url = config.hub.url
     if not url:
         raise HubUnavailable("No hub manifest URL configured")
     checkout = config.target_dir or Path.cwd()
-    checkout_binding = checkout_digest(checkout)
-    url_binding = manifest_url_digest(url)
-    return ValidatedHubSource(
-        manifest=parse_manifest(await fetch_manifest(url)),
-        checkout_digest=checkout_binding,
-        url_digest=url_binding,
+    return await _fetch_bound_manifest(
+        url,
+        checkout_digest(checkout),
+        manifest_url_digest(url),
     )
 
 
@@ -180,8 +188,15 @@ async def _pull(
         or source.url_digest != manifest_url_digest(config.hub.url)
     ):
         raise HubUnavailable("Validated hub source no longer matches configuration")
+    authorized_checkout_digest = None
+    authorized_url = None
+    authorized_url_digest = None
     if automatic and source is None:
-        if not is_trusted(checkout, config.hub.url):
+        authorized_checkout = checkout.expanduser().resolve()
+        authorized_checkout_digest = checkout_digest(authorized_checkout)
+        authorized_url = config.hub.url
+        authorized_url_digest = manifest_url_digest(authorized_url)
+        if not is_trusted(authorized_checkout, authorized_url):
             return False
     if automatic:
         # Keep actual executor completion private: shutdown cancels Tasks, not threads.
@@ -190,7 +205,31 @@ async def _pull(
         )
         if not await _await_pull_worker(worker):
             return False
-    validated = source if source is not None else await fetch_validated_manifest(config)
+    if source is not None:
+        validated = source
+    elif automatic:
+        assert authorized_checkout_digest is not None
+        assert authorized_url is not None
+        assert authorized_url_digest is not None
+        if (
+            checkout_digest(config.target_dir or Path.cwd())
+            != authorized_checkout_digest
+            or config.hub.url != authorized_url
+        ):
+            return False
+        validated = await _fetch_bound_manifest(
+            authorized_url,
+            authorized_checkout_digest,
+            authorized_url_digest,
+        )
+        if (
+            checkout_digest(config.target_dir or Path.cwd())
+            != authorized_checkout_digest
+            or config.hub.url != authorized_url
+        ):
+            return False
+    else:
+        validated = await fetch_validated_manifest(config)
     selected = select_manifest(validated.manifest, key, rel)
     logger.bind(hub_client=True).info(
         "Pulling hub base project={} identity={} embedding={} version={} revision={} "

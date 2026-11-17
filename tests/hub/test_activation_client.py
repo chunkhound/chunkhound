@@ -153,6 +153,47 @@ async def test_validated_source_binding_is_snapshotted_before_fetch(
     assert source.url_digest != manifest_url_digest(config.hub.url)
 
 
+async def test_automatic_pull_retains_authorized_identity_across_absence_wait(
+    tmp_path, hub_http, monkeypatch
+):
+    monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
+    first_checkout = tmp_path / "first-checkout"
+    second_checkout = tmp_path / "second-checkout"
+    first_checkout.mkdir()
+    second_checkout.mkdir()
+    checkout = tmp_path / "checkout"
+    checkout.symlink_to(first_checkout, target_is_directory=True)
+    config = config_for(checkout, hub_http)
+    publish(hub_http, build_database(tmp_path / "published"))
+    grant_trust(checkout, config.hub.url)
+    target = config.database.get_db_path()
+    entered, release = threading.Event(), threading.Event()
+    original_lstat = Path.lstat
+
+    def suspend_absence_check(path):
+        if path == target and not entered.is_set():
+            entered.set()
+            assert release.wait(20)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", suspend_absence_check)
+    task = asyncio.create_task(pull(config, automatic=True))
+    try:
+        assert await asyncio.to_thread(entered.wait, 20)
+        config.hub.url += "&changed=true"
+        checkout.unlink()
+        checkout.symlink_to(second_checkout, target_is_directory=True)
+        release.set()
+
+        assert not await task
+        assert hub_http.requests == []
+        assert not target.exists()
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
 async def test_validated_source_authorizes_without_reading_malformed_store(
     tmp_path, hub_http, monkeypatch
 ):
