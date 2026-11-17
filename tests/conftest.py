@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterator
 
 import pytest
 from loguru import logger
@@ -173,6 +174,22 @@ def free_opencode_models() -> list[str]:
         reasons = "; ".join(f"{slug}: {reason}" for slug, reason in rejected)
         pytest.skip(f"No servable free OpenCode models ({reasons})")
     return servable
+
+
+@pytest.fixture
+def isolated_mcp_mode() -> Iterator[None]:
+    """Restore CHUNKHOUND_MCP_MODE after tests that run an MCP entry point.
+
+    mcp_command and async_main set it for the process lifetime. Restore it by
+    hand: monkeypatch.delenv records no undo when the variable is unset, so it
+    would let those writes leak into later tests.
+    """
+    saved = os.environ.get("CHUNKHOUND_MCP_MODE")
+    yield
+    if saved is None:
+        os.environ.pop("CHUNKHOUND_MCP_MODE", None)
+    else:
+        os.environ["CHUNKHOUND_MCP_MODE"] = saved
 
 
 @pytest.fixture

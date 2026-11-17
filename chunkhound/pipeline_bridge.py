@@ -679,6 +679,19 @@ def _cfg_or(obj: Any, attr: str, default: _T, cast: Callable[[Any], _T]) -> _T:
     return cast(value)
 
 
+def rust_mtime_epsilon(config: Any) -> float:
+    """Return the mtime tolerance, in seconds, the Rust differ uses for *config*.
+
+    The single reader of ``indexing.mtime_epsilon_seconds`` for the Rust
+    pipeline and for anything that must agree with its diff (the incremental
+    precheck in chunkhound/services/rust_incremental_precheck.py). An explicit
+    ``0.0`` is honoured as an exact match; only a missing or None value falls
+    back to 0.01.
+    """
+    indexing_cfg = getattr(config, "indexing", None) if config else None
+    return _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
+
+
 async def run_rust_pipeline(
     files_to_process: list[tuple[Path, str | None]],
     *,
@@ -734,7 +747,7 @@ async def run_rust_pipeline(
     per_file_timeout_min = _cfg_or(
         indexing_cfg, "per_file_timeout_min_size_kb", 128, int
     )
-    mtime_eps = _cfg_or(indexing_cfg, "mtime_epsilon_seconds", 0.01, float)
+    mtime_eps = rust_mtime_epsilon(config)
     detect_sql = bool(getattr(indexing_cfg, "detect_embedded_sql", True))
     # Rust's config_file_size_threshold_kb is a u32 — a negative value (the
     # documented "<=0 disables the gate" convention, see batch_processor.py)
