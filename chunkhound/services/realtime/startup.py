@@ -24,7 +24,7 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler, forward_to_loop
+from .events import SimpleEventHandler, forward_to_loop, watchdog_event_filter
 from .inotify_overflow import InotifyOverflowDetection
 
 
@@ -36,6 +36,7 @@ class RealtimeObserver(Protocol):
         event_handler: SimpleEventHandler,
         path: str,
         recursive: bool = ...,
+        event_filter: list[type] | None = ...,
     ) -> Any: ...
 
     def start(self) -> None: ...
@@ -859,6 +860,7 @@ class RealtimeStartupMixin:
             event_handler,
             str(watch_path),
             recursive=True,  # Use recursive for complete event coverage
+            event_filter=watchdog_event_filter(),
         )
         observer.start()
 
