@@ -33,9 +33,13 @@ def test_package_docstring_matches_pyproject_description() -> None:
         pyproject = tomllib.load(handle)
 
     assert chunkhound.__doc__ is not None
-    # Docstrings end with a period; pyproject's description does not.
-    docstring = chunkhound.__doc__.strip().removesuffix(".")
-    assert docstring == pyproject["project"]["description"]
+    # Compare modulo a single trailing period on either side: docstrings
+    # conventionally end with one, and the description (homepage copy) does too.
+    def _without_trailing_period(s: str) -> str:
+        return s.strip().removesuffix(".")
+
+    docstring = _without_trailing_period(chunkhound.__doc__)
+    assert docstring == _without_trailing_period(pyproject["project"]["description"])
 
 
 def test_package_imports_under_python_optimize() -> None:

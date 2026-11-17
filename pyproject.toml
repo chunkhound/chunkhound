@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chunkhound"
-dynamic = ["version"]
-description = "Local-first research engine for AI agents via MCP, with a CLI companion"
+dynamic = ["version", "dependencies"]
+description = "Free, open-source engineering research for code, git history, rendered web pages, and technical documents—local-first, enterprise-scale, and cited."
 readme = "README.md"
 keywords = [
     "code search",
@@ -38,6 +38,10 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
 ]
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+# Stable builds keep this dependency range. Alpha release builds replace only
+# chunkhound-native with the exact main version and persist it in the sdist.
 dependencies = [
     "duckdb==1.5.4",
     "openai>=1.0.0",
@@ -185,6 +189,9 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist.hooks.custom]
 path = "hatch_build.py"
 
 [tool.chunkhound.watchman_runtime]

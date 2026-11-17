@@ -1,7 +1,7 @@
 # ChunkHound LLM Context
 
 ## PROJECT_IDENTITY
-ChunkHound: Local-first research engine for AI agents via MCP, with a CLI companion
+ChunkHound: Free, open-source engineering research for code, git history, rendered web pages, and technical documents—local-first, enterprise-scale, and cited.
 Built: 100% by AI agents - NO human-written code
 Purpose: Transform codebases into searchable knowledge bases for AI agents
 

@@ -1,6 +1,10 @@
-"""Local-first research engine for AI agents via MCP, with a CLI companion."""
+"""Free, open-source engineering research for code, git history, rendered web pages, and technical documents—local-first, enterprise-scale, and cited."""
 
+from .platform_guard import disable_platform_wmi_queries
 from .version import __version__
+
+# First, before any module calls platform: see chunkhound/platform_guard.py.
+disable_platform_wmi_queries()
 
 __author__ = "Ofri Wolfus"
 
