@@ -519,7 +519,7 @@ def test_candidate_mismatch_exit_preserves_local_database_sidecars(
 
 
 @pytest.mark.parametrize("mode", ["pull", "index"])
-def test_preinstall_busy_is_explicit_failure_and_auto_soft(
+def test_preinstall_busy_has_fixed_fatal_diagnostic(
     tmp_path, hub_http, embedding_http, mode
 ):
     project = tmp_path / "checkout"
@@ -540,7 +540,10 @@ def test_preinstall_busy_is_explicit_failure_and_auto_soft(
     finally:
         held.close()
     assert result.returncode == 1
-    assert "destination is busy" in result.stderr
+    assert (
+        "Hub local installation state is unsafe; local indexing was not started"
+        in result.stderr
+    )
     assert "Traceback" not in result.stdout + result.stderr
     assert not target.exists()
 

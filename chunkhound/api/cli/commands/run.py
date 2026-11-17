@@ -13,6 +13,7 @@ from typing import Any
 
 from loguru import logger
 
+import chunkhound_native as native
 from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.config import Config
 from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
@@ -25,8 +26,12 @@ from chunkhound.hub.client import (
     fetch_validated_manifest,
     pull,
 )
-from chunkhound.hub.errors import FATAL_HUB_ERRORS, HubUnavailable
-from chunkhound.hub.install import installation_target
+from chunkhound.hub.errors import (
+    FATAL_HUB_ERRORS,
+    HubLocalStateError,
+    HubUnavailable,
+)
+from chunkhound.hub.install import installation_failure, installation_target
 from chunkhound.hub.trust import HubTrustError, grant_trust, is_trusted
 from chunkhound.registry import (
     configure_registry,
@@ -118,8 +123,6 @@ async def _prepare_hub_index(
     ):
         return HubIndexDecision.CONTINUE_LOCAL
 
-    target = installation_target(config)
-    target_absent = automatic_target_absent(target)
     hub_url = config.hub.url
     explicit_trust = bool(getattr(args, "trust", False))
 
@@ -131,6 +134,25 @@ async def _prepare_hub_index(
             )
             return HubIndexDecision.STOP
         return HubIndexDecision.CONTINUE_LOCAL
+
+    try:
+        target = installation_target(config)
+        target_absent = automatic_target_absent(target)
+    except HubUnavailable as exc:
+        formatter.error(str(exc))
+        if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
+            return HubIndexDecision.CONTINUE_LOCAL
+        _hub_authorization_guidance(formatter)
+        return HubIndexDecision.STOP
+    except (
+        native.DatabaseBusyError,
+        native.DatabaseInterruptedError,
+        native.DatabaseLayoutError,
+        native.DatabaseFilesystemError,
+    ) as exc:
+        raise installation_failure(exc) from None
+    except OSError:
+        raise HubLocalStateError("Hub local filesystem is unavailable") from None
 
     if not target_absent:
         if explicit_trust:

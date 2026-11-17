@@ -6,10 +6,15 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+import chunkhound_native as native
 from chunkhound.api.cli.commands import run
 from chunkhound.api.cli.parsers.run_parser import add_run_subparser
 from chunkhound.core.config.config import Config
-from chunkhound.hub.errors import HubLocalStateError, HubUnavailable
+from chunkhound.hub.errors import (
+    HubInstallationInterrupted,
+    HubLocalStateError,
+    HubUnavailable,
+)
 from chunkhound.hub.trust import HubTrustError
 
 pytestmark = pytest.mark.asyncio
@@ -116,10 +121,12 @@ async def test_mcp_mode_skips_target_trust_prompt_and_hub(
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
-async def test_no_url_continues_local_without_trust_or_hub(
-    config, args, formatter, monkeypatch, absent_target
+@pytest.mark.parametrize("hub_url", [None, ""])
+async def test_no_url_continues_before_target_trust_or_hub(
+    config, args, formatter, monkeypatch, hub_url
 ):
-    config.hub.url = None
+    config.hub.url = hub_url
+    monkeypatch.setattr(run, "installation_target", _forbid)
     monkeypatch.setattr(run, "is_trusted", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
 
@@ -128,11 +135,13 @@ async def test_no_url_continues_local_without_trust_or_hub(
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
-async def test_explicit_trust_without_url_stops_with_guidance(
-    config, args, formatter, monkeypatch, absent_target
+@pytest.mark.parametrize("hub_url", [None, ""])
+async def test_explicit_trust_without_url_stops_before_target_with_guidance(
+    config, args, formatter, monkeypatch, hub_url
 ):
-    config.hub.url = None
+    config.hub.url = hub_url
     args.trust = True
+    monkeypatch.setattr(run, "installation_target", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
@@ -158,20 +167,48 @@ async def test_existing_database_never_reads_trust_prompts_or_contacts_hub(
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
-async def test_target_inspection_failure_propagates_without_prompt_or_hub(
-    config, args, formatter, monkeypatch, tmp_path
+async def test_unsupported_target_is_safe_failure_without_implicit_fallback(
+    config, args, formatter, monkeypatch
+):
+    monkeypatch.setattr(
+        run,
+        "installation_target",
+        lambda _config: (_ for _ in ()).throw(HubUnavailable("unsupported target")),
+    )
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    assert "unsupported target" in formatter.text
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_type"),
+    [
+        (native.DatabaseBusyError(), HubLocalStateError),
+        (native.DatabaseLayoutError(), HubLocalStateError),
+        (native.DatabaseFilesystemError(), HubLocalStateError),
+        (native.DatabaseInterruptedError(), HubInstallationInterrupted),
+        (OSError("raw local path"), HubLocalStateError),
+    ],
+)
+async def test_target_inspection_failures_are_normalized_as_fatal_local_state(
+    config, args, formatter, monkeypatch, tmp_path, failure, expected_type
 ):
     target = tmp_path / "chunks.db"
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(
         run,
         "automatic_target_absent",
-        lambda _target: (_ for _ in ()).throw(HubLocalStateError("unsafe target")),
+        lambda _target: (_ for _ in ()).throw(failure),
     )
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
 
-    with pytest.raises(HubLocalStateError, match="unsafe target"):
+    with pytest.raises(expected_type):
         await run._prepare_hub_index(args, config, formatter)
 
 
