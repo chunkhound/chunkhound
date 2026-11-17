@@ -191,7 +191,7 @@ async def test_commit_diff_search_without_strategy_still_runs():
 
     with patch(
         "chunkhound.mcp_server.tools._inject_diff_service",
-        new=AsyncMock(return_value=(services, None)),
+        new=AsyncMock(return_value=services),
     ) as inject:
         await search_impl(
             services=services,
@@ -239,7 +239,7 @@ async def test_non_reranking_provider_searches_without_a_warning():
     provider = Mock()
     provider.name, provider.model = "openai", "text-embedding-3-small"
     provider.supports_reranking = Mock(return_value=False)
-    provider.embed = AsyncMock(return_value=[[0.1, 0.2]])
+    provider.embed_query = AsyncMock(return_value=[[0.1, 0.2]])
     db = Mock()
     db.search_semantic = Mock(return_value=([], {"total": 0}))
     manager = Mock(spec=EmbeddingManager)
