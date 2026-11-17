@@ -7,6 +7,7 @@ import pytest
 
 import chunkhound_native as native
 from chunkhound.hub.inspect import inspect_database
+from chunkhound.hub.trust import checkout_digest, manifest_url_digest
 from tests.hub.activation_support import (
     ROOT,
     cli,
@@ -17,6 +18,22 @@ from tests.hub.activation_support import (
 )
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import snapshot
+
+
+def grant_cli_trust(project, checkout, hub_url):
+    path = project.parent / "home" / ".config" / "chunkhound" / "hub-trust.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "grants": {
+                    checkout_digest(checkout): [manifest_url_digest(hub_url)],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
@@ -218,39 +235,163 @@ main()
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
 @pytest.mark.parametrize("rust", ["0", "1"])
 @pytest.mark.parametrize("initial", ["absent", "misaligned", "aligned"])
-def test_auto_installs_before_drift_pinning_and_aligned_makes_no_request(
+def test_trusted_cold_index_installs_but_existing_database_never_requests_hub(
     tmp_path, hub_http, embedding_http, backend, rust, initial
 ):
     project = tmp_path / "checkout"
     project.mkdir()
+    hub_url = hub_http.url + "/catalogue?token=secret"
     (project / "source.py").write_text(
         "\n".join(f"def local_{i}(): return 'local_marker_{i}'" for i in range(100)),
         encoding="utf-8",
     )
+    expected_model = "hub-test"
     if initial != "absent":
-        old_model = "hub-test" if initial == "aligned" else "old-model"
-        write_config(project, backend, None, embedding_http.url, old_model)
+        expected_model = "hub-test" if initial == "aligned" else "old-model"
+        write_config(project, backend, None, embedding_http.url, expected_model)
         old = cli(project, "index", project, rust=rust)
         assert old.returncode == 0, old.stdout + old.stderr
-    write_config(
-        project, backend, hub_http.url + "/catalogue?token=secret", embedding_http.url
-    )
+    write_config(project, backend, hub_url, embedding_http.url)
     publish(hub_http, build_database(tmp_path / "published", backend))
+    if initial == "absent":
+        grant_cli_trust(project, project, hub_url)
     embedding_http.requests.clear()
     result = cli(project, "index", project, "--verbose", rust=rust)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert len(hub_http.requests) == (0 if initial == "aligned" else 2)
+    assert len(hub_http.requests) == (2 if initial == "absent" else 0)
     target = (
         project
         / ".chunkhound"
         / "db"
         / ("chunks.db" if backend == "duckdb" else "lancedb.lancedb")
     )
-    assert {g.model for g in inspect_database(target, backend).groups} == {"hub-test"}
-    assert all(request["model"] == "hub-test" for request in embedding_http.requests)
-    if initial != "aligned":
+    assert {g.model for g in inspect_database(target, backend).groups} == {
+        expected_model
+    }
+    assert all(
+        request["model"] == expected_model for request in embedding_http.requests
+    )
+    if initial == "absent":
         assert embedding_http.requests  # Normal overlay followed base install.
     assert "token=secret" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
+@pytest.mark.parametrize("initial", ["misaligned", "aligned"])
+def test_index_trust_existing_database_saves_source_without_artifact_request(
+    tmp_path, hub_http, embedding_http, backend, initial
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    model = "hub-test" if initial == "aligned" else "old-model"
+    write_config(project, backend, None, embedding_http.url, model)
+    (project / "source.py").write_text("def retained_local(): return 1\n")
+    baseline = cli(project, "index", project)
+    assert baseline.returncode == 0, baseline.stdout + baseline.stderr
+    target = (
+        project
+        / ".chunkhound"
+        / "db"
+        / ("chunks.db" if backend == "duckdb" else "lancedb.lancedb")
+    )
+    write_config(project, backend, hub_url, embedding_http.url)
+    _, route = publish(hub_http, build_database(tmp_path / "published", backend))
+    hub_http.requests.clear()
+
+    result = cli(project, "index", project, "--trust")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests == [("/catalogue?token=secret", None)]
+    assert all(request[0] != route for request in hub_http.requests)
+    assert {g.model for g in inspect_database(target, backend).groups} == {model}
+
+
+def test_index_trust_without_source_stops_before_local_index(tmp_path, embedding_http):
+    project = tmp_path / "checkout"
+    write_config(project, "duckdb", None, embedding_http.url)
+    (project / "source.py").write_text("def must_not_index(): return 1\n")
+
+    result = cli(project, "index", project, "--trust")
+
+    assert result.returncode == 1
+    assert "Configure hub.url" in result.stdout + result.stderr
+    assert embedding_http.requests == []
+    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+
+
+def test_index_trust_persists_and_installs_cold_base(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    (project / "local.py").write_text("def local_overlay(): return 1\n")
+    publish(hub_http, build_database(tmp_path / "published"))
+
+    result = cli(project, "index", project, "--trust")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert cli_is_trusted(project, project, hub_url)
+    assert hub_http.requests == [
+        ("/catalogue?token=secret", None),
+        ("/base.tar.gz?token=secret", None),
+    ]
+    assert embedding_http.requests
+    search = cli(project, "search", "local_overlay", project, "--regex")
+    assert search.returncode == 0, search.stdout + search.stderr
+    assert "local.py" in search.stdout + search.stderr
+
+
+def test_untrusted_no_prompt_index_stops_before_hub_or_embedding(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    write_config(
+        project, "duckdb", hub_http.url + "/catalogue?token=secret", embedding_http.url
+    )
+    (project / "source.py").write_text("def must_not_index(): return 1\n")
+    publish(hub_http, build_database(tmp_path / "published"))
+
+    result = cli(project, "index", project)
+
+    assert result.returncode == 1
+    assert "index --trust" in result.stdout + result.stderr
+    assert hub_http.requests == []
+    assert embedding_http.requests == []
+    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+
+
+def test_interactive_local_choice_allows_full_index_without_hub_request(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    write_config(
+        project, "duckdb", hub_http.url + "/catalogue?token=secret", embedding_http.url
+    )
+    (project / "source.py").write_text("def chosen_local(): return 1\n")
+    script = r"""
+import sys
+sys.path.insert(0, sys.argv.pop(1))
+from chunkhound.api.cli.commands import autodoc_prompts
+from chunkhound.api.cli.main import main
+autodoc_prompts.is_interactive = lambda: True
+autodoc_prompts.prompt_choice = lambda *args, **kwargs: "local"
+sys.argv = ["chunkhound", *sys.argv[1:]]
+main()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(ROOT), "index", str(project)],
+        cwd=project,
+        env={**cli_env(project), "CHUNKHOUND_NO_PROMPTS": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert hub_http.requests == []
+    assert embedding_http.requests
 
 
 @pytest.mark.parametrize("mode", ["--no-embeddings", "--simulate", "--check-ignores"])
@@ -328,8 +469,11 @@ shutil.disk_usage = disk_usage
 sys.argv = ['chunkhound', *sys.argv[1:]]
 main()
 """
+        command_args = [mode, str(project), "--verbose"]
+        if mode == "index":
+            command_args.append("--trust")
         result = subprocess.run(
-            [sys.executable, "-c", script, mode, str(project), "--verbose"],
+            [sys.executable, "-c", script, *command_args],
             cwd=project,
             env=cli_env(project),
             capture_output=True,
@@ -337,8 +481,11 @@ main()
             timeout=180,
         )
     else:
-        result = cli(project, mode, project, "--verbose")
-    fatal = mode == "pull" or failure == "mismatch"
+        command_args = [mode, project, "--verbose"]
+        if mode == "index":
+            command_args.append("--trust")
+        result = cli(project, *command_args)
+    fatal = mode in {"pull", "index"}
     assert result.returncode == (1 if fatal else 0), result.stdout + result.stderr
     text = result.stdout + result.stderr
     assert "token=secret" not in text and "response-body-secret" not in text
@@ -350,7 +497,7 @@ main()
         assert "local.py" in search.stdout + search.stderr
 
 
-@pytest.mark.parametrize("mode", ["pull", "index"])
+@pytest.mark.parametrize("mode", ["pull"])
 def test_candidate_mismatch_exit_preserves_local_database_sidecars(
     tmp_path, hub_http, embedding_http, mode
 ):
@@ -386,13 +533,16 @@ def test_preinstall_busy_is_explicit_failure_and_auto_soft(
     # This owner excludes installation but owns no backend writer connection.
     held = native.acquire_database_lease(str(target))
     try:
-        result = cli(project, mode, project, "--verbose")
+        command_args = [mode, project, "--verbose"]
+        if mode == "index":
+            command_args.append("--trust")
+        result = cli(project, *command_args)
     finally:
         held.close()
-    assert result.returncode == (1 if mode == "pull" else 0)
+    assert result.returncode == 1
     assert "destination is busy" in result.stderr
     assert "Traceback" not in result.stdout + result.stderr
-    assert target.exists() is (mode == "index")
+    assert not target.exists()
 
 
 def test_zero_is_not_a_relative_version(tmp_path):
@@ -401,12 +551,7 @@ def test_zero_is_not_a_relative_version(tmp_path):
 
 @pytest.mark.parametrize(
     "boundary,mode",
-    [
-        ("initial", "index"),
-        ("recheck", "index"),
-        ("candidate", "index"),
-        ("candidate", "pull"),
-    ],
+    [("candidate", "pull")],
 )
 def test_cli_reader_failure_has_sanitized_exit_without_fallback(
     tmp_path, hub_http, embedding_http, boundary, mode

@@ -14,6 +14,7 @@ from chunkhound.hub.client import pull
 from chunkhound.hub.errors import HubUnavailable
 from chunkhound.hub.manifest import Artifact
 from chunkhound.hub.transport import download
+from chunkhound.hub.trust import grant_trust
 from tests.hub.activation_support import cli, config_for, publish, write_config
 from tests.hub.artifacts import build_database
 
@@ -72,6 +73,8 @@ async def test_pull_timeout_uses_config_and_cleans_workspace(
     config = config_for(tmp_path / "checkout", hub_http)
     config.hub.download_timeout_seconds = 0.05
     _, route = publish(hub_http, build_database(tmp_path / "published"))
+    if automatic:
+        grant_trust(config.target_dir, config.hub.url)
     release = threading.Event()
 
     def stall_artifact(path):
@@ -125,7 +128,7 @@ async def test_cancelled_download_cleans_workspace_without_install(tmp_path, hub
 
 
 @pytest.mark.parametrize("command", ["pull", "index"])
-def test_cli_download_timeout_reports_failure_or_indexes_locally(
+def test_cli_download_timeout_stops_before_local_index(
     tmp_path, hub_http, embedding_http, command
 ):
     project = tmp_path / "checkout"
@@ -143,18 +146,17 @@ def test_cli_download_timeout_reports_failure_or_indexes_locally(
             release.wait(2)
 
     hub_http.before_get = stall_artifact
+    command_args = [command, project]
+    if command == "index":
+        command_args.append("--trust")
     try:
-        result = cli(project, command, project)
+        result = cli(project, *command_args)
     finally:
         release.set()
-    assert result.returncode == (1 if command == "pull" else 0), (
-        result.stdout + result.stderr
-    )
+    assert result.returncode == 1, result.stdout + result.stderr
     text = result.stdout + result.stderr
     assert "hub.download_timeout_seconds" in text
     assert "token=secret" not in text
     assert list((project / ".chunkhound" / "db").glob(".chunkhound-pull-*")) == []
-    if command == "index":
-        searched = cli(project, "search", "deadline_local_fallback", project, "--regex")
-        assert searched.returncode == 0, searched.stdout + searched.stderr
-        assert "local.py" in searched.stdout + searched.stderr
+    assert embedding_http.requests == []
+    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()

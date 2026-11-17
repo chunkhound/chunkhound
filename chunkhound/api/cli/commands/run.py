@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,14 @@ from chunkhound.core.embedding_model_drift import ModelDrift, format_drift_warni
 from chunkhound.core.index_format import IndexFormatError
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.daemon.process import pid_alive
+from chunkhound.hub.client import (
+    automatic_target_absent,
+    fetch_validated_manifest,
+    pull,
+)
+from chunkhound.hub.errors import FATAL_HUB_ERRORS, HubUnavailable
+from chunkhound.hub.install import installation_target
+from chunkhound.hub.trust import HubTrustError, grant_trust, is_trusted
 from chunkhound.registry import (
     configure_registry,
     create_indexing_coordinator,
@@ -38,9 +47,149 @@ from ..utils.validation import (
 from . import autodoc_prompts as prompts
 
 
+class HubIndexDecision(Enum):
+    CONTINUE_LOCAL = "continue-local"
+    HUB_INSTALLED = "hub-installed"
+    STOP = "stop"
+
+
 def _mcp_mode() -> bool:
     """True under an MCP server, which must never prompt or print to stdout."""
     return os.environ.get("CHUNKHOUND_MCP_MODE") == "1"
+
+
+def _hub_prompts_allowed() -> bool:
+    return (
+        not _mcp_mode()
+        and os.environ.get("CHUNKHOUND_NO_PROMPTS") != "1"
+        and prompts.is_interactive()
+    )
+
+
+def _choose_untrusted_hub_action() -> str:
+    return prompts.prompt_choice(
+        "A configured hub may avoid a full local index",
+        choices=("trust", "local", "cancel"),
+        default="cancel",
+    )
+
+
+def _choose_hub_failure_action() -> str:
+    return prompts.prompt_choice(
+        "The configured hub could not provide a usable database",
+        choices=("local", "cancel"),
+        default="cancel",
+    )
+
+
+def _hub_authorization_guidance(formatter: RichOutputFormatter) -> None:
+    formatter.error("The configured hub is not trusted for automatic index use.")
+    formatter.info(
+        "Run index --trust, run pull --trust, or rerun interactively to choose "
+        "local indexing."
+    )
+
+
+def _save_hub_trust(config: Config, formatter: RichOutputFormatter) -> None:
+    hub_url = config.hub.url
+    if not hub_url:
+        return
+    try:
+        grant_trust(config.target_dir or Path.cwd(), hub_url)
+    except HubTrustError:
+        formatter.warning(
+            "Hub manifest was authorized for this index, but future automatic "
+            "hub use was not enabled"
+        )
+
+
+async def _prepare_hub_index(
+    args: argparse.Namespace,
+    config: Config,
+    formatter: RichOutputFormatter,
+) -> HubIndexDecision:
+    """Authorize and attempt a cold hub base before local index setup."""
+    if (
+        getattr(args, "simulate", False)
+        or getattr(args, "check_ignores", False)
+        or getattr(args, "no_embeddings", False)
+        or config.embeddings_disabled
+        or _mcp_mode()
+    ):
+        return HubIndexDecision.CONTINUE_LOCAL
+
+    target = installation_target(config)
+    target_absent = automatic_target_absent(target)
+    hub_url = config.hub.url
+    explicit_trust = bool(getattr(args, "trust", False))
+
+    if not hub_url:
+        if explicit_trust:
+            formatter.error(
+                "No hub source is configured. Configure hub.url before using "
+                "index --trust."
+            )
+            return HubIndexDecision.STOP
+        return HubIndexDecision.CONTINUE_LOCAL
+
+    if not target_absent:
+        if explicit_trust:
+            try:
+                await fetch_validated_manifest(config)
+            except HubUnavailable as exc:
+                formatter.error(str(exc))
+                if (
+                    _hub_prompts_allowed()
+                    and _choose_hub_failure_action() == "local"
+                ):
+                    return HubIndexDecision.CONTINUE_LOCAL
+                _hub_authorization_guidance(formatter)
+                return HubIndexDecision.STOP
+            _save_hub_trust(config, formatter)
+        return HubIndexDecision.CONTINUE_LOCAL
+
+    newly_authorized = explicit_trust
+    if not explicit_trust:
+        try:
+            authorized = is_trusted(config.target_dir or Path.cwd(), hub_url)
+        except HubTrustError:
+            formatter.warning(
+                "Hub trust settings could not be read; treating the source as "
+                "untrusted."
+            )
+            authorized = False
+
+        if not authorized:
+            if not _hub_prompts_allowed():
+                _hub_authorization_guidance(formatter)
+                return HubIndexDecision.STOP
+            action = _choose_untrusted_hub_action()
+            if action == "local":
+                return HubIndexDecision.CONTINUE_LOCAL
+            if action == "cancel":
+                return HubIndexDecision.STOP
+            newly_authorized = True
+
+    try:
+        if newly_authorized:
+            source = await fetch_validated_manifest(config)
+            _save_hub_trust(config, formatter)
+            installed = await pull(config, automatic=True, source=source)
+        else:
+            installed = await pull(config, automatic=True)
+    except HubUnavailable as exc:
+        formatter.error(str(exc))
+        if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
+            return HubIndexDecision.CONTINUE_LOCAL
+        _hub_authorization_guidance(formatter)
+        return HubIndexDecision.STOP
+
+    if installed:
+        return HubIndexDecision.HUB_INSTALLED
+    if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
+        return HubIndexDecision.CONTINUE_LOCAL
+    _hub_authorization_guidance(formatter)
+    return HubIndexDecision.STOP
 
 
 def _make_model_drift_prompt(
@@ -275,18 +424,12 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     if not _validate_run_arguments(args, formatter, config):
         sys.exit(1)
 
-    from chunkhound.hub.client import pull
-    from chunkhound.hub.errors import FATAL_HUB_ERRORS
-
     try:
-        await pull(
-            config,
-            automatic=True,
-            mcp_mode=_mcp_mode(),
-            no_embeddings=bool(getattr(args, "no_embeddings", False)),
-        )
+        decision = await _prepare_hub_index(args, config, formatter)
     except FATAL_HUB_ERRORS:
         raise SystemExit(1) from None
+    if decision is HubIndexDecision.STOP:
+        raise SystemExit(1)
 
     # MCP has no interactive layer and must not write to stdout, so it gets no
     # decision hook at all; the registry then keeps the indexed model and logs
