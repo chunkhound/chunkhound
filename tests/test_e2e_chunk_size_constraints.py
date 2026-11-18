@@ -15,6 +15,7 @@ Validates:
 
 import logging
 import re
+from pathlib import Path
 
 import pytest
 
@@ -61,6 +62,52 @@ def _make_large_statements(statement: str, count: int = 500) -> str:
     With count=500 and 5 chars/statement, we get ~2500 non-ws chars.
     """
     return "\n".join([statement] * count)
+
+
+def _max_header_overhead(tmp_path: Path) -> int:
+    """Non-ws-char budget for the embedding header prepended to every chunk.
+
+    Measured from the real formatter (format_chunk_for_embedding) so the header
+    format cannot drift between this test and production. Derived from the real
+    tmp_path because macOS temp roots alone exceed ~130 chars, which a
+    hardcoded guess must underestimate. `"all:"` is the longest rule_target the
+    samples generate (the Makefile sample's `all:` rule) — the same raw
+    target-line string the makefile parser stores as metadata["rule_target"].
+    The current samples produce no constants annotations; if one is added,
+    extend this — the failure output shows the offending header verbatim.
+    """
+    headers = (
+        format_chunk_for_embedding(
+            "",
+            str(tmp_path / f"large_{language.value}{ext}"),
+            language.value,
+            rule_target="all:",
+        )
+        for language, (ext, _, _) in LARGE_LANGUAGE_SAMPLES.items()
+        if language not in BINARY_CONTENT_LANGUAGES
+    )
+    # The validator counts non-whitespace characters. Measuring the raw header
+    # would hand the splitter the header's whitespace as extra content budget.
+    return max(sum(not char.isspace() for char in header) for header in headers)
+
+
+def test_header_overhead_uses_non_whitespace_length(tmp_path: Path) -> None:
+    """The DB limit is content budget + non-ws header, never raw header length."""
+    headers = [
+        format_chunk_for_embedding(
+            "",
+            str(tmp_path / f"large_{language.value}{ext}"),
+            language.value,
+            rule_target="all:",
+        )
+        for language, (ext, _, _) in LARGE_LANGUAGE_SAMPLES.items()
+        if language not in BINARY_CONTENT_LANGUAGES
+    ]
+    largest = max(headers, key=lambda header: sum(not c.isspace() for c in header))
+
+    assert _max_header_overhead(tmp_path) == sum(not c.isspace() for c in largest)
+    # A raw-length measurement would be strictly larger and let an overrun pass.
+    assert sum(not c.isspace() for c in largest) < len(largest)
 
 
 # Language samples: (extension, large_sample, normal_sample)
