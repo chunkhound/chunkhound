@@ -23,6 +23,7 @@ from tests.helpers.duckdb_vector_fixtures import (
     insert_chunks,
     insert_embeddings,
     profile_last_query,
+    require_hnsw_index,
 )
 
 _EXACT_CONFIG = DatabaseConfig(duckdb_hnsw_enabled=False)
@@ -64,25 +65,20 @@ def _ids(results: Sequence[dict[str, object]]) -> list[int]:
 def test_large_batch_insert_drops_and_never_resurrects_hnsw_index_when_disabled(
     tmp_path: Path,
 ) -> None:
-    """Bulk insert (>=50) over a pre-existing HNSW index must drop it and leave
-    it dropped when HNSW is disabled.
+    """Bulk insert (>=50) over a persisted index must leave it dropped.
 
-    The bulk path drops indexes for insert speed and recreates them afterwards;
-    with the configuration turned off that recreate must not happen, or the
-    index would be resurrected behind the user's back.
+    The bulk path drops indexes for insert speed and recreates them after;
+    with the toggle off that recreate must not happen.
     """
     with connected_provider(tmp_path) as enabled:
         chunk_ids = _seed(enabled, 60)
         enabled.ensure_all_hnsw_indexes()
-        if not has_hnsw_index(enabled, 3):
-            pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+        require_hnsw_index(enabled, 3)
 
     with connected_provider(tmp_path, _EXACT_CONFIG) as disabled:
         assert has_hnsw_index(disabled, 3)
-
-        # Exercise the repository's bulk path, which drops indexes for insert
-        # speed and recreates them afterwards (the provider-level batch method
-        # is a plain upsert and never touches indexes).
+        # The repository bulk path is the only drop/recreate seam; the
+        # provider-level batch method is a plain upsert.
         disabled._embedding_repository.insert_embeddings_batch(
             [
                 {
@@ -97,7 +93,38 @@ def test_large_batch_insert_drops_and_never_resurrects_hnsw_index_when_disabled(
             batch_size=50,
             connection=disabled.connection,
         )
+        assert not has_hnsw_index(disabled, 3)
 
+
+@pytest.mark.hnsw
+@pytest.mark.fast
+def test_index_creation_resumes_only_after_reenabling(tmp_path: Path) -> None:
+    """Disabled mode skips every creation site; re-enabling rebuilds on demand."""
+    with connected_provider(tmp_path, _EXACT_CONFIG) as disabled:
+        _seed(disabled, 5)
+        disabled.ensure_all_hnsw_indexes()
+        disabled.create_vector_index(PROVIDER, MODEL, 3)
+        _seed(disabled, 3, "src/late.py")
+        disabled.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=2)
+        assert not has_hnsw_index(disabled, 3)
+
+    with connected_provider(tmp_path) as enabled:
+        enabled.ensure_all_hnsw_indexes()
+        require_hnsw_index(enabled, 3)
+
+
+@pytest.mark.hnsw
+@pytest.mark.fast
+def test_disabled_compaction_does_not_restore_hnsw(tmp_path: Path) -> None:
+    """Compaction honors disabled mode even when the source persisted HNSW."""
+    with connected_provider(tmp_path) as enabled:
+        _seed(enabled, 5)
+        enabled.ensure_all_hnsw_indexes()
+        require_hnsw_index(enabled, 3)
+
+    with connected_provider(tmp_path, _EXACT_CONFIG) as disabled:
+        assert has_hnsw_index(disabled, 3)
+        disabled.compact_database()
         assert not has_hnsw_index(disabled, 3)
 
 
@@ -214,8 +241,7 @@ def test_exact_search_ignores_a_persisted_hnsw_index(tmp_path: Path) -> None:
     with connected_provider(tmp_path) as writer:
         chunk_ids = _seed(writer, 300)
         writer.ensure_all_hnsw_indexes()
-        if not has_hnsw_index(writer, 3):
-            pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+        require_hnsw_index(writer)
 
     with connected_provider(tmp_path, _EXACT_CONFIG) as reader:
         results: list[dict[str, object]] = []
@@ -229,43 +255,10 @@ def test_exact_search_ignores_a_persisted_hnsw_index(tmp_path: Path) -> None:
 
         assert has_hnsw_index(reader, 3)
         assert _ids(results) == chunk_ids[:3]
-        # The ranking query is the only query the exact path runs; asserting it
-        # was profiled keeps the plan assertion from passing vacuously.
+        # Ranking is the only query the exact path runs; asserting it was
+        # profiled keeps the plan check from passing vacuously.
         assert "ARRAY_COSINE_DISTANCE" in profile
         assert "HNSW_INDEX_SCAN" not in profile
-
-
-@pytest.mark.hnsw
-@pytest.mark.fast
-def test_index_creation_resumes_only_after_reenabling(tmp_path: Path) -> None:
-    """Disabled mode skips every creation site; re-enabling rebuilds on demand."""
-    with connected_provider(tmp_path, _EXACT_CONFIG) as disabled:
-        _seed(disabled, 5)
-        disabled.ensure_all_hnsw_indexes()
-        disabled.create_vector_index(PROVIDER, MODEL, 3)
-        _seed(disabled, 3, "src/late.py")
-        disabled.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=2)
-        assert not has_hnsw_index(disabled, 3)
-
-    with connected_provider(tmp_path) as enabled:
-        enabled.ensure_all_hnsw_indexes()
-        if not has_hnsw_index(enabled, 3):
-            pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
-
-
-@pytest.mark.hnsw
-@pytest.mark.fast
-def test_disabled_compaction_does_not_restore_hnsw(tmp_path: Path) -> None:
-    """Compaction honors disabled mode even when the source persisted HNSW."""
-    with connected_provider(tmp_path) as enabled:
-        _seed(enabled, 5)
-        if not has_hnsw_index(enabled, 3):
-            pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
-
-    with connected_provider(tmp_path, _EXACT_CONFIG) as disabled:
-        assert has_hnsw_index(disabled, 3)
-        disabled.compact_database()
-        assert not has_hnsw_index(disabled, 3)
 
 
 @pytest.mark.fast

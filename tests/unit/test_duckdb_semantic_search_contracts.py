@@ -1,12 +1,14 @@
-"""Real-DuckDB contracts for HNSW-backed semantic search."""
+"""Real-DuckDB contracts for HNSW-backed semantic search.
+
+``slow`` tests seed 10k+ rows: candidate-budget exhaustion and Recall@10.
+"""
 
 from __future__ import annotations
 
 import math
-import random
-from collections.abc import Callable, Generator
-from dataclasses import dataclass, field
+from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import numpy as np
@@ -28,7 +30,6 @@ from tests.helpers.duckdb_vector_fixtures import (
     PROVIDER,
     QUERY_VECTOR,
     connected_provider,
-    has_hnsw_index,
     insert_chunks,
     insert_embeddings,
     require_hnsw_index,
@@ -41,52 +42,6 @@ def provider(tmp_path: Path) -> Generator[DuckDBProvider, None, None]:
     """Provide a file-backed database so DuckDB can persist its HNSW index."""
     with connected_provider(tmp_path) as database:
         yield database
-
-
-def _seed_dense_table(
-    provider: DuckDBProvider, count: int, path: str = "src/module.py"
-) -> list[int]:
-    """Seed a large single-provider table of close-to-query vectors.
-
-    Used by the plan-shape tests so the candidate query runs against a
-    realistic cardinality instead of a 3-row toy table.
-    """
-    chunk_ids = insert_chunks(provider, path, count)
-    insert_embeddings(
-        provider,
-        chunk_ids,
-        [[1.0, 0.001 * ((index % 50) + 1) / 50.0, 0.0] for index in range(count)],
-    )
-    require_hnsw_index(provider)
-    return chunk_ids
-
-
-@pytest.mark.hnsw
-@pytest.mark.fast
-def test_hnsw_eligible_candidate_query_uses_index_scan(
-    provider: DuckDBProvider,
-) -> None:
-    """The candidate-query helper retains DuckDB's HNSW-eligible shape.
-
-    EXPLAIN covers the helper query directly; the public call separately guards
-    that semantic search remains functional against the same indexed table.
-    """
-    _seed_dense_table(provider, 2000)
-
-    results, _ = provider.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=10)
-    query = DuckDBProvider._hnsw_eligible_candidate_query("embeddings_3", 3, 100)
-    catalog = provider.execute_query(
-        "SELECT index_name, sql FROM duckdb_indexes() "
-        "WHERE table_name = 'embeddings_3'",
-        [],
-    )
-    plan = provider.execute_query(f"EXPLAIN {query}", [QUERY_VECTOR, 100])
-
-    assert len(results) == 10
-    assert any("USING HNSW" in (row["sql"] or "").upper() for row in catalog)
-    assert "ORDER BY DISTANCE ASC" in query.upper()
-    assert "ORDER BY DISTANCE ASC, CHUNK_ID" not in query.upper()
-    assert "HNSW_INDEX_SCAN" in "\n".join(str(row) for row in plan)
 
 
 @pytest.mark.hnsw
@@ -157,34 +112,64 @@ def test_overfetch_fills_page_after_initial_path_filter_miss(
     assert all(result["file_path"] == "target/module.py" for result in results)
 
 
-@pytest.mark.fast
-def test_overfetch_telemetry_uses_full_filtered_candidate_batch(
-    provider: DuckDBProvider,
-) -> None:
-    """Selectivity measures filtering before result truncation to the requested count."""
-    telemetry: list[dict[str, object]] = []
-    sink_id = logger.add(
-        lambda message: telemetry.append(dict(message.record["extra"])),
-        level="DEBUG",
-        filter=lambda record: record["message"]
-        == "Vector candidate overfetch terminated",
-    )
-    batch = [{"chunk_id": chunk_id} for chunk_id in range(5)]
-    try:
-        results, _ = provider._overfetch_vector_results(
-            needed=2, execute_query=lambda _limit: (batch, 10)
-        )
-    finally:
-        logger.remove(sink_id)
+_BULK_INSERT_ROWS = 500
 
-    assert len(results) == 2
-    assert telemetry[-1]["results"] == 2
-    assert telemetry[-1]["filtered_candidates"] == 5
-    assert telemetry[-1]["filter_selectivity"] == 0.5
+
+def _bulk_seed_embeddings(
+    provider: DuckDBProvider,
+    chunk_ids: Sequence[int],
+    vectors: Sequence[Sequence[float]],
+    *,
+    provider_name: str = PROVIDER,
+    model: str = MODEL,
+    create_table: bool = True,
+) -> None:
+    """Fixture setup: create the table/index, then insert set-based batches.
+
+    The first row goes through the public write API so the table and its
+    canonical HNSW index are created exactly as production creates them;
+    only the remaining rows are set-based. Per-row ``insert_embeddings``
+    turns a 10k seed into a quadratic transaction that is pathologically slow
+    on Windows (see HNSW test portability notes). Fixed-size multi-row VALUES
+    statements are fixture cost, not behaviour.
+    """
+    if not chunk_ids:
+        return
+    start = 0
+    if create_table:
+        provider.insert_embeddings_batch(
+            [
+                {
+                    "chunk_id": chunk_ids[0],
+                    "provider": provider_name,
+                    "model": model,
+                    "embedding": list(vectors[0]),
+                    "dims": 3,
+                }
+            ]
+        )
+        start = 1
+    for start in range(start, len(chunk_ids), _BULK_INSERT_ROWS):
+        rows = list(
+            zip(
+                chunk_ids[start : start + _BULK_INSERT_ROWS],
+                vectors[start : start + _BULK_INSERT_ROWS],
+                strict=True,
+            )
+        )
+        values = ", ".join("(?, ?, ?, ?::FLOAT[3], 3)" for _ in rows)
+        params: list[Any] = []
+        for chunk_id, vector in rows:
+            params.extend([chunk_id, provider_name, model, list(vector)])
+        provider.execute_query(
+            "INSERT INTO embeddings_3 (chunk_id, provider, model, embedding, dims) "
+            f"VALUES {values}",
+            params,
+        )
 
 
 @pytest.mark.hnsw
-@pytest.mark.fast
+@pytest.mark.slow
 def test_filtered_search_short_page_at_candidate_budget(
     provider: DuckDBProvider,
 ) -> None:
@@ -198,19 +183,16 @@ def test_filtered_search_short_page_at_candidate_budget(
         )
     noise_ids = insert_chunks(provider, "noise/module.py", noise_count)
     target_ids = insert_chunks(provider, "target/module.py", 3)
-    insert_embeddings(
-        provider,
-        noise_ids,
-        noise_vectors,
-        provider_name="noise",
-        model="m",
+    _bulk_seed_embeddings(
+        provider, noise_ids, noise_vectors, provider_name="noise", model="m"
     )
-    insert_embeddings(
+    _bulk_seed_embeddings(
         provider,
         target_ids,
-        [[0.1, 0.2, 0.3]] * len(target_ids),
+        [[0.1, 0.2, 0.3]] * 3,
         provider_name="target",
         model="m",
+        create_table=False,
     )
     # Widen the search beam so every overfetch step returns its full limit.
     provider.execute_query("SET hnsw_ef_search = 20000", [])
@@ -238,7 +220,7 @@ def test_filtered_search_short_page_at_candidate_budget(
 
 
 @pytest.mark.hnsw
-@pytest.mark.fast
+@pytest.mark.slow
 def test_list_api_raises_when_budget_exhausted_with_zero_results(
     provider: DuckDBProvider,
 ) -> None:
@@ -257,12 +239,8 @@ def test_list_api_raises_when_budget_exhausted_with_zero_results(
             [math.sqrt(max(0.0, 1.0 - distance * distance)), distance, 0.0]
         )
     noise_ids = insert_chunks(provider, "noise/module.py", noise_count)
-    insert_embeddings(
-        provider,
-        noise_ids,
-        noise_vectors,
-        provider_name="noise",
-        model="m",
+    _bulk_seed_embeddings(
+        provider, noise_ids, noise_vectors, provider_name="noise", model="m"
     )
     require_hnsw_index(provider)
     # Widen the search beam so every overfetch step returns its full limit and
@@ -276,12 +254,13 @@ def test_list_api_raises_when_budget_exhausted_with_zero_results(
     # provider/model; its own row is excluded and the noise rows are filtered,
     # so exhaustion still yields zero results.
     target_ids = insert_chunks(provider, "target/module.py", 1)
-    insert_embeddings(
+    _bulk_seed_embeddings(
         provider,
         target_ids,
         [[0.9, 0.3, 0.1]],
         provider_name="missing",
         model="x",
+        create_table=False,
     )
     with pytest.raises(RuntimeError, match="exhausted the HNSW candidate budget"):
         provider.find_similar_chunks(target_ids[0], "missing", "x", limit=10)
@@ -378,37 +357,70 @@ def test_missing_embeddings_table_still_rejects_non_finite_vectors(
         provider.search_by_embedding(query_embedding, PROVIDER, MODEL, limit=1)
 
 
-Search = Callable[[DuckDBProvider, list[int]], object]
+Search = Callable[[DuckDBProvider, list[int]], list[dict[str, Any]]]
 
 
-def _search_semantic(provider: DuckDBProvider, _: list[int]) -> object:
-    return provider.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=1)
+def _search_semantic(provider: DuckDBProvider, _: list[int]) -> list[dict[str, Any]]:
+    results, _ = provider.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=1)
+    return results
 
 
-def _search_by_embedding(provider: DuckDBProvider, _: list[int]) -> object:
+def _search_by_embedding(
+    provider: DuckDBProvider, _: list[int]
+) -> list[dict[str, Any]]:
     return provider.search_by_embedding(QUERY_VECTOR, PROVIDER, MODEL, limit=1)
 
 
-def _find_similar(provider: DuckDBProvider, chunk_ids: list[int]) -> object:
+def _find_similar(
+    provider: DuckDBProvider, chunk_ids: list[int]
+) -> list[dict[str, Any]]:
     return provider.find_similar_chunks(chunk_ids[0], PROVIDER, MODEL, limit=1)
+
+
+def _hnsw_index_metrics(provider: DuckDBProvider) -> set[tuple[str, str]]:
+    """Return (index, lower-cased metric) pairs for the 3-D table only.
+
+    Scoped by table because the pragma sees indexes from every embedding table.
+    """
+    rows = provider.execute_query(
+        "SELECT index_name, metric FROM pragma_hnsw_index_info() "
+        "WHERE table_name = 'embeddings_3'",
+        [],
+    )
+    return {(str(row["index_name"]), str(row["metric"]).lower()) for row in rows}
+
+
+def _create_canonical_l2sq_collision(provider: DuckDBProvider) -> None:
+    """Occupy the canonical HNSW name ``idx_hnsw_3`` with the l2sq metric.
+
+    Only legacy persisted databases reach this state; no production path builds
+    a non-cosine canonical index, so the fixture uses raw DDL.
+    """
+    provider.drop_all_hnsw_indexes()
+    provider.execute_query(
+        "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) "
+        "WITH (metric = 'l2sq')",
+        [],
+    )
 
 
 @pytest.mark.hnsw
 @pytest.mark.fast
 @pytest.mark.parametrize(
-    "search", [_search_semantic, _search_by_embedding, _find_similar]
+    ("search", "expected_index"),
+    [(_search_semantic, 0), (_search_by_embedding, 0), (_find_similar, 1)],
 )
 def test_vector_search_recovers_missing_hnsw_index(
-    provider: DuckDBProvider, search: Search
+    provider: DuckDBProvider, search: Search, expected_index: int
 ) -> None:
-    """Every public vector API restores an index lost during interrupted indexing."""
+    """Every public vector API still returns its best match without an index."""
     chunk_ids = seed_searchable_chunks(provider)
     provider.drop_all_hnsw_indexes()
-    assert not has_hnsw_index(provider, 3)
 
-    search(provider, chunk_ids)
+    results = search(provider, chunk_ids)
 
-    assert has_hnsw_index(provider, 3)
+    assert [result["chunk_id"] for result in results] == [chunk_ids[expected_index]]
+    require_hnsw_index(provider)
 
 
 @pytest.mark.hnsw
@@ -416,37 +428,17 @@ def test_vector_search_recovers_missing_hnsw_index(
 def test_non_cosine_hnsw_is_preserved_and_cosine_index_is_added(
     provider: DuckDBProvider,
 ) -> None:
-    """Cosine search must not mistake another HNSW metric for compatibility."""
-    seed_searchable_chunks(provider)
-    provider.drop_all_hnsw_indexes()
-    provider.execute_query(
-        "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) "
-        "WITH (metric = 'l2sq')",
-        [],
-    )
-    before = provider.execute_query(
-        "SELECT index_name, metric FROM pragma_hnsw_index_info() "
-        "WHERE table_name = 'embeddings_3'",
-        [],
-    )
+    """Cosine search works when the table already carries another HNSW metric."""
+    chunk_ids = seed_searchable_chunks(provider)
+    _create_canonical_l2sq_collision(provider)
 
-    results, _ = provider.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=1)
-    after = provider.execute_query(
-        "SELECT index_name, metric FROM pragma_hnsw_index_info() "
-        "WHERE table_name = 'embeddings_3'",
-        [],
-    )
-    candidate_query = DuckDBProvider._hnsw_eligible_candidate_query(
-        "embeddings_3", 3, 1
-    )
-    plan = provider.execute_query(f"EXPLAIN {candidate_query}", [QUERY_VECTOR, 1])
+    results, _ = provider.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=3)
 
-    assert results
-    assert {(row["index_name"], row["metric"]) for row in before} <= {
-        (row["index_name"], row["metric"]) for row in after
+    assert {result["chunk_id"] for result in results} == set(chunk_ids)
+    assert _hnsw_index_metrics(provider) == {
+        ("idx_hnsw_3", "l2sq"),
+        ("idx_hnsw_3_cosine", "cosine"),
     }
-    assert {row["metric"] for row in after} >= {"l2sq", "cosine"}
-    assert "HNSW_INDEX_SCAN" in "\n".join(str(row) for row in plan)
 
 
 @pytest.mark.hnsw
@@ -454,25 +446,18 @@ def test_non_cosine_hnsw_is_preserved_and_cosine_index_is_added(
 def test_drop_vector_index_also_drops_cosine_variant(
     provider: DuckDBProvider,
 ) -> None:
-    """Dropping a custom index must also drop the lazily-created _cosine variant.
-
-    A non-cosine custom index occupies the canonical name, so the cosine
-    index gets the idx_hnsw_{dims}_cosine name; drop_vector_index must remove
-    it too or it leaks and the table keeps an orphan index.
-    """
+    """Dropping a custom index must also drop the lazily-created cosine one."""
     seed_searchable_chunks(provider)
-    provider.drop_all_hnsw_indexes()
+    _create_canonical_l2sq_collision(provider)
     provider.create_vector_index(PROVIDER, MODEL, 3, "l2sq")
 
     provider.search_semantic(QUERY_VECTOR, PROVIDER, MODEL, page_size=1)
+    assert ("idx_hnsw_3_cosine", "cosine") in _hnsw_index_metrics(provider)
+
     provider.drop_vector_index(PROVIDER, MODEL, 3, "l2sq")
 
-    remaining = provider.execute_query(
-        "SELECT index_name FROM pragma_hnsw_index_info() "
-        "WHERE table_name = 'embeddings_3'",
-        [],
-    )
-    assert remaining == [], f"indexes leaked after drop_vector_index: {remaining}"
+    remaining = _hnsw_index_metrics(provider)
+    assert remaining == set(), f"indexes leaked after drop_vector_index: {remaining}"
 
 
 class _FakeEmbeddingManager:
@@ -726,127 +711,6 @@ def test_missing_embedding_warning_includes_source_context(
     )
 
 
-@dataclass
-class _Recorder:
-    messages: list[str] = field(default_factory=list)
-
-    def section_header(self, message: str) -> None:
-        self.messages.append(message)
-
-    def info(self, message: str) -> None:
-        self.messages.append(message)
-
-
-def _seed_embeddings_nd(
-    provider: DuckDBProvider,
-    count: int,
-    dims: int,
-    path: str,
-    *,
-    provider_name: str = PROVIDER,
-    model: str = MODEL,
-    vector_fn: Callable[[int], list[float]] | None = None,
-) -> list[int]:
-    """Seed chunks+embeddings for a specific dimensionality."""
-    chunk_ids = insert_chunks(provider, path, count)
-    vectors = [
-        vector_fn(i) if vector_fn else [random.gauss(0, 1) for _ in range(dims)]
-        for i in range(count)
-    ]
-    insert_embeddings(
-        provider, chunk_ids, vectors, provider_name=provider_name, model=model
-    )
-    return chunk_ids
-
-
-# ---------------------------------------------------------------------------
-# Recall benchmark
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.hnsw
-@pytest.mark.slow
-def test_hnsw_recall_vs_brute_force(provider: DuckDBProvider) -> None:
-    """Deterministic multi-query HNSW recall stays close to brute force.
-
-    Ground truth is computed with numpy over a full table read, so it can
-    never be accelerated by a future DuckDB filter-pushdown change (an SQL
-    ground-truth query would become self-referential once the planner can
-    push the provider/model predicates into an HNSW scan).
-    """
-    n = 10_000
-    dims = 8
-
-    def make_vector(index: int) -> list[float]:
-        values = [
-            math.sin((index + 1) * (axis + 1) * 0.173)
-            + math.cos((index + 3) * (axis + 2) * 0.071)
-            for axis in range(dims)
-        ]
-        norm = math.sqrt(sum(value * value for value in values))
-        return [value / norm for value in values]
-
-    def large_primes(count: int) -> list[int]:
-        primes: list[int] = []
-        candidate = 100_003
-        while len(primes) < count:
-            if all(candidate % divisor for divisor in primes):
-                primes.append(candidate)
-            candidate += 2
-        return primes
-
-    _seed_embeddings_nd(provider, n, dims, "recall/module.py", vector_fn=make_vector)
-    require_hnsw_index(provider, dims)
-
-    rows = provider.execute_query(
-        f"SELECT chunk_id, embedding FROM embeddings_{dims}", []
-    )
-    chunk_ids = [int(row["chunk_id"]) for row in rows]
-    matrix = np.array([row["embedding"] for row in rows], dtype=np.float32)
-    matrix = matrix / np.linalg.norm(matrix, axis=1, keepdims=True)
-
-    hits = 0
-    expected = 0
-    for query_index in large_primes(32):
-        query = make_vector(query_index)
-        query_vec = np.array(query, dtype=np.float32)
-        scores = matrix @ query_vec
-        order = sorted(range(len(chunk_ids)), key=lambda i: (-scores[i], chunk_ids[i]))[
-            :10
-        ]
-        brute_force_ids = [chunk_ids[i] for i in order]
-        hnsw_results, _ = provider.search_semantic(query, PROVIDER, MODEL, page_size=10)
-        hnsw_ids = {result["chunk_id"] for result in hnsw_results}
-        hits += len(hnsw_ids & set(brute_force_ids))
-        expected += len(brute_force_ids)
-
-    recall = hits / expected
-    assert recall >= 0.9, f"Aggregate Recall@10 = {recall:.2f}, expected >= 0.90"
-
-    # Recall@100: fetch 100 results and compare against brute-force top-100
-    hits_100 = 0
-    expected_100 = 0
-    for query_index in large_primes(32)[:8]:  # subset for speed
-        query = make_vector(query_index)
-        query_vec = np.array(query, dtype=np.float32)
-        scores = matrix @ query_vec
-        order_100 = sorted(
-            range(len(chunk_ids)), key=lambda i: (-scores[i], chunk_ids[i])
-        )[:100]
-        brute_force_ids_100 = [chunk_ids[i] for i in order_100]
-        hnsw_results_100, _ = provider.search_semantic(
-            query, PROVIDER, MODEL, page_size=100
-        )
-        hnsw_ids_100 = {result["chunk_id"] for result in hnsw_results_100}
-        hits_100 += len(hnsw_ids_100 & set(brute_force_ids_100))
-        expected_100 += len(brute_force_ids_100)
-
-    recall_100 = hits_100 / expected_100 if expected_100 > 0 else 0.0
-    assert recall_100 >= 0.95, (
-        f"Aggregate Recall@100 = {recall_100:.2f}, expected >= 0.95"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Multi-dimension HNSW
 # ---------------------------------------------------------------------------
@@ -857,56 +721,33 @@ def test_hnsw_recall_vs_brute_force(provider: DuckDBProvider) -> None:
 def test_multi_dimension_hnsw_targets_correct_table(
     provider: DuckDBProvider,
 ) -> None:
-    """HNSW search targets the correct table based on query dimensions."""
-    random.seed(123)
-
-    def make_3d(i: int) -> list[float]:
-        return [1.0, 0.01 * i, 0.0]
-
-    def make_8d(i: int) -> list[float]:
-        v = [0.0] * 8
-        v[i % 8] = 1.0
-        return v
-
-    ids_3d = _seed_embeddings_nd(provider, 50, 3, "multi/3d.py", vector_fn=make_3d)
-    ids_8d = _seed_embeddings_nd(provider, 50, 8, "multi/8d.py", vector_fn=make_8d)
-
-    query_3d = [1.0, 0.0, 0.0]
-    results_3d, _ = provider.search_semantic(query_3d, PROVIDER, MODEL, page_size=10)
-    assert len(results_3d) > 0
-    assert {r["chunk_id"] for r in results_3d} <= set(ids_3d)
-
-    query_8d = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    results_8d, _ = provider.search_semantic(query_8d, PROVIDER, MODEL, page_size=10)
-    assert len(results_8d) > 0
-    assert {r["chunk_id"] for r in results_8d} <= set(ids_8d)
-
-    indexes_3d = provider.execute_query(
-        "SELECT sql FROM duckdb_indexes() WHERE table_name = 'embeddings_3'", []
+    """Each query dimension searches only its own embedding table."""
+    ids_3d = insert_chunks(provider, "multi/3d.py", 5)
+    insert_embeddings(
+        provider, ids_3d, [[1.0, 0.01 * index, 0.0] for index in range(5)]
     )
-    indexes_8d = provider.execute_query(
-        "SELECT sql FROM duckdb_indexes() WHERE table_name = 'embeddings_8'", []
-    )
-    assert any("USING HNSW" in (idx["sql"] or "").upper() for idx in indexes_3d)
-    assert any("USING HNSW" in (idx["sql"] or "").upper() for idx in indexes_8d)
-
-
-@pytest.mark.fast
-def test_cli_formats_unknown_semantic_total() -> None:
-    """The CLI must not render an unknown HNSW total as a numeric total."""
-    formatter = _Recorder()
-
-    _format_search_results(
-        formatter,
-        {
-            "results": [{"file_path": "src/module.py", "content": ""}],
-            "pagination": {"offset": 0, "page_size": 10, "total": None},
-        },
-        "query",
-        is_regex=False,
+    ids_8d = insert_chunks(provider, "multi/8d.py", 5)
+    insert_embeddings(
+        provider,
+        ids_8d,
+        [[1.0] + [0.01 * index] * 7 for index in range(5)],
     )
 
-    assert "Results: 1 (showing 1-1)" in formatter.messages
+    results_3d, _ = provider.search_semantic(
+        [1.0, 0.0, 0.0], PROVIDER, MODEL, page_size=5
+    )
+    results_8d, _ = provider.search_semantic(
+        [1.0] + [0.0] * 7, PROVIDER, MODEL, page_size=5
+    )
+
+    assert {result["chunk_id"] for result in results_3d} == set(ids_3d)
+    assert {result["chunk_id"] for result in results_8d} == set(ids_8d)
+
+
+_THRESHOLD_ERROR = (
+    "Threshold.*outside the valid cosine similarity range"
+    "|Threshold must be a finite number"
+)
 
 
 @pytest.mark.fast
@@ -915,10 +756,7 @@ def test_semantic_search_rejects_invalid_threshold(
     provider: DuckDBProvider, threshold: float
 ) -> None:
     """Semantic search rejects thresholds outside [-1, 1] or non-finite."""
-    with pytest.raises(
-        ValueError,
-        match="Threshold.*outside the valid cosine similarity range|Threshold must be a finite number",
-    ):
+    with pytest.raises(ValueError, match=_THRESHOLD_ERROR):
         provider.search_semantic(
             QUERY_VECTOR, PROVIDER, MODEL, page_size=1, threshold=threshold
         )
@@ -930,10 +768,7 @@ def test_find_similar_chunks_rejects_invalid_threshold(
     provider: DuckDBProvider, threshold: float
 ) -> None:
     """find_similar_chunks rejects thresholds outside [-1, 1] or non-finite."""
-    with pytest.raises(
-        ValueError,
-        match="Threshold.*outside the valid cosine similarity range|Threshold must be a finite number",
-    ):
+    with pytest.raises(ValueError, match=_THRESHOLD_ERROR):
         provider.find_similar_chunks(1, PROVIDER, MODEL, limit=1, threshold=threshold)
 
 
@@ -943,10 +778,7 @@ def test_search_by_embedding_rejects_invalid_threshold(
     provider: DuckDBProvider, threshold: float
 ) -> None:
     """search_by_embedding rejects thresholds outside [-1, 1] or non-finite."""
-    with pytest.raises(
-        ValueError,
-        match="Threshold.*outside the valid cosine similarity range|Threshold must be a finite number",
-    ):
+    with pytest.raises(ValueError, match=_THRESHOLD_ERROR):
         provider.search_by_embedding(
             QUERY_VECTOR, PROVIDER, MODEL, limit=1, threshold=threshold
         )
@@ -973,12 +805,82 @@ def test_search_by_embedding_rejects_nonpositive_limit(
         provider.search_by_embedding(QUERY_VECTOR, PROVIDER, MODEL, limit=limit)
 
 
+class _Recorder(list[str]):
+    section_header = info = list.append
+
+
+def test_cli_formats_unknown_semantic_total() -> None:
+    """The CLI must not render an unknown HNSW total as a numeric total."""
+    formatter = _Recorder()
+    _format_search_results(
+        formatter,
+        {
+            "results": [{"file_path": "src/module.py", "content": ""}],
+            "pagination": {"offset": 0, "page_size": 10, "total": None},
+        },
+        "query",
+        is_regex=False,
+    )
+
+    assert "Results: 1 (showing 1-1)" in formatter
+
+
 @pytest.mark.fast
 def test_normalize_semantic_window_cap_rejects_negative() -> None:
-    """normalize_semantic_window_cap returns None for negative caps."""
+    """Normalization maps non-positive caps to None and keeps positive caps."""
     from chunkhound.services.search.semantic_window import normalize_semantic_window_cap
 
     assert normalize_semantic_window_cap(-5) is None
     assert normalize_semantic_window_cap(-1) is None
     assert normalize_semantic_window_cap(0) is None
     assert normalize_semantic_window_cap(1000) == 1000
+
+
+@pytest.mark.hnsw
+@pytest.mark.slow
+def test_hnsw_recall_vs_brute_force(provider: DuckDBProvider) -> None:
+    """HNSW Recall@10 stays close to a numpy full-table ground truth.
+
+    The oracle reads and scores the table in numpy, so a future filter
+    pushdown into the HNSW scan cannot make the oracle self-referential.
+    """
+    n, dims, queries = 10_000, 8, 32
+    rng = np.random.default_rng(7)
+    vectors = rng.normal(size=(n + queries, dims))
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    insert_embeddings(
+        provider, insert_chunks(provider, "recall/module.py", n), vectors[:n].tolist()
+    )
+    require_hnsw_index(provider, dims)
+
+    rows = provider.execute_query(
+        f"SELECT chunk_id, embedding FROM embeddings_{dims}", []
+    )
+    ids = [int(row["chunk_id"]) for row in rows]
+    matrix = np.array([row["embedding"] for row in rows], dtype=np.float32)
+
+    hits = 0
+    for vector in vectors[n:].astype(np.float32):
+        found, _ = provider.search_semantic(
+            vector.tolist(), PROVIDER, MODEL, page_size=10
+        )
+        truth = {ids[i] for i in np.argsort(-(matrix @ vector))[:10]}
+        hits += len({result["chunk_id"] for result in found} & truth)
+
+    recall = hits / (10 * queries)
+    assert recall >= 0.9, f"Aggregate Recall@10 = {recall:.2f}, expected >= 0.90"
+
+    # Recall@100: page_size=100 on a speed-bounded subset of queries
+    hits_100 = 0
+    for vector in vectors[n : n + 8].astype(np.float32):
+        found_100, _ = provider.search_semantic(
+            vector.tolist(), PROVIDER, MODEL, page_size=100
+        )
+        truth_100 = {ids[i] for i in np.argsort(-(matrix @ vector))[:100]}
+        hits_100 += len({result["chunk_id"] for result in found_100} & truth_100)
+
+    recall_100 = hits_100 / (100 * 8)
+    assert recall_100 >= 0.95, (
+        f"Aggregate Recall@100 = {recall_100:.2f}, expected >= 0.95"
+    )

@@ -30,6 +30,10 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 REBUILT = ("write-index", 0, 1)
 LEFT_IN_PLACE = ("write-index", 1, 1)
 
+# These contracts require a real VSS/HNSW index. Mark them so they run in the
+# all-OS HNSW lane rather than the time-boxed split matrix.
+pytestmark = pytest.mark.hnsw
+
 
 def _drop_hnsw_indexes(db_dir: Path) -> None:
     """Drop every HNSW index, as a run killed mid-bracket would leave them."""

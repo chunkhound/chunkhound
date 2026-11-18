@@ -149,6 +149,36 @@ def _job_steps(path: str, job_name: str) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], _job(path, job_name)["steps"])
 
 
+def _run_commands(job: dict[str, Any]) -> list[str]:
+    commands = []
+    for step in cast(list[dict[str, Any]], job.get("steps", [])):
+        inputs = cast(dict[str, Any], step.get("with", {}))
+        commands += [str(step.get("run", "")), str(inputs.get("command", ""))]
+    return commands
+
+
+def _test_bearing_jobs(workflow: dict[str, Any]) -> set[str]:
+    # Folded YAML scalars split `pytest` and `tests/` across lines; normalize
+    # whitespace so every lane spelling is detected.
+    return {
+        name
+        for name, job in cast(dict[str, dict[str, Any]], workflow["jobs"]).items()
+        if any("pytest tests/" in " ".join(c.split()) for c in _run_commands(job))
+    }
+
+
+def _needs_closure(workflow: dict[str, Any], root: str) -> set[str]:
+    jobs = cast(dict[str, dict[str, Any]], workflow["jobs"])
+    closure, pending = {root}, [root]
+    while pending:
+        needs = jobs[pending.pop()].get("needs", [])
+        for dependency in [needs] if isinstance(needs, str) else needs:
+            if dependency not in closure:
+                closure.add(dependency)
+                pending.append(dependency)
+    return closure
+
+
 def _find_step_index(
     steps: list[dict], description: str, predicate: Callable[[dict], bool]
 ) -> int:
@@ -552,6 +582,7 @@ class TestDocsVersionWorkflowContract:
         assert job["needs"] == [
             "site-build",
             "tests",
+            "hnsw-contract-tests",
             "rust-checks",
             "site-build-validation",
             "watchman-rollout-gate",
@@ -564,6 +595,15 @@ class TestDocsVersionWorkflowContract:
         assert download_step["with"]["path"] == "site/dist"
         assert upload_step["with"]["path"] == "site/dist/"
         assert permissions["contents"] == "read"
+
+    def test_every_pytest_job_blocks_the_deploy_path(self) -> None:
+        # A test lane nobody needs can regress silently: only the orphan job
+        # turns red. Keep every test lane reachable from the deploy path.
+        workflow = _load_workflow(".github/workflows/ci.yml")
+        deploy_path = _needs_closure(workflow, "pages-artifact")
+        orphans = _test_bearing_jobs(workflow) - deploy_path
+
+        assert orphans == set(), f"test jobs missing from the deploy path: {orphans}"
 
     def test_pinned_musl_uv_installer_verifies_archives_before_extracting(self) -> None:
         installer = MUSL_UV_INSTALLER.read_text(encoding="utf-8")

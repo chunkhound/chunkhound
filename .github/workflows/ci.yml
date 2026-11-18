@@ -152,7 +152,10 @@ jobs:
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
           max_attempts: 2
-          command: ${{ matrix.offline_runner }} uv run --offline --no-sync pytest tests/ -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
+          # HNSW lives in the dedicated all-OS lane below (it needs a real VSS
+          # extension and fail-closed coverage on every target). Keep it out of
+          # the time-boxed split matrix so the two lanes never double-run it.
+          command: ${{ matrix.offline_runner }} uv run --offline --no-sync pytest tests/ -m "not hnsw" -v --junit-xml=test-results.xml --splits 3 --group ${{ matrix.split }} ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()
@@ -329,7 +332,19 @@ jobs:
           out-dir: native-dist
 
   hnsw-contract-tests:
-    runs-on: ubuntu-latest
+    # HNSW is critical infrastructure: run it on every supported target, and
+    # turn a missing VSS extension into a failure instead of a skip.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            offline_runner: bash scripts/run_offline.sh
+          - os: macos-latest
+            offline_runner: ""
+          - os: windows-latest
+            offline_runner: ""
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       CHUNKHOUND_REQUIRE_HNSW: "1"
@@ -357,21 +372,23 @@ jobs:
         run: uv run python scripts/prepare_offline_tests.py
 
       - name: Run HNSW contract tests
-        run: |
-          bash scripts/run_offline.sh uv run --offline --no-sync pytest \
-            tests/unit/test_duckdb_semantic_search_contracts.py \
-            tests/unit/test_rust_hnsw_disabled_contract.py \
-            tests/test_duckdb_compaction.py \
-            tests/integration/test_duckdb_failure_modes.py \
-            tests/integration/test_directory_indexing_hnsw.py \
-            tests/contracts/test_hnsw_progress_output.py \
-            tests/contracts/test_disk_usage_limit_rust.py \
-            -m hnsw -v
+        run: >-
+          ${{ matrix.offline_runner }} uv run --offline --no-sync pytest
+          tests/ -m hnsw -v --timeout=600 --junit-xml=test-results-hnsw.xml
+
+      - name: Upload HNSW test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-hnsw-${{ matrix.os }}
+          path: test-results-hnsw.xml
+          if-no-files-found: ignore
 
   pages-artifact:
     needs:
       - site-build
       - tests
+      - hnsw-contract-tests
       - rust-checks
       - site-build-validation
       - watchman-rollout-gate
