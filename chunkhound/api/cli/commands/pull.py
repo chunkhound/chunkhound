@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 from pathlib import Path
 
 from loguru import logger
@@ -7,6 +8,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.hub.client import fetch_validated_manifest, pull
 from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
+    HUB_PULL_CANCELLATION_DIAGNOSTIC,
     HUB_PULL_FAILURE_GUIDANCE,
     HubAuthorizationError,
     HubLocalStateError,
@@ -100,7 +102,12 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
                 )
         pre_client_fatal = False
         pull_attempted = True
-        installed = await pull(config, rel=args.version, source=source)
+        try:
+            installed = await pull(config, rel=args.version, source=source)
+        except asyncio.CancelledError:
+            logger.error("{}", HUB_PULL_CANCELLATION_DIAGNOSTIC)
+            logger.error("{}", HUB_PULL_FAILURE_GUIDANCE)
+            raise SystemExit(1) from None
     except HubUnavailable as exc:
         logger.error("Hub pull unavailable: {}", str(exc))
         if pull_attempted:

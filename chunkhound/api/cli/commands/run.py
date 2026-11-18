@@ -30,6 +30,7 @@ from chunkhound.hub.client import (
 )
 from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
+    HUB_PULL_CANCELLATION_DIAGNOSTIC,
     HUB_PULL_FAILURE_GUIDANCE,
     HubLocalStateError,
     HubUnavailable,
@@ -247,6 +248,10 @@ async def _prepare_hub_index(
             installed = await pull(config, automatic=True)
         else:
             installed = await pull(config, automatic=True, source=source)
+    except asyncio.CancelledError:
+        formatter.error(HUB_PULL_CANCELLATION_DIAGNOSTIC)
+        _hub_authorized_failure_guidance(formatter)
+        return HubIndexDecision.STOP
     except HubUnavailable as exc:
         formatter.error(str(exc))
         _hub_authorized_failure_guidance(formatter)

@@ -1,6 +1,7 @@
 """Consent and fallback contracts for automatic hub use by ``index``."""
 
 import argparse
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -756,6 +757,23 @@ async def test_attempted_index_pull_unavailable_always_stops_with_local_retry_gu
     ]
     assert "--forget-trust" in formatter.text
     assert "disable hub.url" in formatter.text
+    assert config.hub.url not in formatter.text
+
+
+async def test_attempted_index_pull_cancellation_stops_with_exact_guidance(
+    config, args, formatter, monkeypatch, absent_target
+):
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
+    monkeypatch.setattr(run, "pull", AsyncMock(side_effect=asyncio.CancelledError()))
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    assert formatter.messages == [
+        ("error", "The attempted hub pull was cancelled before completion."),
+        ("info", HUB_PULL_FAILURE_GUIDANCE),
+    ]
     assert config.hub.url not in formatter.text
 
 

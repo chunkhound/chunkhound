@@ -8,6 +8,10 @@ from chunkhound.providers.database.ownership import (
     DatabaseReaderCloseError,
 )
 
+HUB_PULL_CANCELLATION_DIAGNOSTIC = (
+    "The attempted hub pull was cancelled before completion."
+)
+
 HUB_PULL_FAILURE_GUIDANCE = (
     "The attempted hub pull did not complete. To index locally without another "
     "hub attempt, run chunkhound pull . --forget-trust or disable hub.url, then "

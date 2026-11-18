@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import hashlib
 import importlib
 import json
@@ -169,6 +170,36 @@ async def test_attempted_explicit_pull_failure_stops_with_local_retry_guidance(
 
     assert stopped.value.code == 1
     assert HUB_PULL_FAILURE_GUIDANCE in messages
+    assert config.hub.url not in "\n".join(messages)
+
+
+async def test_attempted_explicit_pull_cancellation_exits_with_exact_guidance(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    monkeypatch.setattr(pull_module, "is_trusted", Mock(return_value=True))
+    monkeypatch.setattr(
+        pull_module, "pull", AsyncMock(side_effect=asyncio.CancelledError())
+    )
+    args = argparse.Namespace(trust=False, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert messages == [
+        "The attempted hub pull was cancelled before completion.",
+        HUB_PULL_FAILURE_GUIDANCE,
+    ]
     assert config.hub.url not in "\n".join(messages)
 
 
