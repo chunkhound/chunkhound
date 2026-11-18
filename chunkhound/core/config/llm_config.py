@@ -141,6 +141,7 @@ LLMProviderLiteral = Literal[
     "grok",
     "openrouter",
     "orcarouter",
+    "vercel",
     "requesty",
     "api-route",
     "opper",
@@ -188,6 +189,7 @@ CLI_PROVIDER_CHOICES = (
     "grok",
     "openrouter",
     "orcarouter",
+    "vercel",
     "requesty",
     "api-route",
     "opper",
@@ -1034,6 +1036,11 @@ class LLMConfig(BaseSettings):
             # Type-level exhaustiveness check — mypy will flag if a new
             # LLMProviderLiteral variant is added without a matching branch.
             assert_never(provider)
+
+    @staticmethod
+    def requires_explicit_model(provider: LLMProviderLiteral) -> bool:
+        """True when no baked-in default model exists (``llm.model`` mandatory)."""
+        return not all(LLMConfig._get_default_models_for(provider))
 
     def get_default_models(self) -> tuple[str, str]:
         """

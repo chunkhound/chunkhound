@@ -1,0 +1,122 @@
+{
+  "llm": [
+    {
+      "id": "anthropic",
+      "requiresModel": false,
+      "customEndpointRequiresModel": false,
+      "authUrl": ""
+    },
+    {
+      "id": "api-route",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://www.api-route.com/api-keys"
+    },
+    {
+      "id": "atlascloud",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://console.atlascloud.ai/api-keys"
+    },
+    {
+      "id": "cheapaimodel",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://console.cheapaimodel.ai/keys"
+    },
+    {
+      "id": "claude-code-cli",
+      "requiresModel": false,
+      "customEndpointRequiresModel": false,
+      "authUrl": ""
+    },
+    {
+      "id": "codex-cli",
+      "requiresModel": false,
+      "customEndpointRequiresModel": false,
+      "authUrl": ""
+    },
+    {
+      "id": "deepseek",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://platform.deepseek.com/api_keys"
+    },
+    {
+      "id": "gemini",
+      "requiresModel": true,
+      "customEndpointRequiresModel": false,
+      "authUrl": ""
+    },
+    {
+      "id": "grok",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://console.x.ai/team/default/api-keys"
+    },
+    {
+      "id": "obscurify-ai",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://obscurify.ai/account"
+    },
+    {
+      "id": "openai",
+      "requiresModel": false,
+      "customEndpointRequiresModel": true,
+      "authUrl": ""
+    },
+    {
+      "id": "opencode-cli",
+      "requiresModel": true,
+      "customEndpointRequiresModel": false,
+      "authUrl": ""
+    },
+    {
+      "id": "openrouter",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://openrouter.ai/keys"
+    },
+    {
+      "id": "opper",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://platform.opper.ai"
+    },
+    {
+      "id": "orcarouter",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://www.orcarouter.ai"
+    },
+    {
+      "id": "requesty",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://app.requesty.ai/api-keys"
+    },
+    {
+      "id": "runcrate",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://www.runcrate.ai/dashboard/api-keys"
+    },
+    {
+      "id": "uberllm",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://uberllm.dev/signup"
+    },
+    {
+      "id": "vercel",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys"
+    }
+  ],
+  "embedding": [
+    "openai",
+    "voyageai"
+  ]
+}
