@@ -13,7 +13,7 @@ _DISCOVERY_TIMEOUT_CAP_SECONDS = 60.0
 
 
 class EmptyWebSearchError(Exception):
-    """DuckDuckGo returned no rows."""
+    """Every engine returned no rows for the query (not refused)."""
 
 
 class NoPagesFetchedError(Exception):
@@ -115,11 +115,18 @@ async def run_websearch(
             queries = await expand_web_queries(
                 query, llm_manager, previous_query=previous_query
             )
+            websearch_config = (
+                getattr(config, "websearch", None) if config is not None else None
+            )
             return await search_multi(
                 queries,
                 limit,
                 progress_callback,
                 failure_callback=failure_callback,
+                websearch_config=websearch_config,
+                # Partition the discovery budget: one hanging engine must
+                # not starve its fallback within the discovery phase.
+                timeout_s=discovery_s,
             )
 
         discovery_task = asyncio.create_task(discover())
@@ -132,9 +139,7 @@ async def run_websearch(
             await _cancel_and_wait(discovery_task, deadline=deadline)
 
         if not results:
-            raise EmptyWebSearchError(
-                f"No results found for {query!r} — DDG HTML structure may have changed"
-            )
+            raise EmptyWebSearchError(f"No results found for {query!r}")
         if progress_callback is not None:
             progress_callback(f"Found {len(results)} results, fetching content...")
 
