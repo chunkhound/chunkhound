@@ -26,23 +26,21 @@ def repos(tmp_path):
     git(tmp_path, "init", str(repo))
     git(repo, "config", "user.name", "Contract Test")
     git(repo, "config", "user.email", "test@example.invalid")
+    git(repo, "commit", "--allow-empty", "-m", "released stable")
+    git(repo, "tag", "-a", "v6.1.0", "-m", "stable")
     git(repo, "commit", "--allow-empty", "-m", "tested source")
     sha = git(repo, "rev-parse", "HEAD")
     git(repo, "remote", "add", "origin", str(remote))
-    git(repo, "push", "origin", "HEAD:refs/heads/main")
+    git(repo, "push", "origin", "HEAD:refs/heads/main", "refs/tags/v6.1.0")
     return repo, remote, sha
 
 
-def allocate(repo, sha, run_id="101", config='[alpha]\nbase_version = "6.2.0"\n'):
-    config_path = repo / f"channel-{run_id}.toml"
-    config_path.write_text(config)
+def allocate(repo, sha, run_id="101"):
     output = repo / f"output-{run_id}.txt"
     return subprocess.run(
         [
             sys.executable,
             str(SCRIPT),
-            "--config",
-            str(config_path),
             "--repository",
             "chunkhound/chunkhound",
             "--run-id",
@@ -89,15 +87,56 @@ def test_next_alpha_uses_remote_tags_and_exact_tested_sha(repos):
 def test_rerun_reuses_original_identity_even_after_base_change(repos):
     repo, remote, sha = repos
     first = allocate(repo, sha)
-    oid = git(remote, "rev-parse", "v6.2.0a1")
-    second = allocate(repo, sha, config='[alpha]\nbase_version = "6.3.0"\n')
-    assert first.returncode == second.returncode == 0, second.stderr
-    assert first.stdout == second.stdout == "v6.2.0a1\n"
-    assert git(remote, "rev-parse", "v6.2.0a1") == oid
-    # A different successful build of the SAME commit gets its own alpha.
-    third = allocate(repo, sha, "102")
-    assert third.returncode == 0, third.stderr
-    assert third.stdout == "v6.2.0a2\n"
+    assert first.returncode == 0, first.stderr
+    assert first.stdout == "v6.2.0a1\n"
+    rerun = allocate(repo, sha)
+    assert rerun.returncode == 0, rerun.stderr
+    assert rerun.stdout == "v6.2.0a1\n"
+    # A new stable tag (6.2.0) moves the base to 6.3.0; the original run keeps
+    # its alpha. A hotfix (6.2.1) does not move the base again.
+    git(repo, "tag", "-a", "v6.2.0", "-m", "stable", sha)
+    git(repo, "push", "origin", "refs/tags/v6.2.0")
+    rerun = allocate(repo, sha)
+    assert rerun.returncode == 0, rerun.stderr
+    assert rerun.stdout == "v6.2.0a1\n"
+    # A different successful build of the same commit uses the new base.
+    other = allocate(repo, sha, "102")
+    assert other.returncode == 0, other.stderr
+    assert other.stdout == "v6.3.0a1\n"
+    git(repo, "tag", "-a", "v6.2.1", "-m", "hotfix", sha)
+    git(repo, "push", "origin", "refs/tags/v6.2.1")
+    hotfix = allocate(repo, sha, "103")
+    assert hotfix.returncode == 0, hotfix.stderr
+    assert hotfix.stdout == "v6.3.0a2\n"
+
+
+def test_base_is_numerically_highest_stable_next_minor(repos):
+    repo, remote, sha = repos
+    # Lexical order would pick 6.9.0 and give base 6.10.0; numeric gives 6.11.0.
+    for version in ("v6.9.0", "v6.10.0"):
+        git(repo, "tag", "-a", version, "-m", "stable", sha)
+        git(repo, "push", "origin", f"refs/tags/{version}")
+    result = allocate(repo, sha)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v6.11.0a1\n"
+
+
+def test_major_stable_moves_base_to_next_minor_of_new_major(repos):
+    repo, remote, sha = repos
+    git(repo, "tag", "-a", "v7.0.0", "-m", "stable", sha)
+    git(repo, "push", "origin", "refs/tags/v7.0.0")
+    result = allocate(repo, sha)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "v7.1.0a1\n"
+
+
+def test_missing_stable_tag_fails_without_creating_alpha_tags(repos):
+    repo, remote, sha = repos
+    git(repo, "push", "origin", "--delete", "refs/tags/v6.1.0")
+    result = allocate(repo, sha)
+    assert result.returncode != 0
+    assert "No stable" in result.stderr
+    assert git(remote, "tag", "--list") == ""
 
 
 @pytest.mark.parametrize("same_run", [True, False])
@@ -140,25 +179,6 @@ def test_concurrent_builds_allocate_atomic_immutable_identities(
     assert len(tags) == (1 if same_run else 2)
 
 
-@pytest.mark.parametrize(
-    "config",
-    [
-        '[alpha]\nbase_version = "v6.2.0"',
-        '[alpha]\nbase_version = "6.2.0a1"',
-        '[alpha]\nbase_version = "06.2.0"',
-        "[alpha]\nbase_version = 6",
-        '[alpha]\nbase_version = "6.2.0"\nunreviewed = true',
-        "not valid toml",
-        '[wrong]\nbase_version = "6.2.0"',
-    ],
-)
-def test_invalid_config_never_creates_remote_tags(repos, config):
-    repo, remote, sha = repos
-    result = allocate(repo, sha, config=config)
-    assert result.returncode != 0
-    assert git(remote, "tag", "--list") == ""
-
-
 def test_rerun_cannot_rebind_identity_to_another_source(repos):
     repo, remote, sha = repos
     assert allocate(repo, sha).returncode == 0
@@ -177,7 +197,7 @@ def test_wrong_checkout_never_tags_untested_source(repos):
     result = allocate(repo, sha)
     assert result.returncode != 0
     assert "Checkout HEAD must be the exact CI-tested source SHA" in result.stderr
-    assert git(remote, "tag", "--list") == ""
+    assert git(remote, "tag", "--list", "v*a*") == ""
 
 
 def test_git_failure_reports_remote_error_details(repos):
@@ -188,7 +208,7 @@ def test_git_failure_reports_remote_error_details(repos):
     assert result.returncode != 0
     assert "Alpha allocation failed" in result.stderr
     assert "missing-remote.git" in result.stderr
-    assert git(remote, "tag", "--list") == ""
+    assert git(remote, "tag", "--list", "v*a*") == ""
 
 
 def test_remote_rejection_leaves_no_half_allocated_release(repos):
@@ -199,7 +219,7 @@ def test_remote_rejection_leaves_no_half_allocated_release(repos):
     result = allocate(repo, sha)
     assert result.returncode != 0
     assert "Atomic tag push failed" in result.stderr
-    assert git(remote, "tag", "--list") == ""
+    assert git(remote, "tag", "--list", "v*a*") == ""
 
 
 def test_duplicate_metadata_fails_closed_without_allocating(repos):

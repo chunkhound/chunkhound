@@ -103,10 +103,12 @@ next available `vX.Y.ZaN` tag after existing CI validation. PR, merge-queue, man
 and fork CI runs do not allocate tags. No GitHub App or PAT is required: CI creates
 the tag using `GITHUB_TOKEN`, then directly calls the reusable release workflow.
 
-The reviewed `.github/release-channel.toml` file declares the alpha base version.
-Update it when moving to the next planned release line. Numbers reflect allocation
-order, not commit order: an older source commit can finish CI later and receive a
-higher alpha number.
+The alpha base is the next minor after the highest stable `vX.Y.Z` tag on the
+remote (compared numerically; prerelease tags are ignored): stable `6.1.0` gives
+alphas `v6.2.0aN`, and stable `6.2.0` or a hotfix `6.2.1` moves the line to
+`v6.3.0aN`. Stable `7.0.0` gives `v7.1.0aN`. If no stable tag exists, allocation
+fails. Numbers reflect allocation order, not commit order: an older source commit
+can finish CI later and receive a higher alpha number.
 
 Publication order is not guaranteed either. Main CI runs are independent, so
 alpha N+1 can reach PyPI before alpha N, and alpha N may be missing if its
@@ -117,7 +119,7 @@ upload order or a gap-free sequence matches the tag order.
 The allocator atomically creates the release tag and
 `alpha-build/chunkhound/chunkhound/<run-id>`. The identity tag points to a metadata
 blob, not a commit, so it does not influence Git version discovery. Rerunning the
-same CI run reuses its original tag even if the configured base later changes.
+same CI run reuses its original tag even if a newer stable tag moves the base.
 Concurrent allocations refetch and retry tag-name collisions. This is not an
 automatic publication-retry system.
 
