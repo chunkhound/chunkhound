@@ -9,6 +9,9 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NPM: str = shutil.which("npm") or "npm"
+# Run node directly, never via `npm exec node`: node is not a local bin, so
+# npm exec fetches the `node` npm package from the registry (network + prerelease).
+NODE: str = shutil.which("node") or "node"
 _SUBPROCESS_ENV_ALLOWLIST = (
     "PATH",
     "HOME",
