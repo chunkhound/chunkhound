@@ -75,7 +75,9 @@ def formatter() -> RecordingFormatter:
 def absent_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     target = tmp_path / ".chunkhound" / "db" / "chunks.db"
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: True)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: True
+    )
     return target
 
 
@@ -167,7 +169,9 @@ async def test_stored_trust_existing_database_never_prompts_or_contacts_hub(
     target = tmp_path / ("aligned.db" if aligned else "misaligned.db")
     monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: False
+    )
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
@@ -248,7 +252,7 @@ async def test_target_inspection_failures_are_normalized_as_fatal_local_state(
     monkeypatch.setattr(
         run,
         "automatic_target_absent",
-        lambda _target: (_ for _ in ()).throw(failure),
+        lambda _target, _backend: (_ for _ in ()).throw(failure),
     )
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
@@ -328,7 +332,9 @@ async def test_explicit_trust_existing_database_validates_and_saves_without_pull
     target = tmp_path / "chunks.db"
     source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: False
+    )
     fetch = AsyncMock(return_value=source)
     grant = Mock()
     monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
@@ -362,7 +368,9 @@ async def test_trust_persistence_uses_validated_authorized_identity_during_fetch
         return source
 
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: False
+    )
     fetch = AsyncMock(side_effect=mutate_config_during_fetch)
     grant = Mock()
     monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
@@ -390,7 +398,9 @@ async def test_mismatched_validated_capability_stops_before_grant_or_pull(
     )
     grant = Mock()
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: False
+    )
     monkeypatch.setattr(
         run, "fetch_validated_manifest", AsyncMock(return_value=mismatched)
     )
@@ -423,7 +433,9 @@ async def test_post_fetch_checkout_failure_is_formatted_once(
         return checkout_digest(checkout)
 
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: False
+    )
     monkeypatch.setattr(
         run,
         "fetch_validated_manifest",
@@ -447,7 +459,9 @@ async def test_manifest_binding_fatal_failure_is_formatted_before_run_exit(
     target = tmp_path / "chunks.db"
     failure = HubLocalStateError("Hub checkout identity is unavailable")
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: False
+    )
     monkeypatch.setattr(
         run,
         "fetch_validated_manifest",
@@ -468,7 +482,9 @@ async def test_existing_database_safe_validation_failure_offers_local_fallback(
     args.trust = True
     target = tmp_path / "chunks.db"
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(run, "automatic_target_absent", lambda _target: False)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: False
+    )
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "local")
     monkeypatch.setattr(

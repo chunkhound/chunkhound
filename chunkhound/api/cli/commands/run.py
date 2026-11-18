@@ -182,7 +182,7 @@ async def _prepare_hub_index(
 
     try:
         target = installation_target(config)
-        target_absent = automatic_target_absent(target)
+        target_absent = automatic_target_absent(target, config.database.provider)
     except HubUnavailable as exc:
         formatter.error(str(exc))
         if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
