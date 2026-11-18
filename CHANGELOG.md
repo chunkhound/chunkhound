@@ -53,6 +53,24 @@ Semantic search also requires a cosine-compatible HNSW index; all vector
 search operations use cosine similarity (`l2sq` and `ip` metrics are not
 supported by the search API).
 
+### Added
+- **Watchdog delivery is verified, not assumed** — Probe events prove the stream
+  works; three missed pings or a dead thread fall back to polling; healthy
+  streams ping every 5 minutes.
+- **Watchdog setup timeout is now 8 s** — Setup and the initial delivery probe
+  share an 8 s budget; overruns fall back to polling with a warning.
+- **Dropped FSEvents batches trigger a rescan** — The watch root is rescanned
+  and missing files reconciled when the emitter reports dropped batches, with
+  capped backoff on repeated failures.
+- **Vanished files are removed from the index** — Polling and rescans delete
+  rows for indexed files gone from disk, so stale paths leave search results.
+- **Rust, watchdog, and stdlib logs reach loguru** — One bridge forwards stdlib,
+  `pyo3-log`, and native `fsevents` records so failures stop disappearing.
+- **MCP stdio logging is muted only for the server run** — Output is silenced
+  while serving and the prior state restored on exit, sparing embedders.
+- **HNSW tests run on every OS and fail without VSS** — CI covers Linux, macOS,
+  and Windows and fails instead of skipping when the VSS extension is missing.
+
 ### Changed
 - **DuckDB HNSW is now configurable** — `database.duckdb_hnsw_enabled`
   (`true` by default; CLI `--duckdb-hnsw` / `--no-duckdb-hnsw`; env
@@ -84,6 +102,8 @@ supported by the search API).
 - **Semantic search errors surface** — Database/provider errors during
   semantic search now raise explicitly instead of returning empty result
   pages.
+- **loguru minimum raised to 0.7.3** — The dependency pin moved from
+  `>=0.6.0` to `>=0.7.3,<0.8`; users on 0.6.x or 0.7.0–0.7.2 must upgrade.
 
 ### Fixed
 - **DuckDB compaction sees real bloat again** — The Python fragmentation
