@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from chunkhound.utils.websearch_backends import AllEnginesBlockedError
 from chunkhound.utils.websearch_pipeline import (
     NoPagesFetchedError,
     run_websearch,
@@ -35,6 +36,32 @@ async def test_discovery_timeout_does_not_wait_for_full_budget(monkeypatch) -> N
             embedding_manager=None,
             llm_manager=None,
             timeout_s=0.08,
+        )
+
+
+@pytest.mark.asyncio
+async def test_all_engines_blocked_propagates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries",
+        AsyncMock(return_value=["q"]),
+    )
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi",
+        AsyncMock(
+            side_effect=AllEnginesBlockedError(
+                [("duckduckgo", "refused status 202"), ("bing", "refused status 429")]
+            )
+        ),
+    )
+
+    with pytest.raises(AllEnginesBlockedError, match="all engines unavailable"):
+        await run_websearch(
+            "q",
+            limit=1,
+            config=None,
+            embedding_manager=None,
+            llm_manager=None,
+            timeout_s=30,
         )
 
 

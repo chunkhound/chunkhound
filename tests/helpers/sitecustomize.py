@@ -122,18 +122,20 @@ def _patch_websearch_for_tests() -> None:
     try:
         from chunkhound.services import web_research_service as web_research
         from chunkhound.utils import websearch_core as ws_core
+        from chunkhound.utils.websearch_verdict import EngineResponse, Verdict
 
         ws_core.search  # noqa: B018
         ws_core.search_multi  # noqa: B018
         ws_core.fetch_pages  # noqa: B018
         web_research.research_web_pages  # noqa: B018
 
-        def _stub_search(query, limit=30, progress_callback=None):
-            return [
+        def _stub_search(query, limit=30, progress_callback=None, **kwargs):
+            rows = [
                 ("Stub Result One", "https://example.invalid/one", "first stub"),
                 ("Stub Result Two", "https://example.invalid/two", "second stub"),
                 ("Stub Result Three", "https://example.invalid/three", "third stub"),
             ][:limit]
+            return EngineResponse(tuple(rows), Verdict.SERVED, 200)
 
         async def _stub_fetch_pages(
             urls, progress_callback=None, warning_callback=None
@@ -150,9 +152,13 @@ def _patch_websearch_for_tests() -> None:
             return {"answer": "ANSWER"}
 
         async def _stub_search_multi(
-            queries, limit, progress_callback=None, failure_callback=None
+            queries, limit, progress_callback=None, failure_callback=None, **kwargs
         ):
-            return _stub_search(queries[0] if queries else "", limit)
+            # The stub delegates to the engine stub, which returns a classified
+            # response; the orchestrator's facade yields plain rows.
+            return list(
+                _stub_search(queries[0] if queries else "", limit).rows
+            )
 
         ws_core.search = _stub_search  # type: ignore[assignment]
         ws_core.search_multi = _stub_search_multi  # type: ignore[assignment]
