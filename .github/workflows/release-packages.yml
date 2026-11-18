@@ -223,6 +223,9 @@ jobs:
         with:
           packages-dir: dist
           skip-existing: true
+          # Attestations name the caller workflow, but PyPI trusts this reusable
+          # workflow. Disable them until PyPI supports that identity mismatch.
+          attestations: false
 
   publish-native:
     needs: [prepare, build-native-wheel, validate-release, validate-artifacts]
@@ -266,6 +269,8 @@ jobs:
         with:
           packages-dir: dist-native
           skip-existing: true
+          # Same caller/reusable-workflow attestation mismatch as the main package.
+          attestations: false
 
       - name: Alert on native publish failure
         # Native publication runs before publish, so a failure prevents the

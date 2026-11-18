@@ -255,3 +255,6 @@ def test_release_workflows_keep_native_first_and_isolate_alpha_approvals():
                 assert step["with"]["overwrite"] is True
             if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@"):
                 assert step["with"]["skip-existing"] is True
+                # PyPI rejects caller-workflow attestations when authentication
+                # uses the reusable workflow's job_workflow_ref instead.
+                assert step["with"]["attestations"] is False
