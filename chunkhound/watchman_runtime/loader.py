@@ -32,6 +32,7 @@ from typing import Literal, cast
 # the isolated build environment, where chunkhound.core's package __init__ (and its
 # runtime-only parser dependencies) are unavailable.
 from chunkhound.utils.cache_paths import platform_cache_root
+from chunkhound.utils.service_temp_names import SERVICE_TEMP_HYDRATION_MARKER_FILENAME
 
 if os.name == "nt":
     import msvcrt
@@ -46,7 +47,7 @@ _RUNTIME_DOWNLOAD_TIMEOUT_SECONDS_ENV = (
     "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS"
 )
 _RUNTIME_DOWNLOAD_RETRIES_ENV = "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES"
-_HYDRATION_MARKER_NAME = ".chunkhound-hydrated.json"
+_HYDRATION_MARKER_NAME = SERVICE_TEMP_HYDRATION_MARKER_FILENAME
 _DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 _DEFAULT_RUNTIME_DOWNLOAD_RETRIES = 2
 _MACHINE_ALIASES = {

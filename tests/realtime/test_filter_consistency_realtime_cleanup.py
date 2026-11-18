@@ -755,3 +755,31 @@ async def test_realtime_start_rejects_wrong_root_before_monitor_setup(
         assert getattr(service, "watch_path", None) is None
     finally:
         services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_user_dot_chunkhound_prefixed_file_admitted_and_preserved(
+    tmp_path: Path,
+) -> None:
+    """User .chunkhound-*.py stays indexable and is never purged as policy-
+    excluded; exact service-temp names stay rejected."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    user_file = root / ".chunkhound-notes.py"
+    user_file.write_text("def notes():\n    return 1\n", encoding="utf-8")
+
+    db_path = tmp_path / "user-chunkhound.duckdb"
+    config = _build_config(root, db_path)
+    provider = DuckDBProvider(db_path, base_directory=root)
+    provider.connect()
+    try:
+        coordinator = IndexingCoordinator(
+            database_provider=provider, base_directory=root, config=config
+        )
+        path_filter = RealtimePathFilter(config=config, root_path=root)
+        assert path_filter.should_index(user_file) is True
+        assert path_filter.should_index(root / ".chunkhound-probe.tmp") is False
+        rel = user_file.relative_to(root).as_posix()
+        assert coordinator._classify_cleanup_candidate(rel, set(), path_filter) is None
+    finally:
+        provider.disconnect()

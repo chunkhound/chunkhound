@@ -9,6 +9,9 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.utils.service_temp_names import is_service_temp_name
+
+# Exact service temp filenames live in chunkhound.utils.service_temp_names.
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +108,8 @@ class RealtimePathFilter:
 
     def should_index(self, file_path: Path) -> bool:
         """Return whether a path should enter the realtime indexing pipeline."""
+        if is_service_temp_name(Path(file_path).name):
+            return False
         settings = self._settings
         if settings is None:
             return self._language_fallback(file_path)
