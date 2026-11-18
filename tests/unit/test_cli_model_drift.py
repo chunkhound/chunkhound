@@ -134,7 +134,6 @@ async def _index(
         )
         monkeypatch.setattr(run_mod, "fetch_validated_manifest", _forbid)
         monkeypatch.setattr(run_mod, "pull", _forbid)
-        monkeypatch.setattr(run_mod, "_validate_run_arguments", lambda *_args: True)
 
     args = Namespace(
         path=tmp_path,
@@ -149,6 +148,14 @@ async def _index(
     )
     config = Config(
         target_dir=tmp_path,
+        embedding={
+            "provider": "openai",
+            "model": "test-model",
+            "output_dims": 8,
+            "api_key": "test",
+        }
+        if hub_existing
+        else None,
         hub={"url": "https://hub.invalid/manifest"} if hub_existing else {},
     )
     config.database = DatabaseConfig(
