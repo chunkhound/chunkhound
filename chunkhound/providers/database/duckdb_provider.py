@@ -637,6 +637,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         finally:
             # Close connection
             conn.close()
+            # Closing aborts any open transaction; a stale True would make
+            # later in-op transactional checks skip their own BEGIN/COMMIT.
+            state["transaction_active"] = False
             # Clear thread-local connection
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")
@@ -3023,6 +3026,34 @@ class DuckDBProvider(SerialDatabaseProvider):
             params.append(file_id)
             conn.execute(query, params)
 
+    def _executor_refresh_file_mtimes(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        entries: list[tuple[str, float, str]],
+    ) -> int:
+        """Executor method for refresh_file_mtimes - runs in DB thread.
+
+        One statement for the whole batch. Leaves updated_at and skip_reason
+        alone: the row's content was confirmed, not re-indexed.
+        """
+        paths = [e[0] for e in entries]
+        mtimes = [float(e[1]) for e in entries]
+        hashes = [e[2] for e in entries]
+        row = conn.execute(
+            """
+            UPDATE files SET modified_time = to_timestamp(v.mtime)
+            FROM (
+                SELECT unnest(?::VARCHAR[]) AS path,
+                       unnest(?::DOUBLE[]) AS mtime,
+                       unnest(?::VARCHAR[]) AS h
+            ) v
+            WHERE files.path = v.path AND files.content_hash = v.h
+            """,
+            [paths, mtimes, hashes],
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def record_skipped_file(
         self,
         path: str,
@@ -3951,68 +3982,126 @@ class DuckDBProvider(SerialDatabaseProvider):
                     WITH (metric = 'cosine')
                 """)
 
-            # Build query with dimension-specific table
-            query = f"""
-                SELECT
-                    c.id as chunk_id,
-                    c.symbol,
-                    c.code,
-                    c.chunk_type,
-                    c.start_line,
-                    c.end_line,
-                    f.path as file_path,
-                    f.language,
-                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity,
-                    c.metadata
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
-            """
-
-            params: list[Any] = [query_embedding, provider, model]
+            # Both shapes score into (chunk_id, similarity), so no vector passes
+            # through the chunk/file joins, and fetch chunk rows for the page only.
+            # - Path-scoped: find the eligible chunk ids (chunk and file present,
+            #   path matches), then score only their embeddings, so a narrow
+            #   filter scores its own chunks rather than the whole corpus.
+            # - Unscoped: score every embedding, then join to drop any whose
+            #   chunk or file is gone. Finding eligible ids first here makes
+            #   DuckDB hash the embeddings side, vectors included, which is as
+            #   slow as joining before scoring (measured 376 vs 140 ms at
+            #   14k x 1024-dim vectors).
+            # TRY() turns a malformed stored vector (NULL elements, which a NaN
+            # vector is stored as) into a NULL score that is skipped, so one bad
+            # row, in scope or not, never fails the whole search.
+            # The ORDER BY/LIMIT never sit over a bare scan of the embeddings
+            # table, so DuckDB's VSS optimizer cannot rewrite this into an
+            # approximate HNSW index scan.
+            # candidates is MATERIALIZED: the page and the total both read it, so
+            # every embedding is scored once and the total counts exactly the rows
+            # the pages can return.
+            similarity = (
+                f"TRY(array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]))"
+            )
+            params: list[Any] = []
 
             path_like: str | None = None
             if normalized_path is not None:
                 path_like = self._build_path_like_pattern(normalized_path)
 
-            if threshold is not None:
-                query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
-                params.append(query_embedding)
-                params.append(threshold)
-
             if path_like is not None:
-                query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
                 # Prepend / so %/repo_a/% only matches repo_a as a complete directory component.
-                params.append(path_like)
+                params.extend([path_like, query_embedding, provider, model])
+                ranked = f"""
+                eligible AS (
+                    SELECT c.id AS chunk_id
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                    WHERE CONCAT('/', f.path) LIKE ? ESCAPE '\\'
+                ),
+                candidates AS MATERIALIZED (
+                    SELECT e.chunk_id, {similarity} AS similarity
+                    FROM {table_name} e
+                    SEMI JOIN eligible ON e.chunk_id = eligible.chunk_id
+                    WHERE e.provider = ? AND e.model = ?
+                )"""
+            else:
+                params.extend([query_embedding, provider, model])
+                ranked = f"""
+                scored AS (
+                    SELECT e.chunk_id, {similarity} AS similarity
+                    FROM {table_name} e
+                    WHERE e.provider = ? AND e.model = ?
+                ),
+                candidates AS MATERIALIZED (
+                    SELECT scored.chunk_id, scored.similarity
+                    FROM scored
+                    JOIN chunks c ON scored.chunk_id = c.id
+                    JOIN files f ON c.file_id = f.id
+                )"""
 
-            # Get total count for pagination
-            # Build count query separately to avoid string replacement issues
-            count_query = f"""
-                SELECT COUNT(*)
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
+            # NULL scores and scores under the threshold sit at the end of the
+            # ordering, so filtering them after the page returns the same rows as
+            # filtering before it. Before it, DuckDB pushes the filter down into
+            # the embeddings scan, which scores every row there first.
+            # The total applies the same filter to the same candidates, so it is
+            # exactly the number of results a caller can page through.
+            keep = "similarity IS NOT NULL"
+            keep_params: list[Any] = []
+            if threshold is not None:
+                keep += " AND similarity >= ?"
+                keep_params.append(threshold)
+
+            # total always yields one row, and the LEFT JOIN keeps it when the
+            # page is empty, so a page past the end still reports the total.
+            query = f"""
+                WITH {ranked},
+                total AS (
+                    SELECT COUNT(*) AS total_count
+                    FROM candidates
+                    WHERE {keep}
+                ),
+                page AS (
+                    SELECT chunk_id, similarity
+                    FROM candidates
+                    ORDER BY similarity DESC NULLS LAST
+                    LIMIT ? OFFSET ?
+                ),
+                kept AS (
+                    SELECT chunk_id, similarity
+                    FROM page
+                    WHERE {keep}
+                ),
+                hits AS (
+                    SELECT
+                        c.id as chunk_id,
+                        c.symbol,
+                        c.code,
+                        c.chunk_type,
+                        c.start_line,
+                        c.end_line,
+                        f.path as file_path,
+                        f.language,
+                        kept.similarity,
+                        c.metadata
+                    FROM kept
+                    JOIN chunks c ON kept.chunk_id = c.id
+                    JOIN files f ON c.file_id = f.id
+                )
+                SELECT total.total_count, hits.*
+                FROM total
+                LEFT JOIN hits ON TRUE
+                ORDER BY hits.similarity DESC
             """
 
-            count_params = [provider, model]
-
-            if threshold is not None:
-                count_query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
-                count_params.extend([query_embedding, threshold])
-
-            if path_like is not None:
-                count_query += " AND CONCAT('/', f.path) LIKE ? ESCAPE '\\'"
-                # Directory-boundary-anchored match, consistent with main query
-                count_params.append(path_like)
-
-            total_count = conn.execute(count_query, count_params).fetchone()[0]
-
-            query += " ORDER BY similarity DESC LIMIT ? OFFSET ?"
+            params.extend(keep_params)
             params.extend([page_size, offset])
+            params.extend(keep_params)
 
-            results = conn.execute(query, params).fetchall()
+            rows = conn.execute(query, params).fetchall()
+            total_count = rows[0][0]
+            results = [row[1:] for row in rows if row[1] is not None]
 
             result_list = [
                 {
