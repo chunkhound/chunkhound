@@ -669,9 +669,17 @@ async def test_auto_marker_is_fatal_without_requests_but_explicit_recovers(
     assert inspect_database(target, "duckdb").groups
 
 
-@pytest.mark.parametrize("racing_marker", [False, True])
-async def test_auto_rechecks_under_exclusive_ownership(
-    tmp_path, hub_http, racing_marker
+@pytest.mark.parametrize(
+    "race_state",
+    [
+        "valid_database",
+        "marker",
+        "orphaned_wal",
+        "orphaned_embedding_sidecar",
+    ],
+)
+async def test_auto_rechecks_complete_inventory_under_exclusive_ownership(
+    tmp_path, hub_http, race_state
 ):
     config = config_for(tmp_path / "checkout", hub_http)
     target = config.database.get_db_path()
@@ -688,21 +696,38 @@ async def test_auto_rechecks_under_exclusive_ownership(
     task = asyncio.create_task(pull(config, automatic=True))
     try:
         assert await asyncio.to_thread(reached.wait, 20)
-        lease = native.acquire_install_lease(str(target), "duckdb")
-        try:
-            lease.install(str(competitor))
-        finally:
-            lease.close()
-        before = snapshot(target)
-        if racing_marker:
-            target.with_name(target.name + ".chunkhound-install.json").write_bytes(b"{")
+        before = None
+        retained = None
+        if race_state == "valid_database":
+            lease = native.acquire_install_lease(str(target), "duckdb")
+            try:
+                lease.install(str(competitor))
+            finally:
+                lease.close()
+            before = snapshot(target)
+        elif race_state == "marker":
+            retained = Path(f"{target}.chunkhound-install.json")
+            retained.write_bytes(b"{")
+        elif race_state == "orphaned_wal":
+            retained = Path(f"{target}.wal")
+            retained.write_bytes(b"retained wal")
+        else:
+            retained = Path(f"{target}.embedding.json")
+            retained.write_bytes(b"retained sidecar")
+
         release.set()
-        if racing_marker:
+        if race_state == "valid_database":
+            assert not await task
+            assert snapshot(target) == before
+        elif race_state == "marker":
             with pytest.raises(HubInstallationInterrupted):
                 await task
+            assert retained is not None and retained.read_bytes() == b"{"
         else:
-            assert not await task  # Aligned race winner must not be replaced.
-        assert snapshot(target) == before
+            with pytest.raises(HubLocalStateError):
+                await task
+            assert retained is not None and retained.exists()
+        assert not list(target.parent.glob(".chunkhound-pull-*"))
     finally:
         release.set()
         if not task.done():

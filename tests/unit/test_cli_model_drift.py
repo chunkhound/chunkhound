@@ -11,7 +11,7 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -41,6 +41,10 @@ _DIMS_ONLY = ModelDrift(
 _HINT = "voyage-code-4 supersedes voyage-code-3"
 
 
+def _forbid(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("existing database contacted a hub boundary")
+
+
 def _coordinator() -> AsyncMock:
     coord = AsyncMock()
     coord._db = SimpleNamespace(
@@ -48,6 +52,12 @@ def _coordinator() -> AsyncMock:
         ensure_all_hnsw_indexes=lambda: None,
     )
     coord.get_stats.return_value = {"files": 0, "chunks": 0, "embeddings": 0}
+    coord.resolve_rust_pipeline_decision = Mock(return_value=False)
+    coord.clear_compaction_skip = Mock()
+    coord.generate_missing_embeddings.return_value = {
+        "status": "up_to_date",
+        "generated": 0,
+    }
     coord.process_directory.return_value = {
         "status": "success",
         "files_processed": 0,
@@ -79,6 +89,7 @@ async def _index(
     answer: str | None = None,
     env: dict[str, str] | None = None,
     embedding: tuple[str, str] = ("voyageai", "voyage-code-3"),
+    hub_existing: bool = False,
 ) -> _Run:
     """Run ``run_command`` once, feeding ``drift`` to whatever hook it builds."""
     run = _Run()
@@ -112,15 +123,34 @@ async def _index(
     for key, value in (env or {}).items():
         monkeypatch.setenv(key, value)
 
+    if hub_existing:
+        target = tmp_path / ".chunkhound" / "db" / "chunks.db"
+        monkeypatch.setattr(run_mod, "is_trusted", lambda *_args: True)
+        monkeypatch.setattr(run_mod, "installation_target", lambda _config: target)
+        monkeypatch.setattr(
+            run_mod,
+            "automatic_target_absent",
+            lambda _target, _backend: False,
+        )
+        monkeypatch.setattr(run_mod, "fetch_validated_manifest", _forbid)
+        monkeypatch.setattr(run_mod, "pull", _forbid)
+        monkeypatch.setattr(run_mod, "_validate_run_arguments", lambda *_args: True)
+
     args = Namespace(
         path=tmp_path,
         verbose=False,
-        no_embeddings=True,
+        no_embeddings=not hub_existing,
         include=None,
         exclude=None,
         db=None,
+        trust=False,
+        simulate=False,
+        check_ignores=False,
     )
-    config = Config(target_dir=tmp_path)
+    config = Config(
+        target_dir=tmp_path,
+        hub={"url": "https://hub.invalid/manifest"} if hub_existing else {},
+    )
     config.database = DatabaseConfig(
         provider="duckdb", path=tmp_path / ".chunkhound" / "db"
     )
@@ -139,7 +169,12 @@ async def _index(
 
 async def test_interactive_accept_switches_model(tmp_path, monkeypatch):
     run = await _index(
-        tmp_path, monkeypatch, drift=_MODEL_SWITCH, interactive=True, answer="y"
+        tmp_path,
+        monkeypatch,
+        drift=_MODEL_SWITCH,
+        interactive=True,
+        answer="y",
+        hub_existing=True,
     )
 
     assert run.decision is True
@@ -149,7 +184,12 @@ async def test_interactive_accept_switches_model(tmp_path, monkeypatch):
 
 async def test_interactive_decline_keeps_indexed_model(tmp_path, monkeypatch):
     run = await _index(
-        tmp_path, monkeypatch, drift=_MODEL_SWITCH, interactive=True, answer="n"
+        tmp_path,
+        monkeypatch,
+        drift=_MODEL_SWITCH,
+        interactive=True,
+        answer="n",
+        hub_existing=True,
     )
 
     assert run.decision is False
@@ -166,6 +206,7 @@ async def test_no_prompts_env_keeps_indexed_model(tmp_path, monkeypatch):
         drift=_MODEL_SWITCH,
         interactive=True,
         env={"CHUNKHOUND_NO_PROMPTS": "1"},
+        hub_existing=True,
     )
 
     assert run.decision is False
@@ -175,7 +216,9 @@ async def test_no_prompts_env_keeps_indexed_model(tmp_path, monkeypatch):
 async def test_non_interactive_run_keeps_indexed_model_without_prompting(
     tmp_path, monkeypatch
 ):
-    run = await _index(tmp_path, monkeypatch, drift=_MODEL_SWITCH)
+    run = await _index(
+        tmp_path, monkeypatch, drift=_MODEL_SWITCH, hub_existing=True
+    )
 
     assert run.decision is False
     assert "no interactive terminal" in run.output
@@ -183,10 +226,24 @@ async def test_non_interactive_run_keeps_indexed_model_without_prompting(
 
 async def test_dims_only_change_is_never_offered(tmp_path, monkeypatch):
     """It cannot be re-embedded in place, so asking would be a false promise."""
-    run = await _index(tmp_path, monkeypatch, drift=_DIMS_ONLY, interactive=True)
+    run = await _index(
+        tmp_path,
+        monkeypatch,
+        drift=_DIMS_ONLY,
+        interactive=True,
+        hub_existing=True,
+    )
 
     assert run.decision is False
     assert "delete the database directory" in run.output
+
+
+async def test_existing_aligned_hub_database_configures_without_hub(
+    tmp_path, monkeypatch
+):
+    run = await _index(tmp_path, monkeypatch, hub_existing=True)
+    assert run.hook is not None
+    assert run.decision is None
 
 
 async def test_mcp_mode_supplies_no_drift_hook(tmp_path, monkeypatch):

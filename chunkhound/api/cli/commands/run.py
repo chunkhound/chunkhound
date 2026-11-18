@@ -256,6 +256,12 @@ async def _prepare_hub_index(
 
     if installed:
         return HubIndexDecision.HUB_INSTALLED
+
+    # The exclusive callback can decline because another process won the race.
+    if not automatic_target_absent(target, config.database.provider):
+        return HubIndexDecision.CONTINUE_LOCAL
+
+    # Still cold means the authorized source did not produce a usable base.
     if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
         return HubIndexDecision.CONTINUE_LOCAL
     _hub_authorized_failure_guidance(formatter)

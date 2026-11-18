@@ -834,6 +834,73 @@ async def test_authorized_pull_failure_can_fall_back_only_interactively(
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
+async def test_race_created_valid_database_continues_without_failure_prompt(
+    config, args, formatter, monkeypatch, tmp_path
+):
+    target = tmp_path / "chunks.db"
+    states = iter([True, False])
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(
+        run,
+        "automatic_target_absent",
+        lambda _target, _backend: next(states),
+    )
+    monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
+    monkeypatch.setattr(run, "_choose_hub_failure_action", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("local", run.HubIndexDecision.CONTINUE_LOCAL),
+        ("cancel", run.HubIndexDecision.STOP),
+    ],
+)
+async def test_still_cold_after_unsuccessful_pull_uses_authorized_failure_policy(
+    config, args, formatter, monkeypatch, tmp_path, answer, expected
+):
+    target = tmp_path / "chunks.db"
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(
+        run, "automatic_target_absent", lambda _target, _backend: True
+    )
+    monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
+    monkeypatch.setattr(run, "_hub_prompts_allowed", lambda: True)
+    monkeypatch.setattr(run, "_choose_hub_failure_action", lambda: answer)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is expected
+
+
+async def test_race_created_ambiguous_state_aborts_before_registry(
+    config, args, formatter, monkeypatch, tmp_path
+):
+    target = tmp_path / "chunks.db"
+    states = iter([True, HubLocalStateError("ambiguous local state")])
+
+    def classify(_target, _backend):
+        state = next(states)
+        if isinstance(state, Exception):
+            raise state
+        return state
+
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(run, "automatic_target_absent", classify)
+    monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
+    monkeypatch.setattr(run, "_choose_hub_failure_action", _forbid)
+
+    with pytest.raises(HubLocalStateError, match="ambiguous local state"):
+        await run._prepare_hub_index(args, config, formatter)
+
+
 async def test_fatal_local_failure_never_offers_fallback(
     config, args, formatter, monkeypatch, absent_target
 ):
