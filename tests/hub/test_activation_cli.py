@@ -755,9 +755,9 @@ def test_hub_declaration_sources_cannot_authorize_or_redirect_trust_store(
         timeout=180,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stdout + result.stderr
     assert hub_http.requests == []
-    assert embedding_http.requests == []
+    assert embedding_http.requests
     assert not alternate_trust_store.exists()
     assert not (
         Path(env["HOME"])
@@ -765,7 +765,7 @@ def test_hub_declaration_sources_cannot_authorize_or_redirect_trust_store(
         / "chunkhound"
         / "hub-trust.json"
     ).exists()
-    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+    assert (project / ".chunkhound" / "db" / "chunks.db").exists()
 
 
 def test_trusted_manifest_delegates_artifact_redirect_chain(
@@ -807,23 +807,24 @@ def test_trusted_manifest_delegates_artifact_redirect_chain(
     assert "token=secret" not in result.stdout + result.stderr
 
 
-def test_untrusted_no_prompt_index_stops_before_hub_or_embedding(
+def test_untrusted_no_prompt_index_builds_searchable_local_database_offline(
     tmp_path, hub_http, embedding_http
 ):
     project = tmp_path / "checkout"
-    write_config(
-        project, "duckdb", hub_http.url + "/catalogue?token=secret", embedding_http.url
-    )
-    (project / "source.py").write_text("def must_not_index(): return 1\n")
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    (project / "source.py").write_text("def local_only(): return 1\n")
     publish(hub_http, build_database(tmp_path / "published"))
 
     result = cli(project, "index", project)
 
-    assert result.returncode == 1
-    assert "index --trust" in result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
     assert hub_http.requests == []
-    assert embedding_http.requests == []
-    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+    assert embedding_http.requests
+    assert not cli_is_trusted(project, project, hub_url)
+    search = cli(project, "search", "local_only", project, "--regex")
+    assert search.returncode == 0, search.stdout + search.stderr
+    assert "source.py" in search.stdout + search.stderr
 
 
 def test_interactive_local_choice_allows_full_index_without_hub_request(
@@ -834,18 +835,33 @@ def test_interactive_local_choice_allows_full_index_without_hub_request(
         project, "duckdb", hub_http.url + "/catalogue?token=secret", embedding_http.url
     )
     (project / "source.py").write_text("def chosen_local(): return 1\n")
+    prompt_report = tmp_path / "prompt-report.json"
     script = r"""
+import json
 import sys
+from pathlib import Path
 sys.path.insert(0, sys.argv.pop(1))
+report = Path(sys.argv.pop(1))
 from chunkhound.api.cli.commands import autodoc_prompts
 from chunkhound.api.cli.main import main
 autodoc_prompts.is_interactive = lambda: True
-autodoc_prompts.prompt_choice = lambda *args, **kwargs: "local"
+def prompt(question, *, default=None):
+    report.write_text(json.dumps({"question": question, "default": default}))
+    return "local"
+autodoc_prompts.prompt_text = prompt
 sys.argv = ["chunkhound", *sys.argv[1:]]
 main()
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(ROOT), "index", str(project)],
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT),
+            str(prompt_report),
+            "index",
+            str(project),
+        ],
         cwd=project,
         env={**cli_env(project), "CHUNKHOUND_NO_PROMPTS": "0"},
         capture_output=True,
@@ -854,8 +870,66 @@ main()
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(prompt_report.read_text()) == {
+        "question": "Continue with local indexing or cancel? (local/cancel)",
+        "default": "cancel",
+    }
+    assert "index --trust" in result.stdout + result.stderr
     assert hub_http.requests == []
     assert embedding_http.requests
+
+
+def test_interactive_cancel_stops_without_hub_embedding_database_or_trust(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    (project / "source.py").write_text("def cancelled_local(): return 1\n")
+    publish(hub_http, build_database(tmp_path / "published"))
+    prompt_report = tmp_path / "prompt-report.json"
+    script = r"""
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv.pop(1))
+report = Path(sys.argv.pop(1))
+from chunkhound.api.cli.commands import autodoc_prompts
+from chunkhound.api.cli.main import main
+autodoc_prompts.is_interactive = lambda: True
+def prompt(question, *, default=None):
+    report.write_text(json.dumps({"question": question, "default": default}))
+    return "cancel"
+autodoc_prompts.prompt_text = prompt
+sys.argv = ["chunkhound", *sys.argv[1:]]
+main()
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT),
+            str(prompt_report),
+            "index",
+            str(project),
+        ],
+        cwd=project,
+        env={**cli_env(project), "CHUNKHOUND_NO_PROMPTS": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(prompt_report.read_text()) == {
+        "question": "Continue with local indexing or cancel? (local/cancel)",
+        "default": "cancel",
+    }
+    assert hub_http.requests == []
+    assert embedding_http.requests == []
+    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+    assert not cli_is_trusted(project, project, hub_url)
 
 
 @pytest.mark.parametrize("mode", ["--no-embeddings", "--simulate", "--check-ignores"])

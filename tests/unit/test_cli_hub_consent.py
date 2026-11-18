@@ -76,6 +76,9 @@ def absent_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     target = tmp_path / ".chunkhound" / "db" / "chunks.db"
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(
+        run, "automatic_target_appears_cold", lambda _target, _backend: True
+    )
+    monkeypatch.setattr(
         run, "automatic_target_absent", lambda _target, _backend: True
     )
     return target
@@ -163,7 +166,7 @@ async def test_explicit_trust_without_url_stops_before_target_with_guidance(
 
 
 @pytest.mark.parametrize("aligned", [True, False])
-async def test_stored_trust_existing_database_never_prompts_or_contacts_hub(
+async def test_trusted_existing_index_never_fetches_or_pulls(
     config, args, formatter, monkeypatch, tmp_path, aligned
 ):
     target = tmp_path / ("aligned.db" if aligned else "misaligned.db")
@@ -181,47 +184,102 @@ async def test_stored_trust_existing_database_never_prompts_or_contacts_hub(
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
-async def test_untrusted_noninteractive_stops_before_target_inspection(
+async def test_untrusted_noninteractive_cold_continues_local_without_hub(
     config, args, formatter, monkeypatch
 ):
     monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
-    monkeypatch.setattr(run, "installation_target", _forbid)
-    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
+    monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+    monkeypatch.setattr(run, "grant_trust", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
-    assert decision is run.HubIndexDecision.STOP
+    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
 @pytest.mark.parametrize(
-    ("choice", "expected"),
-    [("local", "CONTINUE_LOCAL"), ("cancel", "STOP")],
+    ("answer", "expected"),
+    [
+        ("local", run.HubIndexDecision.CONTINUE_LOCAL),
+        ("cancel", run.HubIndexDecision.STOP),
+        (None, run.HubIndexDecision.STOP),
+        ("", run.HubIndexDecision.STOP),
+        ("invalid", run.HubIndexDecision.STOP),
+    ],
 )
-async def test_untrusted_local_or_cancel_stops_before_target_inspection(
-    config, args, formatter, monkeypatch, choice, expected
+async def test_untrusted_interactive_cold_offers_local_or_cancel_once(
+    config, args, formatter, monkeypatch, tmp_path, answer, expected
 ):
+    target = tmp_path / ".chunkhound" / "db" / "chunks.db"
     monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(
-        run.prompts, "prompt_choice", lambda *_args, **_kwargs: choice
+        run, "automatic_target_appears_cold", lambda _target, _backend: True
     )
-    monkeypatch.setattr(run, "installation_target", _forbid)
-    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
+    prompt = Mock(return_value=answer)
+    monkeypatch.setattr(run.prompts, "prompt_text", prompt)
+    monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+    monkeypatch.setattr(run, "grant_trust", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
-    assert decision is getattr(run.HubIndexDecision, expected)
+    assert decision is expected
+    prompt.assert_called_once()
+    assert "index --trust" in formatter.text
+    assert "secret=hidden" not in formatter.text
+
+
+async def test_untrusted_interactive_non_cold_skips_prompt_and_continues_local(
+    config, args, formatter, monkeypatch, tmp_path
+):
+    target = tmp_path / ".chunkhound" / "db" / "chunks.db"
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(
+        run, "automatic_target_appears_cold", lambda _target, _backend: False
+    )
+    monkeypatch.setattr(run.prompts, "prompt_text", _forbid)
+    monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+    monkeypatch.setattr(run, "grant_trust", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
+
+
+async def test_prompts_disabled_untrusted_index_continues_local_without_hub(
+    config, args, formatter, monkeypatch
+):
+    monkeypatch.setenv("CHUNKHOUND_NO_PROMPTS", "1")
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run, "installation_target", _forbid)
+    monkeypatch.setattr(run, "automatic_target_appears_cold", _forbid)
+    monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+    monkeypatch.setattr(run, "grant_trust", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
 
 
 async def test_unsupported_target_is_safe_failure_without_implicit_fallback(
     config, args, formatter, monkeypatch
 ):
     args.trust = True
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(
         run,
         "installation_target",
         lambda _config: (_ for _ in ()).throw(HubUnavailable("unsupported target")),
+    )
+    monkeypatch.setattr(
+        run, "fetch_validated_manifest", AsyncMock(return_value=source)
     )
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
@@ -248,7 +306,11 @@ async def test_target_inspection_failures_are_normalized_as_fatal_local_state(
 ):
     args.trust = True
     target = tmp_path / "chunks.db"
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(
+        run, "fetch_validated_manifest", AsyncMock(return_value=source)
+    )
     monkeypatch.setattr(
         run,
         "automatic_target_absent",
@@ -325,7 +387,7 @@ async def test_run_command_does_not_duplicate_preformatted_fatal_error(
     formatter.error.assert_not_called()
 
 
-async def test_explicit_trust_existing_database_validates_and_saves_without_pull(
+async def test_index_trust_existing_validates_refreshes_trust_without_artifact_pull(
     config, args, formatter, monkeypatch, tmp_path
 ):
     args.trust = True
@@ -386,6 +448,54 @@ async def test_trust_persistence_uses_validated_authorized_identity_during_fetch
     grant.assert_not_called()
     assert "no longer matches" in formatter.text
     assert authorized_url not in formatter.text
+
+
+async def test_index_trust_invalid_manifest_stops_without_grant_or_local_fallback(
+    config, args, formatter, monkeypatch
+):
+    args.trust = True
+    grant = Mock()
+    monkeypatch.setattr(
+        run,
+        "fetch_validated_manifest",
+        AsyncMock(side_effect=HubUnavailable("invalid manifest")),
+    )
+    monkeypatch.setattr(run, "grant_trust", grant)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(run, "pull", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    grant.assert_not_called()
+    assert "invalid manifest" in formatter.text
+
+
+async def test_index_trust_ambiguous_state_retains_validated_trust_but_aborts(
+    config, args, formatter, monkeypatch, tmp_path
+):
+    args.trust = True
+    target = tmp_path / "chunks.db"
+    source = _validated_source(config.target_dir, config.hub.url)
+    grant = Mock()
+    monkeypatch.setattr(
+        run, "fetch_validated_manifest", AsyncMock(return_value=source)
+    )
+    monkeypatch.setattr(run, "grant_trust", grant)
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(
+        run,
+        "automatic_target_absent",
+        lambda _target, _backend: (_ for _ in ()).throw(
+            HubLocalStateError("ambiguous local state")
+        ),
+    )
+    monkeypatch.setattr(run, "pull", _forbid)
+
+    with pytest.raises(HubLocalStateError, match="ambiguous local state"):
+        await run._prepare_hub_index(args, config, formatter)
+
+    grant.assert_called_once_with(config.target_dir, config.hub.url)
 
 
 async def test_mismatched_validated_capability_stops_before_grant_or_pull(
@@ -500,13 +610,11 @@ async def test_existing_database_safe_validation_failure_offers_local_fallback(
     assert "sanitized unavailable" in formatter.text
 
 
-async def test_untrusted_interactive_trust_validates_saves_and_pulls(
+async def test_index_trust_cold_validates_refreshes_trust_and_pulls_source(
     config, args, formatter, monkeypatch, absent_target
 ):
+    args.trust = True
     source = _validated_source(config.target_dir, config.hub.url)
-    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
-    monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "trust")
     fetch = AsyncMock(return_value=source)
     grant = Mock()
     pull = AsyncMock(return_value=True)
@@ -520,45 +628,6 @@ async def test_untrusted_interactive_trust_validates_saves_and_pulls(
     fetch.assert_awaited_once_with(config)
     grant.assert_called_once_with(config.target_dir, config.hub.url)
     pull.assert_awaited_once_with(config, automatic=True, source=source)
-
-
-@pytest.mark.parametrize(
-    ("choice", "expected"),
-    [("local", "CONTINUE_LOCAL"), ("cancel", "STOP")],
-)
-async def test_untrusted_interactive_local_or_cancel_never_contacts_hub(
-    config, args, formatter, monkeypatch, choice, expected
-):
-    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
-    monkeypatch.setattr(run, "installation_target", _forbid)
-    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
-    monkeypatch.setattr(
-        run.prompts, "prompt_choice", lambda *_args, **_kwargs: choice
-    )
-    monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
-    monkeypatch.setattr(run, "pull", _forbid)
-
-    decision = await run._prepare_hub_index(args, config, formatter)
-
-    assert decision is getattr(run.HubIndexDecision, expected)
-
-
-async def test_untrusted_noninteractive_stops_before_hub_or_local(
-    config, args, formatter, monkeypatch
-):
-    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
-    monkeypatch.setattr(run, "installation_target", _forbid)
-    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
-    monkeypatch.setattr(run, "pull", _forbid)
-
-    decision = await run._prepare_hub_index(args, config, formatter)
-
-    assert decision is run.HubIndexDecision.STOP
-    assert "index --trust" in formatter.text
-    assert "pull --trust" in formatter.text
-    assert "interactiv" in formatter.text.lower()
 
 
 async def test_explicit_trust_authorizes_without_prompt(
@@ -579,7 +648,7 @@ async def test_explicit_trust_authorizes_without_prompt(
     pull.assert_awaited_once_with(config, automatic=True, source=source)
 
 
-async def test_matching_saved_trust_pulls_without_prevalidated_source(
+async def test_trusted_cold_index_calls_automatic_pull(
     config, args, formatter, monkeypatch, absent_target
 ):
     monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
@@ -599,11 +668,14 @@ async def test_trust_read_failure_is_fail_closed_and_can_choose_local(
     def fail_read(*_args):
         raise HubTrustError("raw trust path secret")
 
+    target = config.target_dir / ".chunkhound" / "db" / "chunks.db"
     monkeypatch.setattr(run, "is_trusted", fail_read)
-    monkeypatch.setattr(run, "installation_target", _forbid)
-    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
+    monkeypatch.setattr(run, "installation_target", lambda _config: target)
+    monkeypatch.setattr(
+        run, "automatic_target_appears_cold", lambda _target, _backend: True
+    )
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
-    monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "local")
+    monkeypatch.setattr(run.prompts, "prompt_text", lambda *_args, **_kwargs: "local")
     monkeypatch.setattr(run, "pull", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)

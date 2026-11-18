@@ -24,6 +24,7 @@ from chunkhound.daemon.process import pid_alive
 from chunkhound.hub.client import (
     ValidatedHubSource,
     automatic_target_absent,
+    automatic_target_appears_cold,
     fetch_validated_manifest,
     pull,
 )
@@ -78,12 +79,19 @@ def _hub_prompts_allowed() -> bool:
     )
 
 
-def _choose_untrusted_hub_action() -> str:
-    return prompts.prompt_choice(
-        "A configured hub may avoid a full local index",
-        choices=("trust", "local", "cancel"),
+def _choose_untrusted_cold_action(formatter: RichOutputFormatter) -> str:
+    formatter.info(
+        "A hub database may be available and could avoid a full local index."
+    )
+    formatter.info(
+        "The configured source is not trusted. Run chunkhound index --trust "
+        "to validate and authorize it."
+    )
+    answer = prompts.prompt_text(
+        "Continue with local indexing or cancel? (local/cancel)",
         default="cancel",
     )
+    return "local" if (answer or "").strip().lower() == "local" else "cancel"
 
 
 def _choose_hub_failure_action() -> str:
@@ -91,14 +99,6 @@ def _choose_hub_failure_action() -> str:
         "The configured hub could not provide a usable database",
         choices=("local", "cancel"),
         default="cancel",
-    )
-
-
-def _hub_authorization_guidance(formatter: RichOutputFormatter) -> None:
-    formatter.error("The configured hub is not trusted for automatic index use.")
-    formatter.info(
-        "Run index --trust, run pull --trust, or rerun interactively to choose "
-        "local indexing."
     )
 
 
@@ -158,29 +158,49 @@ async def _prepare_hub_index(
         checkout_error = HubLocalStateError("Hub checkout identity is unavailable")
         formatter.error(str(checkout_error))
         raise checkout_error from None
-    newly_authorized = explicit_trust
+    authorized = False
     if not explicit_trust:
         try:
             authorized = is_trusted(authorized_checkout, hub_url)
         except HubTrustError:
             formatter.warning(
-                "Hub trust settings could not be read; treating the source as "
-                "untrusted."
+                "Hub trust settings could not be read; the hub will not be used."
             )
-            authorized = False
 
-        if not authorized:
-            if not _hub_prompts_allowed():
-                _hub_authorization_guidance(formatter)
-                return HubIndexDecision.STOP
-            action = _choose_untrusted_hub_action()
-            if action == "local":
-                return HubIndexDecision.CONTINUE_LOCAL
-            if action == "cancel":
-                return HubIndexDecision.STOP
-            newly_authorized = True
+    if not explicit_trust and not authorized:
+        if not _hub_prompts_allowed():
+            return HubIndexDecision.CONTINUE_LOCAL
+        target = installation_target(config)
+        if not automatic_target_appears_cold(target, config.database.provider):
+            return HubIndexDecision.CONTINUE_LOCAL
+        if _choose_untrusted_cold_action(formatter) == "local":
+            return HubIndexDecision.CONTINUE_LOCAL
+        return HubIndexDecision.STOP
 
+    source: ValidatedHubSource | None = None
+    authorization_in_progress = explicit_trust
     try:
+        if explicit_trust:
+            source = await fetch_validated_manifest(config)
+            try:
+                current_checkout_digest = checkout_digest(
+                    config.target_dir or Path.cwd()
+                )
+            except OSError:
+                raise HubLocalStateError(
+                    "Hub checkout identity is unavailable"
+                ) from None
+            if (
+                source.checkout_digest != authorized_checkout_digest
+                or source.url_digest != authorized_url_digest
+                or current_checkout_digest != authorized_checkout_digest
+                or config.hub.url != hub_url
+            ):
+                raise HubUnavailable(
+                    "Validated hub source no longer matches authorized configuration"
+                )
+            _save_hub_trust(authorized_checkout, hub_url, formatter)
+
         target = installation_target(config)
         target_absent = automatic_target_absent(target, config.database.provider)
     except HubUnavailable as exc:
@@ -206,36 +226,14 @@ async def _prepare_hub_index(
         formatter.error(str(filesystem_error))
         raise filesystem_error from None
 
-    authorization_in_progress = newly_authorized
     try:
-        if newly_authorized:
-            source: ValidatedHubSource = await fetch_validated_manifest(config)
-            try:
-                current_checkout_digest = checkout_digest(
-                    config.target_dir or Path.cwd()
-                )
-            except OSError:
-                raise HubLocalStateError(
-                    "Hub checkout identity is unavailable"
-                ) from None
-            if (
-                source.checkout_digest != authorized_checkout_digest
-                or source.url_digest != authorized_url_digest
-                or current_checkout_digest != authorized_checkout_digest
-                or config.hub.url != hub_url
-            ):
-                raise HubUnavailable(
-                    "Validated hub source no longer matches authorized configuration"
-                )
-            _save_hub_trust(authorized_checkout, hub_url, formatter)
-            if not target_absent:
-                return HubIndexDecision.CONTINUE_LOCAL
-            authorization_in_progress = False
-            installed = await pull(config, automatic=True, source=source)
-        elif target_absent:
+        if not target_absent:
+            return HubIndexDecision.CONTINUE_LOCAL
+        authorization_in_progress = False
+        if source is None:
             installed = await pull(config, automatic=True)
         else:
-            return HubIndexDecision.CONTINUE_LOCAL
+            installed = await pull(config, automatic=True, source=source)
     except HubUnavailable as exc:
         formatter.error(str(exc))
         if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
