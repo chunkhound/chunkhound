@@ -822,11 +822,54 @@ async def test_still_cold_after_unsuccessful_pull_always_stops_with_guidance(
     assert formatter.messages == [("info", HUB_PULL_FAILURE_GUIDANCE)]
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_type", "diagnostic"),
+    [
+        (
+            HubLocalStateError("ambiguous local state"),
+            HubLocalStateError,
+            "ambiguous local state",
+        ),
+        (
+            native.DatabaseBusyError(),
+            HubLocalStateError,
+            "Hub destination is busy; stop database users and retry",
+        ),
+        (
+            native.DatabaseInterruptedError(),
+            HubInstallationInterrupted,
+            "Hub installation was interrupted; run explicit chunkhound pull again. "
+            "Local work may require re-indexing",
+        ),
+        (
+            native.DatabaseLayoutError(),
+            HubLocalStateError,
+            "Hub database installation layout is unsafe",
+        ),
+        (
+            native.DatabaseFilesystemError(),
+            HubLocalStateError,
+            "Hub installation filesystem is unavailable",
+        ),
+        (
+            OSError("raw path?token=secret"),
+            HubLocalStateError,
+            "Hub local filesystem is unavailable",
+        ),
+    ],
+)
 async def test_race_created_ambiguous_state_aborts_before_registry(
-    config, args, formatter, monkeypatch, tmp_path
+    config,
+    args,
+    formatter,
+    monkeypatch,
+    tmp_path,
+    failure,
+    expected_type,
+    diagnostic,
 ):
     target = tmp_path / "chunks.db"
-    states = iter([True, HubLocalStateError("ambiguous local state")])
+    states = iter([True, failure])
 
     def classify(_target, _backend):
         state = next(states)
@@ -838,10 +881,17 @@ async def test_race_created_ambiguous_state_aborts_before_registry(
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(run, "automatic_target_absent", classify)
     monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "_choose_hub_failure_action", _forbid)
 
-    with pytest.raises(HubLocalStateError, match="ambiguous local state"):
+    with pytest.raises(expected_type, match=diagnostic):
         await run._prepare_hub_index(args, config, formatter)
+
+    assert formatter.messages == [
+        ("error", diagnostic),
+        ("info", HUB_PULL_FAILURE_GUIDANCE),
+    ]
+    assert "raw path" not in formatter.text
 
 
 async def test_fatal_local_failure_never_offers_fallback(

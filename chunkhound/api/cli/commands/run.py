@@ -259,7 +259,29 @@ async def _prepare_hub_index(
         return HubIndexDecision.HUB_INSTALLED
 
     # Another process can win the exclusive publication race successfully.
-    if not automatic_target_absent(target, config.database.provider):
+    try:
+        target_absent = automatic_target_absent(target, config.database.provider)
+    except (
+        native.DatabaseBusyError,
+        native.DatabaseInterruptedError,
+        native.DatabaseLayoutError,
+        native.DatabaseFilesystemError,
+    ) as exc:
+        error = installation_failure(exc)
+        formatter.error(str(error))
+        _hub_authorized_failure_guidance(formatter)
+        raise error from None
+    except FATAL_HUB_ERRORS as exc:
+        formatter.error(str(exc))
+        _hub_authorized_failure_guidance(formatter)
+        raise
+    except OSError:
+        filesystem_error = HubLocalStateError("Hub local filesystem is unavailable")
+        formatter.error(str(filesystem_error))
+        _hub_authorized_failure_guidance(formatter)
+        raise filesystem_error from None
+
+    if not target_absent:
         return HubIndexDecision.CONTINUE_LOCAL
 
     _hub_authorized_failure_guidance(formatter)
