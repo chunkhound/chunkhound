@@ -5,12 +5,18 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.hub.client import fetch_validated_manifest, pull
-from chunkhound.hub.errors import FATAL_HUB_ERRORS, HubLocalStateError, HubUnavailable
+from chunkhound.hub.errors import (
+    FATAL_HUB_ERRORS,
+    HubAuthorizationError,
+    HubLocalStateError,
+    HubUnavailable,
+)
 from chunkhound.hub.trust import (
     HubTrustError,
     checkout_digest,
     forget_checkout_trust,
     grant_trust,
+    is_trusted,
     manifest_url_digest,
 )
 
@@ -29,6 +35,29 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
     pre_client_fatal = False
     try:
         source = None
+        authorized_url = config.hub.url
+        if not authorized_url:
+            raise HubUnavailable("No hub manifest URL configured")
+        if not args.trust:
+            pre_client_fatal = True
+            try:
+                checkout = (
+                    config.target_dir or Path(args.path)
+                ).expanduser().resolve()
+                trusted = is_trusted(checkout, authorized_url)
+            except OSError:
+                raise HubLocalStateError(
+                    "Hub checkout identity is unavailable"
+                ) from None
+            except HubTrustError:
+                raise HubAuthorizationError(
+                    "Hub source authorization could not be verified"
+                ) from None
+            if not trusted:
+                raise HubAuthorizationError(
+                    "This hub source is not trusted. Review the configured source "
+                    "and run chunkhound pull --trust to authorize and pull it."
+                )
         if args.trust:
             pre_client_fatal = True
             try:
@@ -41,9 +70,6 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
                 raise HubLocalStateError(
                     "Hub checkout identity is unavailable"
                 ) from None
-            authorized_url = config.hub.url
-            if not authorized_url:
-                raise HubUnavailable("No hub manifest URL configured")
             authorized_url_digest = manifest_url_digest(authorized_url)
             source = await fetch_validated_manifest(config)
             try:

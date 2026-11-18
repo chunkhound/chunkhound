@@ -14,7 +14,7 @@ import chunkhound_native as native
 from chunkhound.hub.client import ValidatedHubSource
 from chunkhound.hub.errors import HubLocalStateError
 from chunkhound.hub.inspect import inspect_database
-from chunkhound.hub.trust import checkout_digest, manifest_url_digest
+from chunkhound.hub.trust import HubTrustError, checkout_digest, manifest_url_digest
 from tests.hub.activation_support import (
     ROOT,
     cli,
@@ -45,6 +45,142 @@ def grant_cli_trust(project, checkout, hub_url):
     )
 
 
+async def test_untrusted_plain_pull_rejects_before_hub_boundaries(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    config.hub.url = "https://user:secret@hub.invalid/manifest"
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    fetch = AsyncMock()
+    artifact_pull = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        pull_module, "is_trusted", Mock(return_value=False), raising=False
+    )
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fetch)
+    monkeypatch.setattr(pull_module, "pull", artifact_pull)
+    args = argparse.Namespace(trust=False, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    fetch.assert_not_awaited()
+    artifact_pull.assert_not_awaited()
+    text = "\n".join(messages)
+    assert "pull --trust" in text
+    assert "user:secret" not in text
+
+
+async def test_plain_pull_trust_read_failure_is_sanitized_and_offline(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    fetch = AsyncMock()
+    artifact_pull = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        pull_module,
+        "is_trusted",
+        Mock(side_effect=HubTrustError("private trust path")),
+        raising=False,
+    )
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fetch)
+    monkeypatch.setattr(pull_module, "pull", artifact_pull)
+    args = argparse.Namespace(trust=False, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    fetch.assert_not_awaited()
+    artifact_pull.assert_not_awaited()
+    assert messages == ["Hub source authorization could not be verified"]
+    assert "private trust path" not in "\n".join(messages)
+
+
+async def test_trusted_plain_pull_uses_explicit_replacement_path(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    trust_check = Mock(return_value=True)
+    artifact_pull = AsyncMock(return_value=True)
+    monkeypatch.setattr(pull_module, "is_trusted", trust_check, raising=False)
+    monkeypatch.setattr(pull_module, "pull", artifact_pull)
+    args = argparse.Namespace(trust=False, path=checkout, version="-1")
+
+    await pull_module.pull_command(args, config)
+
+    trust_check.assert_called_once_with(checkout.resolve(), config.hub.url)
+    artifact_pull.assert_awaited_once_with(config, rel="-1", source=None)
+
+
+async def test_pull_trust_revalidates_even_when_source_is_already_trusted(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    config = config_for(checkout, hub_http)
+    source = ValidatedHubSource(
+        manifest=Mock(),
+        checkout_digest=checkout_digest(checkout),
+        url_digest=manifest_url_digest(config.hub.url),
+    )
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    trust_check = Mock(return_value=True)
+    fetch = AsyncMock(return_value=source)
+    grant = Mock()
+    artifact_pull = AsyncMock(return_value=True)
+    monkeypatch.setattr(pull_module, "is_trusted", trust_check, raising=False)
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fetch)
+    monkeypatch.setattr(pull_module, "grant_trust", grant)
+    monkeypatch.setattr(pull_module, "pull", artifact_pull)
+    args = argparse.Namespace(trust=True, path=checkout, version="latest")
+
+    await pull_module.pull_command(args, config)
+
+    trust_check.assert_not_called()
+    fetch.assert_awaited_once_with(config)
+    grant.assert_called_once_with(checkout.resolve(), config.hub.url)
+    artifact_pull.assert_awaited_once_with(config, rel="latest", source=source)
+
+
+def test_untrusted_plain_pull_makes_zero_requests_and_explains_trust(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    write_config(
+        project,
+        "duckdb",
+        hub_http.url + "/catalogue?token=secret",
+        embedding_http.url,
+    )
+
+    result = cli(project, "pull", project)
+
+    assert result.returncode == 1
+    assert hub_http.requests == []
+    assert "pull --trust" in result.stderr
+    assert "token=secret" not in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
 @pytest.mark.parametrize("rel", ["latest", "-1", "-2"])
 def test_explicit_relative_version_is_installed_and_searchable(
@@ -62,6 +198,9 @@ def test_explicit_relative_version_is_installed_and_searchable(
         versions.extend(manifest["embeddings"][0]["versions"])
     manifest["embeddings"][0]["versions"] = versions
     hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
+    grant_cli_trust(
+        project, project, hub_http.url + "/catalogue?token=secret"
+    )
     prefix = names[rel]
     result = cli(project, "pull", project, "--version", rel)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -79,9 +218,45 @@ def test_explicit_relative_version_is_installed_and_searchable(
     ]
     assert "token=secret" not in result.stdout + result.stderr
     assert "/catalogue?" not in result.stdout + result.stderr
-    assert not cli_is_trusted(
+    assert cli_is_trusted(
         project, project, hub_http.url + "/catalogue?token=secret"
     )
+
+
+def test_trusted_plain_pull_explicitly_replaces_prior_database(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue?token=secret"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    publish(
+        hub_http,
+        build_database(tmp_path / "first", symbol_prefix="first"),
+        prefix="first",
+    )
+    authorized = cli(project, "pull", project, "--trust")
+    assert authorized.returncode == 0, authorized.stdout + authorized.stderr
+    target = project / ".chunkhound" / "db" / "chunks.db"
+    before = snapshot(target.parent)
+    publish(
+        hub_http,
+        build_database(tmp_path / "replacement", symbol_prefix="replacement"),
+        prefix="replacement",
+    )
+    hub_http.requests.clear()
+
+    replaced = cli(project, "pull", project)
+
+    assert replaced.returncode == 0, replaced.stdout + replaced.stderr
+    assert snapshot(target.parent) != before
+    assert hub_http.requests == [
+        ("/catalogue?token=secret", None),
+        ("/replacement.tar.gz?token=secret", None),
+    ]
+    search = cli(project, "search", "replacement_0", project, "--regex")
+    assert search.returncode == 0, search.stdout + search.stderr
+    assert "source.py" in search.stdout + search.stderr
+    assert "token=secret" not in replaced.stdout + replaced.stderr
 
 
 def test_pull_trust_is_saved_after_manifest_before_compatibility_selection(
@@ -707,6 +882,7 @@ def test_unknown_dimensions_do_not_probe_hub_or_embedding_service(tmp_path, hub_
     )
     del data["embedding"]["output_dims"]
     (project / ".chunkhound.json").write_text(json.dumps(data))
+    grant_cli_trust(project, project, hub_http.url + "/catalogue?token=secret")
     result = cli(project, "pull", project)
     assert result.returncode == 1
     assert hub_http.requests == []
@@ -741,6 +917,10 @@ def test_cli_failure_taxonomy_is_real_not_a_mocked_registry_assertion(
             bytes=len(body), sha256=hashlib.sha256(body).hexdigest()
         )
     hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
+    if mode == "pull":
+        grant_cli_trust(
+            project, project, hub_http.url + "/catalogue?token=secret"
+        )
     if failure == "space":
         script = """
 import shutil
@@ -801,6 +981,7 @@ def test_candidate_mismatch_exit_preserves_local_database_sidecars(
         project, "duckdb", hub_http.url + "/catalogue?token=secret", embedding_http.url
     )
     publish(hub_http, build_database(tmp_path / "published", model="contradiction"))
+    grant_cli_trust(project, project, hub_http.url + "/catalogue?token=secret")
     result = cli(project, mode, project, "--verbose")
     assert result.returncode == 1
     assert snapshot(target.parent) == before
@@ -819,6 +1000,10 @@ def test_preinstall_busy_has_fixed_fatal_diagnostic(
     target = project / ".chunkhound" / "db" / "chunks.db"
     target.parent.mkdir(parents=True)
     publish(hub_http, build_database(tmp_path / "published"))
+    if mode == "pull":
+        grant_cli_trust(
+            project, project, hub_http.url + "/catalogue?token=secret"
+        )
     # This owner excludes installation but owns no backend writer connection.
     held = native.acquire_database_lease(str(target))
     try:
@@ -864,6 +1049,7 @@ def test_cli_reader_failure_has_sanitized_exit_without_fallback(
         before.append(snapshot(target))
     competitor = build_database(tmp_path / "competitor", model="old-model")
     publish(hub_http, build_database(tmp_path / "published"))
+    grant_cli_trust(project, project, hub_http.url + "/catalogue?token=secret")
     sidecar = target.with_name(target.name + ".root.json")
     retained_root = json.dumps({"version": 1, "indexed_root_path": project.as_posix()})
     sidecar.write_text(retained_root)
