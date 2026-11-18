@@ -134,6 +134,7 @@ dependencies = [
     # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
     # command; an older native satisfies a lower bound and then fails there.
     "chunkhound-native>=6.1.0",
+    "curl-cffi>=0.7.0",
 ]
 
 [project.optional-dependencies]
