@@ -199,16 +199,21 @@ def _format_search_results(
     page_size = pagination.get("page_size", len(results))
     total = pagination.get("total")
     if total is None:
-        # Hybrid search reports total=None (it cannot estimate one); fall back
-        # to what this page shows so the header never renders "of None".
+        # Fall back to what this page shows so the header never renders "of None".
         total = offset + len(results)
+    corpus_total = pagination.get("corpus_total")
+    beyond_window = corpus_total is not None and corpus_total > total
 
     formatter.section_header(f"{search_type.title()} Search Results")
     formatter.info(f"Query: '{query}'")
     start_idx = offset + 1
     end_idx = offset + len(results)
+    # `total` only counts what the paging window can serve, so name the full
+    # match count separately whenever it is larger.
+    scope = f"{total} reachable" if beyond_window else f"{total}"
+    matches = f", {corpus_total} matches" if beyond_window else ""
     formatter.info(
-        f"Results: {len(results)} of {total} (showing {start_idx}-{end_idx})"
+        f"Results: {len(results)} of {scope} (showing {start_idx}-{end_idx}{matches})"
     )
 
     # Display each result

@@ -4,7 +4,7 @@ An atomic push creates the annotated release tag AND a run-identity tag pointing
 to a metadata blob. GitHub supports atomic pushes and immutable tag creation;
 this also prevents concurrent executions of the same run allocating two versions.
 Do not delete/move either tag namespace. Run IDs (not attempts or source SHAs)
-identify builds, so reruns reuse a tag even after the configured base changes.
+identify builds, so reruns reuse a tag even after a new stable tag moves the base.
 """
 
 import argparse
@@ -14,16 +14,9 @@ import re
 import subprocess
 import sys
 import time
-from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10 development environments
-    import tomli as tomllib
-
 
 ALPHA_TAG = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)a[1-9]\d*")
-BASE_VERSION = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+STABLE_TAG = re.compile(r"v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))")
 
 
 def git(*args: str, input_text: str | None = None) -> str:
@@ -45,6 +38,19 @@ def remote_tags(remote: str) -> dict[str, str]:
         )
         if not ref.endswith("^{}")
     }
+
+
+def alpha_base(tags: dict[str, str]) -> str:
+    """Return the next minor after the highest stable vX.Y.Z tag: (X, Y+1, 0)."""
+    stable = [
+        tuple(map(int, match[1].split(".")))
+        for tag in tags
+        if (match := STABLE_TAG.fullmatch(tag))
+    ]
+    if not stable:
+        raise ValueError("No stable vX.Y.Z tag found on the remote; cannot pick a base")
+    major, minor, _ = max(stable)
+    return f"{major}.{minor + 1}.0"
 
 
 def metadata(oid: str) -> dict:
@@ -101,11 +107,8 @@ def find_existing(
     return tag
 
 
-def allocate(
-    base: str, repository: str, run_id: str, source_sha: str, remote: str
-) -> str:
+def allocate(repository: str, run_id: str, source_sha: str, remote: str) -> str:
     identity = f"alpha-build/{repository}/{run_id}"
-    pattern = re.compile(rf"v{re.escape(base)}a([1-9]\d*)")
     for _ in range(100):
         tags = remote_tags(remote)
         # Use a private local namespace: never force-update release refs. Only
@@ -120,6 +123,9 @@ def allocate(
         existing = find_existing(tags, identity, repository, run_id, source_sha)
         if existing:
             return existing
+        # Base and numbering both come from this same remote snapshot.
+        base = alpha_base(tags)
+        pattern = re.compile(rf"v{re.escape(base)}a([1-9]\d*)")
         numbers = [int(match[1]) for tag in tags if (match := pattern.fullmatch(tag))]
         tag = f"v{base}a{max(numbers, default=0) + 1}"
         message = json.dumps(
@@ -170,28 +176,12 @@ def allocate(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--config", type=Path, default=Path(".github/release-channel.toml")
-    )
     parser.add_argument("--repository", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--remote", default="origin")
     args = parser.parse_args()
     try:
-        with args.config.open("rb") as stream:
-            config = tomllib.load(stream)
-        if (
-            set(config) != {"alpha"}
-            or not isinstance(config["alpha"], dict)
-            or set(config["alpha"]) != {"base_version"}
-        ):
-            raise ValueError("Config must contain only [alpha] base_version")
-        base = config["alpha"]["base_version"]
-        if not isinstance(base, str) or not BASE_VERSION.fullmatch(base):
-            raise ValueError(
-                "alpha.base_version must be a canonical stable version, e.g. 6.2.0"
-            )
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
             raise ValueError("repository must be owner/name")
         if not re.fullmatch(r"[1-9]\d*", args.run_id):
@@ -200,7 +190,7 @@ def main() -> None:
             raise ValueError("source-sha must be a full commit SHA")
         if git("rev-parse", "HEAD") != args.source_sha:
             raise ValueError("Checkout HEAD must be the exact CI-tested source SHA")
-        tag = allocate(base, args.repository, args.run_id, args.source_sha, args.remote)
+        tag = allocate(args.repository, args.run_id, args.source_sha, args.remote)
     except subprocess.CalledProcessError as error:
         details = (error.stderr or b"").decode("utf-8", errors="replace").strip()
         sys.exit(f"Alpha allocation failed: {error}\n{details}")
