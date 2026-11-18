@@ -13,6 +13,8 @@ from typing import Any, cast
 
 from loguru import logger
 
+from chunkhound.core.utils.path_utils import get_relative_path_safe
+
 
 async def resolve_and_fetch_imports(
     chunks: list[dict],
@@ -93,9 +95,12 @@ async def resolve_and_fetch_imports(
                 # Apply path filter if set
                 if path_filter:
                     try:
-                        relative_str = str(resolved_path.relative_to(base_dir))
-                    except ValueError:
-                        continue  # Path not under base_dir
+                        relative_str = str(
+                            get_relative_path_safe(resolved_path, base_dir)
+                        )
+                    except ValueError as e:
+                        logger.warning(f"Skipping import {resolved_path}: {e}")
+                        continue
                     if not relative_str.startswith(path_filter):
                         continue
                 import_files.add(resolved_path)
@@ -116,7 +121,7 @@ async def resolve_and_fetch_imports(
     for import_file in list(import_files)[: config.import_resolution_max_files]:
         try:
             # Convert to relative path
-            relative_path = str(import_file.relative_to(base_dir))
+            relative_path = str(get_relative_path_safe(import_file, base_dir))
 
             # Get file record
             file_record_result = db_services.provider.get_file_by_path(

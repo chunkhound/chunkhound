@@ -10,8 +10,10 @@ on:
 permissions:
   contents: read
 
+# Every main push must finish its own validation/release path. A shared group
+# replaces pending runs even with cancel-in-progress disabled.
 concurrency:
-  group: ${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}
+  group: ci-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -72,9 +74,9 @@ jobs:
             pytest_timeout_minutes: 13
             pytest_timeout_seconds: 300
           - os: macos-latest
-            job_timeout_minutes: 30
-            pytest_timeout_minutes: 13
-            pytest_timeout_seconds: 300
+            job_timeout_minutes: 60
+            pytest_timeout_minutes: 20
+            pytest_timeout_seconds: 600
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
@@ -359,6 +361,54 @@ jobs:
           out-dir: native-dist
 
 
+  prepare-alpha:
+    needs:
+      - tests
+      - rust-checks
+      - watchman-rollout-gate
+      - native-wheel-smoke-arm64
+      - old-linux-wheel-smoke
+      - native-dev-macos
+    # Forks, PRs, merge queues and dispatches never allocate production tags.
+    # Pages deployment and docs-site validation are intentionally not release
+    # prerequisites.
+    if: github.repository == 'chunkhound/chunkhound' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ steps.alpha.outputs.release_tag }}
+      source_sha: ${{ steps.alpha.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+      - name: Allocate or reuse tested alpha tag
+        id: alpha
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_REPOSITORY: ${{ github.repository }}
+        run: >
+          uv run --no-project --python 3.11 python scripts/create_next_alpha_tag.py
+          --source-sha "$SOURCE_SHA"
+          --run-id "$BUILD_RUN_ID"
+          --repository "$BUILD_REPOSITORY"
+
+  release-alpha:
+    needs: prepare-alpha
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    uses: ./.github/workflows/release-packages.yml
+    with:
+      release_tag: ${{ needs.prepare-alpha.outputs.release_tag }}
+      source_sha: ${{ needs.prepare-alpha.outputs.source_sha }}
+
   pages-artifact:
     needs:
       - site-build
@@ -389,6 +439,10 @@ jobs:
     needs: pages-artifact
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Pages may discard superseded pending deployments, never CI builds.
+    concurrency:
+      group: chunkhound-pages-deploy
+      cancel-in-progress: false
     permissions:
       contents: read
       pages: write
@@ -397,7 +451,23 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Check this is still the current main commit
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          current_sha=$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$current_sha" == "$TESTED_SHA" ]]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Skipping superseded Pages build'
+          fi
+      # The check is inside the deployment lock. A main push after this check
+      # can still briefly make Pages stale until the newer build deploys.
       - id: deployment
+        if: steps.current.outputs.deploy == 'true'
         uses: actions/deploy-pages@v5
 
   watchman-runtime-validation:

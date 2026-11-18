@@ -501,7 +501,7 @@ async def test_deep_research_no_commit_range_skips_injection():
     ("commit_inputs", "expected_range"),
     [
         ({"commit_hash": "abc123"}, "abc123^..abc123"),
-        ({"last_n_commits": 5}, "HEAD~5..HEAD"),
+        ({"last_n_commits": 5}, "resolved000..HEAD"),
         ({"commit_range": "v1..v2"}, "v1..v2"),
     ],
 )
@@ -515,7 +515,13 @@ async def test_semantic_search_returns_changed_code_for_commit_inputs(
         yield FAKE_DIFF
 
     git_diff = MagicMock(side_effect=stream_diff)
-    with patch("chunkhound.core.git_diff.stream_git_diff_fragments", git_diff):
+    with (
+        patch("chunkhound.core.git_diff.stream_git_diff_fragments", git_diff),
+        patch(
+            "chunkhound.core.git_diff.resolve_last_n_commits_range",
+            AsyncMock(return_value="resolved000..HEAD"),
+        ),
+    ):
         result = await search_impl(
             services=_make_services(_make_original_search_service()),
             embedding_manager=_make_embedding_manager(),
@@ -614,7 +620,7 @@ async def test_deep_research_commit_hash_expands_to_range():
 
 @pytest.mark.asyncio
 async def test_deep_research_last_n_commits_expands_correctly():
-    """last_n_commits=5 results in effective_commit_range='HEAD~5..HEAD'."""
+    """last_n_commits=5 is resolved through resolve_last_n_commits_range."""
     from chunkhound.mcp_server.tools import deep_research_impl
 
     original_search = _make_original_search_service()
@@ -647,6 +653,10 @@ async def test_deep_research_last_n_commits_expands_correctly():
             "chunkhound.services.research.factory.ResearchServiceFactory.create",
             side_effect=_fake_factory_create,
         ),
+        patch(
+            "chunkhound.core.git_diff.resolve_last_n_commits_range",
+            AsyncMock(return_value="resolved000..HEAD"),
+        ),
     ):
         result = await deep_research_impl(
             services=services,
@@ -658,8 +668,8 @@ async def test_deep_research_last_n_commits_expands_correctly():
 
     assert result == {"answer": "n-commits"}
     await captured_search_service[0].search_semantic("query")
-    assert captured_range == ["HEAD~5..HEAD"], (
-        f"Expected 'HEAD~5..HEAD', got {captured_range}"
+    assert captured_range == ["resolved000..HEAD"], (
+        f"Expected 'resolved000..HEAD', got {captured_range}"
     )
     assert isinstance(captured_search_service[0], TransientSearchService)
 
