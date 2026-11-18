@@ -411,7 +411,7 @@ async def test_index_trust_existing_validates_refreshes_trust_without_artifact_p
 
 
 @pytest.mark.parametrize("change", ["checkout", "url"])
-async def test_trust_persistence_uses_validated_authorized_identity_during_fetch(
+async def test_interactive_binding_change_stops_without_grant_or_local_fallback(
     config, args, formatter, monkeypatch, tmp_path, change
 ):
     args.trust = True
@@ -437,20 +437,25 @@ async def test_trust_persistence_uses_validated_authorized_identity_during_fetch
     grant = Mock()
     monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
     monkeypatch.setattr(run, "grant_trust", grant)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
 
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.STOP
     fetch.assert_awaited_once_with(config)
     grant.assert_not_called()
-    assert "no longer matches" in formatter.text
+    assert formatter.messages == [
+        (
+            "error",
+            "Validated hub source no longer matches authorized configuration",
+        )
+    ]
     assert authorized_url not in formatter.text
 
 
-async def test_index_trust_invalid_manifest_stops_without_grant_or_local_fallback(
+async def test_interactive_invalid_manifest_stops_without_grant_or_local_fallback(
     config, args, formatter, monkeypatch
 ):
     args.trust = True
@@ -458,17 +463,22 @@ async def test_index_trust_invalid_manifest_stops_without_grant_or_local_fallbac
     monkeypatch.setattr(
         run,
         "fetch_validated_manifest",
-        AsyncMock(side_effect=HubUnavailable("invalid manifest")),
+        AsyncMock(
+            side_effect=HubUnavailable("Hub manifest is invalid or unsupported")
+        ),
     )
     monkeypatch.setattr(run, "grant_trust", grant)
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.STOP
     grant.assert_not_called()
-    assert "invalid manifest" in formatter.text
+    assert formatter.messages == [
+        ("error", "Hub manifest is invalid or unsupported")
+    ]
 
 
 async def test_index_trust_ambiguous_state_retains_validated_trust_but_aborts(
@@ -586,22 +596,26 @@ async def test_manifest_binding_fatal_failure_is_formatted_before_run_exit(
     ]
 
 
-async def test_existing_database_safe_validation_failure_offers_local_fallback(
+async def test_postauthorization_classification_failure_offers_local_fallback(
     config, args, formatter, monkeypatch, tmp_path
 ):
     args.trust = True
     target = tmp_path / "chunks.db"
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: False
+        run,
+        "automatic_target_absent",
+        lambda _target, _backend: (_ for _ in ()).throw(
+            HubUnavailable("sanitized unavailable")
+        ),
     )
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "local")
     monkeypatch.setattr(
-        run,
-        "fetch_validated_manifest",
-        AsyncMock(side_effect=HubUnavailable("sanitized unavailable")),
+        run, "fetch_validated_manifest", AsyncMock(return_value=source)
     )
+    monkeypatch.setattr(run, "grant_trust", Mock())
     monkeypatch.setattr(run, "pull", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
@@ -712,6 +726,7 @@ async def test_authorized_safe_failure_requires_explicit_local_fallback(
     config, args, formatter, monkeypatch, absent_target, interactive
 ):
     args.trust = True
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: interactive)
     monkeypatch.setattr(
         run.prompts,
@@ -719,9 +734,11 @@ async def test_authorized_safe_failure_requires_explicit_local_fallback(
         (lambda *_args, **_kwargs: "local") if interactive else _forbid,
     )
     monkeypatch.setattr(
-        run,
-        "fetch_validated_manifest",
-        AsyncMock(side_effect=HubUnavailable("sanitized unavailable")),
+        run, "fetch_validated_manifest", AsyncMock(return_value=source)
+    )
+    monkeypatch.setattr(run, "grant_trust", Mock())
+    monkeypatch.setattr(
+        run, "pull", AsyncMock(side_effect=HubUnavailable("sanitized unavailable"))
     )
 
     decision = await run._prepare_hub_index(args, config, formatter)
@@ -740,11 +757,14 @@ async def test_authorized_noninteractive_failure_has_distinct_local_guidance(
     config, args, formatter, monkeypatch, absent_target
 ):
     args.trust = True
+    source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
     monkeypatch.setattr(
-        run,
-        "fetch_validated_manifest",
-        AsyncMock(side_effect=HubUnavailable("sanitized unavailable")),
+        run, "fetch_validated_manifest", AsyncMock(return_value=source)
+    )
+    monkeypatch.setattr(run, "grant_trust", Mock())
+    monkeypatch.setattr(
+        run, "pull", AsyncMock(side_effect=HubUnavailable("sanitized unavailable"))
     )
 
     decision = await run._prepare_hub_index(args, config, formatter)
@@ -768,6 +788,7 @@ async def test_authorized_interactive_failure_offers_exact_local_fallback(
     config, args, formatter, monkeypatch, absent_target
 ):
     args.trust = True
+    source = _validated_source(config.target_dir, config.hub.url)
     prompts_seen = []
 
     def choose(message, *, choices, default):
@@ -777,9 +798,11 @@ async def test_authorized_interactive_failure_offers_exact_local_fallback(
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(run.prompts, "prompt_choice", choose)
     monkeypatch.setattr(
-        run,
-        "fetch_validated_manifest",
-        AsyncMock(side_effect=HubUnavailable("sanitized unavailable")),
+        run, "fetch_validated_manifest", AsyncMock(return_value=source)
+    )
+    monkeypatch.setattr(run, "grant_trust", Mock())
+    monkeypatch.setattr(
+        run, "pull", AsyncMock(side_effect=HubUnavailable("sanitized unavailable"))
     )
 
     decision = await run._prepare_hub_index(args, config, formatter)

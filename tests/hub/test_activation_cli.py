@@ -668,10 +668,50 @@ def test_index_trust_existing_database_saves_source_without_artifact_request(
     write_config(project, backend, hub_url, embedding_http.url)
     _, route = publish(hub_http, build_database(tmp_path / "published", backend))
     hub_http.requests.clear()
-
-    result = cli(project, "index", project, "--trust")
+    preparation_snapshots = tmp_path / "preparation-snapshots.json"
+    script = r"""
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv.pop(1))
+report = Path(sys.argv.pop(1))
+target = Path(sys.argv.pop(1))
+from chunkhound.api.cli.commands import run
+from chunkhound.api.cli.main import main
+from tests.hub.test_index_format import snapshot
+original = run._prepare_hub_index
+async def snapshot_preparation(*args, **kwargs):
+    before = snapshot(target)
+    decision = await original(*args, **kwargs)
+    after = snapshot(target)
+    report.write_text(json.dumps({"before": before, "after": after}))
+    return decision
+run._prepare_hub_index = snapshot_preparation
+sys.argv = ["chunkhound", *sys.argv[1:]]
+main()
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT),
+            str(preparation_snapshots),
+            str(target),
+            "index",
+            str(project),
+            "--trust",
+        ],
+        cwd=project,
+        env=cli_env(project),
+        text=True,
+        capture_output=True,
+        timeout=180,
+    )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    snapshots = json.loads(preparation_snapshots.read_text())
+    assert snapshots["after"] == snapshots["before"]
     assert cli_is_trusted(project, project, hub_url)
     assert hub_http.requests == [("/catalogue?token=secret", None)]
     assert all(request[0] != route for request in hub_http.requests)

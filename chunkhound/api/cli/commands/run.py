@@ -178,9 +178,8 @@ async def _prepare_hub_index(
         return HubIndexDecision.STOP
 
     source: ValidatedHubSource | None = None
-    authorization_in_progress = explicit_trust
-    try:
-        if explicit_trust:
+    if explicit_trust:
+        try:
             source = await fetch_validated_manifest(config)
             try:
                 current_checkout_digest = checkout_digest(
@@ -199,8 +198,21 @@ async def _prepare_hub_index(
                 raise HubUnavailable(
                     "Validated hub source no longer matches authorized configuration"
                 )
-            _save_hub_trust(authorized_checkout, hub_url, formatter)
+        except HubUnavailable as exc:
+            formatter.error(str(exc))
+            return HubIndexDecision.STOP
+        except FATAL_HUB_ERRORS as exc:
+            formatter.error(str(exc))
+            raise
+        except OSError:
+            filesystem_error = HubLocalStateError(
+                "Hub local filesystem is unavailable"
+            )
+            formatter.error(str(filesystem_error))
+            raise filesystem_error from None
+        _save_hub_trust(authorized_checkout, hub_url, formatter)
 
+    try:
         target = installation_target(config)
         target_absent = automatic_target_absent(target, config.database.provider)
     except HubUnavailable as exc:
@@ -229,7 +241,6 @@ async def _prepare_hub_index(
     try:
         if not target_absent:
             return HubIndexDecision.CONTINUE_LOCAL
-        authorization_in_progress = False
         if source is None:
             installed = await pull(config, automatic=True)
         else:
@@ -240,9 +251,7 @@ async def _prepare_hub_index(
             return HubIndexDecision.CONTINUE_LOCAL
         _hub_authorized_failure_guidance(formatter)
         return HubIndexDecision.STOP
-    except FATAL_HUB_ERRORS as exc:
-        if authorization_in_progress:
-            formatter.error(str(exc))
+    except FATAL_HUB_ERRORS:
         raise
 
     if installed:
