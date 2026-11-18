@@ -40,6 +40,7 @@ from chunkhound.services.research.shared.validation import (
     validate_research_prerequisites,
 )
 from chunkhound.services.vector_cache import VectorCache
+from chunkhound.utils.websearch_backends import AllEnginesBlockedError
 
 # Response size limits (tokens)
 MAX_RESPONSE_TOKENS = 20000
@@ -910,11 +911,11 @@ async def websearch_impl(
 
     Args:
         embedding_manager: Embeds fetched page chunks in process.
-        llm_manager: Used to expand the user query into 3 DuckDuckGo-optimized
+        llm_manager: Used to expand the user query into 3 engine-optimized
             variants via the utility LLM. When None (no LLM configured), the
             expander falls back to a single-query dispatch.
         config: Application configuration; falls back to environment.
-        query: Natural-language or keyword query for DuckDuckGo.
+        query: Natural-language or keyword query for the search engines.
         previous_query: Previous query to build context and chain knowledge (optional).
         limit: Number of results to fetch. Clamped to [1, 100]. Default 30.
 
@@ -954,6 +955,8 @@ async def websearch_impl(
         raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
     except urllib.error.URLError as e:
         raise MCPError(f"Web search failed: {e.reason}") from e
+    except AllEnginesBlockedError as e:
+        raise MCPError(str(e)) from e
     except (TimeoutError, asyncio.TimeoutError) as e:
         raise MCPError(str(e)) from None
     except asyncio.CancelledError:

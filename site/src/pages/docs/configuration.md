@@ -818,7 +818,10 @@ Most environment variables use the `CHUNKHOUND_` prefix with `__` (double unders
 | `CHUNKHOUND_DB_EXECUTE_TIMEOUT` | Legacy alias for `CHUNKHOUND_DATABASE__EXECUTE_TIMEOUT_SECONDS` |
 | `CHUNKHOUND_YAML_ENGINE` | YAML parser engine (`rapid` or `tree`) |
 | `CHUNKHOUND_CONFIG_FILE` | Path to config file (alternative to `--config`) |
-| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Websearch response deadline in seconds (default: 600). Discovery (DDG) is capped at 60s or a quarter of this, whichever is smaller; fetch+research use the remainder. Cancellation cleanup may outlive the deadline, so a one-shot CLI process can wait briefly during event-loop shutdown. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive or non-finite values fall back to 600. |
+| `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Websearch response deadline in seconds (default: 600). Discovery (engine search) is capped at 60s or a quarter of this, whichever is smaller; fetch+research use the remainder. Cancellation cleanup may outlive the deadline, so a one-shot CLI process can wait briefly during event-loop shutdown. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive or non-finite values fall back to 600. |
+| `CHUNKHOUND_WEBSEARCH_BACKENDS` | Comma-separated ordered search engines (default: `duckduckgo,bing`). The first healthy engine serves; the rest are fallbacks. Example: `CHUNKHOUND_WEBSEARCH_BACKENDS=bing,duckduckgo`. |
+| `CHUNKHOUND_WEBSEARCH_SELECTION` | Engine selection: `priority` (listed order) or `random_healthy` (shuffle among healthy engines). Default: `priority`. |
+| `CHUNKHOUND_WEBSEARCH_COOLDOWN_SECONDS` | Seconds a refused engine stays cooled down before retry within a process (default: 900). |
 | `CHUNKHOUND_DEBUG` | Enable debug logging |
 | `VOYAGE_API_KEY` | Fallback API key for VoyageAI provider |
 
@@ -1032,7 +1035,35 @@ LLM config:
 
 ## Web Search
 
-The `websearch` tool searches the web via DuckDuckGo, fetches the top pages, indexes the fetched content in memory, and runs the same deep research pipeline used for local code search. It is available as an MCP tool and as `chunkhound websearch`.
+The `websearch` tool searches the web via configurable search engines (DuckDuckGo by default, with Bing as a fallback), fetches the top pages, indexes the fetched content in memory, and runs the same deep research pipeline used for local code search. It is available as an MCP tool and as `chunkhound websearch`.
+
+### Engines
+
+Engine order and failover are controlled by the `websearch` config section (or `CHUNKHOUND_WEBSEARCH_*` env vars; file settings override env values, matching the general precedence):
+
+```json
+{
+  "websearch": {
+    "backends": ["bing", "duckduckgo"],
+    "selection": "priority",
+    "cooldown_seconds": 900
+  }
+}
+```
+
+| Field | Meaning | Default |
+|---|---|---|
+| `backends` | Ordered list; first healthy serves, rest are fallbacks | `["duckduckgo","bing"]` |
+| `selection` | `priority` = listed order; `random_healthy` = shuffle among healthy only | `priority` |
+| `cooldown_seconds` | Back-off before a refused engine is retried | 900 |
+
+Every engine response is classified by per-response evidence, and that evidence is only promoted to cooldown after repetition. The three outcomes a query can report:
+
+- **Blocked** — an engine refuses to serve (status 202/403/429, e.g. a challenge page or bot wall). Two consecutive refusals put the engine into cooldown: the first refusal records a strike, the second starts a cooldown that doubles on each further refusal (base `cooldown_seconds`, capped at 1h, ±20% jitter). A served response clears the strikes. A refusal after some results still returns the partial rows, but records the strike.
+- **Soft-empty** — the engine answered 200 but reports "no results" through its own sentinel (DuckDuckGo's `links_main` container, Bing's `b_no` marker). This is ambiguous evidence: it neither strikes nor resets the engine, and the search fails over to the next engine.
+- **No results** — every configured engine softly reported empty; the search returns "no results", never "blocked".
+
+Transient failures (timeouts, 5xx, connection errors) also fail over without cooldown; a layout change (drift) is reported as such. When every engine is cooling down, only the single engine that recovers soonest is probed instead of paying the full list's cost on every search. The discovery phase partitions its time budget across engines, so one hanging engine cannot starve its fallback.
 
 ### Requirements
 
@@ -1048,7 +1079,7 @@ If any of these are missing, the MCP `websearch` tool is not registered (capabil
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `query` | string | required | Natural-language or keyword query sent to DuckDuckGo |
+| `query` | string | required | Natural-language or keyword query sent to the search engines |
 | `--limit` / `limit` | int | 30 | Max results to fetch (1–100). CLI uses `--limit`, MCP uses `limit`. |
 
 ### Environment Variables
@@ -1056,6 +1087,9 @@ If any of these are missing, the MCP `websearch` tool is not registered (capabil
 | Variable | Description |
 |---|---|
 | `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` | Websearch response deadline (seconds). Default: 600. Discovery is capped at min(60, total/4); fetch and research share the remainder. Cancellation cleanup may outlive the deadline, so a one-shot CLI process can wait briefly during event-loop shutdown. Previously this bounded only the research subprocess, so add headroom if you tuned it. Non-positive, non-finite, or malformed values fall back to 600. |
+| `CHUNKHOUND_WEBSEARCH_BACKENDS` | Comma-separated ordered engines (default: `duckduckgo,bing`). |
+| `CHUNKHOUND_WEBSEARCH_SELECTION` | `priority` or `random_healthy` (default: `priority`). |
+| `CHUNKHOUND_WEBSEARCH_COOLDOWN_SECONDS` | Refused-engine cooldown in seconds (default: 900). |
 
 ### Fixed Constants
 

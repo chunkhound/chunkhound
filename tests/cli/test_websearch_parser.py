@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from chunkhound.api.cli.parsers.websearch_parser import add_websearch_subparser
+from chunkhound.core.config.websearch_config import WebSearchConfig
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -71,3 +72,26 @@ def test_websearch_parser_config_sections_wired() -> None:
     assert "--llm-provider" in flags
     # research section
     assert "--research-algorithm" in flags
+    # websearch section
+    assert "--websearch-backends" in flags
+    assert "--websearch-selection" in flags
+    assert "--websearch-cooldown-seconds" in flags
+
+
+def test_websearch_parser_websearch_flags_reach_namespace() -> None:
+    args = _build_parser().parse_args(
+        [
+            "websearch",
+            "q",
+            "--websearch-backends",
+            "bing,duckduckgo",
+            "--websearch-selection",
+            "random_healthy",
+            "--websearch-cooldown-seconds",
+            "60",
+        ]
+    )
+    overrides = WebSearchConfig.extract_cli_overrides(args)
+    assert overrides["backends"] == ["bing", "duckduckgo"]
+    assert overrides["selection"] == "random_healthy"
+    assert overrides["cooldown_seconds"] == 60

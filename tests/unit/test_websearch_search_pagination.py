@@ -14,14 +14,12 @@ from __future__ import annotations
 import asyncio
 import threading
 import urllib.error
-import urllib.parse
-import urllib.request
-from io import BytesIO
 
 import pytest
 from loguru import logger
 
 from chunkhound.utils import websearch_core as ws_mod
+from chunkhound.utils.websearch_verdict import EngineResponse, Verdict
 
 # ---------------------------------------------------------------------------
 # HTML fixture builders
@@ -39,12 +37,7 @@ def _next_form_html(params: dict[str, str]) -> str:
     hidden = "".join(
         f'<input type="hidden" name="{n}" value="{v}">' for n, v in params.items()
     )
-    return (
-        "<form>"
-        f"{hidden}"
-        '<input type="submit" value="Next">'
-        "</form>"
-    )
+    return f'<form>{hidden}<input type="submit" value="Next"></form>'
 
 
 def _page_html(
@@ -66,10 +59,10 @@ def _install_fetch_sequence(monkeypatch, pages: list[str]) -> list[dict[str, str
     calls: list[dict[str, str]] = []
     it = iter(pages)
 
-    def fake_fetch(params: dict[str, str]) -> str:
+    def fake_fetch(params: dict[str, str]) -> tuple[int, str]:
         calls.append(dict(params))
         try:
-            return next(it)
+            return 200, next(it)
         except StopIteration as e:
             raise AssertionError("_fetch called more times than pages provided") from e
 
@@ -90,7 +83,8 @@ def test_search_single_page_under_limit(monkeypatch) -> None:
 
     out = ws_mod.search("foo", limit=30)
 
-    assert [url for _, url, _ in out] == ["https://a/", "https://b/", "https://c/"]
+    assert out.verdict.value == "served"
+    assert [url for _, url, _ in out.rows] == ["https://a/", "https://b/", "https://c/"]
     assert len(calls) == 1
 
 
@@ -114,7 +108,7 @@ def test_search_paginates_until_limit(monkeypatch) -> None:
 
     out = ws_mod.search("q", limit=30)
 
-    assert len(out) == 30
+    assert len(out.rows) == 30
     assert len(calls) == 2
     # Second call must forward the hidden-input dict from the Next form.
     assert calls[1] == next_params
@@ -131,7 +125,8 @@ def test_search_halts_on_empty_second_page(monkeypatch) -> None:
 
     out = ws_mod.search("q", limit=30)
 
-    assert len(out) == 5
+    assert len(out.rows) == 5
+    assert out.verdict.value == "served"
     assert len(calls) == 2
 
 
@@ -144,7 +139,7 @@ def test_search_halts_when_no_next_form(monkeypatch) -> None:
 
     out = ws_mod.search("q", limit=30)
 
-    assert len(out) == 7
+    assert len(out.rows) == 7
     assert len(calls) == 1
 
 
@@ -168,62 +163,89 @@ def test_search_progress_callback_invoked_per_page(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeResponse:
-    def __init__(self, body: bytes) -> None:
-        self._body = BytesIO(body)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc) -> None:
-        return None
-
-    def read(self, amt: int | None = None) -> bytes:
-        return self._body.read(-1 if amt is None else amt)
-
-
-def test_fetch_posts_urlencoded_to_ddg_html_endpoint(monkeypatch) -> None:
+def test_fetch_posts_form_to_ddg_html_endpoint(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_urlopen(req, timeout=None):
-        captured["url"] = req.full_url
-        captured["data"] = req.data
-        captured["headers"] = dict(req.header_items())
+    def fake_http_request(
+        method, url, *, params=None, data=None, headers=None, timeout=30.0
+    ):
+        captured["method"] = method
+        captured["url"] = url
+        captured["data"] = data
+        captured["headers"] = headers
         captured["timeout"] = timeout
-        return _FakeResponse(b"<html>ok</html>")
+        return 200, b"<html>ok</html>"
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(ws_mod, "_http_request", fake_http_request)
 
     body = ws_mod._fetch({"q": "cats & dogs", "b": ""})
 
-    assert body == "<html>ok</html>"
+    assert body == (200, "<html>ok</html>")
+    assert captured["method"] == "post"
     assert captured["url"] == "https://html.duckduckgo.com/html/"
-    assert captured["data"] == urllib.parse.urlencode(
-        {"q": "cats & dogs", "b": ""}
-    ).encode()
-    # Request.header_items() title-cases names.
-    assert captured["headers"].get("User-agent") == "Mozilla/5.0"
+    assert captured["data"] == {"q": "cats & dogs", "b": ""}
+    assert captured["headers"].get("User-Agent") == "Mozilla/5.0"
     assert captured["timeout"] == 30
 
 
 @pytest.mark.parametrize("bad_params", [{"q": ""}, {"q": "a b c"}])
-def test_fetch_encodes_params_losslessly(monkeypatch, bad_params) -> None:
+def test_fetch_forwards_params_verbatim(monkeypatch, bad_params) -> None:
     captured: dict[str, object] = {}
 
-    def fake_urlopen(req, timeout=None):
-        captured["data"] = req.data
-        return _FakeResponse(b"ok")
+    def fake_http_request(
+        method, url, *, params=None, data=None, headers=None, timeout=30.0
+    ):
+        captured["data"] = data
+        return 200, b"ok"
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(ws_mod, "_http_request", fake_http_request)
 
     ws_mod._fetch(bad_params)
 
-    # Round-tripping through parse_qs must restore the input params.
-    decoded = urllib.parse.parse_qs(
-        captured["data"].decode(), keep_blank_values=True
+    # The curl transport url-encodes the form dict; the contract is that
+    # params reach it unchanged.
+    assert captured["data"] == bad_params
+
+
+def test_fetch_passes_non_200_through_unclassified(monkeypatch) -> None:
+    # Classification is the caller's job (see search), not the transport's.
+    monkeypatch.setattr(
+        ws_mod, "_http_request", lambda *a, **k: (202, b"<html>challenge</html>")
     )
-    for k, v in bad_params.items():
-        assert decoded[k] == [v]
+    assert ws_mod._fetch({"q": "cats"}) == (202, "<html>challenge</html>")
+
+
+def test_search_empty_page_with_container_is_empty_never_refused(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        ws_mod,
+        "_fetch",
+        lambda params: (
+            200,
+            '<html><body><div id="links_main"></div></body></html>',
+        ),
+    )
+    out = ws_mod.search("cats", limit=10)
+    assert out.verdict.value == "empty"
+    assert out.rows == ()
+
+
+def test_search_empty_page_without_container_is_drift(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ws_mod, "_fetch", lambda params: (200, "<html><body></body></html>")
+    )
+    out = ws_mod.search("cats", limit=10)
+    assert out.verdict.value == "drift"
+
+
+def test_search_non_200_status_maps_to_verdict(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ws_mod, "_fetch", lambda params: (202, "<html>challenge</html>")
+    )
+    out = ws_mod.search("cats", limit=10)
+    assert out.verdict.value == "refused"
+    assert out.status == 202
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +257,7 @@ def _install_search_stub(
     monkeypatch,
     responses: dict[str, list[tuple[str, str, str]] | Exception],
 ) -> list[tuple[str, int]]:
-    """Replace ws_mod.search with a stub returning canned per-query results.
+    """Replace ws_mod.search with a stub returning canned per-query EngineResponses.
 
     Captures (query, limit) per call. Exceptions in the values are raised.
     """
@@ -246,7 +268,7 @@ def _install_search_stub(
         val = responses[query]
         if isinstance(val, Exception):
             raise val
-        return list(val)
+        return EngineResponse(tuple(val), Verdict.SERVED, 200)
 
     monkeypatch.setattr(ws_mod, "search", fake_search)
     return calls
@@ -281,7 +303,9 @@ def test_search_multi_passes_full_limit_to_each_query(monkeypatch) -> None:
     # ``limit / n``) so cross-variant URL overlap cannot silently drop the
     # returned count below ``limit``.
     responses: dict[str, list[tuple[str, str, str]]] = {
-        "q1": [], "q2": [], "q3": [],
+        "q1": [],
+        "q2": [],
+        "q3": [],
     }
     calls = _install_search_stub(monkeypatch, responses)
 
@@ -386,6 +410,23 @@ def test_search_multi_truncates_to_limit(monkeypatch) -> None:
     assert len(out) == 7
 
 
+def test_search_multi_forwards_timeout_budget(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_run_engine_search(queries, limit, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_backends.run_engine_search",
+        fake_run_engine_search,
+    )
+
+    asyncio.run(ws_mod.search_multi(["q"], limit=5, timeout_s=12.0))
+
+    assert seen["timeout_s"] == 12.0
+
+
 def test_search_multi_continues_on_partial_url_error(monkeypatch) -> None:
     responses: dict[str, list[tuple[str, str, str]] | Exception] = {
         "q1": urllib.error.URLError("boom"),
@@ -414,7 +455,9 @@ def test_search_multi_logs_when_no_failure_callback(monkeypatch) -> None:
     finally:
         logger.remove(sink_id)
 
-    assert any("q1" in m and "boom" in m for m in messages)
+    # Queries are sensitive: the warning must not carry the query text.
+    assert any("boom" in m for m in messages)
+    assert not any("q1" in m for m in messages)
 
 
 def test_search_multi_does_not_log_when_callback_provided(monkeypatch) -> None:
@@ -434,9 +477,7 @@ def test_search_multi_does_not_log_when_callback_provided(monkeypatch) -> None:
         seen.append((q, e))
 
     try:
-        asyncio.run(
-            ws_mod.search_multi(["q1", "q2"], limit=10, failure_callback=_cb)
-        )
+        asyncio.run(ws_mod.search_multi(["q1", "q2"], limit=10, failure_callback=_cb))
     finally:
         logger.remove(sink_id)
 
