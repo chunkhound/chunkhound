@@ -145,12 +145,13 @@ and LanceDB support this workflow. DuckDB is recommended; LanceDB remains
 experimental and uses the Python indexing pipeline even when Rust is enabled.
 
 With an authorized hub source and a usable embedding identity, normal
-`chunkhound index` may automatically download a base only when the local
-database is absent. Declaring `hub.url` is not authorization, and an existing
-database is never replaced automatically, including when its embedding model
-is misaligned. MCP, search, simulation, ignore checking and no-embeddings
-indexing never initiate pulls. Use explicit `chunkhound pull` when you intend
-to replace an existing database.
+`chunkhound index` may automatically download a base only when an exhaustive
+inventory proves genuinely cold state: no local database or associated install,
+recovery, or ambiguous state exists. Declaring `hub.url` is not authorization.
+Every existing database stays local and proceeds through ordinary opening and
+model-drift handling, including under `index --trust`. MCP, search, simulation,
+ignore checking and no-embeddings indexing never initiate pulls. Use a trusted
+explicit `chunkhound pull` when you intend to replace an existing database.
 
 **Explicit replacement can discard local index work and require re-indexing.**
 Format and checksum validation do not establish publisher content freshness.
@@ -340,28 +341,35 @@ source, but none of them grants permission to contact it. ChunkHound manages
 that permission in its user trust file; the file's format is not a supported
 user-editing interface.
 
-For a new checkout with no database:
+Authorization and local state determine command behavior:
 
-- `chunkhound pull .` is a one-time explicit download. It does not authorize
-  future automatic hub use.
-- `chunkhound pull . --trust` and `chunkhound index . --trust` first fetch and
-  structurally validate the manifest, then persist authorization for the exact
-  canonical checkout and exact manifest URL. Moving or recloning the checkout,
-  or changing the manifest URL (including its query string), requires trust
-  again.
-- An interactive `chunkhound index .` offers `trust`, `local`, or `cancel`
-  before starting a full local index. The local choice contacts no hub.
-- A noninteractive index stops if hub authorization or authorized hub use
-  fails. It does not silently build a potentially expensive local index.
-- `chunkhound pull . --forget-trust` removes that checkout/source grant
-  offline. It does not contact the hub or delete an installed database.
+| Command and state | Hub behavior |
+|---|---|
+| Plain `chunkhound pull .`, source not trusted | Rejects before any network request and directs the user to `pull --trust`. |
+| `chunkhound pull . --trust` | Fetches and structurally validates the manifest, persists trust for the exact canonical checkout and exact manifest URL, then explicitly pulls and may replace the database. |
+| Plain `chunkhound pull .`, source already trusted | Explicitly pulls and may replace the database using the stored exact checkout/source trust. |
+| Plain `chunkhound index .`, source trusted and destination genuinely cold | May pull a base before overlaying local changes. |
+| Any `chunkhound index .` with an existing database, including `--trust` | Never artifact-pulls or replaces the database; continues to ordinary local opening and model-drift handling. |
+| Plain interactive `chunkhound index .`, source untrusted and destination cold | Makes no network request, suggests rerunning `index --trust`, and offers only local indexing or cancellation; cancellation is the default. |
+| Plain noninteractive or no-prompt `chunkhound index .`, source untrusted | Makes no network request and continues with local indexing. |
+
+`index --trust` validates the configured source and persists the exact grant. It
+may use the hub artifact only when the destination is genuinely cold. Moving or
+recloning the checkout, or changing the manifest URL (including its query
+string), requires trust again. Interrupted installs, recovery files, associated
+state without its primary database, and unreadable or ambiguous state are not
+cold; they are preserved for ordinary recovery diagnostics rather than treated
+as permission to install or replace.
+
+`chunkhound pull . --forget-trust` removes that checkout/source grant offline.
+It does not contact the hub or delete an installed database.
 
 Once a manifest is trusted, it may delegate its artifact to another HTTP(S)
 URL and through normal redirects without another authorization prompt. Artifact
 size and checksum verification, redirect restrictions, archive extraction
 limits, database compatibility checks, and safe installation rules still
 apply. Automatic hub use is cold-start only: ChunkHound never replaces an
-existing database automatically. Use an explicit `pull` to request
+existing database automatically. Use a trusted explicit `pull` to request
 replacement.
 
 ## Remote Configuration

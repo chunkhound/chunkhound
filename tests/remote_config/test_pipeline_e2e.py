@@ -1788,11 +1788,11 @@ async def test_remote_hub_declaration_cannot_authorize_cold_index(
         timeout=180,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stdout + result.stderr
     assert hub_http.requests == []
-    assert embedding_http.requests == []
+    assert embedding_http.requests
     assert not trust_store_path().exists()
-    assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
+    assert (project / ".chunkhound" / "db" / "chunks.db").exists()
 
 
 @pytest.mark.parametrize("operation", ["set", "merge"])

@@ -143,7 +143,7 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--trust",
         action="store_true",
-        help="Trust the configured hub and try it before local indexing",
+        help="Validate and trust the configured hub source for cold index bootstrap",
     )
 
     # Simulate mode as a flag to preserve backward-compatible positional path usage

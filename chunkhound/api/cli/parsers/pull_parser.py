@@ -13,7 +13,7 @@ def add_pull_subparser(subparsers: Any) -> argparse.ArgumentParser:
     trust.add_argument(
         "--trust",
         action="store_true",
-        help="Trust this checkout's configured hub for future cold installs",
+        help="Validate and trust the configured hub source for this pull",
     )
     trust.add_argument(
         "--forget-trust",
