@@ -12,6 +12,8 @@ from chunkhound.api.cli.parsers.run_parser import add_run_subparser
 from chunkhound.core.config.config import Config
 from chunkhound.hub.client import ValidatedHubSource
 from chunkhound.hub.errors import (
+    HUB_PULL_FAILURE_GUIDANCE,
+    HubDatabaseMismatch,
     HubInstallationInterrupted,
     HubLocalStateError,
     HubUnavailable,
@@ -178,6 +180,7 @@ async def test_trusted_existing_index_never_fetches_or_pulls(
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
+    monkeypatch.setattr(run, "_hub_authorized_failure_guidance", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
@@ -189,9 +192,12 @@ async def test_untrusted_noninteractive_cold_continues_local_without_hub(
 ):
     monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(run, "installation_target", _forbid)
+    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
     monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
     monkeypatch.setattr(run, "grant_trust", _forbid)
+    monkeypatch.setattr(run, "_hub_authorized_failure_guidance", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
@@ -243,9 +249,11 @@ async def test_untrusted_interactive_non_cold_skips_prompt_and_continues_local(
         run, "automatic_target_appears_cold", lambda _target, _backend: False
     )
     monkeypatch.setattr(run.prompts, "prompt_text", _forbid)
+    monkeypatch.setattr(run, "automatic_target_absent", _forbid)
     monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
     monkeypatch.setattr(run, "grant_trust", _forbid)
+    monkeypatch.setattr(run, "_hub_authorized_failure_guidance", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
@@ -289,6 +297,7 @@ async def test_unsupported_target_is_safe_failure_without_implicit_fallback(
 
     assert decision is run.HubIndexDecision.STOP
     assert "unsupported target" in formatter.text
+    assert HUB_PULL_FAILURE_GUIDANCE not in formatter.text
 
 
 @pytest.mark.parametrize(
@@ -402,6 +411,7 @@ async def test_index_trust_existing_validates_refreshes_trust_without_artifact_p
     monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
     monkeypatch.setattr(run, "grant_trust", grant)
     monkeypatch.setattr(run, "pull", _forbid)
+    monkeypatch.setattr(run, "_hub_authorized_failure_guidance", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
@@ -722,43 +732,13 @@ async def test_trust_save_failure_warns_but_current_authorized_attempt_proceeds(
 
 
 @pytest.mark.parametrize("interactive", [False, True])
-async def test_authorized_safe_failure_requires_explicit_local_fallback(
+async def test_attempted_index_pull_unavailable_always_stops_with_local_retry_guidance(
     config, args, formatter, monkeypatch, absent_target, interactive
 ):
     args.trust = True
     source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: interactive)
-    monkeypatch.setattr(
-        run.prompts,
-        "prompt_choice",
-        (lambda *_args, **_kwargs: "local") if interactive else _forbid,
-    )
-    monkeypatch.setattr(
-        run, "fetch_validated_manifest", AsyncMock(return_value=source)
-    )
-    monkeypatch.setattr(run, "grant_trust", Mock())
-    monkeypatch.setattr(
-        run, "pull", AsyncMock(side_effect=HubUnavailable("sanitized unavailable"))
-    )
-
-    decision = await run._prepare_hub_index(args, config, formatter)
-
-    expected = (
-        run.HubIndexDecision.CONTINUE_LOCAL
-        if interactive
-        else run.HubIndexDecision.STOP
-    )
-    assert decision is expected
-    assert "sanitized unavailable" in formatter.text
-    assert config.hub.url not in formatter.text
-
-
-async def test_authorized_noninteractive_failure_has_distinct_local_guidance(
-    config, args, formatter, monkeypatch, absent_target
-):
-    args.trust = True
-    source = _validated_source(config.target_dir, config.hub.url)
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(
         run, "fetch_validated_manifest", AsyncMock(return_value=source)
     )
@@ -772,66 +752,32 @@ async def test_authorized_noninteractive_failure_has_distinct_local_guidance(
     assert decision is run.HubIndexDecision.STOP
     assert formatter.messages == [
         ("error", "sanitized unavailable"),
-        (
-            "info",
-            "No usable hub database was obtained from the authorized source. "
-            "Rerun interactively and choose local indexing, or disable hub.url "
-            "and rerun.",
-        ),
+        ("info", HUB_PULL_FAILURE_GUIDANCE),
     ]
-    assert "not trusted" not in formatter.text
-    assert "--trust" not in formatter.text
+    assert "--forget-trust" in formatter.text
+    assert "disable hub.url" in formatter.text
     assert config.hub.url not in formatter.text
 
 
-async def test_authorized_interactive_failure_offers_exact_local_fallback(
-    config, args, formatter, monkeypatch, absent_target
-):
-    args.trust = True
-    source = _validated_source(config.target_dir, config.hub.url)
-    prompts_seen = []
-
-    def choose(message, *, choices, default):
-        prompts_seen.append((message, choices, default))
-        return "local"
-
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
-    monkeypatch.setattr(run.prompts, "prompt_choice", choose)
-    monkeypatch.setattr(
-        run, "fetch_validated_manifest", AsyncMock(return_value=source)
-    )
-    monkeypatch.setattr(run, "grant_trust", Mock())
-    monkeypatch.setattr(
-        run, "pull", AsyncMock(side_effect=HubUnavailable("sanitized unavailable"))
-    )
-
-    decision = await run._prepare_hub_index(args, config, formatter)
-
-    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
-    assert prompts_seen == [
-        (
-            "The configured hub could not provide a usable database",
-            ("local", "cancel"),
-            "cancel",
-        )
-    ]
-    assert formatter.messages == [("error", "sanitized unavailable")]
-    assert "not trusted" not in formatter.text
-    assert "--trust" not in formatter.text
-    assert config.hub.url not in formatter.text
-
-
-async def test_authorized_pull_failure_can_fall_back_only_interactively(
-    config, args, formatter, monkeypatch, absent_target
+@pytest.mark.parametrize(
+    "failure",
+    [
+        HubDatabaseMismatch("mismatch"),
+        HubInstallationInterrupted("interrupted"),
+        HubLocalStateError("unsafe local state"),
+    ],
+)
+async def test_attempted_index_pull_fatal_error_stops_with_guidance(
+    config, args, formatter, monkeypatch, absent_target, failure
 ):
     monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
-    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
-    monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "local")
-    monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
+    monkeypatch.setattr(run, "pull", AsyncMock(side_effect=failure))
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
 
-    decision = await run._prepare_hub_index(args, config, formatter)
+    with pytest.raises(type(failure), match=str(failure)):
+        await run._prepare_hub_index(args, config, formatter)
 
-    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
+    assert formatter.messages == [("info", HUB_PULL_FAILURE_GUIDANCE)]
 
 
 async def test_race_created_valid_database_continues_without_failure_prompt(
@@ -848,21 +794,17 @@ async def test_race_created_valid_database_continues_without_failure_prompt(
     )
     monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
     monkeypatch.setattr(run, "_choose_hub_failure_action", _forbid)
+    monkeypatch.setattr(run, "_hub_authorized_failure_guidance", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
+    assert formatter.messages == []
 
 
-@pytest.mark.parametrize(
-    ("answer", "expected"),
-    [
-        ("local", run.HubIndexDecision.CONTINUE_LOCAL),
-        ("cancel", run.HubIndexDecision.STOP),
-    ],
-)
-async def test_still_cold_after_unsuccessful_pull_uses_authorized_failure_policy(
-    config, args, formatter, monkeypatch, tmp_path, answer, expected
+@pytest.mark.parametrize("interactive", [False, True])
+async def test_still_cold_after_unsuccessful_pull_always_stops_with_guidance(
+    config, args, formatter, monkeypatch, tmp_path, interactive
 ):
     target = tmp_path / "chunks.db"
     monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
@@ -871,12 +813,13 @@ async def test_still_cold_after_unsuccessful_pull_uses_authorized_failure_policy
         run, "automatic_target_absent", lambda _target, _backend: True
     )
     monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
-    monkeypatch.setattr(run, "_hub_prompts_allowed", lambda: True)
-    monkeypatch.setattr(run, "_choose_hub_failure_action", lambda: answer)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: interactive)
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
 
     decision = await run._prepare_hub_index(args, config, formatter)
 
-    assert decision is expected
+    assert decision is run.HubIndexDecision.STOP
+    assert formatter.messages == [("info", HUB_PULL_FAILURE_GUIDANCE)]
 
 
 async def test_race_created_ambiguous_state_aborts_before_registry(

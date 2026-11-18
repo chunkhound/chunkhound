@@ -12,7 +12,11 @@ from loguru import logger
 
 import chunkhound_native as native
 from chunkhound.hub.client import ValidatedHubSource
-from chunkhound.hub.errors import HubLocalStateError
+from chunkhound.hub.errors import (
+    HUB_PULL_FAILURE_GUIDANCE,
+    HubLocalStateError,
+    HubUnavailable,
+)
 from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.trust import HubTrustError, checkout_digest, manifest_url_digest
 from tests.hub.activation_support import (
@@ -77,6 +81,7 @@ async def test_untrusted_plain_pull_rejects_before_hub_boundaries(
     text = "\n".join(messages)
     assert "pull --trust" in text
     assert "user:secret" not in text
+    assert HUB_PULL_FAILURE_GUIDANCE not in text
 
 
 async def test_plain_pull_trust_read_failure_is_sanitized_and_offline(
@@ -130,6 +135,41 @@ async def test_trusted_plain_pull_uses_explicit_replacement_path(
 
     trust_check.assert_called_once_with(checkout.resolve(), config.hub.url)
     artifact_pull.assert_awaited_once_with(config, rel="-1", source=None)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        HubUnavailable("sanitized unavailable"),
+        HubLocalStateError("unsafe local state"),
+        False,
+    ],
+)
+async def test_attempted_explicit_pull_failure_stops_with_local_retry_guidance(
+    tmp_path, hub_http, monkeypatch, outcome
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    monkeypatch.setattr(pull_module, "is_trusted", Mock(return_value=True))
+    artifact_pull = (
+        AsyncMock(return_value=outcome)
+        if outcome is False
+        else AsyncMock(side_effect=outcome)
+    )
+    monkeypatch.setattr(pull_module, "pull", artifact_pull)
+    args = argparse.Namespace(trust=False, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert HUB_PULL_FAILURE_GUIDANCE in messages
+    assert config.hub.url not in "\n".join(messages)
 
 
 async def test_pull_trust_revalidates_even_when_source_is_already_trusted(
@@ -306,6 +346,7 @@ async def test_pull_trust_checkout_identity_failure_is_sanitized_once(
     assert stopped.value.code == 1
     assert messages == ["Hub checkout identity is unavailable"]
     assert raw not in "\n".join(messages)
+    assert HUB_PULL_FAILURE_GUIDANCE not in messages
     pull_module.fetch_validated_manifest.assert_not_awaited()
 
 
@@ -339,6 +380,7 @@ async def test_pull_trust_manifest_binding_failure_is_sanitized_once(
     assert stopped.value.code == 1
     assert messages == ["Hub checkout identity is unavailable"]
     assert raw not in "\n".join(messages)
+    assert HUB_PULL_FAILURE_GUIDANCE not in messages
 
 
 async def test_pull_trust_post_fetch_identity_failure_is_sanitized_once(
@@ -384,6 +426,7 @@ async def test_pull_trust_post_fetch_identity_failure_is_sanitized_once(
     assert messages == ["Hub checkout identity is unavailable"]
     assert raw not in "\n".join(messages)
     pull_module.grant_trust.assert_not_called()
+    assert HUB_PULL_FAILURE_GUIDANCE not in messages
 
 
 @pytest.mark.parametrize("change", ["checkout", "url"])

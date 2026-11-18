@@ -30,6 +30,7 @@ from chunkhound.hub.client import (
 )
 from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
+    HUB_PULL_FAILURE_GUIDANCE,
     HubLocalStateError,
     HubUnavailable,
 )
@@ -103,10 +104,7 @@ def _choose_hub_failure_action() -> str:
 
 
 def _hub_authorized_failure_guidance(formatter: RichOutputFormatter) -> None:
-    formatter.info(
-        "No usable hub database was obtained from the authorized source. "
-        "Rerun interactively and choose local indexing, or disable hub.url and rerun."
-    )
+    formatter.info(HUB_PULL_FAILURE_GUIDANCE)
 
 
 def _save_hub_trust(
@@ -219,7 +217,11 @@ async def _prepare_hub_index(
         formatter.error(str(exc))
         if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
             return HubIndexDecision.CONTINUE_LOCAL
-        _hub_authorized_failure_guidance(formatter)
+        formatter.info(
+            "No usable hub database was obtained from the authorized source. "
+            "Rerun interactively and choose local indexing, or disable hub.url "
+            "and rerun."
+        )
         return HubIndexDecision.STOP
     except (
         native.DatabaseBusyError,
@@ -247,23 +249,19 @@ async def _prepare_hub_index(
             installed = await pull(config, automatic=True, source=source)
     except HubUnavailable as exc:
         formatter.error(str(exc))
-        if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
-            return HubIndexDecision.CONTINUE_LOCAL
         _hub_authorized_failure_guidance(formatter)
         return HubIndexDecision.STOP
     except FATAL_HUB_ERRORS:
+        _hub_authorized_failure_guidance(formatter)
         raise
 
     if installed:
         return HubIndexDecision.HUB_INSTALLED
 
-    # The exclusive callback can decline because another process won the race.
+    # Another process can win the exclusive publication race successfully.
     if not automatic_target_absent(target, config.database.provider):
         return HubIndexDecision.CONTINUE_LOCAL
 
-    # Still cold means the authorized source did not produce a usable base.
-    if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
-        return HubIndexDecision.CONTINUE_LOCAL
     _hub_authorized_failure_guidance(formatter)
     return HubIndexDecision.STOP
 

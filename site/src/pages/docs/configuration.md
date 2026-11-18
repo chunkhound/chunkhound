@@ -353,6 +353,14 @@ Authorization and local state determine command behavior:
 | Plain interactive `chunkhound index .`, source untrusted and destination cold | Makes no network request, suggests rerunning `index --trust`, and offers only local indexing or cancellation; cancellation is the default. |
 | Plain noninteractive or no-prompt `chunkhound index .`, source untrusted | Makes no network request and continues with local indexing. |
 
+No-pull untrusted and local paths retain ordinary local behavior. Once an
+authorized pull is attempted, any failure stops nonzero in both interactive and
+noninteractive execution rather than falling back to local indexing. To retry
+locally without another hub attempt, run `chunkhound pull . --forget-trust` or
+disable `hub.url`, then rerun `index`. A concurrent process that completes a
+valid automatic installation remains a successful race winner, so indexing
+continues locally without failure guidance.
+
 `index --trust` validates the configured source and persists the exact grant. It
 may use the hub artifact only when the destination is genuinely cold. Moving or
 recloning the checkout, or changing the manifest URL (including its query

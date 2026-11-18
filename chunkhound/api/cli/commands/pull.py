@@ -7,6 +7,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.hub.client import fetch_validated_manifest, pull
 from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
+    HUB_PULL_FAILURE_GUIDANCE,
     HubAuthorizationError,
     HubLocalStateError,
     HubUnavailable,
@@ -33,6 +34,7 @@ def forget_trust_command(args: argparse.Namespace) -> None:
 
 async def pull_command(args: argparse.Namespace, config: Config) -> None:
     pre_client_fatal = False
+    pull_attempted = False
     try:
         source = None
         authorized_url = config.hub.url
@@ -97,15 +99,21 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
                     "automatic hub use was not enabled"
                 )
         pre_client_fatal = False
+        pull_attempted = True
         installed = await pull(config, rel=args.version, source=source)
     except HubUnavailable as exc:
         logger.error("Hub pull unavailable: {}", str(exc))
+        if pull_attempted:
+            logger.error("{}", HUB_PULL_FAILURE_GUIDANCE)
         raise SystemExit(1) from None
     except FATAL_HUB_ERRORS as exc:
         # Client fatal outcomes are already logged; pre-client identity failures
         # are formatted here exactly once.
         if pre_client_fatal:
             logger.error("{}", str(exc))
+        if pull_attempted:
+            logger.error("{}", HUB_PULL_FAILURE_GUIDANCE)
         raise SystemExit(1) from None
     if not installed:
+        logger.error("{}", HUB_PULL_FAILURE_GUIDANCE)
         raise SystemExit(1)

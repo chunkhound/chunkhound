@@ -218,6 +218,11 @@ chunkhound pull .
 chunkhound index . --trust
 ```
 
+If an authorized hub pull is attempted but cannot complete, ChunkHound stops
+instead of silently continuing with local indexing. Remove the stored grant with
+`chunkhound pull . --forget-trust` or disable `hub.url`, then rerun `index` to
+work locally without another hub attempt.
+
 An ordinary trusted `index` may use a hub base only when an exhaustive inventory
 shows genuinely cold state. Every existing database stays local and reaches
 ordinary model-drift handling; use trusted explicit `pull` when replacement is

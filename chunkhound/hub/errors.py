@@ -8,6 +8,12 @@ from chunkhound.providers.database.ownership import (
     DatabaseReaderCloseError,
 )
 
+HUB_PULL_FAILURE_GUIDANCE = (
+    "The attempted hub pull did not complete. To index locally without another "
+    "hub attempt, run chunkhound pull . --forget-trust or disable hub.url, then "
+    "rerun chunkhound index ."
+)
+
 
 class HubUnavailable(RuntimeError):  # noqa: N818 - public hub failure category
     """Hub cannot supply a usable candidate; auto indexing may continue."""
