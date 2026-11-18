@@ -12,6 +12,7 @@ from loguru import logger
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
+
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
@@ -89,7 +90,6 @@ def _enqueue_realtime_event(
         )
 
 
-
 @dataclass(frozen=True, slots=True)
 class RealtimeMutation:
     """One downstream realtime pipeline operation."""
@@ -130,6 +130,7 @@ class SimpleEventHandler:
         source_event_callback: Callable[[str, Path], None] | None = None,
         filtered_event_callback: Callable[[str, Path], None] | None = None,
         admission_callback: AdmissionCallback | None = None,
+        event_interceptor: Callable[[Any], bool] | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
@@ -138,6 +139,7 @@ class SimpleEventHandler:
         self._source_event_callback = source_event_callback
         self._filtered_event_callback = filtered_event_callback
         self._admission_callback = admission_callback
+        self._event_interceptor = event_interceptor
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -151,6 +153,8 @@ class SimpleEventHandler:
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
+        if self._event_interceptor and self._event_interceptor(event):
+            return
         # Handle directory creation
         if event.event_type == "created" and event.is_directory:
             # Queue directory creation for processing

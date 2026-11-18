@@ -32,6 +32,7 @@ from chunkhound.watchman import (
 
 from .adapters import _default_watchman_health_snapshot
 from .context import RealtimeServiceContext
+from .delivery_probe import FilesystemDeliveryProbe
 from .events import (
     HotPathPressure,
     RealtimeMutation,
@@ -84,7 +85,18 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _EVENT_PRESSURE_ELEVATED_COALESCED_UPDATES = 5
     _EVENT_PRESSURE_OVERLOADED_COALESCED_UPDATES = 20
     _COMPACTION_IDLE_INTERVAL_SECONDS = 300.0
-    _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
+    # FSEvents delivers in delayed batches (~1-3.5s idle); the probe deadline
+    # (setup timeout minus cleanup reserve) must exceed that under load.
+    _WATCHDOG_SETUP_TIMEOUT_SECONDS = 8.0
+    # Ping window must exceed FSEvents batch coalescing (~1-2s); a healthy
+    # stream delivers pings well inside it, a deaf stream never does.
+    _DELIVERY_PING_WINDOW_SECONDS = 4.0
+    # One missed ping can be a transient FSEvents delay, not deafness. Only a
+    # full run of consecutive misses proves the stream stopped delivering.
+    _MAX_MISSED_DELIVERY_PINGS = 3
+    # A proven-healthy stream only heartbeats; missed pings still ping each tick.
+    _HEALTHY_DELIVERY_PING_INTERVAL_SECONDS = 300.0
+    _DROPPED_RESCAN_BACKOFF_MAX_SECONDS = 120.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
     # Retry budget shared by delete-conflict and compaction-busy retries.
@@ -129,6 +141,11 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         )
         self._RECONCILE_BACKOFF_MAX_SECONDS = (
             config.indexing.reconcile_backoff_max_seconds
+        )
+        # Supervision cadence comes only from config; the class carries no
+        # duplicate constant (single source of truth).
+        self._realtime_supervision_interval_seconds = (
+            config.indexing.realtime_supervision_interval_seconds
         )
         self._debug_sink = debug_sink
         self._status_callback = status_callback
@@ -218,16 +235,28 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self.scan_complete = False
         self.observer: RealtimeObserver | None = None
         self.event_handler: SimpleEventHandler | None = None
+        self._delivery_probe: FilesystemDeliveryProbe | None = None
+        self._dropped_event_batches_seen = 0
+        self._ping_delivery_future: asyncio.Task[bool] | None = None
+        self._ping_attempts = 0
+        self._pings_delivered = 0
+        self._last_ping_delivered: bool | None = None
+        self._consecutive_missed_pings = 0
+        self._last_ping_at: float | None = None
+        self._dropped_rescan_failures = 0
+        self._next_dropped_rescan_attempt_at = 0.0
         self.watch_path: Path | None = None
         self.process_task: asyncio.Task | None = None
         self.event_consumer_task: asyncio.Task | None = None
         self._polling_task: asyncio.Task | None = None
         self._watchdog_setup_task: asyncio.Task | None = None
         self._watchdog_bootstrap_future: (
-            asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler] | None] | None
+            asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler, Any] | None]
+            | None
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
         self._resync_dispatch_task: asyncio.Task | None = None
+        self._monitor_supervision_task: asyncio.Task | None = None
         self._active_start_task: asyncio.Task | None = None
         self._start_generation = 0
         self._using_polling = False
@@ -351,6 +380,24 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         }
 
     @classmethod
+    def _delivery_ping_snapshot(
+        cls,
+        *,
+        attempts: int = 0,
+        delivered: int = 0,
+        last_delivered: bool | None = None,
+        consecutive_misses: int = 0,
+    ) -> dict[str, Any]:
+        """Single schema for live and neutral delivery-ping health."""
+        return {
+            "attempts": attempts,
+            "delivered": delivered,
+            "last_delivered": last_delivered,
+            "consecutive_misses": consecutive_misses,
+            "max_consecutive_misses": cls._MAX_MISSED_DELIVERY_PINGS,
+        }
+
+    @classmethod
     def _default_pending_mutation_snapshot(cls) -> dict[str, Any]:
         counts_by_operation = {
             operation: 0 for operation in cls._PENDING_MUTATION_STATUS_OPERATIONS
@@ -460,6 +507,7 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "last_files_checked": 0,
                 "last_snapshot_truncated": False,
             },
+            "delivery_pings": cls._delivery_ping_snapshot(),
             "event_pressure": cls._default_event_pressure_snapshot(),
             "pipeline": cls._default_pipeline_snapshot(),
             "startup": RealtimeStartupStatusTracker.default_snapshot(startup_mode),
@@ -594,6 +642,14 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "last_files_checked": self._last_poll_files_checked,
                 "last_snapshot_truncated": self._last_poll_snapshot_truncated,
             }
+        )
+        status["delivery_pings"].update(
+            self._delivery_ping_snapshot(
+                attempts=self._ping_attempts,
+                delivered=self._pings_delivered,
+                last_delivered=self._last_ping_delivered,
+                consecutive_misses=self._consecutive_missed_pings,
+            )
         )
         status["event_pressure"].update(self._build_event_pressure_snapshot())
         pipeline = self._build_pipeline_snapshot()

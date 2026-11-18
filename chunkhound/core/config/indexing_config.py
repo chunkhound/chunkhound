@@ -272,6 +272,16 @@ class IndexingConfig(BaseModel):
         default=30.0, description="Internal reconcile backoff ceiling"
     )
 
+    # Watchdog supervision tick cadence: the periodic health check covering
+    # dead-emitter detection, dropped-batch rescans, and delivery pings.
+    # Internal knob; defaults match production behavior and are only tuned by
+    # tests/deployments via config precedence or the CHUNKHOUND_INDEXING__ env.
+    realtime_supervision_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Internal watchdog supervision tick cadence (seconds)",
+    )
+
     # When true, also load the CH root's .gitignore as a global overlay in addition
     # to per-repo .gitignore files. This does not affect Git itself; it is a CH-only
     # convenience to apply workspace-wide rules across external repos.
@@ -502,6 +512,17 @@ class IndexingConfig(BaseModel):
 
         if index_unknown := os.getenv("CHUNKHOUND_INDEXING__INDEX_UNKNOWN_FILES"):
             config["index_unknown_files"] = index_unknown.lower() in ("true", "1", "yes")
+
+        # Watchdog supervision cadence
+        if supervision_interval := os.getenv(
+            "CHUNKHOUND_INDEXING__REALTIME_SUPERVISION_INTERVAL_SECONDS"
+        ):
+            try:
+                interval = float(supervision_interval)
+            except ValueError:
+                interval = 0.0
+            if interval > 0:
+                config["realtime_supervision_interval_seconds"] = interval
 
         return config
 

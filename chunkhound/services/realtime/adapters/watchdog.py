@@ -1,10 +1,57 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..context import RealtimeServiceContext, coerce_realtime_context
+
+if TYPE_CHECKING:
+    from ..startup import RealtimeObserver
+
+
+@functools.cache
+def _rescan_aware_observer_class() -> type[Any]:
+    """Define the macOS observer once, keeping watchdog imports lazy.
+
+    macOS FSEvents can silently LOSE events: native batches carry
+    `must_scan_subdirs` (kernel/user dropped) which watchdog ignores. Counting
+    them lets realtime supervision trigger a reconciliation rescan.
+    """
+    from watchdog.observers.api import DEFAULT_OBSERVER_TIMEOUT
+    from watchdog.observers.fsevents import FSEventsEmitter, FSEventsObserver
+
+    class RescanAwareFSEventsEmitter(FSEventsEmitter):
+        # Supervision reads this counter; the class default keeps it simple.
+        dropped_event_batches = 0
+
+        # NativeEvent-bearing signature is FSEventsEmitter's own override shape
+        # (watchdog's fsevents.py carries the same ignore).
+        def queue_events(  # type: ignore[override]
+            self, timeout: float, events: list[Any]
+        ) -> None:
+            if any(getattr(event, "must_scan_subdirs", False) for event in events):
+                self.dropped_event_batches += 1
+            super().queue_events(timeout, events)
+
+    class RescanAwareFSEventsObserver(FSEventsObserver):
+        def __init__(self, *, timeout: float = DEFAULT_OBSERVER_TIMEOUT) -> None:
+            super().__init__(timeout=timeout)
+            self._emitter_class = RescanAwareFSEventsEmitter
+
+    return RescanAwareFSEventsObserver
+
+
+def create_watchdog_observer() -> RealtimeObserver:
+    """Build the watchdog observer for this platform (lazy watchdog import)."""
+    if sys.platform != "darwin":
+        from watchdog.observers import Observer
+
+        return Observer()
+
+    return cast("RealtimeObserver", _rescan_aware_observer_class()())
 
 
 class WatchdogRealtimeAdapter:

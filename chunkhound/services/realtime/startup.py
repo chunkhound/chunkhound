@@ -11,7 +11,7 @@ from typing import Any, Protocol
 
 from loguru import logger
 
-from chunkhound.utils.windows_constants import IS_WINDOWS
+from chunkhound.utils.logging_bridge import bridge_std_logger
 from chunkhound.watchman import WatchmanScopePlan
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
@@ -22,7 +22,13 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
+from .delivery_probe import FilesystemDeliveryProbe
 from .events import SimpleEventHandler
+
+# Python 3.10 keeps asyncio.TimeoutError distinct from the builtin: the sync
+# probe and observer-start deadlines raise the builtin, wait_for raises the
+# asyncio class. One tuple keeps every timeout on the designed fallback path.
+_TIMEOUT_ERRORS = (asyncio.TimeoutError, TimeoutError)
 
 
 class RealtimeObserver(Protocol):
@@ -46,9 +52,9 @@ class RealtimeObserver(Protocol):
 
 def _create_watchdog_observer() -> RealtimeObserver:
     """Import watchdog only inside the watchdog startup path."""
-    from watchdog.observers import Observer
+    from .adapters.watchdog import create_watchdog_observer
 
-    return Observer()
+    return create_watchdog_observer()
 
 
 class RealtimeStartupStatusTracker:
@@ -266,6 +272,27 @@ class RealtimeStartupStatusTracker:
 
 
 class RealtimeStartupMixin:
+    _WATCHDOG_SETUP_TIMEOUT_SECONDS: float
+    # Watchdog stream supervision: interval cadence, ping delivery budget.
+    _realtime_supervision_interval_seconds: float
+    _DELIVERY_PING_WINDOW_SECONDS: float
+    _HEALTHY_DELIVERY_PING_INTERVAL_SECONDS: float
+    _DROPPED_RESCAN_BACKOFF_MAX_SECONDS: float
+    _MAX_MISSED_DELIVERY_PINGS: int
+    _monitor_supervision_task: asyncio.Task[None] | None
+    _ping_delivery_future: asyncio.Task[bool] | None
+    _delivery_probe: FilesystemDeliveryProbe | None
+    observer: RealtimeObserver | None
+    event_handler: SimpleEventHandler | None
+    _dropped_event_batches_seen: int
+    _ping_attempts: int
+    _pings_delivered: int
+    _last_ping_delivered: bool | None
+    _consecutive_missed_pings: int
+    _last_ping_at: float | None
+    _dropped_rescan_failures: int
+    _next_dropped_rescan_attempt_at: float
+
     def _start_startup_phase(self, phase_name: str) -> None:
         self._startup_tracker.start_phase(phase_name)
         self._emit_status_update()
@@ -470,7 +497,7 @@ class RealtimeStartupMixin:
         if not future.done():
             try:
                 await asyncio.wait_for(future, timeout=1.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (asyncio.CancelledError, *_TIMEOUT_ERRORS):
                 pass
             except Exception as error:
                 logger.debug(
@@ -601,6 +628,8 @@ class RealtimeStartupMixin:
         ):
             active_start_task.cancel()
 
+        await self._cancel_supervision_task()
+
         if self._monitor_adapter:
             await self._monitor_adapter.stop()
         self._watchdog_setup_task = None
@@ -647,6 +676,9 @@ class RealtimeStartupMixin:
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Setup watchdog with timeout - fall back to polling if it takes too long."""
+        # Watchdog emitter threads report native stream failures through the
+        # standard `fsevents` logger; bridge it or those errors stay invisible.
+        bridge_std_logger("fsevents")
         self._watchdog_bootstrap_abort = threading.Event()
         self._watchdog_bootstrap_future = loop.run_in_executor(
             None,
@@ -666,20 +698,27 @@ class RealtimeStartupMixin:
             )
             if bootstrap_result is None:
                 return
-            observer, event_handler = bootstrap_result
-            self._adopt_watchdog_monitor(observer, event_handler, watch_path)
-        except asyncio.TimeoutError:
+            observer, event_handler, probe = bootstrap_result
+            await self._adopt_watchdog_monitor(
+                observer, event_handler, watch_path, probe
+            )
+        except asyncio.CancelledError:
+            self._watchdog_bootstrap_abort.set()
+            raise
+        except _TIMEOUT_ERRORS:
             self._watchdog_bootstrap_abort.set()
             self._fail_startup_phase(
                 "watchdog_setup",
-                "Watchdog setup timed out",
+                "Watchdog setup or filesystem delivery probe timed out",
             )
-            logger.info(
-                f"Watchdog setup timed out for {watch_path} - falling back to polling"
+            logger.warning(
+                f"Watchdog setup/delivery timed out for {watch_path} "
+                "- falling back to polling"
             )
             await self._start_polling_backend(
                 watch_path,
-                reason="Watchdog setup timed out; switched to polling mode",
+                reason="Watchdog setup or filesystem delivery probe timed out; "
+                "switched to polling mode",
             )
         except Exception as e:
             self._watchdog_bootstrap_abort.set()
@@ -700,7 +739,10 @@ class RealtimeStartupMixin:
                 self._watchdog_bootstrap_future = None
 
     def _handle_watchdog_bootstrap_done(
-        self, future: asyncio.Future[tuple[RealtimeObserver, SimpleEventHandler] | None]
+        self,
+        future: asyncio.Future[
+            tuple[RealtimeObserver, SimpleEventHandler, FilesystemDeliveryProbe] | None
+        ],
     ) -> None:
         """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
         if self._watchdog_bootstrap_future is future:
@@ -710,19 +752,22 @@ class RealtimeStartupMixin:
 
         try:
             bootstrap_result = future.result()
+        except _TIMEOUT_ERRORS:
+            # Probe/setup timeout is a designed fallback trigger. The outer
+            # wait_for path owns the warning + polling fallback; recording an
+            # error here would poison live_indexing_state permanently.
+            return
         except Exception as error:
-            if (
-                not self._watchdog_bootstrap_abort.is_set()
-                and self._service_state not in {"stopping", "stopped"}
-            ):
+            # Same as above: the outer path owns fallback semantics. Recovery
+            # to polling must surface as a warning, never a degraded state.
+            if self._service_state not in {"stopping", "stopped"}:
                 logger.warning(f"Watchdog bootstrap failed: {error}")
-                self._set_error(f"Watchdog bootstrap failed: {error}")
             return
 
         if bootstrap_result is None:
             return
 
-        observer, _event_handler = bootstrap_result
+        observer, _event_handler, _probe = bootstrap_result
         if (
             self._watchdog_bootstrap_abort.is_set()
             or self._using_polling
@@ -749,11 +794,12 @@ class RealtimeStartupMixin:
         else:
             self._emit_status_update()
 
-    def _adopt_watchdog_monitor(
+    async def _adopt_watchdog_monitor(
         self,
         observer: RealtimeObserver,
         event_handler: SimpleEventHandler,
         watch_path: Path,
+        probe: FilesystemDeliveryProbe,
     ) -> None:
         """Adopt a successfully bootstrapped watchdog observer into service state."""
         if (
@@ -771,31 +817,275 @@ class RealtimeStartupMixin:
         logger.debug("Watchdog setup completed successfully (recursive mode)")
         self._debug("watchdog setup complete (recursive)")
         self._set_effective_backend("watchdog")
+        self._delivery_probe = probe
+        self._consecutive_missed_pings = 0
+        # A fresh observer starts its emitter counters at zero; keep the
+        # baseline in step or dropped-batch rescans stay suppressed.
+        self._dropped_event_batches_seen = 0
         self._monitoring_ready_at = self._utc_now()
         self.monitoring_ready.set()
         self._complete_startup_phase("watchdog_setup")
+        await self._start_monitor_supervision()
         self._emit_status_update()
+
+    async def _start_monitor_supervision(self) -> None:
+        """Watch the adopted watchdog stream; dead emitters mean silent data loss."""
+        await self._cancel_supervision_task()
+        task = asyncio.create_task(self._supervise_watchdog_monitor())
+        task.add_done_callback(self._log_supervision_exit)
+        self._monitor_supervision_task = task
+
+    @staticmethod
+    def _log_supervision_exit(task: asyncio.Task[None]) -> None:
+        """Retrieve unexpected termination so supervision cannot die silently."""
+        if not task.cancelled() and (error := task.exception()):
+            logger.error(f"Watchdog supervision stopped unexpectedly: {error}")
+
+    async def _cancel_supervision_task(self) -> None:
+        task = self._monitor_supervision_task
+        self._monitor_supervision_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        # An in-flight ping thread still owns the probe file; wait it out so
+        # callers (tests asserting a clean workspace) see the final state.
+        ping_future = self._ping_delivery_future
+        self._ping_delivery_future = None
+        if ping_future is not None:
+            try:
+                await asyncio.shield(ping_future)
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:
+                logger.debug(f"Delivery ping cleanup raised: {error}")
+
+    async def _supervise_watchdog_monitor(self) -> None:
+        """Keep watchdog honest: recover from dead threads and lost event windows.
+
+        Two failure shapes need different responses:
+        - dead observer/emitter threads or no ping delivery: the stream is
+          deaf; fall back to polling (its first snapshot fully catches up).
+        - `must_scan_subdirs` batches while the stream still delivers: FSEvents
+          lost a window; rescan the watch root to reconcile.
+        """
+        while True:
+            await asyncio.sleep(self._realtime_supervision_interval_seconds)
+            try:
+                if not await self._supervision_tick():
+                    return
+            except Exception as error:
+                logger.opt(exception=error).error(
+                    "Watchdog supervision tick failed; retrying next interval"
+                )
+
+    def _supervision_observer(self) -> RealtimeObserver | None:
+        """Return the observer only while supervision is still meaningful."""
+        if self._using_polling or self._service_state in {"stopping", "stopped"}:
+            return None
+        return self.observer
+
+    async def _supervision_tick(self) -> bool:
+        """Return False when supervision has nothing left to watch."""
+        observer = self._supervision_observer()
+        if observer is None:
+            return False
+        if not self._watchdog_monitor_healthy(observer):
+            logger.error(
+                "Watchdog event delivery stopped (observer or emitter "
+                "thread dead); falling back to polling"
+            )
+            await self._recover_dead_watchdog(observer)
+            return False
+        if await self._consume_dropped_batches(observer):
+            return True
+        probe = self._delivery_probe
+        if probe is not None and (
+            self._consecutive_missed_pings
+            or self._last_ping_at is None
+            or time.monotonic() - self._last_ping_at
+            >= self._HEALTHY_DELIVERY_PING_INTERVAL_SECONDS
+        ) and not await self._ping_delivery_stream(probe):
+            await self._recover_dead_watchdog(observer)
+            return False
+        return True
+
+    async def _consume_dropped_batches(self, observer: RealtimeObserver) -> bool:
+        """Rescan after new dropped batches; True means the tick can stop here."""
+        dropped = sum(
+            int(getattr(emitter, "dropped_event_batches", 0))
+            for emitter in getattr(observer, "emitters", ())
+        )
+        if dropped <= self._dropped_event_batches_seen:
+            return False
+        if self._dropped_rescan_failures:
+            if time.monotonic() < self._next_dropped_rescan_attempt_at:
+                return False
+        logger.warning(
+            "FSEvents reported dropped/coalesced event batches; "
+            "rescanning the watch root"
+        )
+        try:
+            await self._request_dir_rescan("FSEvents dropped/coalesced events")
+        except Exception as error:
+            # Back off before retrying; warn only when the backoff starts.
+            self._dropped_rescan_failures += 1
+            self._next_dropped_rescan_attempt_at = time.monotonic() + min(
+                self._realtime_supervision_interval_seconds
+                * (2 ** (self._dropped_rescan_failures - 1)),
+                self._DROPPED_RESCAN_BACKOFF_MAX_SECONDS,
+            )
+            if self._dropped_rescan_failures == 1:
+                logger.warning(f"Dropped-batch rescan failed; retrying: {error}")
+                self._set_warning(f"Dropped-batch rescan failed: {error}")
+            return False
+        self._dropped_event_batches_seen = dropped
+        self._dropped_rescan_failures = 0
+        return True
+
+    async def _ping_delivery_stream(self, probe: FilesystemDeliveryProbe) -> bool:
+        """Return True while the stream is trustworthy enough to keep watching.
+
+        Only consecutive misses prove deafness; exceptions count as misses.
+        """
+        self._last_ping_delivered = await self._run_delivery_ping(probe)
+        if self._last_ping_delivered:
+            self._pings_delivered += 1
+            if self._consecutive_missed_pings:
+                logger.info(
+                    "Watchdog delivery recovered after "
+                    f"{self._consecutive_missed_pings} missed ping(s)"
+                )
+            self._consecutive_missed_pings = 0
+            self._last_ping_at = time.monotonic()
+            return True
+        self._consecutive_missed_pings += 1
+        return self._ping_miss_within_budget()
+
+    async def _run_delivery_ping(self, probe: FilesystemDeliveryProbe) -> bool:
+        """Run one probe ping; a raising ping is a miss, not a supervision crash."""
+        self._ping_attempts += 1
+        self._ping_delivery_future = asyncio.create_task(
+            asyncio.to_thread(probe.ping, self._DELIVERY_PING_WINDOW_SECONDS)
+        )
+        try:
+            # Shield: cancelling supervision must not cancel the to_thread
+            # worker, or shutdown could not await it for probe cleanup.
+            return await asyncio.shield(self._ping_delivery_future)
+        except Exception as error:
+            logger.opt(exception=error).warning(
+                "Watchdog delivery ping raised; counting it as a missed ping"
+            )
+            return False
+
+    def _ping_miss_within_budget(self) -> bool:
+        """Log this miss; return False when the fallback threshold is reached."""
+        misses = self._consecutive_missed_pings
+        if misses < self._MAX_MISSED_DELIVERY_PINGS:
+            logger.warning(
+                "Watchdog stream delivered no ping event "
+                f"({misses}/{self._MAX_MISSED_DELIVERY_PINGS} consecutive misses); "
+                "keeping watchdog supervision"
+            )
+            return True
+        logger.error(
+            f"Watchdog stream missed {misses} consecutive delivery pings; "
+            "falling back to polling"
+        )
+        return False
+
+    @staticmethod
+    def _watchdog_monitor_healthy(observer: RealtimeObserver) -> bool:
+        """Alive dispatch thread is not enough: dead emitters go deaf silently."""
+        if not observer.is_alive():
+            return False
+        emitters = getattr(observer, "emitters", None)
+        if not emitters:
+            return True
+        return all(emitter.is_alive() for emitter in emitters)
+
+    async def _recover_dead_watchdog(self, observer: RealtimeObserver) -> None:
+        watch_path = self.watch_path
+        await self._stop_observer()
+        if not watch_path or self._service_state in {"stopping", "stopped"}:
+            return
+        await self._start_polling_backend(
+            watch_path,
+            reason="Watchdog event delivery stopped; switched to polling mode",
+        )
+        # Polling snapshots recover missed writes; resync is the stronger
+        # reconciliation when a callback is wired (test harnesses omit it).
+        if self._resync_callback is not None:
+            await self.request_resync(
+                reason="Watchdog event delivery stopped",
+                details={"watch_path": str(watch_path)},
+            )
+
+    async def _request_dir_rescan(self, reason: str) -> None:
+        """Re-index the watch root through the existing dir_index mutation path."""
+        if not self.watch_path or self._service_state in {"stopping", "stopped"}:
+            return
+        self._debug(f"rescan requested: {reason}")
+        await self._enqueue_mutation(self._build_mutation("dir_index", self.watch_path))
+        await self._reconcile_missing_files(self.watch_path)
 
     @staticmethod
     def _stop_bootstrap_observer(observer: RealtimeObserver) -> None:
         """Stop a watchdog observer created during a bootstrap race."""
         try:
             observer.stop()
-        except Exception:
-            pass
+        except Exception as error:
+            logger.debug(f"Bootstrap observer stop raised: {error}")
         try:
             observer.join(timeout=1.0)
-        except Exception:
-            pass
+        except Exception as error:
+            logger.debug(f"Bootstrap observer join raised: {error}")
 
     def _bootstrap_fs_monitor(
         self,
         watch_path: Path,
         loop: asyncio.AbstractEventLoop,
         abort_event: threading.Event,
-    ) -> tuple[RealtimeObserver, SimpleEventHandler] | None:
-        """Create and start a watchdog observer without mutating shared state."""
-        event_handler = SimpleEventHandler(
+    ) -> tuple[RealtimeObserver, SimpleEventHandler, FilesystemDeliveryProbe] | None:
+        """Adopt only a live observer that delivers a real filesystem event."""
+        probe = FilesystemDeliveryProbe(watch_path)
+        event_handler = self._build_watchdog_event_handler(watch_path, loop, probe)
+        observer = _create_watchdog_observer()
+        ready = False
+        # Reserve one second of the existing setup budget for observer cleanup.
+        deadline = time.monotonic() + max(0, self._WATCHDOG_SETUP_TIMEOUT_SECONDS - 1)
+        try:
+            observer.schedule(event_handler, str(watch_path), recursive=True)
+            observer.start()
+            ready = self._verify_watchdog_delivery(
+                observer, probe, abort_event, deadline
+            )
+            return (observer, event_handler, probe) if ready else None
+        finally:
+            self._finish_watchdog_probe(probe, observer, ready)
+
+    def _finish_watchdog_probe(
+        self, probe: FilesystemDeliveryProbe, observer: RealtimeObserver, ready: bool
+    ) -> None:
+        try:
+            probe.remove()
+        except OSError as error:
+            # A leaked probe file self-heals: the next supervision ping rewrites
+            # and unlinks the same exact service-temp path. Discarding a
+            # verified observer over cleanup would cost real-time latency.
+            logger.debug(f"Watchdog probe cleanup failed: {error}")
+        if not ready:
+            self._stop_bootstrap_observer(observer)
+
+    def _build_watchdog_event_handler(
+        self,
+        watch_path: Path,
+        loop: asyncio.AbstractEventLoop,
+        probe: FilesystemDeliveryProbe,
+    ) -> SimpleEventHandler:
+        return SimpleEventHandler(
             self.event_queue,
             self.config,
             loop,
@@ -804,39 +1094,24 @@ class RealtimeStartupMixin:
             source_event_callback=self._record_source_event,
             filtered_event_callback=self._record_filtered_event,
             admission_callback=self._should_admit_realtime_event,
+            event_interceptor=probe.intercept,
         )
-        observer = _create_watchdog_observer()
 
-        # Use recursive=True to ensure all directory events are captured
-        # This is necessary for proper real-time monitoring of new directories
-        observer.schedule(
-            event_handler,
-            str(watch_path),
-            recursive=True,  # Use recursive for complete event coverage
-        )
-        observer.start()
-
-        # Wait for observer thread to be fully running
-        # On Windows, observer thread startup can be noticeably slower.
-        # Give it more time to become alive to avoid unnecessary polling fallback.
-        max_wait = 5.0 if IS_WINDOWS else 1.0
-        start = time.time()
-        while not observer.is_alive() and (time.time() - start) < max_wait:
-            if abort_event.is_set():
-                self._stop_bootstrap_observer(observer)
-                return None
-            time.sleep(0.01)
-
+    @staticmethod
+    def _verify_watchdog_delivery(
+        observer: RealtimeObserver,
+        probe: FilesystemDeliveryProbe,
+        abort_event: threading.Event,
+        deadline: float,
+    ) -> bool:
+        while not observer.is_alive():
+            if abort_event.wait(0.01):
+                return False
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Watchdog observer failed to start within timeout")
         if abort_event.is_set():
-            self._stop_bootstrap_observer(observer)
-            return None
-
-        if observer.is_alive():
-            logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
-            return observer, event_handler
-
-        self._stop_bootstrap_observer(observer)
-        raise RuntimeError("Observer failed to start within timeout")
+            return False
+        return probe.verify(abort_event, deadline)
 
     async def _add_subdirectories_progressively(self, root_path: Path) -> None:
         """No longer needed - using recursive monitoring."""

@@ -2185,10 +2185,10 @@ class TestRealtimeFunctional:
             _watch_path: Path,
             loop: asyncio.AbstractEventLoop,
             _abort_event,
-        ) -> tuple[MagicMock, MagicMock]:
+        ) -> tuple[MagicMock, MagicMock, MagicMock]:
             time.sleep(0.05)
             loop.call_soon_threadsafe(late_watchdog_returned.set)
-            return late_observer, MagicMock()
+            return late_observer, MagicMock(), MagicMock()
 
         monkeypatch.setattr(
             service, "_WATCHDOG_SETUP_TIMEOUT_SECONDS", 0.01, raising=False
