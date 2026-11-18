@@ -232,16 +232,18 @@ def test_watches_are_scheduled_without_read_only_events(
 
         def join(self, timeout: float | None = None) -> None: ...
 
-    monkeypatch.setattr(startup_module, "_create_watchdog_observer", FakeObserver)
+    def fake_create(on_overflow: Callable[[], None]) -> tuple[FakeObserver, str]:
+        return FakeObserver(), "not_applicable"
+
+    monkeypatch.setattr(startup_module, "_create_watchdog_observer", fake_create)
     config = Config(target_dir=tmp_path, indexing={"realtime_backend": "watchdog"})
     service = RealtimeIndexingService(SimpleNamespace(provider=None), config)
     loop = asyncio.new_event_loop()
     try:
-        observer, handler = service._bootstrap_fs_monitor(
-            tmp_path, loop, threading.Event()
-        )
-        service.observer = observer
-        service.event_handler = handler
+        bootstrap = service._bootstrap_fs_monitor(tmp_path, loop, threading.Event())
+        assert bootstrap is not None
+        service.observer = bootstrap.observer
+        service.event_handler = bootstrap.event_handler
         loop.run_until_complete(service._add_directory_watch(str(tmp_path / "new")))
     finally:
         loop.close()

@@ -151,6 +151,11 @@ def _escape_like_pattern(value: str) -> str:
     return escape_like_pattern(value, escape_quotes=True)
 
 
+def _sql_text(value: str) -> str:
+    """A string literal for a LanceDB SQL filter or expression."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _iter_batches(values: list[int], batch_size: int) -> list[list[int]]:
     """Split a list into fixed-size batches."""
     return [values[idx : idx + batch_size] for idx in range(0, len(values), batch_size)]
@@ -784,6 +789,53 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         except Exception as e:
             logger.error(f"Error updating file {file_id}: {e}")
+
+    def _executor_refresh_file_mtimes(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        entries: list[tuple[str, float, str]],
+    ) -> int:
+        """Executor method for refresh_file_mtimes - runs in DB thread.
+
+        Another process can index the same database (nothing locks the files
+        table across connections), so a row read here may be rewritten before
+        the write. The write is therefore a compare-and-swap: one merge keyed
+        on (path, content_hash, indexed_time) as read. Every write of a file's
+        content or skip state sets a new indexed_time, so the merge matches
+        only a row nobody rewrote since it was read, and stores that row with
+        the new modified_time and nothing else changed. A row rewritten in
+        between keeps that writer's values.
+
+        Lance 0.39 offers no per-row value in a conditional update (it rejects
+        CASE) and fails a merge whose source has fewer columns than the table,
+        so the merge carries the whole row as read.
+        """
+        if not self._files_table:
+            return 0
+        wanted = {  # type: ignore[unreachable]
+            path: (float(mtime), content_hash) for path, mtime, content_hash in entries
+        }
+        in_list = ", ".join(_sql_text(path) for path in wanted)
+        rows = (
+            self._files_table.search()
+            .where(f"path IN ({in_list})")
+            .limit(len(wanted))
+            .to_list()
+        )
+        confirmed = []
+        for row in rows:
+            mtime, content_hash = wanted[row["path"]]
+            if row.get("content_hash") == content_hash:
+                confirmed.append({**row, "modified_time": mtime})
+        if not confirmed:
+            return 0
+        result = (
+            self._files_table.merge_insert(["path", "content_hash", "indexed_time"])
+            .when_matched_update_all()
+            .execute(confirmed)
+        )
+        return int(result.num_updated_rows)
 
     def record_skipped_file(
         self,

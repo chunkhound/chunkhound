@@ -14,31 +14,43 @@ uv run pytest tests/test_smoke.py -v -n auto
 
 A stable release is published when its GitHub Release is published. An
 alpha/beta/RC tag triggers `release-rc.yml` and publishes the pre-release to
-PyPI. Create tags only with `uv run scripts/update_version.py`; never edit
-version strings manually.
+PyPI. Successful upstream `main` push builds also create alpha tags and call the
+same reusable `release-packages.yml` workflow directly. Create manual release
+tags with `uv run scripts/update_version.py`; never edit version strings manually.
 
 ## Prerequisites (one-time setup)
 
 ### 1. OIDC Trusted Publishing — PyPI
 
-Configure Trusted Publisher on **PyPI** for the **`chunkhound`** project, covering both the
-release and RC workflows (RC pre-releases publish to PyPI, not TestPyPI):
+Configure Trusted Publishers on **PyPI** for the reusable **`release-packages.yml`**
+workflow. PyPI identifies the publishing job through `job_workflow_ref`, which names
+the reusable workflow, not the entry workflow (`ci.yml`, `release.yml`, or
+`release-rc.yml`). All channels publish to real PyPI, not TestPyPI:
 
 - Project: `chunkhound`
 - Owner: `chunkhound`
 - Repository: `chunkhound`
-- Workflow: `release.yml`, Environment: `pypi`
-- Workflow: `release-rc.yml`, Environment: `pypi`
+- Workflow: `release-packages.yml`, Environment: `pypi`
+- Workflow: `release-packages.yml`, Environment: `pypi-alpha`
 
 Separately, configure Trusted Publisher on **PyPI** for the **`chunkhound-native`** project — it
-is a distinct PyPI project published by the `publish-native`/`publish-rc-native` jobs in the same
-two workflows:
+is a distinct PyPI project published by the reusable workflow's `publish-native` job:
 
 - Project: `chunkhound-native`
 - Owner: `chunkhound`
 - Repository: `chunkhound`
-- Workflow: `release.yml`, Environment: `pypi-native`
-- Workflow: `release-rc.yml`, Environment: `pypi-native`
+- Workflow: `release-packages.yml`, Environment: `pypi-native`
+- Workflow: `release-packages.yml`, Environment: `pypi-alpha-native`
+
+Add these entries before enabling the new workflows. Existing publisher entries for
+old workflow filenames do not authorize the reusable publishing jobs.
+
+Both publishing steps disable optional attestations while retaining OIDC Trusted
+Publishing. Attestations identify the caller workflow (for example, `ci.yml`),
+but PyPI authenticates the reusable `release-packages.yml` workflow. PyPI rejects
+that mismatch with `400 Invalid attestations`. Keep attestations disabled until
+this reusable-workflow limitation is resolved; do not change the publisher's
+workflow filename to the caller to work around it.
 
 **Each project's trusted publisher must only claim the environment name its own jobs actually
 declare.** An overly broad "any environment" entry on `chunkhound` will intercept the OIDC token
@@ -49,12 +61,14 @@ unscoped or wrongly-scoped entry stealing the match.
 
 ### 2. GitHub Environments
 
-Create four environments in **Settings → Environments**:
+Configure these environments in **Settings → Environments**:
 
 | Environment | Purpose | Protection rules |
 |---|---|---|
 | `pypi` | Production + RC PyPI publish for `chunkhound` | Required reviewers: maintainer team |
 | `pypi-native` | Production + RC PyPI publish for `chunkhound-native` | Same trusted-publisher scoping as `pypi`, kept as a separate environment since it's a distinct PyPI project |
+| `pypi-alpha` | Automatic alpha publish for `chunkhound` | Restrict to trusted repository runs; no required reviewer |
+| `pypi-alpha-native` | Automatic alpha publish for `chunkhound-native` | Same alpha controls; no required reviewer |
 | `maintainers` | Deprecation approvals | Required reviewers: maintainer team |
 
 There is no `testpypi` environment — RC releases publish pre-release versions to the real PyPI
@@ -64,15 +78,73 @@ index (see `release-rc.yml`), not TestPyPI.
 
 In **Settings → Rules → Rulesets**, create a ruleset:
 
-- Target: tags matching `v*`
-- Restrict tag creation/deletion to: maintainer team
-- This ensures only maintainers can trigger RC and release workflows
+- Protect `v*` tags against updates and deletion, including alpha tags.
+- Protect `alpha-build/**` tags against updates and deletion. They record immutable
+  allocator identity, not package versions or release artifacts.
+- Allow the Actions identity to **create** alpha tags and `alpha-build/**` tags;
+  do not give it blanket bypass permission for stable/beta/RC tags.
+- Keep stable/beta/RC tag creation restricted to maintainers.
+
+Use separate creation and update/deletion rules so allowing CI creation does not
+allow it to move a release. Verify the effective rules with repository admins:
+`contents: write` does not bypass a restrictive ruleset. Both tag refs are pushed
+atomically, so a rejected identity ref also prevents creation of the alpha tag.
 
 ### 4. Deprecation secret
 
 Add `PYPI_API_TOKEN` to the `maintainers` environment secrets. This token must have **Owner** role on the `chunkhound` PyPI project (required for yanking releases).
 
 ---
+
+## Continuous Alpha Releases
+
+Every successful push build on upstream `chunkhound/chunkhound` main allocates the
+next available `vX.Y.ZaN` tag after existing CI validation. PR, merge-queue, manual,
+and fork CI runs do not allocate tags. No GitHub App or PAT is required: CI creates
+the tag using `GITHUB_TOKEN`, then directly calls the reusable release workflow.
+
+The alpha base is the next minor after the highest stable `vX.Y.Z` tag on the
+remote (compared numerically; prerelease tags are ignored): stable `6.1.0` gives
+alphas `v6.2.0aN`, and stable `6.2.0` or a hotfix `6.2.1` moves the line to
+`v6.3.0aN`. Stable `7.0.0` gives `v7.1.0aN`. If no stable tag exists, allocation
+fails. Numbers reflect allocation order, not commit order: an older source commit
+can finish CI later and receive a higher alpha number.
+
+Publication order is not guaranteed either. Main CI runs are independent, so
+alpha N+1 can reach PyPI before alpha N, and alpha N may be missing if its
+publication fails. This is accepted. Installers choose the highest version, so
+users still end up on the newest published alpha. Do not assume that PyPI
+upload order or a gap-free sequence matches the tag order.
+
+The allocator atomically creates the release tag and
+`alpha-build/chunkhound/chunkhound/<run-id>`. The identity tag points to a metadata
+blob, not a commit, so it does not influence Git version discovery. Rerunning the
+same CI run reuses its original tag even if a newer stable tag moves the base.
+Concurrent allocations refetch and retry tag-name collisions. This is not an
+automatic publication-retry system.
+
+The requested tag supplies the exact version to both builds. Main builds override
+Hatch discovery with `SETUPTOOLS_SCM_PRETEND_VERSION`; native builds receive the
+explicit tag. Multiple tags on a source commit cannot select a different version.
+Alpha main artifacts require the matching native alpha version exactly, including
+when a wheel is rebuilt from the published sdist. Stable and beta/RC dependency
+semantics remain unchanged.
+
+For testing, install an exact alpha, for example:
+
+```bash
+pip install 'chunkhound==6.2.0a1'
+```
+
+Alphas sort below beta, RC, and stable releases of the same base version. No
+lockfile upgrade is required for every automatic alpha; local development keeps
+using the reviewed locked native dependency until deliberately upgraded.
+
+On failure, use existing manual Actions reruns. Prefer rerunning failed publication
+jobs, which normally reuse the built artifacts. Uploads keep `skip-existing: true`.
+A full workflow rerun can rebuild and overwrite Actions artifacts; after partial
+publication, PyPI may retain earlier files. This existing limitation is accepted;
+no special artifact storage, checksum registry, or automatic upload retry is added.
 
 ## RC Release
 
@@ -84,7 +156,9 @@ uv run scripts/update_version.py 1.2.0rc1
 git push origin v1.2.0rc1
 ```
 
-The `release-rc.yml` workflow builds and publishes to the real PyPI index (not TestPyPI) via OIDC, tagged as a pre-release. No manual approval needed — the tag push itself is the human gate (only maintainers can push `v*` tags).
+The `release-rc.yml` wrapper calls `release-packages.yml` to publish to real PyPI.
+Alpha tags use the alpha environments without required reviewers. Beta/RC tags use
+`pypi` and `pypi-native` and retain those environments' configured approval rules.
 
 Both release workflows use the same publication order:
 
@@ -157,7 +231,7 @@ If this fails with "no matching version found," the native wheels haven't finish
    **If the main publish fails** after native publication succeeds, the GitHub
    Release and tag are deliberately left in place. Re-run the failed downstream
    jobs from Actions after addressing the failure; do not create another tag just
-   because the main upload needs a retry. A full workflow rerun is also safe:
+   because the main upload needs a retry. A full workflow rerun is supported:
    release artifact uploads use `overwrite: true` for the same stable artifact
    names, while PyPI uploads use `skip-existing: true`. The native job does not
    need to be repeated unless its own upload failed.
