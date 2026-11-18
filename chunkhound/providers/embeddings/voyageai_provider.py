@@ -28,8 +28,11 @@ from .shared_utils import (
     build_dimension_request_param,
     build_runtime_supported_dimensions,
     chunk_text_by_words,
+    embed_preserving_positions,
+    ensure_vector_count,
     get_dimensions_for_model,
     get_usage_stats_dict,
+    require_non_blank_queries,
     validate_embedding_dims,
     validate_positive_output_dims,
     validate_runtime_output_dims_config,
@@ -545,6 +548,7 @@ class VoyageAIEmbeddingProvider:
         the indexed chunks. Callers reach this through
         ``EmbeddingProvider.embed_query``.
         """
+        require_non_blank_queries(texts)
         return await self._embed_as(texts, "query")
 
     async def _embed_as(
@@ -553,21 +557,26 @@ class VoyageAIEmbeddingProvider:
         if not texts:
             return []
 
-        validated_texts = validate_text_input(texts)
-        if not validated_texts:
-            return []
+        return await embed_preserving_positions(
+            texts,
+            lambda non_blank: self._embed_non_blank(non_blank, input_type),
+            fallback_dims=self.dims,
+        )
 
+    async def _embed_non_blank(
+        self, texts: list[str], input_type: VoyageInputType
+    ) -> list[list[float]]:
         # Sub-batch when input exceeds batch_size (protects custom/low-throughput endpoints)
-        if len(validated_texts) > self._batch_size:
+        if len(texts) > self._batch_size:
             all_embeddings: list[list[float]] = []
-            for i in range(0, len(validated_texts), self._batch_size):
-                sub_batch = validated_texts[i : i + self._batch_size]
+            for i in range(0, len(texts), self._batch_size):
+                sub_batch = texts[i : i + self._batch_size]
                 all_embeddings.extend(
                     await self._embed_single_batch(sub_batch, input_type)
                 )
             return all_embeddings
 
-        return await self._embed_single_batch(validated_texts, input_type)
+        return await self._embed_single_batch(texts, input_type)
 
     async def _embed_single_batch(
         self, texts: list[str], input_type: VoyageInputType
@@ -772,6 +781,16 @@ class VoyageAIEmbeddingProvider:
         if not texts:
             return []
 
+        return await embed_preserving_positions(
+            texts,
+            lambda non_blank: self._embed_non_blank_batches(non_blank, batch_size),
+            fallback_dims=self.dims,
+        )
+
+    async def _embed_non_blank_batches(
+        self, texts: list[str], batch_size: int | None
+    ) -> list[list[float]]:
+        """Batch non-blank texts before padding the complete logical batch."""
         effective_batch_size = batch_size or self._batch_size
         max_tokens_per_batch = self._model_config["max_tokens_per_batch"]
 
@@ -796,6 +815,7 @@ class VoyageAIEmbeddingProvider:
         if current_batch:
             all_embeddings.extend(await self.embed(current_batch))
 
+        ensure_vector_count(all_embeddings, texts)
         return all_embeddings
 
     async def embed_streaming(self, texts: list[str]) -> AsyncIterator[list[float]]:

@@ -732,6 +732,8 @@ class TransientSearchService:
         ``time_limit`` only bounds DB multi-hop exploration. It does not bound
         transient streaming or the combined final rerank.
         """
+        if not query or not query.strip():
+            raise ValueError("Search query must not be blank")
         if self._vector_source == "db":
             return await self._original.search_semantic(
                 query=query,
