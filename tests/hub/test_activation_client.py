@@ -23,6 +23,9 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.hub_config import ArchiveLimits
 from chunkhound.core.embedding_model_drift import ActiveModel, write_active_model
 from chunkhound.hub.client import (
+    automatic_inventory_paths,
+    automatic_target_absent,
+    automatic_target_appears_cold,
     fetch_validated_manifest,
     local_needs_pull,
     pull,
@@ -50,6 +53,83 @@ from chunkhound.providers.database.ownership import (
 from tests.hub.activation_support import config_for, publish
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import snapshot
+
+DUCKDB_INSTALL_SUFFIXES = (
+    "",
+    ".wal",
+    ".wal.corrupt",
+    ".compact_backup",
+    ".compact_backup.wal",
+    ".compact_new",
+    ".compact_new.wal",
+    ".old",
+    ".old.wal",
+    ".compact",
+    ".compact.wal",
+    ".swap_intent",
+    ".export_tmp",
+    ".root.json",
+    ".embedding.json",
+)
+
+
+@pytest.mark.parametrize(
+    ("backend", "filename", "suffixes"),
+    [
+        ("duckdb", "chunks.db", DUCKDB_INSTALL_SUFFIXES),
+        ("lancedb", "lancedb.lancedb", ("", ".embedding.json")),
+    ],
+)
+def test_automatic_inventory_matches_native_install_inventory(
+    tmp_path, backend, filename, suffixes
+):
+    target = tmp_path / filename
+    expected = (Path(f"{target}.chunkhound-install.json"),) + tuple(
+        Path(f"{target}{suffix}") for suffix in suffixes
+    )
+    assert automatic_inventory_paths(target, backend) == expected
+
+
+@pytest.mark.parametrize(
+    ("backend", "filename", "suffix"),
+    [
+        ("duckdb", "chunks.db", suffix) for suffix in DUCKDB_INSTALL_SUFFIXES
+    ]
+    + [
+        ("duckdb", "chunks.db", ".chunkhound-install.json"),
+        ("lancedb", "lancedb.lancedb", ""),
+        ("lancedb", "lancedb.lancedb", ".embedding.json"),
+        ("lancedb", "lancedb.lancedb", ".chunkhound-install.json"),
+    ],
+)
+def test_unowned_cold_probe_rejects_every_install_state_path(
+    tmp_path, backend, filename, suffix
+):
+    target = tmp_path / filename
+    associated = Path(f"{target}{suffix}")
+    associated.parent.mkdir(parents=True, exist_ok=True)
+    if backend == "lancedb" and suffix == "":
+        associated.mkdir()
+    else:
+        associated.write_bytes(b"state")
+    assert not automatic_target_appears_cold(target, backend)
+
+
+def test_unowned_cold_probe_suppresses_filesystem_uncertainty(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "chunks.db"
+    private = Path(f"{target}.wal")
+    original_lstat = Path.lstat
+
+    def fail_private(path):
+        if path == private:
+            raise PermissionError("private path")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fail_private)
+
+    assert not automatic_target_appears_cold(target, "duckdb")
 
 
 @pytest.fixture(autouse=True)
@@ -519,6 +599,57 @@ async def test_busy_pull_does_not_replace_or_open_partial_state(
     finally:
         held.close()
     assert await pull(config)
+
+
+@pytest.mark.parametrize("backend", ["duckdb", "lancedb"])
+def test_authoritative_cold_check_accepts_exhaustive_absence(tmp_path, backend):
+    filename = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
+    assert automatic_target_absent(tmp_path / filename, backend)
+
+
+@pytest.mark.parametrize(
+    ("backend", "suffix"),
+    [
+        ("duckdb", ".wal"),
+        ("duckdb", ".compact_backup"),
+        ("duckdb", ".compact_new"),
+        ("duckdb", ".old"),
+        ("duckdb", ".compact"),
+        ("duckdb", ".swap_intent"),
+        ("duckdb", ".export_tmp"),
+        ("duckdb", ".root.json"),
+        ("duckdb", ".embedding.json"),
+        ("lancedb", ".embedding.json"),
+    ],
+)
+def test_authoritative_cold_check_rejects_orphaned_associated_state(
+    tmp_path, backend, suffix
+):
+    filename = "chunks.db" if backend == "duckdb" else "lancedb.lancedb"
+    target = tmp_path / filename
+    Path(f"{target}{suffix}").write_bytes(b"retained state")
+    with pytest.raises(HubLocalStateError, match="local database state"):
+        automatic_target_absent(target, backend)
+
+
+def test_authoritative_cold_check_sanitizes_filesystem_uncertainty(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "chunks.db"
+    private = Path(f"{target}.wal")
+    original_lstat = Path.lstat
+
+    def fail_private(path):
+        if path == private:
+            raise PermissionError("private path")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fail_private)
+
+    with pytest.raises(HubLocalStateError) as caught:
+        automatic_target_absent(target, "duckdb")
+    assert str(caught.value) == "Hub local filesystem is unavailable"
+    assert "private path" not in str(caught.value)
 
 
 async def test_auto_marker_is_fatal_without_requests_but_explicit_recovers(

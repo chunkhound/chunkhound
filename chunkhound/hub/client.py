@@ -90,6 +90,50 @@ _NATIVE_ERRORS = (
     native.DatabaseFilesystemError,
 )
 
+_INSTALL_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "duckdb": (
+        "",
+        ".wal",
+        ".wal.corrupt",
+        ".compact_backup",
+        ".compact_backup.wal",
+        ".compact_new",
+        ".compact_new.wal",
+        ".old",
+        ".old.wal",
+        ".compact",
+        ".compact.wal",
+        ".swap_intent",
+        ".export_tmp",
+        ".root.json",
+        ".embedding.json",
+    ),
+    "lancedb": ("", ".embedding.json"),
+}
+
+
+def automatic_inventory_paths(target: Path, backend: str) -> tuple[Path, ...]:
+    try:
+        suffixes = _INSTALL_SUFFIXES[backend]
+    except KeyError:
+        raise HubLocalStateError("Hub database layout is unsupported") from None
+    return (Path(f"{target}.chunkhound-install.json"),) + tuple(
+        Path(f"{target}{suffix}") for suffix in suffixes
+    )
+
+
+def automatic_target_appears_cold(target: Path, backend: str) -> bool:
+    """Probe without ownership or mutation; uncertainty suppresses prompting."""
+    for path in automatic_inventory_paths(target, backend):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        return False
+    return True
+
 
 def local_needs_pull(
     target: Path,
@@ -125,19 +169,39 @@ def local_needs_pull(
 
 def automatic_target_absent(
     target: Path,
+    backend: str,
     ownership: DatabaseOwnership | None = None,
 ) -> bool:
-    """Return true only for an unambiguous absent target under ownership."""
+    """Return true only for exhaustive absence under database ownership."""
     with ownership_scope(target, ownership):
+        paths = automatic_inventory_paths(target, backend)
+        primary = Path(f"{target}{_INSTALL_SUFFIXES[backend][0]}")
         try:
-            target.lstat()
+            primary.lstat()
         except FileNotFoundError:
-            return True
+            pass
         except OSError:
             raise HubLocalStateError(
                 "Hub local filesystem is unavailable"
             ) from None
-        return False
+        else:
+            return False
+
+        # The ownership boundary rejects a surviving installation marker first.
+        # Any other state without its primary is recoverable or ambiguous, not cold.
+        for path in paths[1:]:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise HubLocalStateError(
+                    "Hub local filesystem is unavailable"
+                ) from None
+            raise HubLocalStateError(
+                "Hub local database state is incomplete or requires recovery"
+            )
+        return True
 
 
 async def _await_pull_worker(worker: asyncio.Future[bool]) -> bool:
@@ -213,7 +277,11 @@ async def _pull(
     if automatic:
         # Keep actual executor completion private: shutdown cancels Tasks, not threads.
         worker = asyncio.get_running_loop().run_in_executor(
-            None, contextvars.copy_context().run, automatic_target_absent, target
+            None,
+            contextvars.copy_context().run,
+            automatic_target_absent,
+            target,
+            key.db_provider,
         )
         if not await _await_pull_worker(worker):
             return False
@@ -298,7 +366,9 @@ async def _pull(
                 state,
                 should_install=(
                     lambda ownership: automatic_target_absent(
-                        target, ownership=ownership
+                        target,
+                        key.db_provider,
+                        ownership=ownership,
                     )
                 )
                 if automatic
