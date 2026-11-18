@@ -1,5 +1,6 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -202,6 +203,24 @@ class DatabaseProvider(Protocol):
 
     async def update_file_async(self, file_id: int, **kwargs: Any) -> None:
         """Update file record with new values (asynchronous)."""
+        ...
+
+    def refresh_file_mtimes(self, entries: list[tuple[str, float, str]]) -> int:
+        """Store the current mtime of files whose bytes were just confirmed
+        unchanged by hash, so the next run does not hash them again.
+
+        Each entry is (stored path, current st_mtime, content_hash just
+        confirmed). Sets modified_time only, and only on rows whose
+        content_hash still equals the confirmed hash, so a concurrent writer
+        that stored new content never gets an older mtime attached to it.
+        Returns the number of rows updated.
+        """
+        ...
+
+    async def refresh_file_mtimes_async(
+        self, entries: list[tuple[str, float, str]]
+    ) -> int:
+        """Asynchronous variant of refresh_file_mtimes."""
         ...
 
     async def record_skipped_file_async(
@@ -520,6 +539,20 @@ class DatabaseProvider(Protocol):
 
     async def rollback_transaction_async(self) -> None:
         """Rollback the current transaction (asynchronous)."""
+        ...
+
+    async def store_file_result_async(
+        self,
+        file: File,
+        plan_chunks: Callable[[int, list[Chunk]], tuple[list[int], list[Chunk]]],
+    ) -> tuple[int, bool, list[int]]:
+        """Store one parsed file and its chunks as one atomic operation.
+
+        Upserts the file row, then calls ``plan_chunks(file_id, existing_chunks)``
+        for ``(chunk_ids_to_delete, chunks_to_insert)`` and applies both, all in
+        one database submission that commits or rolls back as a unit.
+        Returns ``(file_id, is_existing, inserted_chunk_ids)``.
+        """
         ...
 
     # File Processing Integration
