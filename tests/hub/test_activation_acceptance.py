@@ -91,7 +91,7 @@ async def test_mcp_and_search_do_not_pull_even_when_configured_model_differs(
     write_config(project, backend, hub_http.url + "/catalogue?token=secret",
                  embedding_http.url)
     publish(hub_http, build_database(tmp_path / "published", backend))
-    pulled = await asyncio.to_thread(cli, project, "pull", project)
+    pulled = await asyncio.to_thread(cli, project, "pull", project, "--trust")
     assert pulled.returncode == 0, pulled.stdout + pulled.stderr
     # Keep the source represented by the synthetic base available to MCP indexing.
     (project / "source.py").write_text(source_text("MCP_LOCAL"), encoding="utf-8")

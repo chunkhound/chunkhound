@@ -146,9 +146,7 @@ def test_cli_download_timeout_stops_before_local_index(
             release.wait(2)
 
     hub_http.before_get = stall_artifact
-    command_args = [command, project]
-    if command == "index":
-        command_args.append("--trust")
+    command_args = [command, project, "--trust"]
     try:
         result = cli(project, *command_args)
     finally:
