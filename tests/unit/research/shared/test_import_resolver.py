@@ -12,6 +12,7 @@ import pytest
 from loguru import logger
 
 from chunkhound.core.config.research_config import ResearchConfig
+from chunkhound.core.utils import normalize_path_for_lookup
 from chunkhound.parsers.parser_factory import ParserFactory
 from chunkhound.services.research.shared.import_resolution_helper import (
     resolve_and_fetch_imports,
@@ -47,9 +48,12 @@ class FakeProvider:
         return self._base_dir
 
     def get_file_by_path(self, relative_path: str, as_model: bool = False):
-        if relative_path not in self._indexed:
+        # Real providers normalize separators before the lookup; without this
+        # the fake rejects the Windows-style paths the resolver produces.
+        lookup_path = normalize_path_for_lookup(relative_path, self._base_dir)
+        if lookup_path not in self._indexed:
             return None
-        return {"id": relative_path}
+        return {"id": lookup_path}
 
     def get_chunks_by_file_id(self, file_id: str, as_model: bool = False):
         return [{"file_path": file_id, "content": self._indexed[file_id]}]
