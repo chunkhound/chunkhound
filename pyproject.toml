@@ -51,7 +51,7 @@ dependencies = [
     "tree-sitter-language-pack>=0.7.3,<1.0.0",
     "pydantic>=2.12.0",
     "pydantic-settings>=2.0.0",
-    "loguru>=0.6.0",
+    "loguru>=0.7.3,<0.8",
     # The MCP server uses the SDK 1.x low-level decorator API. MCP 2.x
     # replaced it with constructor callbacks, so do not resolve an
     # incompatible SDK until the server is migrated.

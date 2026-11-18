@@ -583,7 +583,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.0.0" },
     { name = "lancedb", specifier = ">=0.25.3" },
     { name = "lark", specifier = ">=1.1.0" },
-    { name = "loguru", specifier = ">=0.6.0" },
+    { name = "loguru", specifier = ">=0.7.3,<0.8" },
     { name = "markdownify", specifier = ">=1.0" },
     { name = "mcp", specifier = ">=1.16.0,<2" },
     { name = "msgpack", specifier = ">=1.0" },

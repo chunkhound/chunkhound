@@ -14,6 +14,7 @@ import logging
 import os
 import sys
 import warnings
+from importlib.metadata import version as package_version
 
 # CRITICAL: Suppress SWIG warnings that break JSON-RPC protocol in CI
 # The DuckDB Python bindings generate a DeprecationWarning that goes to stdout
@@ -21,9 +22,11 @@ import warnings
 warnings.filterwarnings(
     "ignore", message=".*swigvarlink.*", category=DeprecationWarning
 )
-from collections.abc import AsyncIterator  # noqa: E402
-from contextlib import asynccontextmanager  # noqa: E402
-from typing import Any  # noqa: E402
+from collections.abc import AsyncIterator, Iterator  # noqa: E402
+from contextlib import asynccontextmanager, contextmanager, nullcontext  # noqa: E402
+from typing import Any, NoReturn  # noqa: E402
+
+from loguru import logger as loguru_logger  # noqa: E402
 
 from chunkhound.core.config.config import Config  # noqa: E402
 from chunkhound.utils.windows_constants import IS_WINDOWS  # noqa: E402
@@ -31,26 +34,79 @@ from chunkhound.version import __version__  # noqa: E402
 
 from .base import _MCP_AVAILABLE, MCPServerBase  # noqa: E402
 
-# CRITICAL: Disable Python logging at import to prevent JSON-RPC corruption.
-# Loguru is silenced separately in main() — see _silence_loguru below.
-logging.disable(logging.CRITICAL)
-for logger_name in ["", "mcp", "server", "fastmcp"]:
-    logging.getLogger(logger_name).setLevel(logging.CRITICAL + 1)
+_ActivationSnapshot = tuple[list[tuple[str, bool]], bool]
 
 
-def _silence_loguru() -> None:
-    """Remove all loguru sinks so nothing leaks to stdout during JSON-RPC.
+def _snapshot_loguru_activation(loguru_logger: Any) -> _ActivationSnapshot:
+    """Snapshot activation, failing loudly if loguru's private shape drifts."""
+    core = getattr(loguru_logger, "_core", None)
+    with getattr(core, "lock", nullcontext()):
+        entries = getattr(core, "activation_list", None)
+        none_status = getattr(core, "activation_none", None)
+    if not isinstance(entries, list) or not isinstance(none_status, bool):
+        _raise_activation_drift()
+    if not all(
+        isinstance(entry, tuple)
+        and len(entry) == 2
+        and isinstance(entry[0], str)
+        and isinstance(entry[1], bool)
+        for entry in entries
+    ):
+        _raise_activation_drift()
+    return entries, none_status
 
-    Deferred until ``main()`` runs (not import time) so callers that only
-    import the module — including tests that patch ``main`` — keep their
-    own loguru sinks intact.
+
+def _raise_activation_drift() -> NoReturn:
+    raise RuntimeError(
+        f"loguru {package_version('loguru')} drifted from the pin in pyproject.toml: "
+        "need a list[(str, bool)] activation_list and a bool activation_none. "
+        "Re-test tests/unit/test_loguru_compat.py before widening the pin."
+    )
+
+
+def _restore_loguru_activation(loguru_logger: Any, saved: _ActivationSnapshot) -> None:
+    """Replay through public setters; ``enable("")`` also resets the cache."""
+    loguru_logger.enable("")
+    setter = loguru_logger.enable if saved[1] else loguru_logger.disable
+    setter(None)
+    for name, status in sorted(saved[0], key=lambda item: item[0].count(".")):
+        setter = loguru_logger.enable if status else loguru_logger.disable
+        setter(name.removesuffix("."))  # Saved names carry a trailing dot.
+
+
+@contextmanager
+def _silence_loguru() -> Iterator[None]:
+    """Mute loguru for the stdio run, then restore activation state.
+
+    Sinks stay installed: ``Handler.stop()`` closes queues and drops records
+    silently, so removing them would permanently break delivery for any
+    in-process caller that survives ``main()``. Deferred to ``main()`` (not
+    import) so importers keep their sinks and per-module disables.
     """
+    saved = _snapshot_loguru_activation(loguru_logger)
     try:
-        from loguru import logger as loguru_logger
-    except ImportError:
-        return
-    loguru_logger.remove()
-    loguru_logger.add(lambda _: None, level="CRITICAL")
+        loguru_logger.disable("")
+        loguru_logger.disable(None)  # Records without ``__name__`` need the flag.
+        yield
+    finally:
+        _restore_loguru_activation(loguru_logger, saved)
+
+
+@contextmanager
+def _silence_stdlib_logging() -> Iterator[None]:
+    """Mute stdlib logging for the stdio server run, then restore it.
+
+    ``logging.disable`` blocks every level up to CRITICAL for all loggers, so
+    per-logger thresholds add nothing. Deferred to the entry point because the
+    setting is process-global: mutating it on import would silence log delivery
+    inside embedded, daemon, and test processes that only import this module.
+    """
+    saved_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logging.disable(saved_disable)
 
 
 class StdioMCPServer(MCPServerBase):
@@ -310,9 +366,11 @@ async def main(args: Any = None, config: Config | None = None) -> None:
             ``mcp_command``, which already validated it once), validation is
             not repeated; otherwise a fresh one is built and validated here.
     """
-    # Silence loguru before any import that could emit a log record.
-    _silence_loguru()
+    with _silence_stdlib_logging(), _silence_loguru():
+        await _serve(args, config)
 
+
+async def _serve(args: Any = None, config: Config | None = None) -> None:
     import argparse
 
     from chunkhound.api.cli.utils.config_factory import create_validated_config
