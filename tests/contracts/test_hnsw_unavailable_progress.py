@@ -13,6 +13,7 @@ from typing import cast
 
 import pytest
 
+from tests.contracts.compaction_seed import prepare_compaction
 from tests.contracts.pipeline_harness import (
     IndexResult,
     assert_identical,
@@ -56,6 +57,8 @@ def _offline_environment(home: Path, port: int) -> dict[str, str]:
 def _native_case(home: Path, compact: bool) -> tuple[IndexResult, list[str]]:
     phases: list[str] = []
     db_dir = home / ("compact" if compact else "normal")
+    if compact:
+        prepare_compaction(_FIXTURES, db_dir)
     result = index_with_rust(
         _FIXTURES,
         db_dir,

@@ -77,6 +77,16 @@ def _fetch_index_names(db_path: Path | str) -> set[str]:
         conn.close()
 
 
+def _hnsw_index_count(db_path: Path | str) -> int:
+    """HNSW indexes in a DB file, detected from catalog metadata."""
+    conn = duckdb.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT index_name, sql FROM duckdb_indexes()").fetchall()
+    finally:
+        conn.close()
+    return sum(1 for name, sql in rows if is_hnsw_index(name, sql))
+
+
 def _fetch_table_names(db_path: Path | str) -> set[str]:
     """Return main-schema base table names from a DuckDB file."""
     conn = duckdb.connect(str(db_path))
@@ -1421,18 +1431,22 @@ class TestFragmentationThresholdBoundaries:
 
 
 class TestBloatDetection:
-    """Real delete+reinsert churn must trigger compaction without HNSW."""
+    """Real delete+reinsert churn must trigger compaction without HNSW.
+
+    Python provider only: it pins the decision API library users call. The
+    cross-backend outcome (waste reclaimed, both writers) lives in
+    ``tests/contracts/test_compaction_reclaims_waste.py``.
+    """
 
     @staticmethod
     def _seed(db: DuckDBProvider, count: int, dims: int = 16) -> list[int]:
-        file_id = db._execute_in_db_thread_sync(
-            "insert_file",
+        file_id = db.insert_file(
             File(
                 path="churn.py",
                 mtime=1.0,
                 language=Language.PYTHON,
                 size_bytes=count * 50,
-            ),
+            )
         )
         chunks = [
             Chunk(
@@ -1446,58 +1460,62 @@ class TestBloatDetection:
             )
             for i in range(count)
         ]
-        chunk_ids = db._execute_in_db_thread_sync("insert_chunks_batch", chunks)
-        embeddings = [
-            {
-                "chunk_id": chunk_id,
-                "provider": "fake",
-                "model": "fake-embeddings",
-                "embedding": [0.1] * dims,
-                "dims": dims,
-            }
-            for chunk_id in chunk_ids
-        ]
-        db._execute_in_db_thread_sync("insert_embeddings_batch", embeddings, None)
+        chunk_ids = db.insert_chunks_batch(chunks)
+        db.insert_embeddings_batch(
+            [
+                {
+                    "chunk_id": chunk_id,
+                    "provider": "fake",
+                    "model": "fake-embeddings",
+                    "embedding": [0.1] * dims,
+                    "dims": dims,
+                }
+                for chunk_id in chunk_ids
+            ],
+            None,
+        )
         return chunk_ids
 
     def test_delete_reinsert_bloat_triggers_compaction(self, tmp_path: Path) -> None:
         db_path = tmp_path / "bloat.duckdb"
         db = DuckDBProvider(db_path, base_directory=tmp_path)
-        db.config = DatabaseConfig(
-            duckdb_hnsw_enabled=False, fragmentation_threshold_pct=30.0
-        )
         embedding_manager = EmbeddingManager()
         embedding_manager.register_provider(
             FakeEmbeddingProvider(dims=16), set_default=True
         )
         db.embedding_manager = embedding_manager
+
+        # Churn runs with auto-compaction disabled (None): the write path samples
+        # 1-in-100 writes for opportunistic compaction, which would reclaim the
+        # bloat mid-test and hide the decision this test exists to pin.
+        db.config = DatabaseConfig(
+            duckdb_hnsw_enabled=False, fragmentation_threshold_pct=None
+        )
         db.connect()
 
-        chunk_ids = self._seed(db, 1000)
-        db._execute_in_db_thread_sync("delete_chunks_batch", chunk_ids[:500])
+        original = self._seed(db, 1000)
+        db.delete_chunks_batch(original[:500])
         self._seed(db, 500)
-        db._execute_in_db_thread_sync("maybe_checkpoint", True)
 
-        stats = db._execute_in_db_thread_sync("compaction_stats")
-        assert stats["effective"] > 0.30, stats
-        assert db.should_optimize() is True
+        # Threshold 0 turns "any measurable waste" into "compact". The
+        # precondition keeps the test honest: if churn ever stops leaving
+        # reclaimable space, this fails loudly instead of passing vacuously.
+        db.config = DatabaseConfig(
+            duckdb_hnsw_enabled=False, fragmentation_threshold_pct=0.0
+        )
+        fragmentation_before = db.measure_fragmentation()
+        assert fragmentation_before > 1.0, "churn left no reclaimable waste"
 
+        stats_before = db.get_stats()
         size_before = os.path.getsize(db_path)
-        ratio_before = db.measure_fragmentation()
+
         assert db.compact_if_needed() is True
         assert os.path.getsize(db_path) < size_before
-        assert db.measure_fragmentation() < ratio_before
+        assert db.measure_fragmentation() < fragmentation_before
+        assert db.get_stats() == stats_before
         db.disconnect()
 
-        conn = duckdb.connect(str(db_path), read_only=True)
-        try:
-            hnsw = conn.execute(
-                "SELECT COUNT(*) FROM duckdb_indexes() "
-                "WHERE sql ILIKE '%USING HNSW%'"
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        assert hnsw == 0
+        assert _hnsw_index_count(db_path) == 0
 
 
 # ── Index flow compaction points ─────────────────────────────────────────

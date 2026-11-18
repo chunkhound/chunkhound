@@ -13,6 +13,11 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime.service import RealtimeIndexingService
+from tests.helpers.search_contract import (
+    realtime_search_diagnostics,
+    results_contain,
+    wait_for_search,
+)
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
@@ -72,29 +77,20 @@ class TestRealtimeFailures:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_threading_integration_is_broken(self, realtime_setup):
-        """Test that threading integration between watchdog and asyncio works."""
+    async def test_file_created_after_start_is_searchable(self, realtime_setup):
+        """A file written immediately after startup reaches public search."""
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
 
-        # Wait for initial scan to complete
-        await asyncio.sleep(1.0)
-
-        # Now create file AFTER initial scan - should only be caught by
-        # real-time monitoring
         test_file = watch_dir / "realtime_test.py"
         test_file.write_text("def realtime_test(): pass")
 
-        # Wait for debounce delay (0.5s) + processing + database commit
-        await asyncio.sleep(2.0)
-
-        # If threading integration works, file should be processed by
-        # real-time monitoring
-        # Use resolved path to match what the real-time service stores
-        file_record = services.provider.get_file_by_path(str(test_file.resolve()))
-        assert file_record is not None, (
-            "Real-time file should be processed by filesystem monitoring"
-        )
+        with realtime_search_diagnostics(service):
+            await wait_for_search(
+                services,
+                "realtime_test",
+                lambda output: results_contain(output, "realtime_test.py"),
+            )
 
         await service.stop()
 

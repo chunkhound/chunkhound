@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.contracts import test_hnsw_unavailable_progress as unavailable_progress
+from tests.contracts.compaction_seed import prepare_compaction
 from tests.contracts.hnsw_progress_output import ProgressOutput, assert_completed_rows
 from tests.contracts.pipeline_harness import hnsw_index_names, index_with_rust
 
@@ -13,10 +14,16 @@ unavailable_native_runs = unavailable_progress.unavailable_native_runs
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "pipeline"
 
 
-def _run(db_dir: Path, output: ProgressOutput, *, compact: bool = False,
-         enabled: bool = True):
+def _run(
+    db_dir: Path, output: ProgressOutput, *, compact: bool = False, enabled: bool = True
+):
+    if compact:
+        prepare_compaction(_FIXTURES, db_dir, enabled=enabled)
     result = index_with_rust(
-        _FIXTURES, db_dir, incremental=True, skip_embeddings=False,
+        _FIXTURES,
+        db_dir,
+        incremental=True,
+        skip_embeddings=False,
         duckdb_hnsw_enabled=enabled,
         compaction_threshold=0.0 if compact else 1.0,
         compaction_min_size_mb=0 if compact else 10**9,
@@ -50,11 +57,14 @@ def test_enabled_build_and_unchanged_run_render_distinct_work(tmp_path, monkeypa
 )
 @pytest.mark.parametrize("compact", [True, False], ids=["compact", "normal"])
 def test_native_write_output_matches_index_capability(
-    tmp_path, monkeypatch, enabled, compact,
+    tmp_path,
+    monkeypatch,
+    enabled,
+    compact,
 ):
     output = ProgressOutput(monkeypatch, enabled=enabled)
     result = _run(tmp_path / "db", output, compact=compact, enabled=enabled)
-    assert result.chunks_written
+    assert result.chunks_written == 0 if compact else result.chunks_written > 0
     phase = "write-compact" if compact else "write-index"
     if not enabled:
         phase += "-disabled"
@@ -70,7 +80,9 @@ def test_native_write_output_matches_index_capability(
 
 @pytest.mark.parametrize("mode", ["normal", "compact"])
 def test_unavailable_native_phases_hide_index_work(
-    monkeypatch, unavailable_native_runs, mode,
+    monkeypatch,
+    unavailable_native_runs,
+    mode,
 ):
     output = ProgressOutput(monkeypatch)
     # Replay real isolated-process phases; the fixture also verifies persistence.

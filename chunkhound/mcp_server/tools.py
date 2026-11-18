@@ -55,6 +55,9 @@ MAX_DIFF_CHUNKS = 500
 # safely under the 16384-token limit of the smallest supported embedding model.
 MAX_DIFF_CHUNK_CHARS = 10_000
 
+# User-visible search response when the query matched nothing.
+EMPTY_SEARCH_MESSAGE = "No results found."
+
 
 def _summarize_subprocess_stderr(stderr: bytes) -> str:
     """Return the user-visible stderr summary for MCP subprocess failures."""
@@ -400,7 +403,7 @@ def format_search_results_markdown(
     search) similarity percentage. Appends a pagination footer.
     """
     if not results:
-        message = "No results found."
+        message = EMPTY_SEARCH_MESSAGE
         if pagination.get("candidate_budget_exhausted"):
             message += (
                 " HNSW candidate budget reached; results may be incomplete; "

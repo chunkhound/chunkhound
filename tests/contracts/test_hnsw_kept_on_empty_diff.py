@@ -19,6 +19,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from tests.contracts.compaction_seed import seed_compaction_waste
 from tests.contracts.pipeline_harness import (
     collect_table_counts,
     hnsw_index_names,
@@ -139,16 +140,23 @@ class TestHnswKeptOnEmptyDiff:
     def test_empty_run_that_compacts_keeps_the_bracket(
         self, work_dir: Path, indexed_db: Path
     ):
-        """Compaction rebuilds the index with the metrics the drop captures."""
+        """An empty diff still compacts real waste and preserves all live data."""
+        before = index_with_rust(work_dir, indexed_db, incremental=True)
+        counts_before = collect_table_counts(indexed_db)
+        names_before = hnsw_index_names(indexed_db)
+        seed_compaction_waste(indexed_db)
         second, events = _run(
             work_dir, indexed_db, compaction_threshold=0.0, compaction_min_size_mb=0
         )
 
         phases = {phase for phase, _, _ in events}
-        assert second.files_processed == 0
+        assert second.files_processed == second.chunks_written == 0
+        assert second.chunk_tuples == before.chunk_tuples
+        assert second.embedding_tuples == before.embedding_tuples
+        assert collect_table_counts(indexed_db) == counts_before
+        assert hnsw_index_names(indexed_db) == names_before
         assert "write-compact" in phases
         assert "write-index" not in phases
-        assert hnsw_index_names(indexed_db)
 
     def test_empty_run_restores_an_index_a_crash_left_missing(
         self, work_dir: Path, indexed_db: Path

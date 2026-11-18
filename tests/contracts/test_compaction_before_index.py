@@ -5,9 +5,8 @@
 `reopen()` — on both its success and failure-fallback paths. So whenever
 compaction triggers, the store thread must NOT also call
 `ensure_all_hnsw_indexes()` separately, or the (CPU-intensive) HNSW index
-gets built twice for one run. This test forces compaction to trigger on
-every run (`compaction_threshold=0.0`, `compaction_min_size_mb=0`) and
-verifies the mutual exclusion, plus that data and the index both survive
+gets built twice for one run. These tests prepare real deleted-row waste
+and use zero thresholds to verify mutual exclusion. Data and the index must survive
 the compact-then-reindex sequence intact.
 """
 
@@ -16,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.contracts.compaction_seed import prepare_compaction
 from tests.contracts.mock_embed import MockEmbeddingProvider
 from tests.contracts.pipeline_harness import (
     IndexResult,
@@ -28,19 +28,11 @@ from tests.contracts.pipeline_harness import (
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
 
 
-def _index_with_rust_forced_compaction(
+def _index_with_rust_after_waste(
     fixture_dir: Path, db_dir: Path
 ) -> tuple[IndexResult, list[str]]:
-    """Index *fixture_dir* with the Rust pipeline, forcing compaction to run.
-
-    Returns ``(IndexResult, phases_seen)`` where ``phases_seen`` is every
-    phase string the progress callback observed, in call order.
-
-    ``compaction_threshold=0.0`` means any non-negative free/waste ratio
-    (always true) clears the bar, and ``compaction_min_size_mb=0`` means
-    even a tiny reclaimable amount clears the min-size gate — together
-    these force ``needs_compaction()`` to always return true.
-    """
+    """Measure a full indexing run after preparing positive deleted-row waste."""
+    prepare_compaction(fixture_dir, db_dir)
     phases_seen: list[str] = []
 
     def progress_callback(phase: str, current: int, total: int) -> None:
@@ -69,11 +61,11 @@ class TestCompactionBeforeIndex:
         with tempfile.TemporaryDirectory() as tmp_rs:
             db_rs = Path(tmp_rs) / "db"
 
-            result_rs, phases = _index_with_rust_forced_compaction(FIXTURE_DIR, db_rs)
+            result_rs, phases = _index_with_rust_after_waste(FIXTURE_DIR, db_rs)
 
             assert not result_rs.errors, f"Unexpected errors: {result_rs.errors}"
             assert "write-compact" in phases, (
-                "Expected compaction to trigger with compaction_threshold=0.0"
+                "Expected positive waste to trigger compaction at threshold zero"
             )
             assert "write-index" not in phases, (
                 "write-index should not fire in the same run as write-compact — "
@@ -98,8 +90,10 @@ class TestCompactionBeforeIndex:
                 embedding_provider=MockEmbeddingProvider(),
             )
 
-            result_rs, _phases = _index_with_rust_forced_compaction(FIXTURE_DIR, db_rs)
+            result_rs, phases = _index_with_rust_after_waste(FIXTURE_DIR, db_rs)
 
+            assert "write-compact" in phases
+            assert "write-index" not in phases
             assert_identical(result_py, result_rs)
 
             hnsw_names = hnsw_index_names(db_rs)

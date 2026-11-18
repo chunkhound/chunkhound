@@ -47,7 +47,11 @@ class ProgressOutput:
         return self.stream.getvalue()
 
     def during(self, phase: str) -> str:
-        return next(output for name, output in self.frames if name == phase)
+        for name, output in self.frames:
+            if name == phase:
+                return output
+        observed = [name for name, _ in self.frames]
+        raise AssertionError(f"Missing progress phase {phase!r}; observed: {observed}")
 
 
 def assert_completed_rows(output: str) -> None:

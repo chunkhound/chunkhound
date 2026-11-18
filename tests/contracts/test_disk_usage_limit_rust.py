@@ -34,7 +34,7 @@ def _write_many_fixture_files(project_dir: Path, count: int) -> None:
 def _disk_limit_trip(
     db_dir: Path, project_dir: Path = FIXTURE_DIR, *, skip_embeddings: bool = True
 ) -> tuple[IndexResult, list[str]]:
-    """Force compaction eligibility but stop writes at the disk limit."""
+    """Stop writes at the disk limit with low compaction thresholds."""
     phases: list[str] = []
     result = index_with_rust(
         project_dir,
@@ -121,14 +121,15 @@ class TestDiskUsageLimitRust:
         """A disk-limit trip must never trigger compaction.
 
         Compaction's EXPORT/IMPORT rewrite transiently roughly doubles disk
-        usage — the opposite of what a disk-limit trip should do. Forces
-        compaction eligibility (compaction_threshold=0.0,
-        compaction_min_size_mb=0 -- the same technique as
-        test_compaction_before_index.py) plus disk_usage_limit_mb=0.0, so
-        without the fix a `write-compact*` phase would fire.
+        usage — the opposite of what a disk-limit trip should do. Real
+        deleted-row waste makes compaction due before the disk limit trips.
         """
+        from tests.contracts.compaction_seed import prepare_compaction
+
         with tempfile.TemporaryDirectory() as tmp:
-            _disk_limit_trip(Path(tmp) / "db")
+            db_dir = Path(tmp) / "db"
+            prepare_compaction(FIXTURE_DIR, db_dir, enabled=False)
+            _disk_limit_trip(db_dir)
 
     @pytest.mark.hnsw
     @pytest.mark.asyncio

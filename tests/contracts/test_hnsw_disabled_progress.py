@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.contracts.compaction_seed import prepare_compaction
 from tests.contracts.pipeline_harness import hnsw_index_names, index_with_rust
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "pipeline"
@@ -47,6 +48,7 @@ def test_disabled_run_reports_disabled_and_creates_no_hnsw(tmp_path: Path) -> No
 
 def test_disabled_compaction_reports_no_index_rebuild(tmp_path: Path) -> None:
     db_dir = tmp_path / "db"
+    prepare_compaction(FIXTURE_DIR, db_dir, enabled=False)
 
     phases = _run(
         db_dir,
