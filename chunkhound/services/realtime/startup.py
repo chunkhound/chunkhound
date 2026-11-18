@@ -24,7 +24,12 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler, forward_to_loop, watchdog_event_filter
+from .events import (
+    SimpleEventHandler,
+    forward_to_loop,
+    ignore_windows_last_access,
+    watchdog_event_filter,
+)
 from .inotify_overflow import InotifyOverflowDetection
 
 
@@ -74,6 +79,7 @@ def _create_watchdog_observer(
 
     from watchdog.observers import Observer
 
+    ignore_windows_last_access()
     detection: InotifyOverflowDetection = (
         "unavailable" if sys.platform.startswith("linux") else "not_applicable"
     )
