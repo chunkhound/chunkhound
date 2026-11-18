@@ -91,6 +91,12 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     _MAX_RETRY_BUDGET = 5
     _RETRY_BASE_DELAY_SECONDS = 0.1
     _DELETE_BATCH_SIZE = 64
+    # First-snapshot reconciliation retry cap: a permanently failing reconcile
+    # must stop re-listing and re-stating the whole index after this many
+    # consecutive failures, instead of doing so on every poll cycle forever.
+    _RECONCILE_MAX_ATTEMPTS = 5
+    _RECONCILE_BACKOFF_BASE_SECONDS = 1.0
+    _RECONCILE_BACKOFF_MAX_SECONDS = 30.0
     _MUTATION_PRIORITIES = {
         "delete": 0,
         "dir_delete": 0,
@@ -115,6 +121,15 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
     ):
         self.services = services
         self.config = config
+        # First-snapshot reconcile retry tuning from config (defaults keep
+        # production behavior unchanged; instance attrs shadow the class attrs).
+        self._RECONCILE_MAX_ATTEMPTS = config.indexing.reconcile_max_attempts
+        self._RECONCILE_BACKOFF_BASE_SECONDS = (
+            config.indexing.reconcile_backoff_base_seconds
+        )
+        self._RECONCILE_BACKOFF_MAX_SECONDS = (
+            config.indexing.reconcile_backoff_max_seconds
+        )
         self._debug_sink = debug_sink
         self._status_callback = status_callback
         self._resync_callback = resync_callback

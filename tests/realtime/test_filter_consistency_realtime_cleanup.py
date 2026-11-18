@@ -21,9 +21,9 @@ from chunkhound.providers.database.duckdb_provider import (
     _normalize_indexed_root,
 )
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
-from chunkhound.services.realtime.service import RealtimeIndexingService
-from chunkhound.services.realtime.events import SimpleEventHandler
 from chunkhound.services.realtime.adapters import WatchmanRealtimeAdapter
+from chunkhound.services.realtime.events import SimpleEventHandler
+from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.services.realtime_path_filter import (
     RealtimePathFilter,
     RealtimePathFilterSettings,
@@ -159,8 +159,8 @@ async def test_watchdog_delete_admits_previously_indexed_excluded_file(
             config=config,
             loop=asyncio.get_running_loop(),
             root_path=root,
-            filtered_event_callback=lambda event_type, file_path: filtered_events.append(
-                (event_type, file_path)
+            filtered_event_callback=lambda event_type, file_path: (
+                filtered_events.append((event_type, file_path))
             ),
             admission_callback=service._should_admit_realtime_event,
         )
@@ -462,9 +462,70 @@ async def test_cleanup_deleted_directory_enumerates_chunkless_files(
 
         await service._cleanup_deleted_directory(str(root / "sub"))
 
-        absolute_paths = {str(root / "sub" / "empty.bin"), str(root / "sub" / "code.py")}
+        absolute_paths = {
+            str(root / "sub" / "empty.bin"),
+            str(root / "sub" / "code.py"),
+        }
         assert set(queued) == absolute_paths
         assert str(root / "other" / "keep.py") not in queued
+        nested_base, nested_root = tmp_path.resolve(), tmp_path.resolve() / "project"
+        (nested_root / "sub").mkdir(parents=True)
+        nested_db = tmp_path / "nested-deldir.duckdb"
+        nested_provider = DuckDBProvider(nested_db, base_directory=nested_base)
+        nested_provider.connect()
+        try:
+            nested_provider.insert_file(
+                File(
+                    path="project/sub/mod.py",
+                    mtime=0.0,
+                    language=Language.PYTHON,
+                    size_bytes=1,
+                )
+            )
+            nested = RealtimeIndexingService(
+                SimpleNamespace(provider=nested_provider), config
+            )
+            nested.watch_path = nested_root
+            nested._enqueue_mutation = fake_enqueue  # type: ignore[assignment]
+            queued.clear()
+            await nested._cleanup_deleted_directory(nested_root / "sub")
+            assert queued == [str(nested_root / "sub" / "mod.py")]
+        finally:
+            nested_provider.disconnect()
+    finally:
+        services.provider.disconnect()
+
+
+async def test_cleanup_deleted_watch_root_enumerates_all_rows(tmp_path: Path) -> None:
+    """Root deletion lists the whole files scope; prefix listing never matches ""."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    db_path = tmp_path / "delroot.duckdb"
+    config = _build_config(root, db_path)
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        provider = services.provider
+        relative_paths = ("root_chunkless.bin", "root_module.py", "sub/nested.py")
+        for path in relative_paths:
+            language = Language.UNKNOWN if path.endswith(".bin") else Language.PYTHON
+            provider.insert_file(
+                File(path=path, mtime=0.0, language=language, size_bytes=0)
+            )
+
+        service = RealtimeIndexingService(services, config)
+        service.watch_path = root
+        queued: list[str] = []
+
+        async def fake_enqueue(mutation: object) -> bool:
+            queued.append(str(getattr(mutation, "path", "")))
+            return True
+
+        service._enqueue_mutation = fake_enqueue  # type: ignore[assignment]
+        await service._cleanup_deleted_directory(root)
+
+        assert set(queued) == {str(root / path) for path in relative_paths}
     finally:
         services.provider.disconnect()
 
@@ -541,9 +602,7 @@ async def test_cleanup_preserves_rows_when_realtime_filter_is_degraded(
 
         # Discovery sees the file on disk; reconciliation pass is told it is
         # not in the current discovered set so the cleanup path is exercised.
-        cleaned = coordinator._cleanup_orphaned_files(
-            root, [], ["**/*.py"], []
-        )
+        cleaned = coordinator._cleanup_orphaned_files(root, [], ["**/*.py"], [])
 
         # Only the missing-on-disk row was deleted; the still-present row was
         # preserved because the filter could not prove exclusion.

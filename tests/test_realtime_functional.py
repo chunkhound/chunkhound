@@ -2516,7 +2516,8 @@ class TestRealtimeFunctional:
         )
 
         async def fake_to_thread(func, *args, **kwargs):
-            assert func == service._polling_snapshot
+            if func != service._polling_snapshot:
+                return []  # reconciliation row listing
             assert args == (watch_dir,)
             assert kwargs == {}
             return next(snapshots)
@@ -2564,7 +2565,8 @@ class TestRealtimeFunctional:
         service._last_accepted_event_path = baseline_accepted_path
 
         async def fake_to_thread(func, *args, **kwargs):
-            assert func == service._polling_snapshot
+            if func != service._polling_snapshot:
+                return []  # reconciliation row listing
             assert args == (watch_dir,)
             assert kwargs == {}
             return {target_file: (100, 10)}, 1, False
@@ -2786,3 +2788,57 @@ class TestRealtimeFunctional:
         assert processed_count > 0, "At least one processing path should work"
 
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_reconcile_delete_in_flight_recreate_survives(
+        self, realtime_setup, monkeypatch
+    ):
+        service, watch_dir, _, services = realtime_setup
+        service.process_task = asyncio.create_task(service._process_loop())
+        file = watch_dir / "recon_recreate.py"
+        file.write_text("def recon_recreate_v1():\n    return 1\n")
+        poll_task = None
+        try:
+            await service.add_file(file, priority="priority")
+            assert await _wait_for_logical_indexed(services.provider, file)
+            file.unlink()
+            orig_delete = services.provider.delete_file_completely_async
+            started, release = asyncio.Event(), asyncio.Event()
+
+            async def spy(path):
+                started.set()
+                await release.wait()
+                return await orig_delete(path)
+
+            monkeypatch.setattr(services.provider, "delete_file_completely_async", spy)
+            # No public gateway to a targeted reconcile: request_resync requires a
+            # resync_callback that the harness does not wire, so drive the internal
+            # entry point directly.
+            reconcile_task = asyncio.create_task(
+                service._reconcile_missing_files(watch_dir)
+            )
+            await asyncio.wait_for(started.wait(), timeout=5.0)
+            # Start the watcher while the delete is paused so its baseline snapshot
+            # is taken after v1 is gone; it then detects the v2 write below and
+            # enqueues the change behind the in-flight delete.
+            poll_task = asyncio.create_task(service._polling_monitor(watch_dir))
+            file.write_text("def recon_recreate_v2():\n    return 2\n")
+            release.set()
+            await asyncio.wait_for(reconcile_task, timeout=5.0)
+            deadline = time.monotonic() + 10.0
+            found = False
+            while time.monotonic() < deadline:
+                results, _ = await services.provider.search_regex_async(
+                    "recon_recreate_v2"
+                )
+                if any("recon_recreate_v2" in r.get("content", "") for r in results):
+                    found = True
+                    break
+                await asyncio.sleep(0.1)
+            assert found
+        finally:
+            if poll_task is not None:
+                poll_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await poll_task
+            await service.stop()

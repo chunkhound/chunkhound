@@ -256,6 +256,22 @@ class IndexingConfig(BaseModel):
         description="Realtime backend for filesystem monitoring: watchman|watchdog|polling",
     )
 
+    # First-snapshot reconciliation retry cap/backoff: a permanently failing
+    # reconcile must stop re-listing and re-stating the whole index after
+    # ``reconcile_max_attempts`` consecutive failures instead of doing so on
+    # every poll cycle forever. Internal knobs; defaults match production
+    # behavior and are only tuned by tests/deployments.
+    reconcile_max_attempts: int = Field(
+        default=5, description="Internal first-snapshot reconcile retry cap"
+    )
+    reconcile_backoff_base_seconds: float = Field(
+        default=1.0,
+        description="Internal reconcile backoff base (exponential growth)",
+    )
+    reconcile_backoff_max_seconds: float = Field(
+        default=30.0, description="Internal reconcile backoff ceiling"
+    )
+
     # When true, also load the CH root's .gitignore as a global overlay in addition
     # to per-repo .gitignore files. This does not affect Git itself; it is a CH-only
     # convenience to apply workspace-wide rules across external repos.

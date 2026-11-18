@@ -4,7 +4,7 @@ import asyncio
 import gc
 import random
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -12,16 +12,143 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.utils.path_utils import normalize_realtime_path
-from chunkhound.utils.logging_guard import log_if_not_mcp
 from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConflictError
 from chunkhound.providers.database.serial_executor import (
     DatabaseTemporarilyUnavailableError,
 )
+from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .events import RealtimeMutation, SimpleEventHandler, normalize_file_path
 
 
+def _indexed_prefix(watch_path: Path, base: Path) -> str:
+    """Map an absolute watch path to the provider's indexed path prefix."""
+    try:
+        prefix = watch_path.resolve().relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return str(watch_path)
+    return "" if prefix == "." else prefix
+
+
+_SEARCH_FALLBACK_PAGE_SIZE = 200
+
+
+def _under_prefix(row: str, prefix: str) -> bool:
+    """Prefix match on a path boundary: 'sub' must not match 'sub_dir'.
+
+    ``get_scope_file_paths`` uses a raw LIKE prefix, so its results can include
+    sibling paths; reconciliation must not queue deletes for those.
+    """
+    return not prefix or row == prefix or row.startswith(f"{prefix}/")
+
+
+def _prefix_filtered_rows(
+    scope_rows: Callable[[str | None], list[str]], prefix: str
+) -> list[str]:
+    return [row for row in scope_rows(prefix) if _under_prefix(row, prefix)]
+
+
+async def _search_backed_rows(search: Any, prefix: str) -> list[str]:
+    """Enumerate indexed files through chunk search: last-resort capability.
+
+    Providers such as the ``SerialDatabaseProvider`` base class expose neither
+    scope listing nor directory listing. Chunk search still reports every file
+    that holds a chunk, so vanished files stop being searchable. Chunkless rows
+    (binary, empty, unparseable) stay behind; the provider keeps its warning.
+    """
+    rows: dict[str, None] = {}
+    offset = 0
+    # A directory filter (trailing slash) is the only shape that matches all
+    # descendants; exact row filtering below removes sibling LIKE matches.
+    path_filter = f"{prefix}/" if prefix else None
+    while True:
+        results, pagination = await search(
+            "",
+            page_size=_SEARCH_FALLBACK_PAGE_SIZE,
+            offset=offset,
+            path_filter=path_filter,
+        )
+        if pagination.get("error"):
+            logger.warning(
+                f"Reconciliation cannot enumerate indexed rows: {pagination['error']}"
+            )
+            return list(rows)
+        for result in results:
+            row = str(result.get("file_path") or "").replace("\\", "/")
+            if row and _under_prefix(row, prefix):
+                rows[row] = None
+        if not pagination.get("has_more"):
+            return list(rows)
+        offset = int(pagination.get("next_offset") or offset + len(results))
+
+
+def _indexed_row_lister(
+    provider: Any, watch_path: Path, base: Path
+) -> Callable[[], Awaitable[list[str]]]:
+    """Build an awaitable lister of indexed rows under ``watch_path``.
+
+    Capability order: exact table listing, then scope listing filtered to the
+    watch prefix, then paginated chunk search. No provider method is assumed.
+    The index root has no relative prefix, and prefix queries never match
+    relative rows for "", so the root lists the whole ``files`` scope instead.
+    """
+    scope_rows = getattr(provider, "get_scope_file_paths", None)
+    list_under = getattr(provider, "list_file_paths_under_directory", None)
+    search = getattr(provider, "search_regex_async", None)
+    prefix = _indexed_prefix(watch_path, base)
+    if not prefix and callable(scope_rows):
+        return lambda: asyncio.to_thread(scope_rows, None)
+    if callable(list_under):
+        return lambda: asyncio.to_thread(list_under, prefix)
+    if callable(scope_rows):
+        return lambda: asyncio.to_thread(_prefix_filtered_rows, scope_rows, prefix)
+    if callable(search):
+        return lambda: _search_backed_rows(search, prefix)
+    raise RuntimeError(
+        "Provider cannot enumerate indexed rows: it has no "
+        "get_scope_file_paths, list_file_paths_under_directory, or "
+        "search_regex_async"
+    )
+
+
+def _path_absence(path: Path) -> bool | None:
+    """Classify a path as absent (True), present (False), or unreadable (None).
+
+    Path.exists() suppresses every OSError into ``False`` on Python 3.14, so
+    an inaccessible file would look absent and get deleted. stat() surfaces
+    errors instead: only a confirmed missing-path error counts as absence.
+    """
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    except NotADirectoryError:
+        # An ancestor component is now a regular file, so the path cannot exist.
+        return True
+    except OSError as error:
+        logger.warning(f"Reconciliation cannot stat {path}: {error}")
+        return None
+    return False
+
+
+def _watch_root_exists(watch_path: Path) -> bool:
+    """True when the watch root exists on disk; a missing root is transient."""
+    return watch_path.resolve().exists()
+
+
+class RealtimeWatchRootMissingError(Exception):
+    """The watch root vanished mid-reconciliation; transient, never permanent."""
+
+
 class RealtimePipelineMixin:
+    # Lazy-initialized by _reconcile_first_snapshot: the last failure kind
+    # (missing root vs db busy — both transient).
+    _last_reconcile_missing_root = False
+    _last_reconcile_busy = False
+    # First-snapshot reconcile retry state (reset by _polling_monitor).
+    _reconcile_failures = 0
+    _next_reconcile_attempt_at = 0.0
+
     def _emit_status_update(self) -> None:
         try:
             if self._status_callback:
@@ -29,6 +156,7 @@ class RealtimePipelineMixin:
         except Exception:
             # Status plumbing must never affect runtime behavior.
             pass
+
     def _record_source_event(self, event_type: str, file_path: Path | str) -> None:
         normalized_path = str(self._normalize_mutation_path(file_path))
         self._last_source_event_at = self._utc_now()
@@ -39,6 +167,7 @@ class RealtimePipelineMixin:
             event_type=event_type,
             count_event=True,
         )
+
     def _record_accepted_event(self, event_type: str, file_path: Path | str) -> None:
         normalized_path = str(self._normalize_mutation_path(file_path))
         source_generation = self._advance_source_generation(normalized_path)
@@ -52,6 +181,7 @@ class RealtimePipelineMixin:
             scope="included",
         )
         self._emit_status_update()
+
     def _record_filtered_event(self, event_type: str, file_path: Path | str) -> None:
         self._filtered_event_count += 1
         self._track_event_pressure(
@@ -60,6 +190,7 @@ class RealtimePipelineMixin:
             scope="excluded",
         )
         self._emit_status_update()
+
     def _should_admit_realtime_event(
         self,
         event_type: str,
@@ -77,8 +208,10 @@ class RealtimePipelineMixin:
                 f"Realtime delete admission lookup failed for {file_path}: {error}"
             )
             return False
+
     def _record_translation_error(self) -> None:
         self._translation_error_count += 1
+
     def _record_duplicate_suppression(
         self, event_type: str, file_path: Path | str
     ) -> None:
@@ -89,11 +222,13 @@ class RealtimePipelineMixin:
             scope="included",
         )
         self._emit_status_update()
+
     def _record_processing_started(self, file_path: Path | str) -> None:
         self._active_processing_count += 1
         self._last_processing_started_at = self._utc_now()
         self._last_processing_started_path = str(file_path)
         self._emit_status_update()
+
     def _record_processing_finished(
         self, file_path: Path | str, *, completed: bool
     ) -> None:
@@ -103,23 +238,26 @@ class RealtimePipelineMixin:
         if self._active_processing_count > 0:
             self._active_processing_count -= 1
         self._emit_status_update()
+
     def _record_processing_error(self) -> None:
         self._processing_error_count += 1
-    def _start_transient_task(
-        self, awaitable: Awaitable[Any]
-    ) -> asyncio.Task[Any]:
+
+    def _start_transient_task(self, awaitable: Awaitable[Any]) -> asyncio.Task[Any]:
         return self._transient_tasks.create_task(awaitable)
+
     def _normalize_mutation_path(self, file_path: Path | str) -> Path:
         path_obj = Path(file_path)
         base_dir = self.watch_path or getattr(self.config, "target_dir", None)
         return normalize_realtime_path(
             path_obj, base_dir if isinstance(base_dir, Path) else None
         )
+
     @classmethod
     def _mutation_priority(cls, operation: str) -> int:
         return cls._MUTATION_PRIORITIES.get(
             operation, cls._MUTATION_PRIORITIES["change"]
         )
+
     @classmethod
     def _normalize_add_priority(cls, priority: str) -> tuple[str, bool]:
         if priority == "change":
@@ -131,11 +269,13 @@ class RealtimePipelineMixin:
         if priority in cls._MUTATION_PRIORITIES:
             return priority, False
         return "change", False
+
     @staticmethod
     def _status_operation(operation: str) -> str:
         if operation == "scan":
             return "change"
         return operation
+
     def _build_mutation(
         self,
         operation: str,
@@ -153,6 +293,7 @@ class RealtimePipelineMixin:
             retry_count=retry_count,
             source_generation=source_generation,
         )
+
     def _advance_source_generation(self, file_path: Path | str) -> int:
         normalized_path = str(self._normalize_mutation_path(file_path))
         self._next_source_generation += 1
@@ -160,9 +301,11 @@ class RealtimePipelineMixin:
             self._next_source_generation
         )
         return self._next_source_generation
+
     def _current_source_generation(self, file_path: Path | str) -> int | None:
         normalized_path = str(self._normalize_mutation_path(file_path))
         return self._latest_source_generation_by_path.get(normalized_path)
+
     def _refresh_pending_change_generation(
         self, file_path: Path | str, source_generation: int | None = None
     ) -> None:
@@ -183,6 +326,7 @@ class RealtimePipelineMixin:
             existing,
             source_generation=current_generation,
         )
+
     def _mark_coalesced_change(
         self, file_path: Path | str, event_type: str = "modified"
     ) -> None:
@@ -193,6 +337,7 @@ class RealtimePipelineMixin:
             scope="included",
             count_coalesced=True,
         )
+
     def _reserve_change_follow_up(
         self, file_path: Path | str, source_generation: int | None = None
     ) -> None:
@@ -210,6 +355,7 @@ class RealtimePipelineMixin:
             self._reserved_follow_up_change_generations[normalized_path] = (
                 current_generation
             )
+
     def _mutation_for_processing(self, mutation: RealtimeMutation) -> RealtimeMutation:
         if mutation.operation not in {"change", "scan"}:
             return mutation
@@ -220,6 +366,7 @@ class RealtimePipelineMixin:
         ):
             return mutation
         return replace(mutation, source_generation=current_generation)
+
     def _delete_mutation_is_stale(self, mutation: RealtimeMutation) -> bool:
         if mutation.source_generation is None:
             return False
@@ -229,12 +376,15 @@ class RealtimePipelineMixin:
             current_generation is not None
             and current_generation > mutation.source_generation
         )
+
     @staticmethod
     def _pending_mutation_key(mutation: RealtimeMutation) -> tuple[str, str]:
         return (mutation.operation, str(mutation.path))
+
     def _owns_pending_mutation(self, mutation: RealtimeMutation) -> bool:
         current = self._pending_mutations.get(self._pending_mutation_key(mutation))
         return current is not None and current.mutation_id == mutation.mutation_id
+
     def _delete_mutation_supersedes_existing(
         self, mutation: RealtimeMutation, existing: RealtimeMutation
     ) -> bool:
@@ -258,6 +408,7 @@ class RealtimePipelineMixin:
         ):
             return True
         return False
+
     def _register_pending_mutation(self, mutation: RealtimeMutation) -> bool:
         key = self._pending_mutation_key(mutation)
         existing = self._pending_mutations.get(key)
@@ -281,6 +432,7 @@ class RealtimePipelineMixin:
         )
         self.pending_files.add(mutation.path)
         return True
+
     def _release_pending_mutation(self, mutation: RealtimeMutation) -> None:
         key = self._pending_mutation_key(mutation)
         current = self._pending_mutations.get(key)
@@ -295,6 +447,7 @@ class RealtimePipelineMixin:
             self.pending_files.discard(mutation.path)
             return
         self._pending_path_counts[path_key] = remaining
+
     async def _enqueue_mutation(
         self, mutation: RealtimeMutation, *, register: bool = True
     ) -> bool:
@@ -318,6 +471,7 @@ class RealtimePipelineMixin:
         )
         self._emit_status_update()
         return True
+
     async def _retry_mutation_after_delay(
         self, mutation: RealtimeMutation, delay_seconds: float
     ) -> None:
@@ -330,7 +484,9 @@ class RealtimePipelineMixin:
                     f"source_generation={mutation.source_generation}"
                 )
                 return
-            if mutation.operation == "delete" and self._delete_mutation_is_stale(mutation):
+            if mutation.operation == "delete" and self._delete_mutation_is_stale(
+                mutation
+            ):
                 self._debug(
                     "dropped stale realtime delete retry "
                     f"path={mutation.path} source_generation="
@@ -362,9 +518,7 @@ class RealtimePipelineMixin:
         if not self._register_pending_mutation(retry_mutation):
             return True
 
-        base = self._RETRY_BASE_DELAY_SECONDS * (
-            2**mutation.retry_count
-        )
+        base = self._RETRY_BASE_DELAY_SECONDS * (2**mutation.retry_count)
         delay_seconds = base * random.uniform(0.75, 1.25)
         self._start_transient_task(
             self._retry_mutation_after_delay(retry_mutation, delay_seconds)
@@ -377,9 +531,7 @@ class RealtimePipelineMixin:
         self._emit_status_update()
         return True
 
-    def _handle_compaction_busy(
-        self, mutation: RealtimeMutation, op_desc: str
-    ) -> bool:
+    def _handle_compaction_busy(self, mutation: RealtimeMutation, op_desc: str) -> bool:
         """Handle DatabaseTemporarilyUnavailableError for a single mutation.
 
         Covers both database compaction and a Rust indexing pipeline run —
@@ -406,9 +558,7 @@ class RealtimePipelineMixin:
         error = DatabaseTemporarilyUnavailableError(
             "Database temporarily unavailable — retry budget exhausted"
         )
-        log_if_not_mcp(
-            "error", f"Error during {op_desc} for {mutation.path}: {error}"
-        )
+        log_if_not_mcp("error", f"Error during {op_desc} for {mutation.path}: {error}")
         self.failed_files.add(str(mutation.path))
         self._record_processing_error()
         self._set_error(f"Error during {op_desc} for {mutation.path}: {error}")
@@ -453,9 +603,7 @@ class RealtimePipelineMixin:
                 "Database temporarily unavailable — retry budget exhausted"
             )
             paths = ", ".join(str(m.path) for m in exhausted[:3])
-            log_if_not_mcp(
-                "error", f"Error during {op_desc} for {paths}: {error}"
-            )
+            log_if_not_mcp("error", f"Error during {op_desc} for {paths}: {error}")
             for mutation in exhausted:
                 self.failed_files.add(str(mutation.path))
             self._record_processing_error()
@@ -490,9 +638,7 @@ class RealtimePipelineMixin:
             return True
 
         if delay_seconds is None:
-            base = self._RETRY_BASE_DELAY_SECONDS * (
-                2**mutation.retry_count
-            )
+            base = self._RETRY_BASE_DELAY_SECONDS * (2**mutation.retry_count)
             delay_seconds = base * random.uniform(0.75, 1.25)
         self._start_transient_task(
             self._retry_mutation_after_delay(retry_mutation, delay_seconds)
@@ -504,6 +650,7 @@ class RealtimePipelineMixin:
         )
         self._emit_status_update()
         return True
+
     def _prepare_dequeued_mutation(
         self, mutation: RealtimeMutation
     ) -> tuple[RealtimeMutation, bool]:
@@ -511,6 +658,7 @@ class RealtimePipelineMixin:
         owned_when_dequeued = self._owns_pending_mutation(mutation)
         self._release_pending_mutation(mutation)
         return mutation, owned_when_dequeued
+
     def _collect_delete_batch(
         self,
         mutation: RealtimeMutation,
@@ -539,6 +687,7 @@ class RealtimePipelineMixin:
             batch.append((prepared_mutation, prepared_owned))
 
         return batch, buffered_mutation
+
     async def _queue_follow_up_change(
         self,
         file_path: Path | str,
@@ -556,6 +705,7 @@ class RealtimePipelineMixin:
             self._refresh_pending_change_generation(file_path, source_generation)
             return False
         return await self._enqueue_mutation(follow_up, register=False)
+
     async def _drain_reserved_follow_up_change(
         self,
         file_path: Path | str,
@@ -587,9 +737,11 @@ class RealtimePipelineMixin:
                 )
                 return
             raise
+
     @staticmethod
     def _overflow_drop_label(drop_count: int) -> str:
         return "event" if drop_count == 1 else "events"
+
     def _record_event_queue_overflow(
         self, event_type: str, file_path: Path, *, timestamp: str
     ) -> None:
@@ -622,6 +774,7 @@ class RealtimePipelineMixin:
             return
 
         self._event_queue_overflow_current_burst_dropped += 1
+
     def _complete_event_queue_overflow_burst(self, *, success: bool) -> None:
         if self._event_queue_overflow_state == "idle":
             return
@@ -648,6 +801,7 @@ class RealtimePipelineMixin:
         )
         logger.warning(message)
         self._set_warning(message)
+
     def _handle_queue_result(
         self, event_type: str, file_path: Path, accepted: bool, reason: str | None
     ) -> None:
@@ -680,6 +834,7 @@ class RealtimePipelineMixin:
                 )
 
         self._emit_status_update()
+
     async def request_resync(
         self, reason: str, details: dict[str, Any] | None = None
     ) -> bool:
@@ -695,10 +850,9 @@ class RealtimePipelineMixin:
         if self._resync_dispatch_task and not self._resync_dispatch_task.done():
             return False
 
-        self._resync_dispatch_task = self._start_transient_task(
-            self._dispatch_resync()
-        )
+        self._resync_dispatch_task = self._start_transient_task(self._dispatch_resync())
         return True
+
     async def _dispatch_resync(self) -> None:
         """Coalesce resync requests and run the callback on the trailing edge."""
         try:
@@ -750,6 +904,7 @@ class RealtimePipelineMixin:
                 details = self._last_resync_details
         finally:
             self._resync_dispatch_task = None
+
     def _polling_snapshot(
         self, watch_path: Path
     ) -> tuple[dict[Path, tuple[int, int]], int, bool]:
@@ -796,6 +951,7 @@ class RealtimePipelineMixin:
                 rglob_gen.close()
 
         return current_files, files_checked, truncated
+
     def _collect_supported_files(self, dir_path: Path) -> list[Path]:
         """Collect supported files in a directory off the event loop."""
         simple_handler = SimpleEventHandler(
@@ -814,6 +970,7 @@ class RealtimePipelineMixin:
                 continue
 
         return supported_files
+
     def _path_filter_root(self, fallback_path: Path | None = None) -> Path:
         """Return the logical workspace root for realtime scope decisions."""
         if self.watch_path is not None:
@@ -827,6 +984,84 @@ class RealtimePipelineMixin:
             return fallback_path
 
         return Path.cwd()
+
+    async def _reconcile_first_snapshot(self, watch_path: Path) -> bool:
+        """Reconcile before trusting the first polling baseline; retry on failure."""
+        if not _watch_root_exists(watch_path):
+            # A missing watch root is transient (mount/rename): keep the
+            # first-snapshot flag set so deletions during the outage are still
+            # reconciled once the root returns. Warn only on the transition
+            # into the missing state to avoid per-pass log spam.
+            if not self._last_reconcile_missing_root:
+                self._last_reconcile_missing_root = True
+                logger.warning(
+                    f"Skipping reconciliation: missing watch root {watch_path}"
+                )
+            else:
+                logger.debug(
+                    f"Skipping reconciliation: missing watch root {watch_path}"
+                )
+            return False
+        self._last_reconcile_missing_root = False
+        self._last_reconcile_busy = False
+        try:
+            await self._reconcile_missing_files(watch_path)
+        except RealtimeWatchRootMissingError:
+            if not self._last_reconcile_missing_root:
+                self._last_reconcile_missing_root = True
+                logger.warning(
+                    f"Skipping reconciliation: missing watch root {watch_path}"
+                )
+            return False
+        except DatabaseTemporarilyUnavailableError as error:
+            # DB-busy bootstrap is transient: defer without consuming the
+            # permanent-failure retry budget.
+            self._last_reconcile_busy = True
+            logger.debug(f"Polling reconciliation deferred (db busy): {error}")
+            return False
+        except Exception as error:
+            logger.warning(f"Polling reconciliation failed; retrying: {error}")
+            self._set_warning(f"Polling reconciliation failed: {error}")
+            return False
+        return True
+
+    async def _attempt_first_snapshot_reconcile(
+        self, watch_path: Path
+    ) -> bool:
+        """One first-snapshot reconcile attempt with retry cap/backoff.
+
+        Returns True while unreconciled (retry or give-up), False once the
+        baseline is trusted. Missing-root and DB-busy failures are transient and
+        never consume the permanent-failure budget; after the cap the attempt
+        time pins to infinity so the reconcile is never re-invoked until restart.
+        """
+        if time.monotonic() < self._next_reconcile_attempt_at:
+            return True
+        if await self._reconcile_first_snapshot(watch_path):
+            self._reconcile_failures = 0
+            self._next_reconcile_attempt_at = 0.0
+            return False
+        if self._last_reconcile_missing_root or self._last_reconcile_busy:
+            self._reconcile_failures = 0
+            return True
+        self._reconcile_failures += 1
+        if self._reconcile_failures >= self._RECONCILE_MAX_ATTEMPTS:
+            self._next_reconcile_attempt_at = float("inf")
+            message = (
+                "Polling reconciliation failed after "
+                f"{self._RECONCILE_MAX_ATTEMPTS} consecutive attempts; "
+                "giving up until restart"
+            )
+            logger.warning(message)
+            self._set_warning(message)
+            return True
+        self._next_reconcile_attempt_at = time.monotonic() + min(
+            self._RECONCILE_BACKOFF_BASE_SECONDS
+            * (2 ** (self._reconcile_failures - 1)),
+            self._RECONCILE_BACKOFF_MAX_SECONDS,
+        )
+        return True
+
     async def _polling_monitor(self, watch_path: Path) -> None:
         """Simple polling monitor for large directories."""
         logger.debug(f"Starting polling monitor for {watch_path}")
@@ -834,6 +1069,12 @@ class RealtimePipelineMixin:
         # Track both mtime and size so Windows polling catches overwrites that
         # fail to advance mtime reliably on CI filesystems.
         known_files: dict[Path, tuple[int, int]] = {}
+        # The baseline is only trusted after reconciliation succeeds; clearing it
+        # before the pass would lose every missed deletion for the process life.
+        first_snapshot = True
+        # First-snapshot reconcile retry capping (see helper above).
+        self._reconcile_failures = 0
+        self._next_reconcile_attempt_at = 0.0
 
         # Use a shorter interval during the first few seconds to ensure
         # freshly created files are detected quickly after startup/fallback.
@@ -845,6 +1086,10 @@ class RealtimePipelineMixin:
                     current_files, files_checked, truncated = await asyncio.to_thread(
                         self._polling_snapshot, watch_path
                     )
+                    if first_snapshot:
+                        first_snapshot = await self._attempt_first_snapshot_reconcile(
+                            watch_path
+                        )
                     self._last_poll_snapshot_at = self._utc_now()
                     self._last_poll_files_checked = files_checked
                     self._last_poll_snapshot_truncated = truncated
@@ -856,60 +1101,31 @@ class RealtimePipelineMixin:
 
                     for file_path, current_fingerprint in current_files.items():
                         if file_path not in known_files:
-                            logger.debug(f"Polling detected new file: {file_path}")
-                            self._debug(f"polling detected new file: {file_path}")
-                            self._record_source_event("created", file_path)
-                            accepted = await self.add_file(file_path, priority="change")
-                            if accepted:
-                                self._record_accepted_event("created", file_path)
-                            else:
-                                source_generation = self._advance_source_generation(
-                                    file_path
-                                )
-                                self._refresh_pending_change_generation(
-                                    file_path,
-                                    source_generation,
-                                )
-                                self._reserve_change_follow_up(
-                                    file_path,
-                                    source_generation,
-                                )
+                            event_type = "created"
                         elif known_files[file_path] != current_fingerprint:
-                            logger.debug(f"Polling detected modified file: {file_path}")
-                            self._debug(f"polling detected modified file: {file_path}")
-                            self._record_source_event("modified", file_path)
-                            accepted = await self.add_file(file_path, priority="change")
-                            if accepted:
-                                self._record_accepted_event("modified", file_path)
-                            else:
-                                source_generation = self._advance_source_generation(
-                                    file_path
-                                )
-                                self._refresh_pending_change_generation(
-                                    file_path,
-                                    source_generation,
-                                )
-                                self._reserve_change_follow_up(
-                                    file_path,
-                                    source_generation,
-                                )
+                            event_type = "modified"
+                        else:
+                            continue
+                        logger.debug(f"Polling detected {event_type} file: {file_path}")
+                        self._debug(f"polling detected {event_type} file: {file_path}")
+                        self._record_source_event(event_type, file_path)
+                        accepted = await self.add_file(file_path, priority="change")
+                        if accepted:
+                            self._record_accepted_event(event_type, file_path)
+                        else:
+                            source_generation = self._advance_source_generation(
+                                file_path
+                            )
+                            self._refresh_pending_change_generation(
+                                file_path, source_generation
+                            )
+                            self._reserve_change_follow_up(file_path, source_generation)
 
                     # Check for deleted files.
                     deleted = set(known_files.keys()) - set(current_files.keys())
                     for file_path in deleted:
                         logger.debug(f"Polling detected deleted file: {file_path}")
-                        self._record_source_event("deleted", file_path)
-                        self._record_accepted_event("deleted", file_path)
-                        delete_source_generation: int | None = (
-                            self._current_source_generation(file_path)
-                        )
-                        await self._enqueue_mutation(
-                            self._build_mutation(
-                                "delete",
-                                file_path,
-                                source_generation=delete_source_generation,
-                            )
-                        )
+                        await self._record_delete_event_and_enqueue(file_path)
                         self._debug(f"polling detected deleted file: {file_path}")
 
                     known_files = current_files
@@ -934,6 +1150,7 @@ class RealtimePipelineMixin:
             # Force cleanup of any lingering file handles on Windows
             gc.collect()
             logger.debug("Polling monitor stopped")
+
     async def add_file(self, file_path: Path, priority: str = "change") -> bool:
         """Add file to the realtime pipeline and report whether work was admitted."""
         operation, debounced = self._normalize_add_priority(priority)
@@ -985,6 +1202,7 @@ class RealtimePipelineMixin:
 
         # Immediate mutations bypass debouncing.
         return await self._enqueue_mutation(mutation, register=False)
+
     async def _debounced_add_file(
         self, file_or_mutation: Path | RealtimeMutation, priority: str = "change"
     ) -> None:
@@ -1036,6 +1254,7 @@ class RealtimePipelineMixin:
         logger.debug(f"Processing debounced file: {current_mutation.path}")
         self._debug(f"processing debounced file: {current_mutation.path}")
         return
+
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
         while True:
@@ -1120,6 +1339,7 @@ class RealtimePipelineMixin:
                 logger.error(f"Error consuming event: {e}")
                 self._set_error(f"Error consuming realtime event: {e}")
                 await asyncio.sleep(0.1)  # Brief pause on error
+
     async def remove_file(self, file_path: Path) -> None:
         """Remove file from database."""
         logger.debug(f"Removing file from database: {file_path}")
@@ -1129,6 +1349,7 @@ class RealtimePipelineMixin:
         async with self._file_condition:
             self._removed_files.add(normalized)
             self._file_condition.notify_all()
+
     async def _add_directory_watch(self, dir_path: str) -> None:
         """Add a new directory to monitoring with recursive watching."""
         async with self.watch_lock:
@@ -1141,6 +1362,7 @@ class RealtimePipelineMixin:
                     )
                     self.watched_directories.add(dir_path)
                     logger.debug(f"Added recursive watch for new directory: {dir_path}")
+
     async def _remove_directory_watch(self, dir_path: str) -> None:
         """Remove directory from monitoring and clean up database."""
         async with self.watch_lock:
@@ -1154,60 +1376,153 @@ class RealtimePipelineMixin:
                     source_generation=self._current_source_generation(dir_path),
                 )
                 logger.debug(f"Removed watch for deleted directory: {dir_path}")
+
+    def _indexed_base(self) -> Path:
+        """Resolve the provider base that turns indexed rows into real paths."""
+        return Path(self.services.provider.get_base_directory()).resolve()
+
+    async def _queue_row_deletes(
+        self, rows: list[str], base: Path, *, source_generation: int | None = None
+    ) -> int:
+        """Queue a delete for every non-empty indexed row under ``base``.
+
+        Dir cleanup enqueues child deletes (never deletes directly); adjacent
+        queued deletes are later coalesced into one batched provider call by
+        ``_process_delete_batch``.
+        """
+        queued = 0
+        for row in rows:
+            if not row:
+                continue
+            accepted = await self._enqueue_mutation(
+                self._build_mutation(
+                    "delete",
+                    base / row,
+                    source_generation=source_generation,
+                )
+            )
+            if accepted:
+                queued += 1
+        return queued
+
+    def _log_deleted_directory_cleanup(self, absolute_dir: str, queued: int) -> None:
+        logger.info(
+            f"Queued cleanup for {queued} files from deleted directory: {absolute_dir}"
+        )
+        self._debug(f"queued deleted directory cleanup {absolute_dir} files={queued}")
+
     async def _cleanup_deleted_directory(
         self, dir_path: str | Path, *, source_generation: int | None = None
     ) -> int:
         """Queue cleanup work for files that were under a deleted directory.
 
-        Enumerates rows directly from the ``files`` table by path prefix so
-        chunkless rows (binary, empty, or unparseable files) are still cleaned
-        up alongside chunked rows.
+        Rows come straight from the ``files`` table so chunkless rows (binary,
+        empty, unparseable) are cleaned up alongside chunked rows.
         """
         normalized_dir = self._normalize_mutation_path(dir_path)
         absolute_dir = str(normalized_dir)
+        base = self._indexed_base()
+        list_rows = _indexed_row_lister(self.services.provider, normalized_dir, base)
+        rows = await list_rows()
+        queued_files = await self._queue_row_deletes(
+            rows, base, source_generation=source_generation
+        )
+        self._log_deleted_directory_cleanup(absolute_dir, queued_files)
+        return queued_files
 
-        base_root = self._path_filter_root(normalized_dir)
-        try:
-            relative_dir = normalized_dir.relative_to(base_root).as_posix()
-        except ValueError:
-            relative_dir = absolute_dir
+    @staticmethod
+    def _missing_indexed_paths(rows: list[str], base: Path) -> list[Path]:
+        """Resolve indexed rows and keep only the confirmed-absent paths."""
+        return [path for row in rows if _path_absence(path := base / row)]
 
-        provider = self.services.provider
-        list_paths = getattr(provider, "list_file_paths_under_directory", None)
-        if callable(list_paths):
-            file_paths = await asyncio.to_thread(list_paths, relative_dir)
-        else:
-            search_results, _ = await provider.search_regex_async(
-                pattern=f"^{absolute_dir}/.*",
-                page_size=1000,
+    def _record_delete_event(self, file_path: Path) -> None:
+        """Record a delete event pair without enqueueing the removal.
+
+        The accepted event advances the path generation synchronously, so a
+        create admitted afterwards carries a higher generation and supersedes
+        the pending delete as stale.
+        """
+        self._record_source_event("deleted", file_path)
+        self._record_accepted_event("deleted", file_path)
+
+    async def _record_delete_event_and_enqueue(self, file_path: Path) -> bool:
+        """Record a delete event pair and queue the removal for that path.
+
+        Contract: the caller must confirm the path is absent immediately before
+        this call, with no await in between. The accepted event then advances the
+        path generation synchronously, so a create admitted afterwards carries a
+        higher generation and supersedes this delete as stale.
+        """
+        self._record_delete_event(file_path)
+        return await self._enqueue_mutation(
+            self._build_mutation(
+                "delete",
+                file_path,
+                source_generation=self._current_source_generation(file_path),
             )
-            file_paths = [
-                result.get("file_path") or result.get("path", "")
-                for result in search_results
-            ]
+        )
 
-        queued_files = 0
-        for file_path in file_paths:
-            if not file_path:
+    async def _enqueue_missing_deletes(
+        self,
+        list_rows: Callable[[], Awaitable[list[str]]],
+        base: Path,
+        watch_path: Path,
+    ) -> int:
+        """Queue deletes for indexed rows absent from disk, off the event loop."""
+        rows = await list_rows()
+        if not _watch_root_exists(watch_path):
+            raise RealtimeWatchRootMissingError(watch_path)
+        missing_paths = await asyncio.to_thread(self._missing_indexed_paths, rows, base)
+        confirmed: list[Path] = []
+        for path in missing_paths:
+            # The snapshot came from a worker thread: a path may be recreated
+            # before its delete is recorded. Stat synchronously here so no await
+            # interleaves between this check and the generation advance in
+            # _record_delete_event; otherwise the stale delete wins and removes
+            # a live file from the index.
+            if _path_absence(path) is not True:
+                self._debug(f"reconciliation skipped non-absent path {path}")
                 continue
-            accepted = await self._enqueue_mutation(
+            self._record_delete_event(path)
+            confirmed.append(path)
+        if not confirmed:
+            return 0
+        # Route every confirmed delete through the mutation queue so the process
+        # loop applies it via _process_delete_batch, which re-checks staleness
+        # immediately before the provider call. A create admitted after this
+        # confirmation advances the source generation and supersedes the
+        # delete; the direct batch call here previously deleted those fresh
+        # rows after they were indexed.
+        queued = 0
+        for path in confirmed:
+            if await self._enqueue_mutation(
                 self._build_mutation(
                     "delete",
-                    file_path,
-                    source_generation=source_generation,
+                    path,
+                    source_generation=self._current_source_generation(path),
                 )
-            )
-            if accepted:
-                queued_files += 1
+            ):
+                queued += 1
+        return queued
 
-        logger.info(
-            "Queued cleanup for "
-            f"{queued_files} files from deleted directory: {absolute_dir}"
-        )
-        self._debug(
-            f"queued deleted directory cleanup {absolute_dir} files={queued_files}"
-        )
-        return queued_files
+    async def _reconcile_missing_files(self, watch_path: Path) -> int:
+        """Queue deletes for indexed files that no longer exist on disk.
+
+        Polling fallback and dropped-event rescans start with an empty baseline,
+        so vanished files would otherwise stay searchable forever. Blocking row
+        listing and existence stats stay off the event loop.
+        """
+        if not _watch_root_exists(watch_path):
+            # Direct callers (e.g. _request_dir_rescan) keep the 0 guard; the
+            # warning is emitted only by _reconcile_first_snapshot.
+            return 0
+        base = self._indexed_base()
+        list_rows = _indexed_row_lister(self.services.provider, watch_path, base)
+        queued = await self._enqueue_missing_deletes(list_rows, base, watch_path)
+        if queued:
+            logger.info(f"Reconciled {queued} vanished files under {watch_path}")
+        return queued
+
     async def _process_delete_mutation(
         self, mutation: RealtimeMutation, *, owned_when_dequeued: bool
     ) -> None:
@@ -1273,6 +1588,7 @@ class RealtimePipelineMixin:
             self._set_error(f"Error removing file {mutation.path}: {error}")
         finally:
             self._record_processing_finished(mutation.path, completed=completed)
+
     async def _process_delete_batch(
         self, mutations: list[tuple[RealtimeMutation, bool]]
     ) -> None:
@@ -1319,6 +1635,10 @@ class RealtimePipelineMixin:
             for mutation in executable_mutations:
                 self._record_processing_finished(mutation.path, completed=True)
                 finished_mutation_ids.add(mutation.mutation_id)
+            async with self._file_condition:
+                for mutation in executable_mutations:
+                    self._removed_files.add(normalize_file_path(mutation.path))
+                self._file_condition.notify_all()
         except DuckDBTransactionConflictError as error:
             surviving_mutations: list[RealtimeMutation] = []
             exhausted_mutations: list[RealtimeMutation] = []
@@ -1327,9 +1647,7 @@ class RealtimePipelineMixin:
             # queue together and can be re-collected into a single batch.
             # All mutations share the same retry_count — they were collected together.
             batch_retry_count = executable_mutations[0].retry_count
-            batch_base = self._RETRY_BASE_DELAY_SECONDS * (
-                2**batch_retry_count
-            )
+            batch_base = self._RETRY_BASE_DELAY_SECONDS * (2**batch_retry_count)
             batch_delay_seconds = batch_base * random.uniform(0.75, 1.25)
 
             for mutation in executable_mutations:
@@ -1383,6 +1701,7 @@ class RealtimePipelineMixin:
                 if mutation.mutation_id in finished_mutation_ids:
                     continue
                 self._record_processing_finished(mutation.path, completed=False)
+
     async def _process_deleted_directory_mutation(
         self, mutation: RealtimeMutation
     ) -> None:
@@ -1408,6 +1727,7 @@ class RealtimePipelineMixin:
             )
         finally:
             self._record_processing_finished(mutation.path, completed=completed)
+
     async def _index_directory(self, dir_path: Path) -> None:
         """Index files in a newly created directory."""
         self._record_processing_started(dir_path)
@@ -1448,16 +1768,9 @@ class RealtimePipelineMixin:
         last = self._last_compaction_check_at
         # None = never checked yet (also covers a monotonic clock below the
         # cooldown right after boot).
-        if (
-            last is not None
-            and now - last < self._COMPACTION_IDLE_INTERVAL_SECONDS
-        ):
+        if last is not None and now - last < self._COMPACTION_IDLE_INTERVAL_SECONDS:
             return
-        if (
-            not self.file_queue.empty()
-            or self.pending_files
-            or self._pending_mutations
-        ):
+        if not self.file_queue.empty() or self.pending_files or self._pending_mutations:
             return
         self._last_compaction_check_at = now
         provider = getattr(self.services, "provider", None)
