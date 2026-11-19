@@ -29,6 +29,7 @@ from chunkhound.services.realtime_path_filter import (
     RealtimePathFilter,
     RealtimePathFilterSettings,
 )
+from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine_from_roots
 from chunkhound.watchman import WatchmanSubscriptionScope
 
 
@@ -463,6 +464,28 @@ def test_linked_package_is_excluded_when_the_root_is_spelled_through_a_link(
     linked = root / "node_modules" / "@scope" / "pkg"
     assert path_filter.excludes_directory(linked)
     assert not path_filter.should_index(linked / "build.py")
+
+
+def test_linked_nested_repository_keeps_its_own_ignore_rules(tmp_path: Path) -> None:
+    """A repository linked into the workspace (`linked/` to a checkout outside
+    it) still holds the paths spelled through the link, so its own .gitignore
+    applies to them."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external-repo"
+    external.mkdir()
+    (external / ".gitignore").write_text("*.secret.py\n", encoding="utf-8")
+    (external / "private.secret.py").write_text("X = 1\n", encoding="utf-8")
+    (external / "public.py").write_text("X = 1\n", encoding="utf-8")
+    linked = workspace / "linked"
+    _link_directory(linked, external)
+
+    engine = build_repo_aware_ignore_engine_from_roots(
+        workspace, [linked], ["gitignore"]
+    )
+
+    assert engine.matches(linked / "private.secret.py", is_dir=False) is not None
+    assert engine.matches(linked / "public.py", is_dir=False) is None
 
 
 def test_ignore_engine_error_on_a_new_directory_marks_the_filter_degraded(
