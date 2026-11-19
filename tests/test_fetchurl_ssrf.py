@@ -46,3 +46,83 @@ async def test_fetch_with_retry_propagates_ssrf_blocked_error(tmp_path) -> None:
         await _fetch_with_retry(
             "http://127.0.0.1:9/secret", Config(target_dir=tmp_path)
         )
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_retry_blocks_public_to_private_redirect(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A redirect from a public address to loopback is not followed (#478).
+
+    The initial URL passes the SSRF pre-check; only its redirect target is
+    private. ``_managed_browser`` is pinned to the urllib branch so the
+    test does not depend on a local Chrome. The blocked hop must also not
+    be retried: an SSRF rejection is terminal.
+    """
+    import http.server
+    from contextlib import asynccontextmanager
+
+    from chunkhound.core.config.config import Config
+    from chunkhound.utils import fetchurl
+    from tests.test_websearch_ssrf import (
+        _PUBLIC_TEST_HOST,
+        _patch_public_test_dns,
+        _start_server,
+        _stop_server,
+    )
+
+    _patch_public_test_dns(monkeypatch)
+
+    @asynccontextmanager
+    async def _no_browser(warning_callback=None):
+        yield None
+
+    monkeypatch.setattr(fetchurl, "_managed_browser", _no_browser)
+
+    secret_hits: list[str] = []
+    start_hits: list[str] = []
+
+    class _SecretHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — stdlib API
+            secret_hits.append(self.path)
+            body = b"<html><body>SECRET</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    secret_server, secret_thread = _start_server(_SecretHandler)
+    target = f"http://127.0.0.1:{secret_server.server_address[1]}/secret"
+
+    class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — stdlib API
+            start_hits.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    try:
+        redirect_server, redirect_thread = _start_server(_RedirectHandler)
+        try:
+            port = redirect_server.server_address[1]
+            with pytest.raises(SsrfBlockedError):
+                await fetchurl._fetch_with_retry(
+                    f"http://{_PUBLIC_TEST_HOST}:{port}/start",
+                    Config(target_dir=tmp_path),
+                )
+        finally:
+            _stop_server(redirect_server, redirect_thread)
+    finally:
+        _stop_server(secret_server, secret_thread)
+
+    # The private hop was validated, never fetched, and nothing was retried.
+    assert secret_hits == []
+    assert start_hits == ["/start"]
