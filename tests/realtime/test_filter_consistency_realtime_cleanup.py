@@ -287,6 +287,55 @@ async def test_watchman_delete_admits_previously_indexed_excluded_file(
         services.provider.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_watchman_new_directory_inside_excluded_path_is_not_queued(
+    tmp_path: Path,
+) -> None:
+    """A directory created under node_modules/ never becomes dir_index work."""
+    root = tmp_path / "repo"
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg").mkdir(parents=True)
+    db_path = tmp_path / "watchman-dir.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchman"},
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        service = RealtimeIndexingService(services, config)
+        adapter = WatchmanRealtimeAdapter(service)
+        adapter._path_filter = RealtimePathFilter(config=config, root_path=root)
+
+        adapter._translate_subscription_pdu(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:21",
+                "files": [
+                    {"name": name, "exists": True, "new": True, "type": "d"}
+                    for name in ("node_modules/pkg", "src/pkg")
+                ],
+            },
+            WatchmanSubscriptionScope(
+                requested_path=root,
+                watch_root=root.resolve(),
+                relative_root=None,
+                scope_kind="primary",
+            ),
+        )
+
+        assert service.event_queue.get_nowait() == (
+            "dir_created",
+            (root / "src" / "pkg").resolve(),
+        )
+        assert service.event_queue.empty()
+        assert service._filtered_event_count == 1
+    finally:
+        services.provider.disconnect()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_dir_index_expansion_does_not_enqueue_gitignored_worktree_children(
