@@ -20,6 +20,10 @@ from loguru import logger
 from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.exceptions import DiskUsageLimitExceededError, RustPipelineError
 from chunkhound.core.types.common import FileId
+from chunkhound.core.utils.embedding_utils import (
+    DEFAULT_DOCUMENT_TEMPLATE,
+    render_document_text,
+)
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.utils.parent_watch import exit_when_parent_dies
@@ -550,6 +554,8 @@ def parse_batch_callback(
     parse_config: Any = None,
     *,
     index_unknown_files: bool = False,
+    document_template: str = DEFAULT_DOCUMENT_TEMPLATE,
+    rel_keys: dict[str, str] | None = None,
 ) -> list[tuple[str, list[dict], str | None, str | None]]:
     """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
@@ -570,6 +576,11 @@ def parse_batch_callback(
             ParseCallConfig has no such field, so run_rust_pipeline() binds
             this from the resolved indexing config via functools.partial
             rather than it flowing through parse_config.
+        document_template: The embedding config's document template. When it
+            is not the identity template, every chunk gets an ``embed_text``
+            (the text Rust embeds instead of ``code``) rendered from it.
+        rel_keys: Maps each path in ``file_paths`` to its repository-relative
+            key, used for the template's ``{file_path}``/``{filename}``.
 
     Returns:
         List of (language, chunks, error, skip_reason) tuples — same order as
@@ -582,7 +593,16 @@ def parse_batch_callback(
     )
     args_list = [(p, cfg) for p in file_paths]
     pool = _get_parse_pool(cfg.parse_thread_pool_size)
-    return list(pool.map(_parse_one_file, args_list))
+    results = list(pool.map(_parse_one_file, args_list))
+    if document_template != DEFAULT_DOCUMENT_TEMPLATE:
+        for path, (_lang, chunks, _err, _skip) in zip(file_paths, results):
+            rel_key = (rel_keys or {}).get(path)
+            for chunk in chunks:
+                if chunk["code"].strip():
+                    chunk["embed_text"] = render_document_text(
+                        document_template, chunk["code"], rel_key
+                    )
+    return results
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:
@@ -879,6 +899,14 @@ async def run_rust_pipeline(
     # _EmbedThreadCache's docstring for why that isolation matters.
     embed_cache = _EmbedThreadCache()
 
+    # Document template: Rust embeds ``embed_text`` when a chunk carries one,
+    # so the parse callback renders the template there (see
+    # parse_batch_callback). Identity template -> nothing is set.
+    document_template = getattr(embedding_cfg, "document_template", None)
+    if not isinstance(document_template, str) or skip_embeddings:
+        document_template = DEFAULT_DOCUMENT_TEMPLATE
+    rel_keys = {io_path: rel_key for io_path, rel_key in file_entries}
+
     # Both the pipeline construction and pipeline.run() raise a plain PyO3
     # PyRuntimeError on failure (see src/pipeline/pipeline.rs), indistinguishable
     # from any other exception IndexingCoordinator.process_directory() can hit.
@@ -892,7 +920,10 @@ async def run_rust_pipeline(
             pipeline.run,
             files=file_entries,
             parse_batch_callback=functools.partial(
-                parse_batch_callback, index_unknown_files=_index_unknown
+                parse_batch_callback,
+                index_unknown_files=_index_unknown,
+                document_template=document_template,
+                rel_keys=rel_keys,
             ),
             embed_batch_callback=(
                 functools.partial(

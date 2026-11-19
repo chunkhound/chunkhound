@@ -25,6 +25,10 @@ from chunkhound.core.exceptions.embedding import (
     EmbeddingProviderError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
+from chunkhound.core.utils.embedding_utils import (
+    DEFAULT_DOCUMENT_TEMPLATE,
+    validate_document_template,
+)
 from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
@@ -302,6 +306,8 @@ class OpenAIEmbeddingProvider:
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
         max_concurrent_batches: int | None = None,
+        query_prefix: str = "",
+        document_template: str = DEFAULT_DOCUMENT_TEMPLATE,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -336,6 +342,10 @@ class OpenAIEmbeddingProvider:
                 Sizes the HTTP connection pool so legitimate concurrency isn't
                 bottlenecked on socket availability. None/unset falls back to
                 RECOMMENDED_CONCURRENCY-sized defaults.
+            query_prefix: Text prepended to search queries before embedding, for
+                models that expect an instruction on queries (e.g. Qwen3).
+            document_template: Template applied to indexed chunks before
+                embedding; may use {text}, {file_path} and {filename}.
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -375,6 +385,8 @@ class OpenAIEmbeddingProvider:
         )
         self._max_concurrent_batches = max_concurrent_batches
         self._embedding_space_generation = 0
+        self._query_prefix = query_prefix
+        self._document_template = validate_document_template(document_template)
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -1082,9 +1094,17 @@ class OpenAIEmbeddingProvider:
         """Generate embeddings for search queries.
 
         OpenAI-compatible embedding APIs take no query/document input type, so
-        queries are embedded exactly like documents.
+        queries differ from documents only by the configured ``query_prefix``
+        (empty by default, which embeds queries exactly like documents).
         """
+        if self._query_prefix:
+            texts = [self._query_prefix + text for text in texts]
         return await self.embed(texts)
+
+    @property
+    def document_template(self) -> str:
+        """Template applied to indexed chunks before embedding."""
+        return self._document_template
 
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""

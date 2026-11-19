@@ -393,6 +393,47 @@ When a newer model supersedes the one in use, an interactive `chunkhound index` 
 | `api_version` | `string` | `null` | Azure OpenAI API version (`YYYY-MM-DD`) |
 | `azure_endpoint` | `string` | `null` | Azure OpenAI endpoint (mutually exclusive with `base_url`) |
 | `azure_deployment` | `string` | `null` | Azure OpenAI deployment name |
+| `query_prefix` | `string` | `""` | Text prepended to every search query before embedding. `openai` provider only. See [Query and document prompts](#query-and-document-prompts). |
+| `document_template` | `string` | `"{text}"` | Template applied to every indexed chunk before embedding. `openai` provider only. See [Query and document prompts](#query-and-document-prompts). |
+
+### Query and document prompts
+
+Some embedding models expect different input for search queries and indexed code. Set `query_prefix` and `document_template` to give an OpenAI-compatible endpoint the format its model was trained on. Both are off by default, so requests are unchanged unless you set them.
+
+```json
+{
+  "embedding": {
+    "provider": "openai",
+    "model": "embeddinggemma-2",
+    "base_url": "http://127.0.0.1:8080/v1",
+    "query_prefix": "task: code retrieval | query: ",
+    "document_template": "title: {file_path} | text: {text}"
+  }
+}
+```
+
+For Qwen3-Embedding, queries take an instruction and documents take none:
+
+```json
+{
+  "embedding": {
+    "query_prefix": "Instruct: Given a code search query, retrieve relevant code
+Query: "
+  }
+}
+```
+
+`query_prefix` is prepended to every search query. `document_template` supports these placeholders, and anything else in braces is an error:
+
+| Placeholder | Value |
+|---|---|
+| `{text}` | The chunk text that would be embedded without a template. Required. |
+| `{file_path}` | Repository-relative path with `/` separators, e.g. `src/network/retry.ts`. |
+| `{filename}` | The file's basename, e.g. `retry.ts`. |
+
+Without file metadata, `{file_path}` and `{filename}` become `none`. Substitution happens once, so braces in source code stay literal. Environment variables: `CHUNKHOUND_EMBEDDING__QUERY_PREFIX` and `CHUNKHOUND_EMBEDDING__DOCUMENT_TEMPLATE`. Setting either with the `voyageai` provider is an error.
+
+> **Re-index after changing these.** Stored vectors are tied to the provider and model, not to the prompts, so ChunkHound cannot tell that existing vectors were built with different ones. Delete the database directory and re-index so queries and documents use the same format.
 
 ## Database Backends
 

@@ -60,6 +60,8 @@ def _bare_provider(
     provider._retry_attempts = retry_attempts
     provider._retry_delay = retry_delay
     provider._client = None
+    provider._query_prefix = ""
+    provider._document_template = "{text}"
     provider._model = model
     provider._base_url = None
     provider._azure_endpoint = None

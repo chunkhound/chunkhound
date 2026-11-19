@@ -16,6 +16,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
 from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
+from chunkhound.core.utils.embedding_utils import (
+    DEFAULT_DOCUMENT_TEMPLATE,
+    validate_document_template,
+)
 from chunkhound.core.utils.openai_utils import (
     is_azure_openai_endpoint,
     is_official_openai_endpoint,
@@ -212,6 +216,26 @@ class EmbeddingConfig(BaseSettings):
         ),
     )
 
+    query_prefix: str = Field(
+        default="",
+        description=(
+            "Text prepended to every search query before embedding "
+            "(openai provider only). For models that expect an instruction "
+            "on queries, e.g. 'task: code retrieval | query: '."
+        ),
+    )
+
+    document_template: str = Field(
+        default=DEFAULT_DOCUMENT_TEMPLATE,
+        description=(
+            "Template applied to every indexed chunk before embedding "
+            "(openai provider only). Placeholders: {text} (required), "
+            "{file_path} (repository-relative path), {filename} (basename); "
+            "both path placeholders resolve to 'none' without file metadata. "
+            "Example: 'title: {file_path} | text: {text}'."
+        ),
+    )
+
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
@@ -264,6 +288,27 @@ class EmbeddingConfig(BaseSettings):
         """Validate client_side_truncation requires output_dims."""
         if self.client_side_truncation and self.output_dims is None:
             raise ValueError("client_side_truncation requires output_dims to be set")
+        return self
+
+    @field_validator("document_template")
+    def validate_document_template_field(cls, v: str) -> str:  # noqa: N805
+        """Reject unknown placeholders and templates without {text}."""
+        return validate_document_template(v)
+
+    @model_validator(mode="after")
+    def validate_prompt_settings_provider(self) -> Self:
+        """Query/document prompts only apply to the openai provider.
+
+        VoyageAI takes an ``input_type`` instead; silently ignoring the
+        settings there would leave the user believing they are in effect.
+        """
+        if self.provider != "openai" and (
+            self.query_prefix or self.document_template != DEFAULT_DOCUMENT_TEMPLATE
+        ):
+            raise ValueError(
+                "query_prefix and document_template are only supported with "
+                f"provider 'openai', not '{self.provider}'"
+            )
         return self
 
     @field_validator("model")
@@ -403,6 +448,12 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_ssl_verify"] = self.rerank_ssl_verify
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
+
+        # Query/document prompts (openai provider only; validated above)
+        if self.query_prefix:
+            base_config["query_prefix"] = self.query_prefix
+        if self.document_template != DEFAULT_DOCUMENT_TEMPLATE:
+            base_config["document_template"] = self.document_template
 
         # Add matryoshka configuration if set
         if self.output_dims is not None:
@@ -653,6 +704,12 @@ class EmbeddingConfig(BaseSettings):
                 config["rerank_batch_size"] = int(rerank_batch_size)
             except ValueError:
                 pass
+
+        # Query/document prompts (empty string is a valid "unset")
+        if query_prefix := os.getenv("CHUNKHOUND_EMBEDDING__QUERY_PREFIX"):
+            config["query_prefix"] = query_prefix
+        if document_template := os.getenv("CHUNKHOUND_EMBEDDING__DOCUMENT_TEMPLATE"):
+            config["document_template"] = document_template
 
         # Matryoshka configuration
         output_dims_raw = os.getenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS")
