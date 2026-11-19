@@ -103,12 +103,34 @@ class RealtimePathFilter:
             or self._include_degraded
         )
 
-    def should_index(self, file_path: Path) -> bool:
-        """Return whether a path should enter the realtime indexing pipeline."""
+    def excludes_directory(self, dir_path: Path) -> bool:
+        """Return whether ignore policy excludes a directory and its subtree.
+
+        Gitignore-style patterns such as ``**/node_modules/**`` match the
+        directory itself, as in initial-index discovery, so nothing below it
+        needs to be walked. Fails closed like ``should_index``: when ignore
+        policy cannot be evaluated, no file below the directory would be
+        admitted either.
+        """
         settings = self._settings
         if settings is None:
-            return self._language_fallback(file_path)
+            return False
+        if not self._ensure_ignore_engine(settings):
+            return True
+        if self._ignore_engine_degraded:
+            return True
+        try:
+            return bool(
+                self._engine is not None and self._engine.matches(dir_path, is_dir=True)
+            )
+        except Exception as error:
+            self._ignore_engine_degraded = True
+            self._engine = None
+            self._warn_ignore_engine_degraded_once(error)
+            return True
 
+    def _ensure_ignore_engine(self, settings: RealtimePathFilterSettings) -> bool:
+        """Build the ignore engine once; return False if it cannot be built."""
         if not self._engine_initialized and not self._engine_initialization_failed:
             try:
                 from chunkhound.utils.ignore_engine import (
@@ -136,7 +158,15 @@ class RealtimePathFilter:
                 )
                 return False
 
-        if self._engine_initialization_failed:
+        return not self._engine_initialization_failed
+
+    def should_index(self, file_path: Path) -> bool:
+        """Return whether a path should enter the realtime indexing pipeline."""
+        settings = self._settings
+        if settings is None:
+            return self._language_fallback(file_path)
+
+        if not self._ensure_ignore_engine(settings):
             return False
 
         if not self._ignore_engine_degraded:

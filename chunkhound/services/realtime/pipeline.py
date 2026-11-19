@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
 import random
 import time
 from collections.abc import Awaitable
@@ -910,14 +911,27 @@ class RealtimePipelineMixin:
             None,
             root_path=self._path_filter_root(dir_path),
         )
+        path_filter = simple_handler._path_filter
         supported_files: list[Path] = []
+        if path_filter.excludes_directory(dir_path):
+            return supported_files
 
-        for file_path in dir_path.rglob("*"):
-            try:
-                if file_path.is_file() and simple_handler._should_index(file_path):
-                    supported_files.append(file_path)
-            except (OSError, PermissionError):
-                continue
+        # Prune excluded subdirectories instead of walking them, as initial
+        # indexing does: no file below an excluded directory is admitted.
+        for current, dirnames, filenames in os.walk(dir_path):
+            current_dir = Path(current)
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not path_filter.excludes_directory(current_dir / name)
+            ]
+            for filename in filenames:
+                file_path = current_dir / filename
+                try:
+                    if file_path.is_file() and simple_handler._should_index(file_path):
+                        supported_files.append(file_path)
+                except (OSError, PermissionError):
+                    continue
 
         return supported_files
     def _path_filter_root(self, fallback_path: Path | None = None) -> Path:
