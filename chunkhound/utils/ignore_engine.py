@@ -1054,11 +1054,10 @@ class RepoAwareLibgit2Evaluator:
         self.config_exclude = list(config_exclude or [])
 
         # Precompile config_exclude with pathspec for fast hard excludes
-        self._cfg_spec = (
-            _compile_gitwildmatch(self.config_exclude) if self.config_exclude else None
-        )
         self._cfg_rules = (
-            _spec_rules(self._cfg_spec) if self._cfg_spec is not None else None
+            _spec_rules(_compile_gitwildmatch(self.config_exclude))
+            if self.config_exclude
+            else None
         )
 
         # Open libgit2 repos
