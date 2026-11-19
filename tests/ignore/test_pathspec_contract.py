@@ -35,15 +35,16 @@ def test_ignore_engine_agrees_with_git_where_pathspec_alone_does_not(
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text("X = 1\n", encoding="utf-8")
 
+    # NUL-separated bytes: text mode would write "\r\n" on Windows, and git
+    # would then read each path with a trailing "\r".
     checked = subprocess.run(
-        ["git", "check-ignore", "--no-index", "--stdin"],
+        ["git", "check-ignore", "--no-index", "--stdin", "-z"],
         cwd=root,
-        input="\n".join(_FILES),
+        input="\0".join(_FILES).encode(),
         capture_output=True,
-        text=True,
     )
     assert checked.returncode in (0, 1), checked.stderr
-    git_ignored = set(checked.stdout.split())
+    git_ignored = set(checked.stdout.decode().split("\0")) - {""}
     # The layout does what it is for: git decides both re-include cases.
     assert git_ignored == {"dir/keep.py", "contents/sub/x.py", "contents/top.py"}
 
