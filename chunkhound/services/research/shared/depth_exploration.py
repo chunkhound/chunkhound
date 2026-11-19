@@ -199,6 +199,7 @@ class DepthExplorationService(ProgressEmitterMixin):
                 "files_explored": len(top_files),
                 "queries_generated": 0,
                 "chunks_added": 0,
+                "query_generation_failures": generation_metrics.to_dict(),
             }
 
         # Step 3: Execute unified search for each query (parallel, independent)
@@ -433,13 +434,28 @@ class DepthExplorationService(ProgressEmitterMixin):
         # Build chunk summary using shared builder
         chunk_context = builder.build_chunk_summary(fragments, max_chunks=5)
 
-        # JSON schema for structured output
+        # JSON schema for structured output. Some models return each query as
+        # {query, aspect} instead of a bare string (#515), so both are accepted
+        # and normalized to strings below; other keys are still rejected.
         schema = {
             "type": "object",
             "properties": {
                 "queries": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string"},
+                                    "aspect": {"type": "string"},
+                                },
+                                "required": ["query"],
+                                "additionalProperties": False,
+                            },
+                        ]
+                    },
                     "minItems": 1,
                     "maxItems": num_queries,
                 }
@@ -476,24 +492,41 @@ IMPORTANT:
 
 Output JSON with queries array."""
 
-        try:
-            result = await llm.complete_structured(
-                prompt=prompt,
-                json_schema=schema,
-                max_completion_tokens=(
-                    self._config.depth_exploration_max_completion_tokens
-                ),
-            )
+        # A failure propagates: _generate_all_exploration_queries logs it at
+        # warning with the file and records it in the stats'
+        # query_generation_failures, instead of it becoming a silent [] (#515).
+        result = await llm.complete_structured(
+            prompt=prompt,
+            json_schema=schema,
+            max_completion_tokens=(
+                self._config.depth_exploration_max_completion_tokens
+            ),
+        )
 
-            queries: list[str] = result.get("queries", [])
-            logger.debug(
-                f"Generated {len(queries)} exploration queries for {file_path}"
-            )
-            return queries
-
-        except Exception as e:
-            logger.warning(f"Exploration query generation failed for {file_path}: {e}")
-            return []
+        queries: list[str] = []
+        for i, item in enumerate(result.get("queries", [])):
+            if isinstance(item, str):
+                queries.append(item)
+            elif (
+                isinstance(item, dict)
+                and isinstance(item.get("query"), str)
+                and isinstance(item.get("aspect", ""), str)
+                and set(item) <= {"query", "aspect"}
+            ):
+                logger.debug(
+                    f"Coerced object-shaped exploration query {i} for {file_path} "
+                    f"(aspect={item.get('aspect')!r})"
+                )
+                queries.append(item["query"])
+            else:
+                # Some providers (Anthropic, Gemini) don't validate the response
+                # against the schema, so the item shape is checked here too
+                raise ValueError(
+                    f"Exploration query {i} for {file_path} is not a query string "
+                    f"or {{query, aspect}} object: {item!r}"
+                )
+        logger.debug(f"Generated {len(queries)} exploration queries for {file_path}")
+        return queries
 
     async def _execute_exploration_queries(
         self,

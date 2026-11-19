@@ -342,7 +342,10 @@ def _link_shared_tree(source: Path, target: Path) -> None:
 @contextmanager
 def sandbox_context(root: Path, artifacts: Path) -> Iterator[Path]:
     """Keep writable artifacts out of pytest's retained test-output directories."""
-    with tempfile.TemporaryDirectory(prefix=".sandbox-", dir=root) as scratch:
+    # The sandbox lives beside ``root``, never inside it: a test that treats its
+    # ``tmp_path`` as a repository (``git init`` + untracked-file assertions) or
+    # as a directory it lists must not see the harness's HOME/TMPDIR trees.
+    with tempfile.TemporaryDirectory(prefix=".sandbox-", dir=root.parent) as scratch:
         # Restore cwd/env after dependent teardown, before deleting private state.
         with pytest.MonkeyPatch.context() as patch:
             try:

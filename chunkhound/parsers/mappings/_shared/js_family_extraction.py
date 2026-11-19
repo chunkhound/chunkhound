@@ -1,10 +1,12 @@
 """Shared extraction logic for JavaScript-family mappings (JS/TS/JSX/TSX).
 
 Provides a single, minimal implementation of the universal extraction trio:
-`extract_name`, `extract_metadata`, and `extract_content`.
+`extract_name`, `extract_metadata`, and `extract_content`, shared by the
+JS, JSX, TS and TSX mappings.
 
-All implementations are behavior-preserving copies of the existing JS/TS
-methods, consolidated here to avoid duplication across mappings.
+Besides definitions and comments, the JS family chunks two concepts that only
+occur at the top level of a file: IMPORT (import statements) and BLOCK (call
+statements such as `describe(...)`, `it(...)`, an IIFE or `app.listen(...)`).
 """
 
 from typing import Any
@@ -12,7 +14,7 @@ from typing import Any
 from tree_sitter import Node as TSNode
 
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH
-from chunkhound.parsers.universal_engine import UniversalConcept
+from chunkhound.parsers.universal_engine import TOP_LEVEL_STATEMENT, UniversalConcept
 
 
 class JSFamilyExtraction:
@@ -42,11 +44,70 @@ class JSFamilyExtraction:
                 line = node.start_point[0] + 1
                 return f"definition_line_{line}"
 
+        if concept == UniversalConcept.IMPORT and "definition" in captures:
+            node = captures["definition"]
+            module_node = node.child_by_field_name("source")
+            if module_node is not None:
+                return f"import_{self._string_value(module_node, source)}"
+            return f"import_line_{node.start_point[0] + 1}"
+
+        if concept == UniversalConcept.BLOCK and "definition" in captures:
+            return self._call_statement_name(captures["definition"], source)
+
         if concept == UniversalConcept.COMMENT and "definition" in captures:
             node = captures["definition"]
             return f"comment_line_{node.start_point[0] + 1}"
 
         return f"unnamed_{concept.value}"
+
+    def _call_statement_name(self, statement: TSNode, source: str) -> str:
+        """Name a top-level call statement.
+
+        ``callee`` or ``callee("first string argument")`` for a named callee,
+        ``iife_line_N`` for an immediately invoked function expression, and
+        ``statement_line_N`` for any other callee.
+        """
+        line = statement.start_point[0] + 1
+        call = statement.named_child(0)
+        if call is not None and call.type == "await_expression":
+            call = call.named_child(0)
+        callee = call.child_by_field_name("function") if call is not None else None
+        if callee is not None and callee.type == "parenthesized_expression":
+            inner = callee.named_child(0)
+            if inner is not None and inner.type in {
+                "function_expression",
+                "function",
+                "arrow_function",
+            }:
+                return f"iife_line_{line}"
+        if callee is None or callee.type not in {"identifier", "member_expression"}:
+            return f"statement_line_{line}"
+        name: str = self.get_node_text(callee, source).strip()  # type: ignore[attr-defined]
+        arguments = call.child_by_field_name("arguments") if call else None
+        first = (
+            arguments.named_child(0)
+            if arguments is not None and arguments.named_child_count
+            else None
+        )
+        if first is not None and first.type in {"string", "template_string"}:
+            return f'{name}("{self._string_value(first, source)}")'
+        return name
+
+    def _string_value(self, node: TSNode, source: str) -> str:
+        """The text between a string or template literal's delimiters.
+
+        Only the delimiters are removed, so quotes inside the string survive:
+        ``'say "hi"'`` gives ``say "hi"``. A template's ``${...}`` stays as
+        written.
+        """
+        text: str = self.get_node_text(node, source)  # type: ignore[attr-defined]
+        if node.child_count >= 2:
+            opening, closing = node.child(0), node.child(node.child_count - 1)
+            if opening is not None and closing is not None:
+                start = opening.end_byte - node.start_byte
+                end = closing.start_byte - node.start_byte
+                return text.encode("utf-8")[start:end].decode("utf-8")
+        return text
 
     def extract_metadata(
         self,
@@ -55,6 +116,10 @@ class JSFamilyExtraction:
         content: bytes,
     ) -> dict[str, Any]:
         meta: dict[str, Any] = {"concept": concept.value}
+
+        if concept == UniversalConcept.BLOCK:
+            # BLOCK is only ever a top-level call statement in the JS family.
+            meta[TOP_LEVEL_STATEMENT] = True
 
         if concept == UniversalConcept.DEFINITION and "definition" in captures:
             node = captures["definition"]

@@ -18,10 +18,10 @@ import sys
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -31,9 +31,6 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.interfaces.embedding_provider import (
-    EmbeddingProvider as EmbeddingProviderProtocol,
-)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.database.serial_executor import (
     DatabaseCompactionInProgressError,
@@ -53,8 +50,8 @@ from chunkhound.watchman_runtime.loader import (
 # hard-fails in environments without the SDK installed.
 _MCP_AVAILABLE = True
 try:  # runtime path
-    import mcp.types as types  # type: ignore  # noqa: F401
-    from mcp.server import Server  # type: ignore
+    import mcp.types as types  # noqa: F401
+    from mcp.server import Server
 except ImportError:  # pragma: no cover - optional dependency path
     _MCP_AVAILABLE = False
 
@@ -67,7 +64,11 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps on import
 # already-registered call_tool handler observe the patched behavior — the
 # handler closure below resolves this name from these module globals on
 # every call, not from a value captured once at registration time.
-from .common import first_error_tool_content, handle_tool_call  # noqa: E402
+from .common import (  # noqa: E402
+    handle_tool_call,
+    parse_mcp_arguments,
+    tool_call_failed,
+)
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
 
@@ -114,11 +115,11 @@ class MCPServerBase(ABC):
             getattr(config, "target_dir", None) or Path.cwd(),
         )
 
-        # Underlying MCP protocol server. Constructed lazily in
-        # _register_common_tool_handlers() by subclasses that actually
-        # dispatch tools through the SDK (stdio/HTTP); left None for
-        # subclasses whose _register_tools() is a no-op (e.g. the daemon,
-        # which dispatches tools via its own JSON-RPC IPC loop instead).
+        # Underlying MCP protocol server. Constructed in
+        # _register_common_tool_handlers(), which every concrete subclass's
+        # _register_tools() calls (stdio, HTTP, and the daemon) so that
+        # serve_connection()/build_streamable_http_app() always have a
+        # non-None self.server to drive.
         self._initialization_complete = asyncio.Event()
         self.server: Server | None = None
 
@@ -131,6 +132,7 @@ class MCPServerBase(ABC):
         # Background tasks
         self._deferred_start_task: asyncio.Task | None = None
         self._realtime_start_task: asyncio.Task | None = None
+        self._realtime_failure_recorded = False
         self._scan_task: asyncio.Task | None = None
         self._scan_lock = asyncio.Lock()
         self._scan_target_path: Path | None = None
@@ -156,9 +158,6 @@ class MCPServerBase(ABC):
                 startup_mode=self._realtime_startup_mode(),
             ),
         }
-
-        # Set MCP mode to suppress stderr output that interferes with JSON-RPC
-        os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
         # Register tools with the underlying MCP server
         self._register_tools()
@@ -396,6 +395,9 @@ class MCPServerBase(ABC):
             self._reset_warm_ready_tracking()
             self._warm_ready_started_monotonic = time.monotonic()
             self._scan_progress["realtime"] = self._default_realtime_scan_status()
+            self._realtime_failure_recorded = False
+            # A start task left from an earlier run belongs to a stopped service.
+            self._realtime_start_task = None
             if self._realtime_startup_mode() == "daemon":
                 self._startup_publish_complete.clear()
             else:
@@ -417,11 +419,8 @@ class MCPServerBase(ABC):
                 # Setup embedding provider (optional - continue if it fails)
                 try:
                     if self.config.embedding:
-                        provider = cast(
-                            EmbeddingProviderProtocol,
-                            EmbeddingProviderFactory.create_provider(
-                                self.config.embedding
-                            ),
+                        provider = EmbeddingProviderFactory.create_provider(
+                            self.config.embedding
                         )
                         self.embedding_manager.register_provider(
                             provider,
@@ -828,8 +827,46 @@ class MCPServerBase(ABC):
         realtime["startup"] = self._startup_tracker.snapshot()
         self._scan_progress["realtime"] = realtime
 
+    def _current_scan_progress(self) -> dict[str, Any]:
+        """scan_progress for a status read, with the realtime section built now.
+
+        The realtime service publishes its snapshot only when it records
+        something, so between publishes the published section can show a
+        drained queue as `busy` and cannot show `stalled`. A status
+        read therefore takes the service's state as of now. It keeps the
+        published section while the service has not started cleanly, once a
+        realtime failure was recorded (that record exists only in the published
+        section), and if building the snapshot fails: status must never break
+        a status read. Nothing is written back.
+        """
+        service = self.realtime_indexing
+        task = self._realtime_start_task
+        if (
+            service is None
+            or task is None
+            or not task.done()
+            or task.cancelled()
+            or task.exception() is not None
+            or self._realtime_failure_recorded
+        ):
+            return self._scan_progress
+        try:
+            realtime = service.health_snapshot()
+            realtime["startup"] = self._startup_tracker.snapshot()
+        except Exception as error:
+            self.debug_log(f"Realtime status read used the published one: {error}")
+            return self._scan_progress
+        return {**self._scan_progress, "realtime": realtime}
+
+    def _scan_progress_for_tool(self, tool_name: str) -> dict[str, Any]:
+        """The scan_progress a tool call gets; only daemon_status reads it."""
+        if tool_name == "daemon_status":
+            return self._current_scan_progress()
+        return self._scan_progress
+
     def _record_realtime_failure(self, message: str) -> None:
         """Persist a startup failure into the shared realtime status snapshot."""
+        self._realtime_failure_recorded = True
         realtime = copy.deepcopy(
             self._scan_progress.get("realtime") or self._default_realtime_scan_status()
         )
@@ -1274,6 +1311,7 @@ class MCPServerBase(ABC):
         run_rust_indexing_phase() restore the connection when the
         respective owner finishes.
         """
+        assert self.services is not None
         if self.services.provider.is_connected:
             return
         async with self._connect_lock:
@@ -1284,8 +1322,8 @@ class MCPServerBase(ABC):
                 except DatabaseCompactionInProgressError:
                     log_if_not_mcp(
                         "info",
-                        "Database compaction in progress \u2014 DB-backed MCP tools will be "
-                        "unavailable until compaction finishes. "
+                        "Database compaction in progress \u2014 DB-backed MCP tools "
+                        "will be unavailable until compaction finishes. "
                         "Non-DB tools (daemon_status, websearch) are unaffected.",
                     )
                     raise
@@ -1381,53 +1419,98 @@ class MCPServerBase(ABC):
 
         return tools
 
-    def _register_common_tool_handlers(self) -> None:
-        """Register call_tool/list_tools handlers shared by every transport.
+    def _validate_advertised_tool_arguments(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> str | None:
+        """Validate arguments against the schema advertised via tools/list.
 
-        Transport subclasses call this from their ``_register_tools()``
-        implementation so tool dispatch never drifts between stdio and HTTP.
+        The MCP SDK 2.x no longer validates ``tools/call`` arguments, so do it
+        here. Uses ``_build_filtered_tool_dicts()`` -- the same source as
+        ``build_available_tools()`` -- so validation cannot diverge from what
+        clients are shown. Tools that are not advertised (unknown or hidden by
+        missing capabilities) are left to ``handle_tool_call``'s own error path.
+        """
+        from jsonschema import ValidationError
+        from jsonschema.validators import validator_for
+
+        schema = next(
+            (
+                d["inputSchema"]
+                for d in self._build_filtered_tool_dicts()
+                if d["name"] == tool_name
+            ),
+            None,
+        )
+        if schema is None:
+            return None
+        try:
+            # Skip validate()'s per-call check_schema(): the schema is ours.
+            validator_for(schema)(schema).validate(arguments)
+        except ValidationError as e:
+            return e.message
+        return None
+
+    def _register_common_tool_handlers(self) -> None:
+        """Build the shared SDK Server with tool-call/list-tools callbacks.
+
+        This is the single place in the codebase that builds an
+        ``mcp.server.Server``. Every transport (daemon, stdio, HTTP) reaches
+        it only through the inherited ``serve_connection()`` /
+        ``build_streamable_http_app()`` methods below -- none of them import
+        ``mcp`` directly.
         """
         if not _MCP_AVAILABLE:
             return  # no-op when SDK not available
 
-        self.server = Server("ChunkHound Code Search", version=__version__)
+        def _validation_error_result(message: str) -> types.CallToolResult:
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(
+                        type="text", text=f"Input validation error: {message}"
+                    )
+                ],
+                is_error=True,
+            )
 
-        # The MCP SDK's call_tool decorator expects a SINGLE handler function
-        # with signature (tool_name: str, arguments: dict) that handles ALL tools
-        @self.server.call_tool()  # type: ignore[misc]
-        async def handle_all_tools(
-            tool_name: str, arguments: dict[str, Any]
-        ) -> list[types.TextContent]:
+        async def on_call_tool(
+            ctx: Any,
+            params: types.CallToolRequestParams,
+        ) -> types.CallToolResult:
             """Universal tool handler that routes to the unified handler."""
+            arguments = params.arguments or {}
+            # Coerce first (e.g. ``page_size: "10"``) so validation sees the
+            # same values the tool will receive.
+            try:
+                arguments = parse_mcp_arguments(arguments)
+            except (ValueError, TypeError) as e:
+                return _validation_error_result(str(e))
+            validation_error = self._validate_advertised_tool_arguments(
+                params.name, arguments
+            )
+            if validation_error is not None:
+                return _validation_error_result(validation_error)
             text_contents = await handle_tool_call(
-                tool_name=tool_name,
+                tool_name=params.name,
                 arguments=arguments,
                 services=self.services,
                 embedding_manager=self.embedding_manager,
                 initialization_complete=self._initialization_complete,
                 debug_mode=self.debug_mode,
-                scan_progress=self._scan_progress,
+                scan_progress=self._scan_progress_for_tool(params.name),
                 llm_manager=self.llm_manager,
                 config=self.config,
                 ensure_services=self.ensure_tool_services,
                 analytics_recorder=self.analytics_recorder,
             )
-            error_content = first_error_tool_content(text_contents)
-            if error_content is not None:
-                raise RuntimeError(error_content.text)
-            return text_contents
+            return types.CallToolResult(
+                content=list(text_contents),
+                is_error=tool_call_failed(text_contents),
+            )
 
-        self._register_list_tools()
-
-    def _register_list_tools(self) -> None:
-        """Register the list_tools handler shared by every transport."""
-        # Only called from _register_common_tool_handlers(), which constructs
-        # self.server immediately before calling this.
-        assert self.server is not None
-
-        @self.server.list_tools()  # type: ignore[misc]
-        async def list_tools() -> list[types.Tool]:
-            """List available tools."""
+        async def on_list_tools(
+            ctx: Any,
+            params: types.PaginatedRequestParams | None,
+        ) -> types.ListToolsResult:
             # Wait for initialization
             try:
                 await asyncio.wait_for(
@@ -1436,8 +1519,14 @@ class MCPServerBase(ABC):
             except asyncio.TimeoutError:
                 # Return basic tools even if not fully initialized
                 pass
+            return types.ListToolsResult(tools=self.build_available_tools())
 
-            return self.build_available_tools()
+        self.server = Server(
+            "ChunkHound Code Search",
+            version=__version__,
+            on_call_tool=on_call_tool,
+            on_list_tools=on_list_tools,
+        )
 
     def build_available_tools(self) -> list[types.Tool]:
         """Build list of tools available based on current configuration.
@@ -1449,10 +1538,146 @@ class MCPServerBase(ABC):
             types.Tool(
                 name=d["name"],
                 description=d["description"],
-                inputSchema=d["inputSchema"],
+                input_schema=d["inputSchema"],
             )
             for d in self._build_filtered_tool_dicts()
         ]
+
+    async def serve_connection(
+        self,
+        read_frame: Callable[[], Awaitable[dict[str, Any] | None]],
+        write_frame: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Drive one dual-era SDK session over a generic duplex-frame transport.
+
+        ``read_frame``/``write_frame`` exchange plain JSON-RPC dicts; this
+        method owns everything SDK-specific. Callers never see an mcp type.
+
+        A frame that fails JSON-RPC shape validation is logged, and if it
+        carries a readable ``id`` this method replies itself with a -32600
+        "Invalid Request" error. The frame is then forwarded to the session as
+        an exception (mirroring the SDK's ``stdio_server``), which the SDK
+        dispatcher logs and drops; the session keeps serving. The error reply
+        is written inline before the exception is forwarded, so a slow client
+        whose ``write_frame`` blocks (drain) also stalls inbound reads. Only
+        ``read_frame`` returning ``None`` (or ``run()`` returning) ends it.
+
+        Used by:
+        - ChunkHoundDaemon, once per client IPC connection.
+        - StdioMCPServer, once per process, with read_frame/write_frame backed
+          by stdio line framing (no daemon, no IPC hop).
+        """
+        import anyio
+        from mcp.server.lowlevel import NotificationOptions
+        from mcp.server.models import InitializationOptions
+        from mcp.shared.message import SessionMessage
+        from mcp_types.jsonrpc import jsonrpc_message_adapter
+
+        assert self.server is not None  # _register_tools() always builds it
+
+        init_options = InitializationOptions(
+            server_name="ChunkHound Code Search",
+            server_version=__version__,
+            capabilities=self.server.get_capabilities(
+                notification_options=NotificationOptions(),
+                experimental_capabilities={},
+            ),
+        )
+
+        # Plain anyio streams satisfy the SDK's public ReadStream/WriteStream
+        # protocols; avoid the SDK-private context-stream wrappers.
+        read_stream_writer, read_stream = anyio.create_memory_object_stream[
+            SessionMessage | Exception
+        ](0)
+        write_stream, write_stream_reader = anyio.create_memory_object_stream[
+            SessionMessage
+        ](0)
+
+        # pump_in (invalid-request replies) and pump_out both write frames.
+        write_lock = anyio.Lock()
+
+        async def send_frame(payload: dict[str, Any]) -> None:
+            async with write_lock:
+                await write_frame(payload)
+
+        async def pump_in() -> None:
+            async with read_stream_writer:
+                while True:
+                    frame = await read_frame()
+                    if frame is None:
+                        break
+                    try:
+                        message = SessionMessage(
+                            message=jsonrpc_message_adapter.validate_python(frame)
+                        )
+                    except Exception as exc:
+                        self.debug_log(
+                            f"serve_connection: invalid JSON-RPC frame: {exc}"
+                        )
+                        request_id = (
+                            frame.get("id") if isinstance(frame, dict) else None
+                        )
+                        if isinstance(request_id, (str, int)) and not isinstance(
+                            request_id, bool
+                        ):
+                            # JSON-RPC 2.0: a request whose id is readable must
+                            # get an error reply, or the caller waits forever.
+                            await send_frame(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "error": {
+                                        "code": -32600,
+                                        "message": "Invalid Request",
+                                    },
+                                }
+                            )
+                        await read_stream_writer.send(exc)
+                        continue
+                    await read_stream_writer.send(message)
+
+        async def pump_out() -> None:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    payload = session_message.message.model_dump(
+                        by_alias=True, mode="json", exclude_unset=True
+                    )
+                    await send_frame(payload)
+
+        async with anyio.create_task_group() as tg:
+            # pump_in has its own scope so it can be cancelled alone: pump_out
+            # must keep draining responses already queued when run() returns.
+            in_scope = anyio.CancelScope()
+
+            async def pump_in_scoped() -> None:
+                with in_scope:
+                    try:
+                        await pump_in()
+                    except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+                        # run() ended (and closed read_stream) while a frame
+                        # was in flight; that is a normal shutdown, not an error.
+                        pass
+
+            tg.start_soon(pump_in_scoped)
+            tg.start_soon(pump_out)
+            try:
+                await self.server.run(read_stream, write_stream, init_options)
+            finally:
+                # Cancel before closing: pump_in may be blocked in read_frame()
+                # with no EOF coming, or in send() on the zero-buffer stream;
+                # closing the writer under it would raise inside pump_in.
+                in_scope.cancel()
+                await read_stream_writer.aclose()
+                # Closing the write side lets pump_out finish after delivering
+                # every response still in flight.
+                await write_stream.aclose()
+
+    def build_streamable_http_app(self, **kwargs: Any) -> Any:
+        """Wrap StreamableHTTPSessionManager construction for HttpMCPServer."""
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+        assert self.server is not None
+        return StreamableHTTPSessionManager(app=self.server, **kwargs)
 
     @abstractmethod
     def _register_tools(self) -> None:

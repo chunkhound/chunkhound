@@ -164,7 +164,7 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
             )
             result_dict = {"results": results, "pagination": pagination}
 
-        # Surface any warnings from diff injection (e.g. truncation)
+        # Surface any warnings the search path attached to its result.
         for w in result_dict.get("warnings", []):
             formatter.warning(w)
 
@@ -203,27 +203,37 @@ def _format_search_results(
 
     search_type = "regex" if is_regex else "semantic"
     if pagination.get("candidate_budget_exhausted"):
-        formatter.warning("Results may be incomplete; narrow the query or path filter.")
+        formatter.warning(
+            "Vector candidates were exhausted before the page filled; results "
+            "may be incomplete. Try a more specific query, remove the path "
+            "filter, or run with --no-duckdb-hnsw for an exact scan."
+        )
 
     if not results:
         formatter.info(f"No results found for {search_type} search: '{query}'")
         return
 
     # Display header
-    total = pagination.get("total")
     offset = pagination.get("offset", 0)
     page_size = pagination.get("page_size", len(results))
+    total = pagination.get("total")
+    if total is None:
+        # Fall back to what this page shows so the header never renders "of None".
+        total = offset + len(results)
+    corpus_total = pagination.get("corpus_total")
+    beyond_window = corpus_total is not None and corpus_total > total
 
     formatter.section_header(f"{search_type.title()} Search Results")
     formatter.info(f"Query: '{query}'")
     start_idx = offset + 1
     end_idx = offset + len(results)
-    if total is None:
-        formatter.info(f"Results: {len(results)} (showing {start_idx}-{end_idx})")
-    else:
-        formatter.info(
-            f"Results: {len(results)} of {total} (showing {start_idx}-{end_idx})"
-        )
+    # `total` only counts what the paging window can serve, so name the full
+    # match count separately whenever it is larger.
+    scope = f"{total} reachable" if beyond_window else f"{total}"
+    matches = f", {corpus_total} matches" if beyond_window else ""
+    formatter.info(
+        f"Results: {len(results)} of {scope} (showing {start_idx}-{end_idx}{matches})"
+    )
 
     # Display each result
     for i, result_item in enumerate(results, 1):

@@ -118,7 +118,7 @@ def test_unknown_dimension_query_returns_empty_page(provider: DuckDBProvider) ->
     assert results == []
     assert pagination["has_more"] is False
     assert pagination["next_offset"] is None
-    assert pagination["total"] is None
+    assert pagination["total"] == 0
     assert pagination["candidate_budget_exhausted"] is False
 
 

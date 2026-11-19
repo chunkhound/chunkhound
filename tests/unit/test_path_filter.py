@@ -1,7 +1,7 @@
 """Unit tests for path filter semantics shared by DB and diff search.
 
 Covers the pure string logic of:
-  - validate_and_normalize_path_filter() — file vs directory classification
+  - normalize_path_filter() — file vs directory classification
   - path_matches_filter() — in-memory matching (diff search)
   - DuckDBProvider._build_path_like_pattern() — SQL LIKE translation
 
@@ -16,18 +16,18 @@ import pytest
 
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.utils.path_filter import (
+    normalize_path_filter,
     path_matches_filter,
-    validate_and_normalize_path_filter,
 )
 
 # ---------------------------------------------------------------------------
-# validate_and_normalize_path_filter
+# normalize_path_filter
 # ---------------------------------------------------------------------------
 
 
 def _normalize(path: str | None) -> str | None:
     """Shorthand to call the shared normalizer."""
-    return validate_and_normalize_path_filter(path)
+    return normalize_path_filter(path)
 
 
 class TestNormalizeNoneOrEmpty:
@@ -210,7 +210,7 @@ class TestBuildLikeSpecialChars:
 
 def _matches(file_path: str, path_filter: str) -> bool:
     """Normalize a user filter, then match it against a stored path."""
-    normalized = validate_and_normalize_path_filter(path_filter)
+    normalized = normalize_path_filter(path_filter)
     assert normalized is not None
     return path_matches_filter(file_path, normalized)
 
@@ -277,7 +277,7 @@ class TestMatchAgreesWithLikePattern:
         ],
     )
     def test_matches_like_semantics(self, file_path: str, path_filter: str) -> None:
-        normalized = validate_and_normalize_path_filter(path_filter)
+        normalized = normalize_path_filter(path_filter)
         assert normalized is not None
         pattern = DuckDBProvider._build_path_like_pattern(normalized)
         assert path_matches_filter(file_path, normalized) == _like_matches(

@@ -42,10 +42,9 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
+from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.services.search.semantic_window import validate_semantic_window
 from chunkhound.utils.logging_guard import log_if_not_mcp
-from chunkhound.providers.database.like_utils import escape_like_pattern
-from chunkhound.utils.path_filter import validate_and_normalize_path_filter
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -55,6 +54,7 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseTemporarilyUnavailableError,
     _executor_local,
 )
+from chunkhound.utils.path_filter import normalize_path_filter
 from chunkhound.utils.windows_constants import (
     IS_WINDOWS,
     WINDOWS_FILE_HANDLE_DELAY,
@@ -688,6 +688,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         finally:
             # Close connection
             conn.close()
+            # Closing aborts any open transaction; a stale True would make
+            # later in-op transactional checks skip their own BEGIN/COMMIT.
+            state["transaction_active"] = False
             # Clear thread-local connection
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")
@@ -3116,6 +3119,34 @@ class DuckDBProvider(SerialDatabaseProvider):
             params.append(file_id)
             conn.execute(query, params)
 
+    def _executor_refresh_file_mtimes(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        entries: list[tuple[str, float, str]],
+    ) -> int:
+        """Executor method for refresh_file_mtimes - runs in DB thread.
+
+        One statement for the whole batch. Leaves updated_at and skip_reason
+        alone: the row's content was confirmed, not re-indexed.
+        """
+        paths = [e[0] for e in entries]
+        mtimes = [float(e[1]) for e in entries]
+        hashes = [e[2] for e in entries]
+        row = conn.execute(
+            """
+            UPDATE files SET modified_time = to_timestamp(v.mtime)
+            FROM (
+                SELECT unnest(?::VARCHAR[]) AS path,
+                       unnest(?::DOUBLE[]) AS mtime,
+                       unnest(?::VARCHAR[]) AS h
+            ) v
+            WHERE files.path = v.path AND files.content_hash = v.h
+            """,
+            [paths, mtimes, hashes],
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def record_skipped_file(
         self,
         path: str,
@@ -3941,6 +3972,21 @@ class DuckDBProvider(SerialDatabaseProvider):
         return chunks_with_metadata
 
     @staticmethod
+    def _validate_and_normalize_path_filter(path_filter: str | None) -> str | None:
+        """Validate and normalize path filter for security and consistency.
+
+        Args:
+            path_filter: User-provided path filter
+
+        Returns:
+            Normalized path filter safe for SQL LIKE queries, or None
+
+        Raises:
+            ValueError: If path contains dangerous patterns
+        """
+        return normalize_path_filter(path_filter)
+
+    @staticmethod
     def _build_path_like_pattern(normalized_path: str) -> str:
         """Build a LIKE pattern from a normalized path filter.
 
@@ -4050,6 +4096,26 @@ class DuckDBProvider(SerialDatabaseProvider):
             """
 
     @staticmethod
+    def _hnsw_null_safe_candidate_query(table_name: str, dims: int, limit: int) -> str:
+        """Same scan, with rows whose stored vector holds NULL elements removed.
+
+        ``array_cosine_distance`` raises on such a vector (a NaN vector is stored
+        as NULL elements). The filter is a list lambda, which DuckDB's VSS
+        optimizer cannot push below an index scan, so this variant runs only
+        after the fast query reports the malformed row.
+        """
+        return f"""
+            SELECT chunk_id,
+                   provider,
+                   model,
+                   array_cosine_distance(embedding, ?::FLOAT[{dims}]) AS distance
+            FROM {table_name}
+            WHERE len(list_filter(embedding, x -> x IS NULL)) = 0
+            ORDER BY distance ASC
+            LIMIT ? OFFSET 0
+            """
+
+    @staticmethod
     def _validate_query_embedding(query_embedding: list[float]) -> None:
         """Reject non-finite query vectors.
 
@@ -4072,10 +4138,21 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> list[tuple[int, str, str, float]]:
         """Fetch raw vector candidates with their provider/model identity."""
         self._validate_query_embedding(query_embedding)
-        query = self._hnsw_eligible_candidate_query(
-            table_name, len(query_embedding), limit
-        )
-        rows = conn.execute(query, [query_embedding, limit]).fetchall()
+        dims = len(query_embedding)
+        try:
+            rows = conn.execute(
+                self._hnsw_eligible_candidate_query(table_name, dims, limit),
+                [query_embedding, limit],
+            ).fetchall()
+        except duckdb.InvalidInputException as error:
+            # One malformed stored vector must not fail the whole search, and
+            # it must not cost the index scan on the common path either.
+            if "NULL" not in str(error):
+                raise
+            rows = conn.execute(
+                self._hnsw_null_safe_candidate_query(table_name, dims, limit),
+                [query_embedding, limit],
+            ).fetchall()
         return [
             (int(chunk_id), str(provider), str(model), float(distance))
             for chunk_id, provider, model, distance in rows
@@ -4156,7 +4233,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         Parameters are ordered by textual ``?`` position.
         """
         distance = (
-            f"array_cosine_distance(e.embedding, ?::FLOAT[{len(query_embedding)}])"
+            f"TRY(array_cosine_distance(e.embedding, ?::FLOAT[{len(query_embedding)}]))"
         )
         conditions = ["e.provider = ?", "e.model = ?"]
         # Param order matches textual ? position: embedding for SELECT distance,
@@ -4170,6 +4247,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             # embedding bind and keep max_distance bound to the comparison.
             conditions.append("distance <= ?")
             params.append(max_distance)
+        # A malformed stored vector yields a NULL distance; drop it rather than
+        # fail the scan or count it.
+        conditions.append("distance IS NOT NULL")
         query = f"""
             SELECT c.id, c.symbol, c.code, c.chunk_type, c.start_line, c.end_line,
                    f.path, f.language, c.metadata, {distance} AS distance
@@ -4354,7 +4434,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _vector_path_like(self, path_filter: str | None) -> str | None:
         """Translate an optional API path filter for vector post-filtering."""
-        normalized_path = validate_and_normalize_path_filter(path_filter)
+        normalized_path = self._validate_and_normalize_path_filter(path_filter)
         return (
             self._build_path_like_pattern(normalized_path)
             if normalized_path is not None
@@ -4437,15 +4517,25 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     @staticmethod
     def _semantic_pagination(
-        offset: int, page_size: int, has_more: bool, budget_exhausted: bool = False
+        offset: int,
+        page_size: int,
+        has_more: bool,
+        total: int | None = None,
+        budget_exhausted: bool = False,
     ) -> dict[str, Any]:
-        """Build semantic pagination metadata; ``total`` is never counted."""
+        """Build semantic pagination metadata.
+
+        ``total`` counts the rows the search can actually return (malformed
+        vectors and filtered-out rows excluded), matching what paging yields.
+        It stays ``None`` only when the candidate scan stopped early and the
+        eligible count is unknown; ``candidate_budget_exhausted`` says why.
+        """
         return {
             "offset": offset,
             "page_size": page_size,
             "has_more": has_more,
             "next_offset": offset + page_size if has_more else None,
-            "total": None,
+            "total": total,
             "candidate_budget_exhausted": budget_exhausted,
         }
 
@@ -4455,6 +4545,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         offset: int,
         page_size: int,
         budget_exhausted: bool = False,
+        total: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Slice results into a page and compute pagination metadata.
 
@@ -4464,6 +4555,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             page_size: Page size
             budget_exhausted: True when candidate budget was exhausted, indicating
                 more results may exist beyond what was fetched
+            total: Exact eligible-row count when it is known
         """
         next_offset = offset + page_size
         # Only advertise a next page already materialized by the look-ahead
@@ -4473,8 +4565,50 @@ class DuckDBProvider(SerialDatabaseProvider):
             cap is None or next_offset < cap
         )
         return all_results[offset:next_offset], self._semantic_pagination(
-            offset, page_size, has_more, budget_exhausted
+            offset, page_size, has_more, total, budget_exhausted
         )
+
+    def _executor_count_semantic_rows(
+        self,
+        conn: Any,
+        table_name: str,
+        query_embedding: list[float],
+        provider: str,
+        model: str,
+        path_like: str | None,
+        max_distance: float | None,
+    ) -> int:
+        """Count the rows a semantic page can actually return.
+
+        ``total`` must describe the pages the caller can page through, not the
+        raw embedding-table size, so this mirrors the scoring scope: chunk and
+        file present, provider/model match, path filter applied, malformed
+        vectors excluded, and the threshold honoured.
+        """
+        distance = (
+            f"TRY(array_cosine_distance(e.embedding, ?::FLOAT[{len(query_embedding)}]))"
+        )
+        conditions = ["e.provider = ?", "e.model = ?"]
+        filter_params: list[Any] = [provider, model]
+        self._append_chunk_scope_conditions(conditions, filter_params, path_like, None)
+        outer = ["distance IS NOT NULL"]
+        outer_params: list[Any] = []
+        if max_distance is not None:
+            outer.append("distance <= ?")
+            outer_params.append(max_distance)
+        query = f"""
+            SELECT COUNT(*) FROM (
+                SELECT {distance} AS distance
+                FROM {table_name} e
+                JOIN chunks c ON c.id = e.chunk_id
+                JOIN files f ON f.id = c.file_id
+                WHERE {" AND ".join(conditions)}
+            ) scored
+            WHERE {" AND ".join(outer)}
+        """
+        params = [query_embedding, *filter_params, *outer_params]
+        row = conn.execute(query, params).fetchone()
+        return int(row[0]) if row else 0
 
     def _executor_exact_semantic_page(
         self,
@@ -4502,8 +4636,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             page_size + 1,
             offset,
         )
-        has_more = len(rows) > page_size
-        return rows[:page_size], self._semantic_pagination(offset, page_size, has_more)
+        total = self._executor_count_semantic_rows(
+            conn, table_name, query_embedding, provider, model, path_like, max_distance
+        )
+        has_more = offset + page_size < total
+        return rows[:page_size], self._semantic_pagination(
+            offset, page_size, has_more, total
+        )
 
     def _executor_search_semantic(
         self,
@@ -4525,7 +4664,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         table_name = f"embeddings_{dims}"
         if not self._executor_table_exists(conn, state, table_name):
             logger.warning(f"No embeddings table found for {dims} dimensions")
-            return [], self._semantic_pagination(offset, page_size, False)
+            return [], self._semantic_pagination(offset, page_size, False, 0)
         path_like = self._vector_path_like(path_filter)
         # Fetch one extra result to detect if more exist beyond current page.
         # This avoids a separate COUNT query (which would require full table scan).
@@ -4554,8 +4693,21 @@ class DuckDBProvider(SerialDatabaseProvider):
             max_distance,
             "symbol",
         )
+        total: int | None = None
+        if not budget_exhausted:
+            # The scan saw every eligible row, so the count is exact. Under
+            # budget exhaustion the eligible count is genuinely unknown.
+            total = self._executor_count_semantic_rows(
+                conn,
+                table_name,
+                query_embedding,
+                provider,
+                model,
+                path_like,
+                max_distance,
+            )
         return self._build_semantic_pagination(
-            all_results, offset, page_size, budget_exhausted
+            all_results, offset, page_size, budget_exhausted, total
         )
 
     def search_regex(
@@ -4596,7 +4748,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for search_regex - runs in DB thread."""
         try:
             # Validate and normalize path filter
-            normalized_path = validate_and_normalize_path_filter(path_filter)
+            normalized_path = self._validate_and_normalize_path_filter(path_filter)
 
             # Build base WHERE clause
             where_conditions = ["regexp_matches(c.code, ?)"]

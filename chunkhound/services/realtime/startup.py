@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -23,7 +25,8 @@ from .adapters import (
     WatchmanRealtimeAdapter,
 )
 from .delivery_probe import FilesystemDeliveryProbe
-from .events import SimpleEventHandler
+from .events import SimpleEventHandler, forward_to_loop, watchdog_event_filter
+from .inotify_overflow import InotifyOverflowDetection
 
 # Python 3.10 keeps asyncio.TimeoutError distinct from the builtin: the sync
 # probe and observer-start deadlines raise the builtin, wait_for raises the
@@ -39,6 +42,7 @@ class RealtimeObserver(Protocol):
         event_handler: SimpleEventHandler,
         path: str,
         recursive: bool = ...,
+        event_filter: list[type] | None = ...,
     ) -> Any: ...
 
     def start(self) -> None: ...
@@ -50,11 +54,40 @@ class RealtimeObserver(Protocol):
     def join(self, timeout: float | None = ...) -> None: ...
 
 
-def _create_watchdog_observer() -> RealtimeObserver:
-    """Import watchdog only inside the watchdog startup path."""
-    from .adapters.watchdog import create_watchdog_observer
+@dataclass(frozen=True)
+class WatchdogBootstrap:
+    """A started watchdog observer, ready for the service to adopt."""
 
-    return create_watchdog_observer()
+    observer: RealtimeObserver
+    event_handler: SimpleEventHandler
+    inotify_overflow_detection: InotifyOverflowDetection
+    # Verified-live probe for ping supervision; None for observers built
+    # without delivery verification (tests, fallback paths).
+    delivery_probe: FilesystemDeliveryProbe | None = None
+
+
+def _create_watchdog_observer(
+    on_overflow: Callable[[], None],
+) -> tuple[RealtimeObserver, InotifyOverflowDetection]:
+    """Import watchdog only inside the watchdog startup path.
+
+    Returns the observer and whether a kernel inotify overflow reaches
+    ``on_overflow``: "active", "unavailable" (Linux, but no hook
+    could be installed) or "not_applicable" (not Linux).
+    """
+    from .adapters.watchdog import create_watchdog_observer as create_platform_observer
+    from .inotify_overflow import create_inotify_observer
+
+    observer = create_inotify_observer(on_overflow)
+    if observer is not None:
+        return observer, "active"
+
+    detection: InotifyOverflowDetection = (
+        "unavailable" if sys.platform.startswith("linux") else "not_applicable"
+    )
+    # The platform factory keeps macOS on the rescan-aware FSEvents observer,
+    # whose emitter counts silently dropped native batches for supervision.
+    return create_platform_observer(), detection
 
 
 class RealtimeStartupStatusTracker:
@@ -661,6 +694,10 @@ class RealtimeStartupMixin:
         self._next_source_generation = 0
         self._latest_source_generation_by_path.clear()
         self._event_pressure_by_path.clear()
+        # cancel_all() above cancelled any pending trailing filtered-status
+        # publish; the final update below carries its counters.
+        self._filtered_status_flush_pending = False
+        self._filtered_status_last_emit = float("-inf")
         self._active_change_generations.clear()
         self._reserved_follow_up_change_generations.clear()
         self.file_queue = asyncio.PriorityQueue()
@@ -670,6 +707,7 @@ class RealtimeStartupMixin:
 
         self._service_state = "stopped"
         self._monitor_adapter = None
+        self._inotify_overflow_detection = None
         self._emit_status_update()
 
     async def _setup_watchdog_with_timeout(
@@ -698,9 +736,12 @@ class RealtimeStartupMixin:
             )
             if bootstrap_result is None:
                 return
-            observer, event_handler, probe = bootstrap_result
-            await self._adopt_watchdog_monitor(
-                observer, event_handler, watch_path, probe
+            self._adopt_watchdog_monitor(
+                bootstrap_result.observer,
+                bootstrap_result.event_handler,
+                watch_path,
+                bootstrap_result.inotify_overflow_detection,
+                bootstrap_result.delivery_probe,
             )
         except asyncio.CancelledError:
             self._watchdog_bootstrap_abort.set()
@@ -740,9 +781,7 @@ class RealtimeStartupMixin:
 
     def _handle_watchdog_bootstrap_done(
         self,
-        future: asyncio.Future[
-            tuple[RealtimeObserver, SimpleEventHandler, FilesystemDeliveryProbe] | None
-        ],
+        future: asyncio.Future[WatchdogBootstrap | None],
     ) -> None:
         """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
         if self._watchdog_bootstrap_future is future:
@@ -767,7 +806,7 @@ class RealtimeStartupMixin:
         if bootstrap_result is None:
             return
 
-        observer, _event_handler, _probe = bootstrap_result
+        observer = bootstrap_result.observer
         if (
             self._watchdog_bootstrap_abort.is_set()
             or self._using_polling
@@ -780,6 +819,7 @@ class RealtimeStartupMixin:
     ) -> None:
         """Start polling mode and optionally record it as a fallback warning."""
         self._start_startup_phase("polling_setup")
+        self._inotify_overflow_detection = None
         if not self._using_polling or not self._polling_task:
             self._using_polling = True
             self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
@@ -794,12 +834,13 @@ class RealtimeStartupMixin:
         else:
             self._emit_status_update()
 
-    async def _adopt_watchdog_monitor(
+    def _adopt_watchdog_monitor(
         self,
         observer: RealtimeObserver,
         event_handler: SimpleEventHandler,
         watch_path: Path,
-        probe: FilesystemDeliveryProbe,
+        inotify_overflow_detection: InotifyOverflowDetection,
+        delivery_probe: FilesystemDeliveryProbe | None = None,
     ) -> None:
         """Adopt a successfully bootstrapped watchdog observer into service state."""
         if (
@@ -812,12 +853,13 @@ class RealtimeStartupMixin:
 
         self.event_handler = event_handler
         self.observer = observer
+        self._inotify_overflow_detection = inotify_overflow_detection
         self._using_polling = False
         self.watched_directories.add(str(watch_path))
         logger.debug("Watchdog setup completed successfully (recursive mode)")
         self._debug("watchdog setup complete (recursive)")
         self._set_effective_backend("watchdog")
-        self._delivery_probe = probe
+        self._delivery_probe = delivery_probe
         self._consecutive_missed_pings = 0
         # A fresh observer starts its emitter counters at zero; keep the
         # baseline in step or dropped-batch rescans stay suppressed.
@@ -825,8 +867,21 @@ class RealtimeStartupMixin:
         self._monitoring_ready_at = self._utc_now()
         self.monitoring_ready.set()
         self._complete_startup_phase("watchdog_setup")
-        await self._start_monitor_supervision()
+        self._start_monitor_supervision_soon()
         self._emit_status_update()
+
+    def _start_monitor_supervision_soon(self) -> None:
+        """Kick off watchdog supervision without blocking the adopter.
+
+        Adopt runs on the event loop in production (and sync in tests), so
+        schedule the async supervisor instead of awaiting it. No running loop
+        means no supervision; polling fallback still covers that path.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._start_monitor_supervision())
 
     async def _start_monitor_supervision(self) -> None:
         """Watch the adopted watchdog stream; dead emitters mean silent data loss."""
@@ -1048,21 +1103,42 @@ class RealtimeStartupMixin:
         watch_path: Path,
         loop: asyncio.AbstractEventLoop,
         abort_event: threading.Event,
-    ) -> tuple[RealtimeObserver, SimpleEventHandler, FilesystemDeliveryProbe] | None:
+    ) -> WatchdogBootstrap | None:
         """Adopt only a live observer that delivers a real filesystem event."""
         probe = FilesystemDeliveryProbe(watch_path)
         event_handler = self._build_watchdog_event_handler(watch_path, loop, probe)
-        observer = _create_watchdog_observer()
+
+        def on_overflow() -> None:
+            # Called on the inotify thread; the service state lives on the loop.
+            loop.call_soon_threadsafe(self._record_inotify_overflow)
+
+        observer, detection = _create_watchdog_observer(on_overflow)
         ready = False
         # Reserve one second of the existing setup budget for observer cleanup.
         deadline = time.monotonic() + max(0, self._WATCHDOG_SETUP_TIMEOUT_SECONDS - 1)
         try:
-            observer.schedule(event_handler, str(watch_path), recursive=True)
+            # Use recursive=True to ensure all directory events are captured.
+            # This is necessary for proper real-time monitoring of new
+            # directories. The event filter also narrows the kernel watch mask
+            # on inotify so reads never take a queue slot.
+            observer.schedule(
+                event_handler,
+                str(watch_path),
+                recursive=True,  # Use recursive for complete event coverage
+                event_filter=watchdog_event_filter(),
+            )
             observer.start()
             ready = self._verify_watchdog_delivery(
                 observer, probe, abort_event, deadline
             )
-            return (observer, event_handler, probe) if ready else None
+            if ready:
+                logger.debug(
+                    f"Started recursive filesystem monitoring for {watch_path}"
+                )
+                return WatchdogBootstrap(
+                    observer, event_handler, detection, probe
+                )
+            return None
         finally:
             self._finish_watchdog_probe(probe, observer, ready)
 
@@ -1091,8 +1167,8 @@ class RealtimeStartupMixin:
             loop,
             root_path=watch_path,
             queue_result_callback=self._handle_queue_result,
-            source_event_callback=self._record_source_event,
-            filtered_event_callback=self._record_filtered_event,
+            source_event_callback=forward_to_loop(loop, self._record_source_event),
+            filtered_event_callback=forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
             event_interceptor=probe.intercept,
         )

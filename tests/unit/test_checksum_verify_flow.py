@@ -62,14 +62,20 @@ class _FakeDB:
     def should_optimize(self, operation: str = "") -> bool:
         return False
 
-    async def begin_transaction_async(self):
-        return self.begin_transaction()
-
-    async def commit_transaction_async(self, force_checkpoint: bool = False):
-        return self.commit_transaction(force_checkpoint=force_checkpoint)
-
-    async def rollback_transaction_async(self):
-        return self.rollback_transaction()
+    async def store_file_result_async(self, file_model, plan_chunks):
+        existing = self.get_file_by_path(file_model.path)
+        if existing:
+            file_id = existing["id"]
+            self.update_file(
+                file_id,
+                size_bytes=file_model.size_bytes,
+                mtime=file_model.mtime,
+                content_hash=file_model.content_hash,
+            )
+        else:
+            file_id = self.insert_file(file_model)
+        _, to_insert = plan_chunks(file_id, self.get_chunks_by_file_id(file_id))
+        return file_id, existing is not None, self.insert_chunks_batch(to_insert)
 
     async def get_file_by_path_async(self, path: str, as_model: bool = False):
         return self.get_file_by_path(path, as_model)

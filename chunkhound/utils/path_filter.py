@@ -1,29 +1,29 @@
-"""Shared path-filter validation, normalization, and matching.
+"""Shared path-filter semantics for database and transient search.
 
-Single source of truth for interpreting a user-supplied ``path_filter``:
-DB-backed search translates the normalized filter into a SQL LIKE pattern,
-diff-backed search matches it against in-memory chunk paths. Both layers must
-agree on file-vs-directory classification, otherwise the same query returns
-inconsistent results depending on the vector source.
+Database providers translate a normalized filter into a SQL ``LIKE`` pattern;
+transient (in-memory) search uses :func:`path_matches_filter`. Both must agree
+so ``vector_source="both"`` filters diff and indexed results identically.
 """
 
-# Rejected outright: traversal (``..``, ``~``) and glob/control characters that
-# would otherwise leak into LIKE patterns or log injection.
 _FORBIDDEN_PATTERNS = ("..", "~", "*", "?", "[", "]", "\0", "\n", "\r")
 
 
-def validate_and_normalize_path_filter(path_filter: str | None) -> str | None:
-    """Validate and normalize a path filter for security and consistency.
+def normalize_path_filter(path_filter: str | None) -> str | None:
+    """Validate and normalize a user-provided path filter.
+
+    Separators become ``/`` and leading slashes are removed. Directory filters
+    (no extension in the last segment) end with ``/``; file filters do not.
+    A file extension is a dot after the first character, so ``.github`` is a
+    directory while ``.eslintrc.js`` is a file.
 
     Args:
-        path_filter: User-provided path filter
+        path_filter: User-provided path filter.
 
     Returns:
-        Normalized relative path; directory filters carry a trailing slash.
-        None when the filter is absent or blank.
+        The normalized filter, or ``None`` when no filter applies.
 
     Raises:
-        ValueError: If path contains dangerous patterns
+        ValueError: If the filter contains traversal or wildcard patterns.
     """
     if path_filter is None:
         return None
@@ -36,35 +36,24 @@ def validate_and_normalize_path_filter(path_filter: str | None) -> str | None:
         if pattern in normalized:
             raise ValueError(f"Path filter contains forbidden pattern: {pattern}")
 
-    # Forward slashes only, relative paths only.
     normalized = normalized.replace("\\", "/").lstrip("/")
-    if not normalized:
-        return None
 
-    if not normalized.endswith("/"):
-        normalized += "" if _has_file_extension(normalized) else "/"
+    if normalized and not normalized.endswith("/"):
+        last = normalized.split("/")[-1]
+        if "." not in last[1:]:
+            normalized += "/"
 
-    return normalized
-
-
-def _has_file_extension(normalized: str) -> bool:
-    """Classify the last path component as a file (True) or directory (False).
-
-    A file extension is a dot appearing AFTER the first character. Leading-dot
-    names without a second dot (.github, .env) are directories; leading-dot
-    names with an extension (.eslintrc.js) are files.
-    """
-    return "." in normalized.split("/")[-1][1:]
+    return normalized or None
 
 
 def path_matches_filter(file_path: str, normalized_filter: str) -> bool:
-    """In-memory equivalent of ``CONCAT('/', path) LIKE <pattern>`` filtering.
+    """Return whether ``file_path`` matches a filter from normalize_path_filter.
 
-    Directory filters match anywhere in the path; file filters are
-    right-anchored so ``module.py`` does not match ``module.py.bak``.
+    Mirrors the database rule ``CONCAT('/', path) LIKE pattern``: directory
+    filters match a complete path-segment run anywhere (``%/dir/%``); file
+    filters must match the path suffix on a segment boundary (``%/file.py``).
     """
-    anchored = "/" + str(file_path).replace("\\", "/").lstrip("/")
-    needle = "/" + normalized_filter
+    candidate = "/" + file_path.replace("\\", "/").lstrip("/")
     if normalized_filter.endswith("/"):
-        return needle in anchored
-    return anchored.endswith(needle)
+        return f"/{normalized_filter}" in candidate
+    return candidate.endswith(f"/{normalized_filter}")

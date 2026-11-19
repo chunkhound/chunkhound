@@ -153,10 +153,10 @@ def test_exact_search_serves_every_api_without_an_index(
 
 
 @pytest.mark.fast
-def test_exact_semantic_pagination_is_uncapped_and_totalless(
+def test_exact_semantic_pagination_is_uncapped_and_counted(
     exact_provider: DuckDBProvider,
 ) -> None:
-    """Pages partition results by look-ahead, with no total and no offset cap."""
+    """Pages partition results with an exact total and no offset cap."""
     chunk_ids = _seed(exact_provider, 5)
     assert exact_provider.semantic_result_window_cap is None
 
@@ -176,11 +176,11 @@ def test_exact_semantic_pagination_is_uncapped_and_totalless(
         "page_size": 3,
         "has_more": True,
         "next_offset": 3,
-        "total": None,
+        "total": 5,
         "candidate_budget_exhausted": False,
     }
     assert (second_page["has_more"], second_page["next_offset"]) == (False, None)
-    assert second_page["total"] is None
+    assert second_page["total"] == 5
     assert beyond == []
     assert (beyond_page["has_more"], beyond_page["next_offset"]) == (False, None)
 

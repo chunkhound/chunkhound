@@ -1,4 +1,10 @@
-"""SSRF gate for fetchurl — non-http(s) scheme, missing host, private IPs."""
+"""SSRF gate for fetchurl — non-http(s) scheme, missing host, private IPs.
+
+These tests exercise the shared validator directly (raising
+``SsrfBlockedError``); fetchurl's boundary lets that error propagate
+unchanged, and the CLI/MCP boundaries catch it alongside
+``FetchUrlError`` (covered by the ``_fetch_with_retry`` test below).
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,7 @@ import socket
 
 import pytest
 
-from chunkhound.utils.fetchurl import FetchUrlError, _validate_url_and_resolve
+from chunkhound.utils.ssrf import SsrfBlockedError, validate_url
 
 
 @pytest.mark.parametrize(
@@ -22,20 +28,26 @@ from chunkhound.utils.fetchurl import FetchUrlError, _validate_url_and_resolve
 )
 @pytest.mark.asyncio
 async def test_fetchurl_ssrf_rejects_unsafe_urls(url: str) -> None:
-    with pytest.raises(FetchUrlError):
-        await _validate_url_and_resolve(url)
+    with pytest.raises(SsrfBlockedError):
+        await validate_url(url)
 
 
 @pytest.mark.asyncio
-async def test_hostname_resolving_to_private_ip_is_rejected(monkeypatch) -> None:
-    """Addresses returned by DNS must pass the same SSRF classification."""
+async def test_fetch_with_retry_propagates_ssrf_blocked_error(tmp_path) -> None:
+    """fetchurl's boundary lets SsrfBlockedError propagate unchanged.
 
-    def fake_getaddrinfo(*args: object, **kwargs: object) -> list[tuple]:
-        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 0))]
+    ``FetchUrlError`` is a plain ``ValueError`` for fetchurl-local
+    failures only; SSRF rejections keep the shared type and are caught
+    alongside ``FetchUrlError`` at the CLI/MCP boundaries.
+    """
+    from chunkhound.core.config.config import Config
+    from chunkhound.utils.fetchurl import _fetch_with_retry
+    from chunkhound.utils.ssrf import SsrfBlockedError
 
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    with pytest.raises(FetchUrlError):
-        await _validate_url_and_resolve("http://internal.example/")
+    with pytest.raises(SsrfBlockedError):
+        await _fetch_with_retry(
+            "http://127.0.0.1:9/secret", Config(target_dir=tmp_path)
+        )
 
 
 @pytest.mark.parametrize(
@@ -53,11 +65,11 @@ async def test_hostname_resolving_to_private_ip_is_rejected(monkeypatch) -> None
 async def test_literal_ip_never_calls_resolver(
     monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
-    """Literal IPs classify without DNS; resolver must stay unused."""
+    """Literal IPs classify without DNS; the resolver must stay unused."""
 
     def _fail(*args: object, **kwargs: object) -> list[tuple]:
         raise AssertionError("resolver must not run for literal IP")
 
     monkeypatch.setattr(socket, "getaddrinfo", _fail)
-    with pytest.raises(FetchUrlError):
-        await _validate_url_and_resolve(url)
+    with pytest.raises(SsrfBlockedError):
+        await validate_url(url)

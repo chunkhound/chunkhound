@@ -10,6 +10,7 @@ import urllib.error
 
 from chunkhound.core.config.config import Config
 from chunkhound.utils.fetchurl import FetchUrlError, run_fetchurl
+from chunkhound.utils.ssrf import SsrfBlockedError
 
 from ..utils.provider_setup import setup_embedding_manager, setup_llm_manager
 from ..utils.rich_output import RichOutputFormatter
@@ -49,7 +50,7 @@ async def fetchurl_command(args: argparse.Namespace, config: Config) -> None:
     except (TimeoutError, asyncio.TimeoutError):
         formatter.error("fetchurl timed out")
         sys.exit(124)
-    except FetchUrlError as e:
+    except (FetchUrlError, SsrfBlockedError) as e:
         formatter.error(f"fetchurl failed: {e}")
         sys.exit(1)
     except urllib.error.URLError as e:

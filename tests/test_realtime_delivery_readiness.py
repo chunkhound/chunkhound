@@ -82,10 +82,10 @@ def discard_native_delivery(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
             event_queue.get(block=True, timeout=self.timeout)
             event_queue.task_done()
 
-    def create_observer() -> Any:
+    def create_observer(on_overflow: Any) -> Any:
         observer = NonDeliveringObserver()
         observers.append(observer)
-        return observer
+        return observer, "active"
 
     monkeypatch.setattr(startup, "_create_watchdog_observer", create_observer)
     return observers
@@ -129,7 +129,13 @@ class FakeNativeObserver:
         self._alive = False
         self._thread: threading.Thread | None = None
 
-    def schedule(self, event_handler: Any, path: str, recursive: bool = True) -> Any:
+    def schedule(
+        self,
+        event_handler: Any,
+        path: str,
+        recursive: bool = True,
+        event_filter: list[type] | None = None,
+    ) -> Any:
         self._handlers.append(event_handler)
         self.emitters.append(FakeNativeEmitter(self))
         return (path, recursive)
@@ -173,7 +179,11 @@ class FakeNativeObserver:
 def controlled_native_observer(monkeypatch: pytest.MonkeyPatch) -> FakeNativeObserver:
     """Replace the native-observer factory with the port-level fake."""
     observer = FakeNativeObserver()
-    monkeypatch.setattr(startup, "_create_watchdog_observer", lambda: observer)
+    monkeypatch.setattr(
+        startup,
+        "_create_watchdog_observer",
+        lambda on_overflow: (observer, "active"),
+    )
     return observer
 
 

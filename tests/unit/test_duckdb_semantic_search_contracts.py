@@ -18,13 +18,7 @@ from loguru import logger
 from chunkhound.api.cli.commands.search import _format_search_results
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.constants import HNSW_CANDIDATE_BUDGET
-from chunkhound.core.models import Chunk
-from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
-from chunkhound.embeddings import LocalEmbeddingResult
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-from chunkhound.services.diff_aware_search_service import DiffAwareSearchService
-from chunkhound.services.search_service import SearchService
-from tests.fixtures.fake_providers import FakeEmbeddingProvider
 from tests.helpers.duckdb_vector_fixtures import (
     MODEL,
     PROVIDER,
@@ -268,10 +262,10 @@ def test_list_api_raises_when_budget_exhausted_with_zero_results(
 
 @pytest.mark.hnsw
 @pytest.mark.fast
-def test_semantic_pagination_uses_one_extra_result_without_total(
+def test_semantic_pagination_counts_the_returnable_rows(
     provider: DuckDBProvider,
 ) -> None:
-    """Semantic pagination reports only look-ahead state, not a full-scan total."""
+    """Semantic pagination counts every row the pages can return."""
     seed_searchable_chunks(provider)
 
     first_page, first_pagination = provider.search_semantic(
@@ -287,7 +281,7 @@ def test_semantic_pagination_uses_one_extra_result_without_total(
         "page_size": 2,
         "has_more": True,
         "next_offset": 2,
-        "total": None,
+        "total": 3,
         "candidate_budget_exhausted": False,
     }
     assert len(second_page) == 1
@@ -296,7 +290,7 @@ def test_semantic_pagination_uses_one_extra_result_without_total(
         "page_size": 2,
         "has_more": False,
         "next_offset": None,
-        "total": None,
+        "total": 3,
         "candidate_budget_exhausted": False,
     }
 
@@ -338,7 +332,7 @@ def test_missing_embeddings_table_contract(provider: DuckDBProvider) -> None:
         "page_size": 10,
         "has_more": False,
         "next_offset": None,
-        "total": None,
+        "total": 0,
         "candidate_budget_exhausted": False,
     }
     assert provider.search_by_embedding(QUERY_VECTOR, PROVIDER, MODEL, limit=10) == []
@@ -460,67 +454,6 @@ def test_drop_vector_index_also_drops_cosine_variant(
     assert remaining == set(), f"indexes leaked after drop_vector_index: {remaining}"
 
 
-class _FakeEmbeddingManager:
-    """Minimal EmbeddingManager stand-in returning a fixed query vector."""
-
-    def __init__(self, query_vector: list[float]) -> None:
-        self._query_vector = query_vector
-
-    async def embed_texts(self, texts: list[str]) -> LocalEmbeddingResult:
-        return LocalEmbeddingResult(
-            embeddings=[self._query_vector] * len(texts),
-            model="test",
-            provider="test",
-            dims=len(self._query_vector),
-        )
-
-
-@pytest.mark.hnsw
-@pytest.mark.fast
-@pytest.mark.asyncio
-async def test_both_mode_diff_search_clamps_db_window(
-    provider: DuckDBProvider,
-) -> None:
-    """Diff-aware 'both' mode must keep its DB fetch inside the offset window.
-
-    Pre-fix this raised ValueError: the diff service fetched DB results with
-    page_size=10_000 while the provider caps semantic windows at 1000.
-    """
-    chunk_ids = seed_searchable_chunks(provider, count=3)
-    diff_chunks = [
-        Chunk(
-            symbol="new_function",
-            start_line=LineNumber(1),
-            end_line=LineNumber(3),
-            code="def new_function(): pass",
-            chunk_type=ChunkType.FUNCTION,
-            file_id=FileId(999),
-            language=Language.PYTHON,
-            file_path="src/diff.py",  # type: ignore[arg-type]
-        )
-    ]
-    original = SearchService(provider, FakeEmbeddingProvider(dims=3))
-    svc = DiffAwareSearchService(
-        original,
-        diff_chunks,
-        [[1.0, 0.0, 0.0]],
-        "both",
-        _FakeEmbeddingManager([1.0, 0.0, 0.0]),
-    )
-
-    results, pagination = await svc.search_semantic(
-        query="query", page_size=2, provider=PROVIDER, model=MODEL
-    )
-
-    db_chunk_ids = [
-        int(r["chunk_id"]) for r in results if isinstance(r.get("chunk_id"), int)
-    ]
-    assert db_chunk_ids, "merged results must include DB-backed rows"
-    assert set(db_chunk_ids) <= set(chunk_ids)
-    assert any(str(r.get("chunk_id")).startswith("diff:") for r in results)
-    assert pagination["total"] is None
-
-
 @pytest.mark.hnsw
 @pytest.mark.fast
 def test_missing_hnsw_in_read_only_database_fails_explicitly(tmp_path: Path) -> None:
@@ -596,7 +529,7 @@ def test_semantic_offset_window_accepts_exact_endpoint(
         "page_size": 100,
         "has_more": False,
         "next_offset": None,
-        "total": None,
+        "total": 0,
         "candidate_budget_exhausted": False,
     }
 
@@ -619,7 +552,7 @@ def test_semantic_page_ending_at_cap_never_advertises_next_offset(
         "page_size": 1,
         "has_more": False,
         "next_offset": None,
-        "total": None,
+        "total": 1001,
         "candidate_budget_exhausted": False,
     }
 
@@ -810,7 +743,7 @@ class _Recorder(list[str]):
 
 
 def test_cli_formats_unknown_semantic_total() -> None:
-    """The CLI must not render an unknown HNSW total as a numeric total."""
+    """An unknown total (candidate budget exhausted) still renders a usable header."""
     formatter = _Recorder()
     _format_search_results(
         formatter,
@@ -822,7 +755,7 @@ def test_cli_formats_unknown_semantic_total() -> None:
         is_regex=False,
     )
 
-    assert "Results: 1 (showing 1-1)" in formatter
+    assert "Results: 1 of 1 (showing 1-1)" in formatter
 
 
 @pytest.mark.fast

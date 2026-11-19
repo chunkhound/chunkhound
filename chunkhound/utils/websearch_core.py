@@ -10,21 +10,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import html
 import html.parser
 import itertools
+import math
 import os
 import re
 import subprocess
-import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, TypeVar
 
 from loguru import logger
 
@@ -33,19 +32,29 @@ if TYPE_CHECKING:
 
     import zendriver as zd
 
-from chunkhound.core.config.config import Config
+from chunkhound.utils.ssrf import validate_url, validate_url_sync
 
 _MAX_FETCH_CONCURRENCY = 5
 
+T = TypeVar("T")
+
 WEBSEARCH_LIMIT_MAX = 100
+
+# Cap on a single fetched page's body size. A target URL can be anything --
+# a mis-served multi-GB file, an infinite stream -- and there's no way to
+# know its size in advance. Generous enough for any legitimate markdown/PDF
+# page; _fetch_content already catches and skips-with-a-warning any single
+# page that fails, so exceeding this cap degrades gracefully rather than
+# letting one oversized page balloon memory for the whole websearch call.
+_MAX_PAGE_BYTES = 20 * 1024 * 1024
 
 __all__ = [
     "WEBSEARCH_LIMIT_MAX",
     "clamp_limit",
     "websearch_timeout",
-    "fetch_and_save",
+    "fetch_pages",
+    "fetch_url_to_content",
     "search_multi",
-    "build_quickresearch_argv_core",
 ]
 
 # Probe these paths before zendriver's auto-discovery. zendriver picks the
@@ -93,7 +102,7 @@ def _install_late_completion_guard() -> None:
     was the awaiter inside Connection.send, which already received
     CancelledError.
 
-    Idempotent via module-level flag — safe to call from every fetch_and_save.
+    Idempotent via module-level flag — safe to call from every fetch_pages.
     """
     global _late_completion_guard_installed
     if _late_completion_guard_installed:
@@ -138,8 +147,7 @@ def _check_chrome_version(chrome_path: str) -> None:
         ).strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         raise RuntimeError(
-            f"--version probe at {chrome_path!r} failed: "
-            f"{type(e).__name__}: {e}"
+            f"--version probe at {chrome_path!r} failed: {type(e).__name__}: {e}"
         ) from e
     major = next(
         (int(tok.split(".")[0]) for tok in out.split() if tok.split(".")[0].isdigit()),
@@ -179,6 +187,7 @@ def _resolve_chrome_path(
                 deferred[p] = e
     try:
         from zendriver.core.config import find_executable
+
         resolved = find_executable("auto")
     except Exception:
         # Broad catch: zendriver's launch-failure surface is documented as
@@ -217,8 +226,8 @@ async def _managed_browser(
 ) -> AsyncIterator[zd.Browser | None]:
     """Yield a running Chrome browser, or None if none can be launched.
 
-    Shared by every zendriver-consuming caller (websearch/quickresearch's
-    ``fetch_and_save`` and fetchurl's ``_fetch_with_retry``). Callers must
+    Shared by every zendriver-consuming caller (websearch's ``fetch_pages``
+    and fetchurl's ``_fetch_with_retry``). Callers must
     tolerate ``None`` — ``fetch_url_to_content`` and ``_fetch_page`` already
     dispatch to the urllib fallback when ``browser is None``.
     """
@@ -270,8 +279,7 @@ async def _managed_browser(
     finally:
         if browser is not None:
             # Bounded best-effort stop. browser.stop() can wedge on a stuck
-            # websocket close or a Chrome process ignoring SIGTERM; the subprocess
-            # process-group reaps any orphans when _quickresearch exits.
+            # websocket close or a Chrome process ignoring SIGTERM.
             try:
                 await asyncio.wait_for(browser.stop(), timeout=10)
             except asyncio.TimeoutError:
@@ -287,18 +295,24 @@ def clamp_limit(limit: int) -> int:
 
 
 def websearch_timeout() -> float:
-    """Overall wall-clock timeout (seconds) for the websearch subprocess.
+    """Response deadline (seconds) for one websearch request.
 
-    Reads CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS; falls back to 600.0 on
-    unset or malformed values.
+    Covers query expansion, DuckDuckGo, fetch, and in-process research.
+    Discovery is internally capped so DDG cannot consume the research
+    remainder. Cancellation cleanup may outlive the deadline; in particular,
+    a one-shot CLI process can wait for that cleanup during event-loop
+    shutdown. Reads CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS; falls back to
+    600.0 on unset or malformed values.
     """
     raw = os.environ.get("CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS")
     if raw is None:
         return 600.0
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         return 600.0
+    # Reject 0/negative (instant timeout) and nan/inf (no effective budget).
+    return value if math.isfinite(value) and value > 0 else 600.0
 
 
 class _NextFormParser(html.parser.HTMLParser):
@@ -374,6 +388,77 @@ class _ResultParser(html.parser.HTMLParser):
             self._desc += data
 
 
+def _read_bounded(resp: IO[bytes], max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
+    """Read *resp* up to `max_bytes`, raising `ValueError` if it's exceeded.
+
+    Reads in fixed-size chunks rather than one `resp.read()` call so an
+    oversized response is caught before it's fully buffered.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"Response exceeds maximum page size of {max_bytes} bytes")
+        chunks.append(chunk)
+
+
+def _check_page_size(body: bytes, max_bytes: int = _MAX_PAGE_BYTES) -> bytes:
+    """Reject an already-materialized body that exceeds `max_bytes`."""
+    if len(body) > max_bytes:
+        raise ValueError(f"Response exceeds maximum page size of {max_bytes} bytes")
+    return body
+
+
+def _declared_page_size(headers: dict[str, Any]) -> int | None:
+    """Return a valid non-negative Content-Length from CDP headers, if present."""
+    raw = next(
+        (value for key, value in headers.items() if key.casefold() == "content-length"),
+        None,
+    )
+    if raw is None:
+        return None
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _raise_if_page_too_large(size: int) -> None:
+    if size > _MAX_PAGE_BYTES:
+        raise ValueError(
+            f"Response exceeds maximum page size of {_MAX_PAGE_BYTES} bytes"
+        )
+
+
+async def _await_with_page_limit(
+    awaitable: Awaitable[T], oversized: asyncio.Event
+) -> T:
+    """Abort a CDP operation as soon as streamed response bytes exceed the cap."""
+    operation = asyncio.ensure_future(awaitable)
+    limit = asyncio.create_task(oversized.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {operation, limit}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if limit in done and oversized.is_set():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+            _raise_if_page_too_large(_MAX_PAGE_BYTES + 1)
+        return await operation
+    except BaseException:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        raise
+    finally:
+        limit.cancel()
+        await asyncio.gather(limit, return_exceptions=True)
+
+
 def _fetch(params: dict[str, str]) -> str:
     data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(
@@ -382,17 +467,7 @@ def _fetch(params: dict[str, str]) -> str:
         headers={"User-Agent": "Mozilla/5.0"},
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode()
-
-
-def _url_to_filename(url: str, max_length: int = 100) -> str:
-    # Append a short stable hash of the full URL so distinct URLs cannot
-    # collide via the lossy [^\w.-]→_ substitution or via truncation when
-    # two URLs share a long common prefix.
-    name = re.sub(r"^https?://", "", url)
-    name = re.sub(r"[^\w.-]", "_", name)
-    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
-    return f"{name[: max(0, max_length - 9)]}_{digest}"[:max_length]
+        return _read_bounded(resp).decode()
 
 
 def _html_to_markdown(html_text: str) -> str:
@@ -414,8 +489,14 @@ def _html_to_markdown(html_text: str) -> str:
     return _Converter(
         strip=[
             "head",
-            "nav", "footer", "header", "aside",
-            "form", "button", "iframe", "noscript",
+            "nav",
+            "footer",
+            "header",
+            "aside",
+            "form",
+            "button",
+            "iframe",
+            "noscript",
         ],
         heading_style="ATX",
     ).convert(html_text)
@@ -489,25 +570,128 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         )
 
 
+class _RedirectTargetError(Exception):
+    """Internal signal carrying a redirect destination (see ``_CaptureRedirect``)."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(url)
+        self.url = url
+
+
+class _CaptureRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that reports instead of following.
+
+    Raising ``_RedirectTargetError`` lets ``_fetch_url`` validate each redirect
+    destination before fetching it, instead of urllib silently following
+    a public-to-private redirect.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        # Close the response before signalling: raising without closing
+        # would leave the socket open until GC.
+        try:
+            fp.close()
+        except Exception:
+            pass
+        raise _RedirectTargetError(newurl)
+
+
+_MAX_FETCH_REDIRECTS = 10
+
+
+# Validation is ``chunkhound.utils.ssrf.validate_url_sync`` /
+# ``validate_url`` called directly (raising ``SsrfBlockedError``), and
+# openers are ``urllib.request.build_opener`` called directly. The proxy
+# caveat lives on ``_fetch_url`` below, where the opener is actually used.
+
+
+def _open_and_read(
+    opener: urllib.request.OpenerDirector, req: urllib.request.Request
+) -> tuple[str, bytes, str]:
+    """Open one request and return (content-type, body, charset)."""
+    with opener.open(req, timeout=30) as resp:
+        ct = _normalize_ct(resp.headers.get("Content-Type"))
+        return ct, _read_bounded(resp), resp.headers.get_content_charset() or "utf-8"
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """Origin triple used to drop Cookie headers on cross-origin hops."""
+    parsed = urllib.parse.urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return (
+        parsed.scheme.lower(),
+        (parsed.hostname or "").lower(),
+        port,
+    )
+
+
 def _fetch_url(
     url: str,
     extra_headers: dict[str, str] | None = None,
     follow_redirects: bool = True,
+    *,
+    validate_ssrf: bool = True,
 ) -> tuple[str, bytes, str]:
     # Header values are passed verbatim. http.client blocks CRLF, but
     # nothing else is validated — never pass attacker-influenced values.
     headers = {"User-Agent": "Mozilla/5.0"}
     if extra_headers:
         headers.update(extra_headers)
-    req = urllib.request.Request(url, headers=headers)
-    opener = (
-        urllib.request.build_opener()
-        if follow_redirects
-        else urllib.request.build_opener(_NoRedirect)
-    )
-    with opener.open(req, timeout=30) as resp:
-        ct = _normalize_ct(resp.headers.get("Content-Type"))
-        return ct, resp.read(), resp.headers.get_content_charset() or "utf-8"
+
+    # Note on proxies: ``urllib.request.build_opener()`` includes a
+    # ProxyHandler honouring the environment, so when HTTP(S)_PROXY is
+    # set the proxy — not this process — resolves the target hostname.
+    # The SSRF check below still blocks private hostnames before any
+    # request is made, but for a DNS hostname it cannot guarantee what
+    # the proxy resolves it to. No guard is added: rejecting every
+    # proxied fetch would break legitimate corporate-proxy users, and
+    # the check remains the correct fail-closed behaviour for direct
+    # (unproxied) fetches.
+    if not validate_ssrf:
+        req = urllib.request.Request(url, headers=headers)
+        opener = (
+            urllib.request.build_opener()
+            if follow_redirects
+            else urllib.request.build_opener(_NoRedirect)
+        )
+        return _open_and_read(opener, req)
+
+    # SSRF-validated path: validate the initial URL and every redirect
+    # destination before fetching it. Redirects are followed manually
+    # (one hop at a time) so no hop is fetched unvalidated.
+    if not follow_redirects:
+        validate_url_sync(url)
+        req = urllib.request.Request(url, headers=headers)
+        return _open_and_read(urllib.request.build_opener(_NoRedirect), req)
+
+    current = url
+    hop = 0
+    while True:
+        validate_url_sync(current)
+        req = urllib.request.Request(current, headers=headers)
+        try:
+            return _open_and_read(urllib.request.build_opener(_CaptureRedirect), req)
+        except _RedirectTargetError as redir:
+            if hop >= _MAX_FETCH_REDIRECTS:
+                raise ValueError(f"Too many redirects fetching {url!r}") from redir
+            nxt = urllib.parse.urljoin(current, redir.url)
+            # Never forward a Cookie header to a different origin — the
+            # same credential-leak reason ``_NoRedirect`` exists for.
+            if _origin(current) != _origin(nxt):
+                headers.pop("Cookie", None)
+            current = nxt
+            hop += 1
 
 
 async def _close_tab_quietly(tab: zd.Tab) -> None:
@@ -523,7 +707,9 @@ async def _close_tab_quietly(tab: zd.Tab) -> None:
         pass
 
 
-async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
+async def _fetch_page(
+    browser: zd.Browser, url: str, *, validate_ssrf: bool = True
+) -> tuple[str, bytes, str]:
     """Fetch a single URL via raw CDP.
 
     Replicates Playwright's ``wait_until="commit"`` semantics by subscribing
@@ -531,6 +717,21 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
     content-type before Chrome's PDF viewer engages or HTML rendering starts.
     PDFs are re-fetched via urllib because headless Chrome cannot reliably
     expose PDF bytes through the DOM.
+
+    With ``validate_ssrf=True``, the initial URL is validated before
+    navigation and Chrome's final URL is validated before any content is
+    returned, so private-redirect content never enters the pipeline.
+    Chrome-path limitation: Chrome
+    performs the navigation itself, so final-URL validation discards
+    already-fetched internal content rather than preventing Chrome's
+    request. A side-effecting GET to an internal host or metadata
+    endpoint can still go out on the default Chrome path (blind SSRF);
+    only the urllib path (which validates every hop before fetching) is
+    fully preventive. Properly closing this needs CDP Fetch.requestPaused
+    interception, tracked in chunkhound issue #476
+    (https://github.com/chunkhound/chunkhound/issues/476) — until then,
+    users who need fully preventive validation should use the urllib
+    path (``browser=None``).
     """
     from zendriver import cdp
 
@@ -549,6 +750,9 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
         main_response: asyncio.Future[cdp.network.ResponseReceived] = (
             asyncio.get_running_loop().create_future()
         )
+        main_request_id: cdp.network.RequestId | None = None
+        received_by_request: dict[cdp.network.RequestId, int] = {}
+        oversized = asyncio.Event()
 
         # Handler MUST be ``async def``. zendriver 0.15.3's sync-dispatch
         # path reassigns ``event`` in the listener scope before the
@@ -565,11 +769,26 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             if event.loader_id == nav_loader_id:
                 main_response.set_result(event)
 
+        async def on_data(event: cdp.network.DataReceived) -> None:
+            if main_request_id is not None and event.request_id != main_request_id:
+                return
+            received = received_by_request.get(event.request_id, 0) + max(
+                event.data_length, event.encoded_data_length
+            )
+            received_by_request[event.request_id] = received
+            if event.request_id == main_request_id and received > _MAX_PAGE_BYTES:
+                oversized.set()
+
         # Register the handler BEFORE Network.enable. Events that fire
         # during the enable round-trip would otherwise land before the
         # handler exists and be silently dropped.
         tab.add_handler(cdp.network.ResponseReceived, on_response)
+        tab.add_handler(cdp.network.DataReceived, on_data)
         await tab.send(cdp.network.enable())
+
+        if validate_ssrf:
+            # Reject direct private URLs before Chrome navigates anywhere.
+            await validate_url(url)
 
         # Non-blocking navigate — does NOT wait for load. Bound the send
         # itself so a stalled websocket cannot hang here indefinitely.
@@ -595,9 +814,23 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
 
         response_event = await asyncio.wait_for(main_response, timeout=30)
         response = response_event.response
+        main_request_id = response_event.request_id
+        main_received = received_by_request.get(main_request_id, 0)
+        received_by_request.clear()
+        received_by_request[main_request_id] = main_received
+        if main_received > _MAX_PAGE_BYTES:
+            oversized.set()
+            _raise_if_page_too_large(main_received)
+        declared_size = _declared_page_size(response.headers)
+        if declared_size is not None:
+            _raise_if_page_too_large(declared_size)
+        if validate_ssrf:
+            # Chrome already followed any redirects to reach this final
+            # URL; validating it here still keeps internal content out
+            # of the pipeline (see the docstring limitation).
+            await validate_url(response.url or url)
         ct = _normalize_ct(
-            response.headers.get("content-type")
-            or response.headers.get("Content-Type")
+            response.headers.get("content-type") or response.headers.get("Content-Type")
         )
 
         if ct == "application/pdf":
@@ -621,9 +854,7 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                     tab.send(cdp.network.get_cookies(urls=[pdf_url])),
                     timeout=10,
                 )
-                cookie_header = "; ".join(
-                    f"{c.name}={c.value}" for c in cookies
-                )
+                cookie_header = "; ".join(f"{c.name}={c.value}" for c in cookies)
             except asyncio.TimeoutError:
                 cookie_header = ""
             # Close the tab *before* urllib so Chrome stops holding the
@@ -644,17 +875,26 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
             # the literal avoids a silent decode-behavior change there.
             extra = {"Cookie": cookie_header} if cookie_header else None
             _, body, _ = await asyncio.to_thread(
-                _fetch_url, pdf_url, extra, False  # follow_redirects=False
+                _fetch_url,
+                pdf_url,
+                extra,
+                False,  # follow_redirects=False
+                validate_ssrf=validate_ssrf,
             )
             return "application/pdf", body, "utf-8"
 
         if ct in {"text/plain", "text/markdown"}:
-            await asyncio.wait_for(tab.wait(), timeout=30)
+            await asyncio.wait_for(
+                _await_with_page_limit(tab.wait(), oversized), timeout=30
+            )
             body_text, base64_encoded = await asyncio.wait_for(
-                tab.send(
-                    cdp.network.get_response_body(
-                        request_id=response_event.request_id
-                    )
+                _await_with_page_limit(
+                    tab.send(
+                        cdp.network.get_response_body(
+                            request_id=response_event.request_id
+                        )
+                    ),
+                    oversized,
                 ),
                 timeout=30,
             )
@@ -663,23 +903,40 @@ async def _fetch_page(browser: zd.Browser, url: str) -> tuple[str, bytes, str]:
                 if base64_encoded
                 else body_text.encode("utf-8")
             )
-            return ct, body_bytes, "utf-8"
+            return ct, _check_page_size(body_bytes), "utf-8"
 
         if ct != "text/html":
             raise ValueError(f"Unsupported content-type: {ct!r}")
 
-        # Bounded load wait — replaces page.wait_for_load_state("load")'s
-        # implicit 30s timeout.
-        await asyncio.wait_for(tab.wait(), timeout=30)
-        html_str = await tab.get_content()
-        return ct, html_str.encode("utf-8"), "utf-8"
+        # Bound both network transfer and DOM growth before get_content copies
+        # the rendered HTML into Python. Content-Length catches declared large
+        # bodies; DataReceived catches chunked/lying servers; the UTF-8 length
+        # check catches JavaScript-expanded DOMs.
+        await asyncio.wait_for(
+            _await_with_page_limit(tab.wait(), oversized), timeout=30
+        )
+        snapshot = await tab.evaluate(
+            f"""(() => {{
+                const html = document.documentElement.outerHTML;
+                const size = new TextEncoder().encode(html).length;
+                return size > {_MAX_PAGE_BYTES} ? {{oversized: true}} : {{html}};
+            }})()"""
+        )
+        if not isinstance(snapshot, dict):
+            raise ValueError("Unable to snapshot rendered page")
+        if snapshot.get("oversized") is True:
+            _raise_if_page_too_large(_MAX_PAGE_BYTES + 1)
+        html_str = snapshot.get("html")
+        if not isinstance(html_str, str):
+            raise ValueError("Unable to snapshot rendered page")
+        return ct, _check_page_size(html_str.encode("utf-8")), "utf-8"
     finally:
         if not tab_closed:
             await _close_tab_quietly(tab)
 
 
 async def fetch_url_to_content(
-    url: str, browser: zd.Browser | None
+    url: str, browser: zd.Browser | None, *, validate_ssrf: bool = True
 ) -> tuple[str, str | bytes, dict[str, str | None]]:
     """Fetch one URL and return (kind, payload, source_metadata).
 
@@ -689,16 +946,18 @@ async def fetch_url_to_content(
     strip=["head", ...] in `_html_to_markdown` would otherwise discard.
     PDF and non-HTML paths return {"title": None}.
 
-    Shared between _fetch_one (websearch/quickresearch, which discards
+    Shared between fetch_pages (websearch, which discards
     source_metadata) and `_fetch_with_retry` in `chunkhound.utils.fetchurl`
     (which threads it into `_derive_page_title`, §4.1a).
 
     Raises ValueError on unsupported Content-Type or empty rendered body.
     """
     if browser is not None:
-        ct, body, charset = await _fetch_page(browser, url)
+        ct, body, charset = await _fetch_page(browser, url, validate_ssrf=validate_ssrf)
     else:
-        ct, body, charset = await asyncio.to_thread(_fetch_url, url)
+        ct, body, charset = await asyncio.to_thread(
+            _fetch_url, url, None, True, validate_ssrf=validate_ssrf
+        )
     source_metadata: dict[str, str | None] = {"title": None}
     if ct == "application/pdf":
         kind, content = _decode_pdf_or_fallback_html(body, charset)
@@ -738,69 +997,94 @@ async def fetch_url_to_content(
     return kind, content, source_metadata
 
 
-async def _fetch_one(
+async def _fetch_content(
     url: str,
-    tmpdir: Path,
     browser: zd.Browser | None,
     progress_callback: Callable[[str], None] | None,
     warning_callback: Callable[[str], None] | None,
     semaphore: asyncio.Semaphore,
-    mapping: dict[str, str] | None,
-) -> None:
+) -> tuple[str, str, str | bytes] | None:
     async with semaphore:
         if progress_callback:
             progress_callback(f"Fetching {url}...")
         try:
             ext, content, _source_metadata = await fetch_url_to_content(url, browser)
-            path = tmpdir / (_url_to_filename(url) + ext)
-            if isinstance(content, bytes):
-                path.write_bytes(content)
-            else:
-                path.write_text(content, encoding="utf-8")
-            if mapping is not None:
-                mapping[path.name] = url
+            return url, ext, content
         except Exception as e:
             if warning_callback:
                 warning_callback(f"Failed to fetch {url}: {type(e).__name__}: {e}")
+            return None
 
 
-async def fetch_and_save(
+async def fetch_pages(
     urls: list[str],
-    tmpdir: Path,
     progress_callback: Callable[[str], None] | None = None,
     warning_callback: Callable[[str], None] | None = None,
-    mapping: dict[str, str] | None = None,
-) -> None:
-    """Fetch each URL concurrently (bounded) and save content to tmpdir."""
+) -> AsyncGenerator[tuple[str, str, str | bytes], None]:
+    """Yield completed bodies with a bounded, downstream-driven task window.
+
+    At most _MAX_FETCH_CONCURRENCY requests/results exist ahead of the
+    consumer. A replacement starts only when the consumer asks for another
+    page, and delivered tasks are discarded instead of retaining their bodies.
+    """
     semaphore = asyncio.Semaphore(_MAX_FETCH_CONCURRENCY)
-
-    async def _run(browser: zd.Browser | None) -> None:
-        tasks = [
-            _fetch_one(
-                url, tmpdir, browser, progress_callback, warning_callback,
-                semaphore, mapping,
-            )
-            for url in urls
-        ]
-        await asyncio.gather(*tasks)
-
+    remaining = iter(urls)
     async with _managed_browser(warning_callback) as browser:
-        await _run(browser)
+        tasks: set[asyncio.Task[tuple[str, str, str | bytes] | None]] = set()
+
+        def schedule_one() -> None:
+            url = next(remaining, None)
+            if url is not None:
+                tasks.add(
+                    asyncio.create_task(
+                        _fetch_content(
+                            url, browser, progress_callback, warning_callback, semaphore
+                        )
+                    )
+                )
+
+        for _ in range(_MAX_FETCH_CONCURRENCY):
+            schedule_one()
+        try:
+            while tasks:
+                done, _pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                completed = done.pop()
+                tasks.remove(completed)
+                fetched = completed.result()
+                # No secondary task containers may retain delivered payloads.
+                del completed, done, _pending
+                if fetched is not None:
+                    yield fetched
+                del fetched
+                schedule_one()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            tasks.clear()
 
 
 def search(
     query: str,
     limit: int = 30,
     progress_callback: Callable[[str], None] | None = None,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> list[tuple[str, str, str]]:
     results: list[tuple[str, str, str]] = []
     params: dict[str, str] = {"q": query, "b": ""}  # b = submit button name
     page_num = 0
-    while True:
+    while cancel_event is None or not cancel_event.is_set():
         page_num += 1
         if progress_callback:
             progress_callback(f"Fetching page {page_num}...")
         page = _fetch(params)
+        if cancel_event is not None and cancel_event.is_set():
+            break
         rp = _ResultParser()
         rp.feed(page)
         if not rp.results:
@@ -866,29 +1150,40 @@ async def search_multi(
     batches: list[list[tuple[str, str, str]]] = []
     first_error: urllib.error.URLError | None = None
     successes = 0
-    for i, q in enumerate(queries, start=1):
-        per_query_progress: Callable[[str], None] | None = (
-            (lambda msg, p=f"[{i}/{n}] ": progress_callback(f"{p}{msg}"))
-            if progress_callback is not None
-            else None
-        )
-        try:
-            batch = await asyncio.to_thread(
-                search, q, limit, per_query_progress
-            )
-        except urllib.error.URLError as e:
-            if failure_callback is not None:
-                failure_callback(q, e)
+    cancel_event = threading.Event()
+    try:
+        for i, q in enumerate(queries, start=1):
+            if progress_callback is None:
+                per_query_progress = None
             else:
-                logger.warning(
-                    f"DDG query failed ({q!r}): {e.reason}; "
-                    "continuing with remaining queries"
+                prefix = f"[{i}/{n}] "
+
+                def per_query_progress(msg: str) -> None:
+                    progress_callback(f"{prefix}{msg}")
+
+            try:
+                batch = await asyncio.to_thread(
+                    search,
+                    q,
+                    limit,
+                    per_query_progress,
+                    cancel_event=cancel_event,
                 )
-            if first_error is None:
-                first_error = e
-            continue
-        successes += 1
-        batches.append(batch)
+            except urllib.error.URLError as e:
+                if failure_callback is not None:
+                    failure_callback(q, e)
+                else:
+                    logger.warning(
+                        f"DDG query failed ({q!r}): {e.reason}; "
+                        "continuing with remaining queries"
+                    )
+                if first_error is None:
+                    first_error = e
+                continue
+            successes += 1
+            batches.append(batch)
+    finally:
+        cancel_event.set()
     if successes == 0 and first_error is not None:
         raise first_error
     seen: dict[str, tuple[str, str, str]] = {}
@@ -900,38 +1195,3 @@ async def search_multi(
             if key not in seen:
                 seen[key] = row
     return list(seen.values())[:limit]
-
-
-def build_quickresearch_argv_core(
-    query: str,
-    tmpdir: Path,
-    config: Config,
-    parent_pid: int,
-    previous_query: str | None = None,
-) -> list[str]:
-    """Build argv to invoke _quickresearch as a subprocess.
-
-    Forwards the config source file as an absolute path so the child process
-    does not need to re-run config discovery (which would otherwise fall back
-    to env vars / defaults under the MCP server's working directory).
-
-    ``parent_pid`` is the caller's own PID (``os.getpid()``); the child uses
-    it as the reference for its orphan watchdog.
-
-    ``previous_query`` — single-hop chain payload, ``None``/empty omits the
-    flag entirely (truthy guard mirrors ``--config``).
-    """
-    cmd: list[str] = [
-        sys.executable,
-        "-m", "chunkhound.api.cli.main",
-        "_quickresearch",
-        query,
-        str(tmpdir),
-        "--parent-pid", str(parent_pid),
-    ]
-    source = config.config_file or config.local_config_file
-    if source is not None:
-        cmd.extend(["--config", str(Path(source).resolve())])
-    if previous_query:
-        cmd.extend(["--previous-query", previous_query])
-    return cmd

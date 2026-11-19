@@ -7,6 +7,8 @@ Note: This provider is configured for vanilla LLM behavior:
 - All tools disabled via ``--tools ""``
 - MCP servers disabled via empty --mcp-config (temp JSON file on disk so
   Windows ``claude.cmd`` shims do not garble inline JSON quotes)
+- User hooks disabled via a --settings file holding ``disableAllHooks``
+  (a temp JSON file, like the MCP config)
 - System instructions use ``--append-system-prompt-file`` by default.
   ``append_system_prompt="inline"`` sends ``--append-system-prompt`` instead.
   The user request stays on stdin.
@@ -42,6 +44,8 @@ from chunkhound.utils.text_sanitization import sanitize_error_text
 # Empty MCP config: no servers. Passed as a file path (not inline JSON) so
 # Windows cmd.exe / .cmd batch reparse cannot mangle embedded quotes.
 _EMPTY_MCP_CONFIG_JSON = b'{"mcpServers":{}}\n'
+# A user's Stop hook can make the CLI answer twice, replacing the first answer.
+_DISABLE_HOOKS_SETTINGS_JSON = b'{"disableAllHooks":true}\n'
 
 
 def _write_temp_bytes(
@@ -84,6 +88,16 @@ def _write_empty_mcp_config_file(directory: str | None = None) -> Path:
     return _write_temp_bytes(
         _EMPTY_MCP_CONFIG_JSON,
         prefix="chunkhound_claude_mcp_",
+        suffix=".json",
+        directory=directory,
+    )
+
+
+def _write_disable_hooks_settings_file(directory: str | None = None) -> Path:
+    """Write a unique settings JSON file that disables hooks; caller must unlink it."""
+    return _write_temp_bytes(
+        _DISABLE_HOOKS_SETTINGS_JSON,
+        prefix="chunkhound_claude_settings_",
         suffix=".json",
         directory=directory,
     )
@@ -132,7 +146,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             max_retries: Number of retry attempts for failed requests
             append_system_prompt: ``file`` passes ``--append-system-prompt-file``.
                 ``inline`` passes ``--append-system-prompt``.
-            temp_dir: Directory for the instruction file and MCP config file.
+            temp_dir: Directory for the instruction, MCP config and settings files.
                 ``None`` uses the system temp directory.
         """
         if append_system_prompt not in ("file", "inline"):
@@ -147,7 +161,7 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         return "claude-code-cli"
 
     def _resolve_temp_dir(self) -> str:
-        """Directory for the instruction file and the MCP config file."""
+        """Directory for the instruction, MCP config and settings files."""
         if self._temp_dir is None:
             return tempfile.gettempdir()
         path = Path(self._temp_dir)
@@ -216,8 +230,13 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
             mcp_config_path = _write_empty_mcp_config_file(file_dir)
         except OSError as e:
             raise RuntimeError(f"Failed to write Claude MCP config: {e}") from e
+        settings_path: Path | None = None
         system_prompt_path: Path | None = None
         try:
+            try:
+                settings_path = _write_disable_hooks_settings_file(file_dir)
+            except OSError as e:
+                raise RuntimeError(f"Failed to write Claude settings: {e}") from e
             # Prompt is passed via stdin, not CLI args (avoids ARG_MAX limit).
             cli_args = [
                 "--print",
@@ -229,6 +248,9 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 "--mcp-config",
                 str(mcp_config_path),
                 "--strict-mcp-config",
+                # No user hooks, via file path like the MCP config.
+                "--settings",
+                str(settings_path),
                 # Prevent session persistence (avoid context bleed between calls).
                 "--no-session-persistence",
             ]
@@ -311,10 +333,6 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     return stdout.decode("utf-8").strip()
 
                 except asyncio.TimeoutError as e:
-                    # Kill cmd.exe + Node/CLI tree when wrapping a .cmd shim
-                    if process is not None:
-                        await terminate_cli_process(process)
-
                     last_error = RuntimeError(
                         f"CLI command timed out after {request_timeout}s"
                     )
@@ -326,8 +344,6 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 except Exception as e:
                     if isinstance(e, RuntimeError):
                         raise
-                    if process is not None:
-                        await terminate_cli_process(process)
 
                     last_error = RuntimeError(f"CLI command failed: {e}")
                     if attempt < self._max_retries - 1:
@@ -335,10 +351,15 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                         continue
                     raise last_error from e
 
+                finally:
+                    # Kill the CLI if it still runs (timeout, error or cancellation).
+                    if process is not None:
+                        await terminate_cli_process(process)
+
             # Should not reach here, but just in case
             raise last_error or RuntimeError("CLI command failed after retries")
         finally:
-            for temp_path in (mcp_config_path, system_prompt_path):
+            for temp_path in (mcp_config_path, settings_path, system_prompt_path):
                 if temp_path is None:
                     continue
                 try:
