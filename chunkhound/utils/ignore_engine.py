@@ -82,11 +82,21 @@ def _negation_scope(body: str) -> str:
     return body
 
 
-# pathspec (0.12) ends a pattern's regex with a tail, the group named ps_d,
-# that makes a match on a directory also match everything beneath it. Git
-# matches a pattern against the path itself, so the exact form drops the tail.
-_PS_D_OPTIONAL_TAIL = "(?:(?P<ps_d>/).*)?"
-_PS_D_DIR_TAIL = "(?P<ps_d>/).*"
+# pathspec ends a pattern's regex with a tail, the group named ps_d, that
+# makes a match on a directory also match everything beneath it. Git matches
+# a pattern against the path itself, so the exact form ends at the path
+# instead. The tail is spelled per pathspec version (TFS 65863):
+#   0.12: "(?:(?P<ps_d>/).*)?$" (file or directory), "(?P<ps_d>/).*$" (directory)
+#   1.x:  "(?:(?P<ps_d>/)|$)" and "(?P<ps_d>/)"
+# pathspec 1.x applies its regexes with re.search, and some are unanchored
+# ("*" compiles to "."). 0.12 anchors every regex, so re.search is right for
+# both; every regex below is applied with it.
+_PS_D_TAILS = (
+    "(?:(?P<ps_d>/).*)?$",
+    "(?P<ps_d>/).*$",
+    "(?:(?P<ps_d>/)|$)",
+    "(?P<ps_d>/)",
+)
 # The .gitignore transform writes a directory pattern "foo/" as "foo/**".
 _DIR_CONTENTS_SUFFIX = "/**"
 _DIR_DECISIONS_MAX = 65536
@@ -132,10 +142,20 @@ class _SpecRules:
     dir_decisions: dict[str, bool] = field(default_factory=dict)
 
 
-def _exact_regex(pathspec_regex: str) -> re.Pattern[str]:
-    exact = pathspec_regex.replace(_PS_D_OPTIONAL_TAIL, "").replace(_PS_D_DIR_TAIL, "")
+def _exact_regex(pathspec_regex: str, source: str) -> re.Pattern[str]:
+    exact = pathspec_regex
+    for tail in _PS_D_TAILS:
+        if exact.endswith(tail):
+            exact = exact[: -len(tail)] + "$"
+            break
     if "ps_d" in exact:
-        raise _PathspecContractError(f"unexpected pathspec regex {pathspec_regex!r}")
+        import pathspec as installed_pathspec
+
+        version = getattr(installed_pathspec, "__version__", "?")
+        raise _PathspecContractError(
+            f"pathspec {version} compiled {source!r} to an unexpected regex "
+            f"{pathspec_regex!r}"
+        )
     return re.compile(exact)
 
 
@@ -162,7 +182,7 @@ def _build_spec_rules(spec: PathSpec, dir_only: Sequence[bool] | None) -> _SpecR
         if dir_only is None:
             # Patterns as written (config excludes): "foo/" is dir-only.
             is_dir_only = body.endswith("/")
-            exact: re.Pattern[str] | None = _exact_regex(regex.pattern)
+            exact: re.Pattern[str] | None = _exact_regex(regex.pattern, source)
         elif dir_only[index]:
             # Transformed .gitignore "foo/" arrives as "foo/**": git matches
             # the directory against "foo" itself.
@@ -170,10 +190,12 @@ def _build_spec_rules(spec: PathSpec, dir_only: Sequence[bool] | None) -> _SpecR
                 raise _PathspecContractError(f"dir-only line {source!r} lacks /**")
             base = GitWildMatchPattern(body[: -len(_DIR_CONTENTS_SUFFIX)])
             is_dir_only = True
-            exact = None if base.regex is None else _exact_regex(base.regex.pattern)
+            exact = (
+                None if base.regex is None else _exact_regex(base.regex.pattern, source)
+            )
         else:
             is_dir_only = False
-            exact = _exact_regex(regex.pattern)
+            exact = _exact_regex(regex.pattern, source)
         rules.append(_Rule(regex, exact, bool(include), is_dir_only))
         if not include:
             negations.append(regex)
@@ -213,7 +235,7 @@ def _exact_decision(rules: _SpecRules, rel: str, is_dir: bool) -> bool | None:
     for rule in rules.rules:
         if rule.exact is None or (rule.dir_only and not is_dir):
             continue
-        if rule.exact.match(rel):
+        if rule.exact.search(rel):
             decision = rule.include
     return decision
 
@@ -255,7 +277,7 @@ def _contents_covered(rules: _SpecRules, rel: str) -> bool:
     under = rel + "/"
     decision: bool | None = None
     for rule in rules.rules:
-        if not rule.dir_only and rule.regex.match(under):
+        if not rule.dir_only and rule.regex.search(under):
             decision = rule.include
     return decision is True
 
@@ -291,7 +313,7 @@ def _spec_excludes_file(rules: _SpecRules, rel: str) -> bool:
     directory re-include (``foo/**`` then ``!foo/bar/``) re-includes the
     directory only; ``foo/**`` still matches the files in it.
     """
-    if rules.degraded or not any(regex.match(rel) for regex in rules.negations):
+    if rules.degraded or not any(regex.search(rel) for regex in rules.negations):
         return bool(rules.spec.match_file(rel))
     if _exact_decision(rules, rel, False) is True:
         return True
