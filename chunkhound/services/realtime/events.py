@@ -263,6 +263,11 @@ class SimpleEventHandler:
             # Queue directory creation for processing
             file_path = Path(normalize_file_path(event.src_path))
             self._record_source_event("dir_created", file_path)
+            # An excluded directory can hold no indexable file, so walking it
+            # is wasted work (e.g. every node_modules/ dir an install creates).
+            if self._path_filter.excludes_directory(file_path):
+                self._record_filtered_event("dir_created", file_path)
+                return
             self._queue_event("dir_created", file_path)
             return
 

@@ -316,6 +316,100 @@ async def test_dir_index_expansion_does_not_enqueue_gitignored_worktree_children
         services.provider.disconnect()
 
 
+@pytest.mark.parametrize("realtime_backend", ["watchdog", "watchman"])
+@pytest.mark.asyncio
+async def test_directory_created_inside_excluded_path_queues_no_dir_index(
+    tmp_path: Path,
+    realtime_backend: str,
+) -> None:
+    """A new directory under an excluded path must never become dir_index work.
+
+    Issue #549: a dependency install inside an excluded path queued one
+    dir_index walk per created directory, starving real changes.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    root = root.resolve()
+    created_dirs = {
+        # Matched by a user exclude (`.claude/*`).
+        "excluded_by_config": root / ".claude" / "worktrees" / "feature",
+        # Matched by the default `**/node_modules/**` exclude.
+        "excluded_by_default": root / "web" / "node_modules" / "left-pad",
+        "included": root / "src" / "feature",
+    }
+    for dir_path in created_dirs.values():
+        dir_path.mkdir(parents=True)
+    db_path = tmp_path / f"{realtime_backend}-dirs.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={
+            "include": ["**/*.py"],
+            "exclude": [".claude/*"],
+            "realtime_backend": realtime_backend,
+        },
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        service = RealtimeIndexingService(services, config)
+        if realtime_backend == "watchdog":
+            loop = asyncio.get_running_loop()
+            handler = SimpleEventHandler(
+                service.event_queue,
+                config,
+                loop,
+                root_path=root,
+                queue_result_callback=service._handle_queue_result,
+                source_event_callback=service._record_source_event,
+                filtered_event_callback=service._record_filtered_event,
+                admission_callback=service._should_admit_realtime_event,
+            )
+            for dir_path in created_dirs.values():
+                handler.on_any_event(
+                    SimpleNamespace(
+                        event_type="created",
+                        is_directory=True,
+                        src_path=str(dir_path),
+                    )
+                )
+            await asyncio.sleep(0)
+        else:
+            adapter = WatchmanRealtimeAdapter(service)
+            adapter._path_filter = RealtimePathFilter(config=config, root_path=root)
+            adapter._translate_subscription_pdu(
+                {
+                    "subscription": "chunkhound-live-indexing",
+                    "clock": "c:0:21",
+                    "files": [
+                        {
+                            "name": dir_path.relative_to(root).as_posix(),
+                            "exists": True,
+                            "new": True,
+                            "type": "d",
+                        }
+                        for dir_path in created_dirs.values()
+                    ],
+                },
+                WatchmanSubscriptionScope(
+                    requested_path=root,
+                    watch_root=root.resolve(),
+                    relative_root=None,
+                    scope_kind="primary",
+                ),
+            )
+
+        queued: list[tuple[str, Path]] = []
+        while not service.event_queue.empty():
+            queued.append(service.event_queue.get_nowait())
+
+        assert queued == [("dir_created", created_dirs["included"])]
+        assert service._filtered_event_count == 2
+    finally:
+        services.provider.disconnect()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
