@@ -191,11 +191,24 @@ class RealtimePathFilter:
         return not self._engine_initialization_failed
 
     def should_index(self, file_path: Path) -> bool:
-        """Return whether a path should enter the realtime indexing pipeline."""
+        """Return whether a path should enter the realtime indexing pipeline.
+
+        A path is judged where it sits in the tree. When a link is on its way
+        (the file itself, or a directory between it and the root), the indexer
+        reads the link's target, so the target has to pass as well: a link
+        ``src/a.py -> vendor/x.py`` with ``vendor/`` ignored is not indexed.
+        The startup scan never indexes a symlinked file at all.
+        """
         settings = self._settings
         if settings is None:
             return self._language_fallback(file_path)
+        if not self._admits(file_path, settings):
+            return False
+        target = file_path.resolve()
+        return target == self._engine_path(file_path) or self._admits(target, settings)
 
+    def _admits(self, file_path: Path, settings: RealtimePathFilterSettings) -> bool:
+        """The policy for ``file_path`` where it sits: ignore rules, then includes."""
         # A match rejects the file, and so does a policy that cannot be evaluated.
         if self._ignore_rule_matches(file_path, is_dir=False) is not False:
             return False

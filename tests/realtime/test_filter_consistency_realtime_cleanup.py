@@ -488,6 +488,28 @@ def test_linked_nested_repository_keeps_its_own_ignore_rules(tmp_path: Path) -> 
     assert engine.matches(linked / "public.py", is_dir=False) is None
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_file_link_to_an_ignored_file_is_not_indexed(tmp_path: Path) -> None:
+    """A file link is judged by its target too: src/a.py -> vendor/x.py with
+    vendor/ gitignored is not indexed, just as the startup scan never indexes
+    a symlinked file."""
+    root = tmp_path / "repo"
+    _git_init(root)
+    (root / ".gitignore").write_text("vendor/\n", encoding="utf-8")
+    (root / "vendor").mkdir()
+    (root / "vendor" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    (root / "src").mkdir()
+    try:
+        (root / "src" / "a.py").symlink_to(root / "vendor" / "x.py")
+    except OSError:
+        pytest.skip("this system does not allow creating a file symlink")
+    path_filter = RealtimePathFilter(
+        config=_build_config(root, tmp_path / "unused.duckdb"), root_path=root
+    )
+
+    assert not path_filter.should_index(root / "src" / "a.py")
+
+
 def test_ignore_engine_error_on_a_new_directory_marks_the_filter_degraded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
