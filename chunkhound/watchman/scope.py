@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -106,8 +106,14 @@ def discover_nested_linux_mount_roots(
 
 def discover_nested_windows_junction_scopes(
     target_dir: Path,
+    excludes_directory: Callable[[Path], bool] | None = None,
 ) -> tuple[WatchmanSubscriptionScope, ...]:
-    """Return logical junction-backed scopes that resolve outside the target."""
+    """Return logical junction-backed scopes that resolve outside the target.
+
+    A directory that ``excludes_directory`` reports excluded, judged by its
+    path in the tree, is neither walked nor watched: nothing under it is
+    indexed, so a junction under ``node_modules/`` needs no subscription.
+    """
 
     if not sys.platform.startswith("win"):
         return ()
@@ -130,6 +136,10 @@ def discover_nested_windows_junction_scopes(
                         logical_path = _lexical_absolute_path(Path(entry.path))
                         entry_stat = entry.stat(follow_symlinks=False)
                     except OSError:
+                        continue
+                    if excludes_directory is not None and excludes_directory(
+                        logical_path
+                    ):
                         continue
 
                     is_reparse_point = bool(

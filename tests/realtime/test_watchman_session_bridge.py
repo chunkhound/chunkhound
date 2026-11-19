@@ -892,7 +892,7 @@ async def test_watchman_cli_session_start_adds_nested_junction_subscription(
     monkeypatch.setattr(
         watchman_session_module,
         "discover_nested_windows_junction_scopes",
-        lambda target_path: (
+        lambda target_path, excludes_directory=None: (
             WatchmanSubscriptionScope(
                 requested_path=logical_junction,
                 watch_root=physical_root.resolve(),
