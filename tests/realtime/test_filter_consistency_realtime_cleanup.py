@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +29,7 @@ from chunkhound.services.realtime_path_filter import (
     RealtimePathFilter,
     RealtimePathFilterSettings,
 )
+from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine_from_roots
 from chunkhound.watchman import WatchmanSubscriptionScope
 
 
@@ -286,6 +288,55 @@ async def test_watchman_delete_admits_previously_indexed_excluded_file(
         services.provider.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_watchman_new_directory_inside_excluded_path_is_not_queued(
+    tmp_path: Path,
+) -> None:
+    """A directory created under node_modules/ never becomes dir_index work."""
+    root = tmp_path / "repo"
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg").mkdir(parents=True)
+    db_path = tmp_path / "watchman-dir.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchman"},
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        service = RealtimeIndexingService(services, config)
+        adapter = WatchmanRealtimeAdapter(service)
+        adapter._path_filter = RealtimePathFilter(config=config, root_path=root)
+
+        adapter._translate_subscription_pdu(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:21",
+                "files": [
+                    {"name": name, "exists": True, "new": True, "type": "d"}
+                    for name in ("node_modules/pkg", "src/pkg")
+                ],
+            },
+            WatchmanSubscriptionScope(
+                requested_path=root,
+                watch_root=root.resolve(),
+                relative_root=None,
+                scope_kind="primary",
+            ),
+        )
+
+        assert service.event_queue.get_nowait() == (
+            "dir_created",
+            (root / "src" / "pkg").resolve(),
+        )
+        assert service.event_queue.empty()
+        assert service._filtered_event_count == 1
+    finally:
+        services.provider.disconnect()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 @pytest.mark.asyncio
 async def test_dir_index_expansion_does_not_enqueue_gitignored_worktree_children(
@@ -312,6 +363,322 @@ async def test_dir_index_expansion_does_not_enqueue_gitignored_worktree_children
         await service._index_directory(ignored_file.parent)
 
         assert queued_children == []
+    finally:
+        services.provider.disconnect()
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """A directory link as package managers make them: a junction on Windows."""
+    if sys.platform == "win32":
+        # _winapi is private, but it is the standard library's only way to make
+        # a junction, which (unlike a symlink) needs no admin rights or
+        # Developer Mode.
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+@pytest.mark.asyncio
+async def test_linked_package_under_node_modules_is_never_indexed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`npm install` links a local `file:` dependency into node_modules/. Its files
+    live outside the root, but the default node_modules exclude still applies to
+    them: realtime neither queues the link's directory event nor, when it walks a
+    new directory above the link, any file behind it."""
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    package = tmp_path / "outside" / "pkg"
+    package.mkdir(parents=True)
+    (package / "build.py").write_text("def build():\n    return 1\n", encoding="utf-8")
+    scope = root / "node_modules" / "@scope"
+    scope.mkdir(parents=True)
+    _link_directory(scope / "pkg", package)
+
+    db_path = tmp_path / "linked.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchdog"},
+    )
+
+    event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+    handler = SimpleEventHandler(
+        event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
+    )
+    handler.on_any_event(
+        SimpleNamespace(
+            event_type="created", is_directory=True, src_path=str(scope / "pkg")
+        )
+    )
+    await asyncio.sleep(0)
+    assert event_queue.empty()
+
+    services = create_services(db_path, config)
+    services.provider.connect()
+    try:
+        service = RealtimeIndexingService(services, config)
+        service.watch_path = root
+        queued: list[Path] = []
+
+        async def fake_add_file(file_path: Path, priority: str = "change") -> bool:
+            queued.append(file_path)
+            return True
+
+        monkeypatch.setattr(service, "add_file", fake_add_file)
+        # The walk still descends the link with rglob, which is wasted work;
+        # this passes because should_index rejects each file found behind it.
+        await service._index_directory(scope)
+
+        assert queued == []
+    finally:
+        services.provider.disconnect()
+
+
+def test_linked_package_is_excluded_when_the_root_is_spelled_through_a_link(
+    tmp_path: Path,
+) -> None:
+    """Watchman reports paths under the root as it was requested. When that
+    spelling goes through a link (`/var` is `/private/var` on macOS), a package
+    linked into node_modules/ is still excluded where it sits."""
+    real_root = tmp_path / "real" / "repo"
+    scope = real_root / "node_modules" / "@scope"
+    scope.mkdir(parents=True)
+    package = tmp_path / "outside" / "pkg"
+    package.mkdir(parents=True)
+    (package / "build.py").write_text("def build():\n    return 1\n", encoding="utf-8")
+    _link_directory(scope / "pkg", package)
+    root = tmp_path / "repo-link"
+    _link_directory(root, real_root)
+
+    config = Config(
+        target_dir=root,
+        database={"path": str(tmp_path / "spelled.duckdb"), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchman"},
+    )
+    path_filter = RealtimePathFilter(config=config, root_path=root)
+
+    linked = root / "node_modules" / "@scope" / "pkg"
+    assert path_filter.excludes_directory(linked)
+    assert not path_filter.should_index(linked / "build.py")
+
+
+def test_linked_nested_repository_keeps_its_own_ignore_rules(tmp_path: Path) -> None:
+    """A repository linked into the workspace (`linked/` to a checkout outside
+    it) still holds the paths spelled through the link, so its own .gitignore
+    applies to them."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external-repo"
+    external.mkdir()
+    (external / ".gitignore").write_text("*.secret.py\n", encoding="utf-8")
+    (external / "private.secret.py").write_text("X = 1\n", encoding="utf-8")
+    (external / "public.py").write_text("X = 1\n", encoding="utf-8")
+    linked = workspace / "linked"
+    _link_directory(linked, external)
+
+    engine = build_repo_aware_ignore_engine_from_roots(
+        workspace, [linked], ["gitignore"]
+    )
+
+    assert engine.matches(linked / "private.secret.py", is_dir=False) is not None
+    assert engine.matches(linked / "public.py", is_dir=False) is None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_file_link_to_an_ignored_file_is_not_indexed(tmp_path: Path) -> None:
+    """A file link is judged by its target too: src/a.py -> vendor/x.py with
+    vendor/ gitignored is not indexed, just as the startup scan never indexes
+    a symlinked file."""
+    root = tmp_path / "repo"
+    _git_init(root)
+    (root / ".gitignore").write_text("vendor/\n", encoding="utf-8")
+    (root / "vendor").mkdir()
+    (root / "vendor" / "x.py").write_text("X = 1\n", encoding="utf-8")
+    (root / "src").mkdir()
+    try:
+        (root / "src" / "a.py").symlink_to(root / "vendor" / "x.py")
+    except OSError:
+        pytest.skip("this system does not allow creating a file symlink")
+    path_filter = RealtimePathFilter(
+        config=_build_config(root, tmp_path / "unused.duckdb"), root_path=root
+    )
+
+    assert not path_filter.should_index(root / "src" / "a.py")
+
+
+def test_ignore_engine_error_on_a_new_directory_marks_the_filter_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ignore-engine error while judging a new directory is not swallowed:
+    the filter reports itself degraded, as it does for a file, so cleanup keeps
+    rows it can no longer prove are excluded."""
+    import chunkhound.utils.ignore_engine as ignore_engine_module
+
+    class _FailingEngine:
+        def matches(self, path: Path, is_dir: bool) -> None:
+            raise RuntimeError("simulated ignore-engine evaluation failure")
+
+    monkeypatch.setattr(
+        ignore_engine_module,
+        "build_repo_aware_ignore_engine",
+        lambda *args, **kwargs: _FailingEngine(),
+    )
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    path_filter = RealtimePathFilter(
+        config=_build_config(root, tmp_path / "unused.duckdb"), root_path=root
+    )
+
+    assert not path_filter.excludes_directory(root / "src")
+    assert path_filter.is_degraded
+
+
+def _git_ignores(root: Path, rel: str) -> bool:
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", rel],
+        cwd=str(root),
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
+# Each case: .gitignore files, then the .py/.md files to create. git decides
+# which of them are ignored; the full scan, the polling walk and event
+# admission must all agree with it.
+_REINCLUDE_CASES = {
+    # A contents pattern does not exclude the directory itself, so a later
+    # negation re-includes a file inside it.
+    "contents_then_negation": (
+        {".gitignore": "foo/**\n!foo/bar.py\n"},
+        ["foo/bar.py", "foo/other.py", "foo/sub/bar.py", "a.py"],
+    ),
+    # The same through a nested .gitignore; src/sub/ itself is ignored by "**",
+    # so its keep.py stays ignored.
+    "nested_everything_then_negation": (
+        {"src/.gitignore": "**\n!keep.py\n"},
+        ["src/keep.py", "src/drop.py", "src/sub/keep.py", "a.py"],
+    ),
+    # A directory pattern excludes the directory: git never re-includes a file
+    # under an excluded directory.
+    "directory_then_negation": (
+        {".gitignore": "foo/\n!foo/bar.py\n"},
+        ["foo/bar.py", "foo/x.py", "a.py"],
+    ),
+    # Git's whitelist idiom: everything at the top but src/.
+    "whitelist": (
+        {".gitignore": "/*\n!/src/\n!.gitignore\n"},
+        ["src/a.py", "src/pkg/b.py", "other/c.py"],
+    ),
+    # Re-including a directory inside a contents pattern re-includes only the
+    # directory: foo/** still matches every file in it.
+    "directory_reinclude_inside_contents": (
+        {".gitignore": "foo/**\n!foo/bar/\n"},
+        ["foo/bar/x.py", "foo/y.py", "a.py"],
+    ),
+    "anchored_directory_reinclude_inside_contents": (
+        {".gitignore": "/a/**\n!/a/b/\n"},
+        ["a/b/x.py", "a/b/d/z.py", "a/c.py", "b.py"],
+    ),
+    "nested_directory_reinclude_inside_contents": (
+        {".gitignore": "/s/**\n", "s/.gitignore": "!/keep/\n"},
+        ["s/keep/a.py", "s/b.py", "a.py"],
+    ),
+    # A directory re-include does not re-include the files a file pattern
+    # excludes in it.
+    "directory_reinclude_of_file_pattern": (
+        {".gitignore": "*.md\n!keep/\n"},
+        ["keep/a.md", "keep/b.py", "c.md"],
+    ),
+    # The whitelist idiom for file types: ignore everything, then re-include
+    # every directory and the .py files.
+    "whitelist_directories_then_type": (
+        {".gitignore": "*\n!*/\n!*.py\n"},
+        ["a.py", "a.md", "d/b.py", "d/c.md", "d/e/f.md"],
+    ),
+    "whitelist_double_star_directories_then_type": (
+        {".gitignore": "*\n!**/\n!*.py\n"},
+        ["top.py", "t.md", "d/a.py", "d/c.md"],
+    ),
+    "whitelist_anchored_double_star_directories_then_type": (
+        {".gitignore": "*\n!/**/\n!*.py\n"},
+        ["top.py", "d/a.py", "d/c.md"],
+    ),
+}
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+@pytest.mark.parametrize("case", sorted(_REINCLUDE_CASES))
+@pytest.mark.asyncio
+async def test_scan_walk_and_admission_agree_with_git_on_reincluded_files(
+    tmp_path: Path, case: str
+) -> None:
+    """A file a negation re-includes is indexed by the full scan, found by the
+    polling walk and admitted as an event, exactly when git does not ignore it.
+    A new directory holding such a file is expanded, not dropped."""
+    ignore_files, files = _REINCLUDE_CASES[case]
+    root = tmp_path / "repo"
+    _git_init(root)
+    for rel, text in {**ignore_files, **{p: "X = 1\n" for p in files}}.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
+    expected = {rel for rel in files if not _git_ignores(root, rel)}
+
+    db_path = tmp_path / "reinclude.duckdb"
+    includes = ["**/*.py", "**/*.md"]
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={
+            "include": includes,
+            "exclude": [],
+            "exclude_sentinel": ".gitignore",
+            "realtime_backend": "watchdog",
+        },
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+    try:
+        coordinator = IndexingCoordinator(
+            database_provider=services.provider, base_directory=root, config=config
+        )
+        discovered = await coordinator._discover_files(root, includes, [])
+        assert {p.relative_to(root).as_posix() for p in discovered} == expected
+
+        service = RealtimeIndexingService(services, config)
+        current_files, _checked, _truncated = service._polling_snapshot(root)
+        assert {p.relative_to(root).as_posix() for p in current_files} == expected
+
+        event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+        handler = SimpleEventHandler(
+            event_queue, config=config, loop=asyncio.get_running_loop(), root_path=root
+        )
+        for rel in files:
+            handler.on_any_event(
+                SimpleNamespace(
+                    event_type="modified", is_directory=False, src_path=str(root / rel)
+                )
+            )
+        expected_dirs = {Path(rel).parent.as_posix() for rel in expected} - {"."}
+        for rel in expected_dirs:
+            handler.on_any_event(
+                SimpleNamespace(
+                    event_type="created", is_directory=True, src_path=str(root / rel)
+                )
+            )
+        await asyncio.sleep(0)
+        admitted = set()
+        expanded = set()
+        while not event_queue.empty():
+            event_type, path = event_queue.get_nowait()
+            rel_path = path.relative_to(root.resolve()).as_posix()
+            (expanded if event_type == "dir_created" else admitted).add(rel_path)
+        assert admitted == expected
+        assert expanded == expected_dirs
     finally:
         services.provider.disconnect()
 
