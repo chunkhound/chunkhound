@@ -509,7 +509,7 @@ DECISION GUIDE:
 GIT HISTORY SEARCH (type='semantic' only):
 - commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
 - commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
-- last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history covers the full history).
+- last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history without notice; when merged branches leave a ragged window edge, the range may include a few extra commits from those branches).
 - vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
 
@@ -549,7 +549,7 @@ SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster,
 GIT HISTORY RESEARCH:
 - commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
 - commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
-- last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history covers the full history).
+- last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history without notice; when merged branches leave a ragged window edge, the range may include a few extra commits from those branches).
 - vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
 
@@ -730,7 +730,7 @@ async def search_impl(
         offset: Starting offset for pagination
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
         commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
-        last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history covers the full history).
+        last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history without notice; when merged branches leave a ragged window edge, the range may include a few extra commits from those branches).
         vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 
     Returns:
@@ -851,7 +851,7 @@ async def deep_research_impl(
         config: Application configuration (optional, defaults to environment config)
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
         commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
-        last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history covers the full history).
+        last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history without notice; when merged branches leave a ragged window edge, the range may include a few extra commits from those branches).
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
         previous_query: Prior query for follow-up framing (optional). When set, the synthesis stage frames the answer in the prior topic's context. Does not affect which code is searched or retrieved.
 
