@@ -109,24 +109,18 @@ class DirectoryIndexingService:
             if stats.files_processed > 0 or stats.chunks_created > 0:
                 await self._run_batch_compaction(stats)
 
-            # Embedding generation (extracted from run.py:85-88, 287-312)
-            # Rust pipeline embeds before write — skip redundant embed pass.
-            # Gated on the coordinator's *actual* resolved decision
-            # (process_result["pipeline"]), not the raw feature flag: the
-            # coordinator falls back to Python for non-DuckDB providers
-            # (e.g. LanceDB) and non-standard DB filenames even when the
-            # flag requests Rust, and that fallback still needs this
-            # embed pass — using the raw flag here would silently skip
-            # embedding generation for those projects.
-            #
-            # Also still run the pass if the Rust pipeline reported errors:
-            # its per-file errors include embed failures (src/pipeline/
-            # pipeline.rs's embed_errors accumulator), and a file with a
-            # failed embed still gets its content_hash written as up to
-            # date — without this pass it would never be retried.
+            # Embedding generation (extracted from run.py:85-88, 287-312).
+            # Always run the missing-embeddings pass, whichever pipeline ran.
+            # The Python pipeline needs it to embed at all. The Rust pipeline
+            # embeds only the files it (re)processes, so this pass is what
+            # repairs (a) files whose embed failed in Rust (their content_hash
+            # is still written as up to date) and (b) chunks of UNCHANGED files
+            # that never got a vector (a realtime embed that was starved,
+            # failed, or cut off by a shutdown). Previously it was skipped after
+            # a clean Rust run, so `chunkhound index` never repaired (b). When
+            # nothing is missing the pass is one anti-join query.
             used_rust_pipeline = process_result.get("pipeline") == "rust"
-            rust_had_errors = used_rust_pipeline and process_result.get("errors", 0) > 0
-            if not no_embeddings and (not used_rust_pipeline or rust_had_errors):
+            if not no_embeddings:
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 generated = embed_result.get("generated", 0)
