@@ -2238,7 +2238,10 @@ class IndexingCoordinator(BaseService):
             valid_chunk_data = []
             empty_count = 0
             for chunk_id, chunk in zip(chunk_ids, chunks):
-                from chunkhound.core.utils import format_chunk_for_embedding
+                from chunkhound.core.utils import (
+                    format_chunk_for_embedding,
+                    format_document_for_provider,
+                )
                 from chunkhound.utils.normalization import normalize_content
 
                 code = normalize_content(chunk.get("code", ""))
@@ -2253,6 +2256,9 @@ class IndexingCoordinator(BaseService):
                         language=chunk.get("language"),
                         constants=constants,
                         rule_target=rule_target,
+                    )
+                    text = format_document_for_provider(
+                        self._embedding_provider, text, chunk.get("file_path")
                     )
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:

@@ -195,6 +195,8 @@ def create_openai_provider(
     timeout: int = 30,
     retry_attempts: int = 3,
     max_concurrent_batches: int | None = None,
+    query_prefix: str = "",
+    document_template: str = "{text}",
 ) -> "OpenAIEmbeddingProvider":
     """Create an OpenAI embedding provider with default settings.
 
@@ -225,6 +227,8 @@ def create_openai_provider(
         retry_attempts: Number of retry attempts on failure (default: 3)
         max_concurrent_batches: Expected concurrent request width this
             instance will serve; sizes the HTTP connection pool accordingly
+        query_prefix: Text prepended to search queries before embedding
+        document_template: Template applied to indexed chunks before embedding
 
     Returns:
         Configured OpenAI embedding provider
@@ -251,4 +255,6 @@ def create_openai_provider(
         timeout=timeout,
         retry_attempts=retry_attempts,
         max_concurrent_batches=max_concurrent_batches,
+        query_prefix=query_prefix,
+        document_template=document_template,
     )

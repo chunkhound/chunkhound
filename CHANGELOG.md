@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Separate query and document prompts for OpenAI-compatible embeddings** — New optional `embedding.query_prefix` and `embedding.document_template` settings (also `CHUNKHOUND_EMBEDDING__QUERY_PREFIX` / `CHUNKHOUND_EMBEDDING__DOCUMENT_TEMPLATE`) give models such as Qwen3-Embedding and EmbeddingGemma the input format they expect for search queries and indexed chunks. The template supports `{text}`, `{file_path}` and `{filename}`; unknown placeholders are rejected. Unset by default, so existing requests are unchanged. Changing them requires re-indexing. Addresses #441.
+
 ### Removed
 - **`_quickresearch` subcommand, `run_git_diff`, and `IndexingConfig.reset_user_include_exclude()`** — superseded by in-process streaming (`stream_git_diff_fragments`, `run_websearch`).
 

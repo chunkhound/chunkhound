@@ -8,7 +8,11 @@ from rich.progress import Progress, TaskID
 
 from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector, BatchTiming
 from chunkhound.core.types.common import ChunkId
-from chunkhound.core.utils import DEFAULT_CHARS_PER_TOKEN, estimate_tokens
+from chunkhound.core.utils import (
+    DEFAULT_CHARS_PER_TOKEN,
+    estimate_tokens,
+    format_document_for_provider,
+)
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import APIEmbeddingProvider
 from chunkhound.providers.database.duckdb.schema_constants import (
@@ -253,7 +257,7 @@ class EmbeddingService(BaseService):
                 self._get_chunks_by_ids, chunk_ids_without_embeddings,
             )
             chunk_id_list = [chunk["id"] for chunk in chunks_data]
-            chunk_texts = [chunk["code"] for chunk in chunks_data]
+            chunk_texts = self._document_texts(chunks_data)
 
             generated_count = await self.generate_embeddings_for_chunks(
                 chunk_id_list, chunk_texts, show_progress=True
@@ -327,7 +331,7 @@ class EmbeddingService(BaseService):
             )
 
             # Generate new embeddings
-            chunk_texts = [chunk["code"] for chunk in chunks_to_regenerate]
+            chunk_texts = self._document_texts(chunks_to_regenerate)
             regenerated_count = await self.generate_embeddings_for_chunks(
                 chunk_ids_to_regenerate, chunk_texts
             )
@@ -954,6 +958,15 @@ class EmbeddingService(BaseService):
             else:
                 result.append(ch)
         return "".join(result)
+
+    def _document_texts(self, chunks: list[dict[str, Any]]) -> list[str]:
+        """Embedding text per chunk, shaped by the provider's document template."""
+        return [
+            format_document_for_provider(
+                self._embedding_provider, chunk["code"], chunk.get("path")
+            )
+            for chunk in chunks
+        ]
 
     def _get_chunks_by_ids(self, chunk_ids: list[ChunkId]) -> list[dict[str, Any]]:
         """Get chunk data (id, code, symbol, path) for specific chunk IDs."""

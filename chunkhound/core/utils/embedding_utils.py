@@ -1,5 +1,9 @@
 """Utilities for embedding generation."""
 
+import re
+from pathlib import PurePath
+from typing import Any
+
 # Maximum constants to include in embedding header (prevents bloat)
 MAX_CONSTANTS_IN_HEADER = 5
 
@@ -68,3 +72,64 @@ def format_chunk_for_embedding(
         header += f" [{const_str}]"
 
     return f"{header}\n{code}"
+
+
+# Document templates let OpenAI-compatible models that expect a per-role input
+# format (e.g. EmbeddingGemma's ``title: ... | text: ...``) receive it.
+DEFAULT_DOCUMENT_TEMPLATE = "{text}"
+DOCUMENT_TEMPLATE_PLACEHOLDERS = ("text", "file_path", "filename")
+_PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
+
+
+def validate_document_template(template: str) -> str:
+    """Validate a document template and return it unchanged.
+
+    Raises:
+        ValueError: If the template names an unknown placeholder or has no
+            ``{text}`` placeholder (the chunk would never be embedded).
+    """
+    names = _PLACEHOLDER_RE.findall(template)
+    allowed = ", ".join("{" + n + "}" for n in DOCUMENT_TEMPLATE_PLACEHOLDERS)
+    for name in names:
+        if name not in DOCUMENT_TEMPLATE_PLACEHOLDERS:
+            raise ValueError(
+                f"document_template contains unknown placeholder {{{name}}}; "
+                f"allowed placeholders: {allowed}"
+            )
+    if "text" not in names:
+        raise ValueError("document_template must contain the {text} placeholder")
+    return template
+
+
+def render_document_text(template: str, text: str, file_path: str | None = None) -> str:
+    """Render a document template for one chunk.
+
+    Placeholders are substituted in a single pass over the template, so braces
+    inside ``text`` (source code) stay literal and are never re-expanded.
+    ``{file_path}`` is the repository-relative path with ``/`` separators and
+    ``{filename}`` its basename; both resolve to ``none`` without file metadata.
+    """
+    if template == DEFAULT_DOCUMENT_TEMPLATE:
+        return text
+
+    path = file_path.replace("\\", "/") if file_path else None
+    values = {
+        "text": text,
+        "file_path": path or "none",
+        "filename": PurePath(path).name if path else "none",
+    }
+    return _PLACEHOLDER_RE.sub(lambda m: values.get(m.group(1), m.group(0)), template)
+
+
+def format_document_for_provider(
+    provider: Any, text: str, file_path: str | None = None
+) -> str:
+    """Apply the provider's document template to a chunk's embedding text.
+
+    Providers without a string ``document_template`` (Voyage, test doubles)
+    keep ``text`` unchanged.
+    """
+    template = getattr(provider, "document_template", None)
+    if not isinstance(template, str):
+        return text
+    return render_document_text(template, text, file_path)
