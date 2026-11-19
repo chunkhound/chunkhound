@@ -369,6 +369,9 @@ async def test_dir_index_expansion_does_not_enqueue_gitignored_worktree_children
 def _link_directory(link: Path, target: Path) -> None:
     """A directory link as package managers make them: a junction on Windows."""
     if sys.platform == "win32":
+        # _winapi is private, but it is the standard library's only way to make
+        # a junction, which (unlike a symlink) needs no admin rights or
+        # Developer Mode.
         import _winapi
 
         _winapi.CreateJunction(str(target), str(link))
@@ -425,11 +428,69 @@ async def test_linked_package_under_node_modules_is_never_indexed(
             return True
 
         monkeypatch.setattr(service, "add_file", fake_add_file)
+        # The walk still descends the link with rglob, which is wasted work;
+        # this passes because should_index rejects each file found behind it.
         await service._index_directory(scope)
 
         assert queued == []
     finally:
         services.provider.disconnect()
+
+
+def test_linked_package_is_excluded_when_the_root_is_spelled_through_a_link(
+    tmp_path: Path,
+) -> None:
+    """Watchman reports paths under the root as it was requested. When that
+    spelling goes through a link (`/var` is `/private/var` on macOS), a package
+    linked into node_modules/ is still excluded where it sits."""
+    real_root = tmp_path / "real" / "repo"
+    scope = real_root / "node_modules" / "@scope"
+    scope.mkdir(parents=True)
+    package = tmp_path / "outside" / "pkg"
+    package.mkdir(parents=True)
+    (package / "build.py").write_text("def build():\n    return 1\n", encoding="utf-8")
+    _link_directory(scope / "pkg", package)
+    root = tmp_path / "repo-link"
+    _link_directory(root, real_root)
+
+    config = Config(
+        target_dir=root,
+        database={"path": str(tmp_path / "spelled.duckdb"), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchman"},
+    )
+    path_filter = RealtimePathFilter(config=config, root_path=root)
+
+    linked = root / "node_modules" / "@scope" / "pkg"
+    assert path_filter.excludes_directory(linked)
+    assert not path_filter.should_index(linked / "build.py")
+
+
+def test_ignore_engine_error_on_a_new_directory_marks_the_filter_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ignore-engine error while judging a new directory is not swallowed:
+    the filter reports itself degraded, as it does for a file, so cleanup keeps
+    rows it can no longer prove are excluded."""
+    import chunkhound.utils.ignore_engine as ignore_engine_module
+
+    class _FailingEngine:
+        def matches(self, path: Path, is_dir: bool) -> None:
+            raise RuntimeError("simulated ignore-engine evaluation failure")
+
+    monkeypatch.setattr(
+        ignore_engine_module,
+        "build_repo_aware_ignore_engine",
+        lambda *args, **kwargs: _FailingEngine(),
+    )
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    path_filter = RealtimePathFilter(
+        config=_build_config(root, tmp_path / "unused.duckdb"), root_path=root
+    )
+
+    assert not path_filter.excludes_directory(root / "src")
+    assert path_filter.is_degraded
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")

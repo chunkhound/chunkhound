@@ -43,7 +43,14 @@ def _in_tree_path(path: Path, root: Path) -> Path:
     excludes a linked package. Resolving first would match the link's target
     instead, which lies outside the tree, where no root-relative rule applies.
     A path that is not lexically under ``root`` (already resolved, or spelled
-    differently) is resolved as before.
+    differently) is resolved as before. ``root`` is resolved, so a path given
+    under a root spelled through a link (``/var`` is ``/private/var`` on macOS)
+    lands here too, and a link below the root is then matched at its target.
+    A caller that receives paths in the requested spelling respells them under
+    the resolved root first, as ``RealtimePathFilter`` does.
+
+    ``os.path.abspath`` collapses ``..`` lexically, as Git does. That differs
+    from ``resolve()`` when the ``..`` follows a link.
     """
     in_tree = Path(os.path.abspath(path))
     try:
