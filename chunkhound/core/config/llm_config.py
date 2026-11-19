@@ -148,6 +148,7 @@ LLMProviderLiteral = Literal[
     "atlascloud",
     "runcrate",
     "cheapaimodel",
+    "uberllm",
     "opencode-cli",
 ]
 
@@ -194,6 +195,7 @@ CLI_PROVIDER_CHOICES = (
     "atlascloud",
     "runcrate",
     "cheapaimodel",
+    "uberllm",
     "opencode-cli",
 )
 

@@ -18,7 +18,12 @@ from chunkhound.providers.database.serial_executor import (
     DatabaseTemporarilyUnavailableError,
 )
 
-from .events import RealtimeMutation, SimpleEventHandler, normalize_file_path
+from .events import (
+    RealtimeMutation,
+    SimpleEventHandler,
+    normalize_file_path,
+    watchdog_event_filter,
+)
 
 
 class RealtimePipelineMixin:
@@ -59,7 +64,49 @@ class RealtimePipelineMixin:
             event_type=event_type,
             scope="excluded",
         )
+        self._emit_filtered_status_update()
+
+    def _emit_filtered_status_update(self) -> None:
+        """Publish status for a filtered event at most once per interval.
+
+        A filtered event changes only counters, and filtered events arrive in
+        bursts of thousands (an npm install, a junction to node_modules), where
+        building and publishing a full snapshot per event cost more than
+        filtering the event did. The first event after a quiet interval
+        publishes at once; later events in the interval share one trailing
+        publish, so the counters the burst's last event left still reach the
+        status consumer when the burst ends.
+
+        Runs on the event loop, which owns the counters and event-pressure
+        state the snapshot reads. The trailing publish is a transient task, so
+        it also runs on the loop, and stop() cancels it with the others.
+        """
+        if not self._status_callback or self._filtered_status_flush_pending:
+            return
+        now = time.monotonic()
+        wait = (
+            self._filtered_status_last_emit
+            + self._FILTERED_STATUS_INTERVAL_SECONDS
+            - now
+        )
+        if wait > 0:
+            self._filtered_status_flush_pending = True
+            self._start_transient_task(self._flush_filtered_status_update(wait))
+            return
+        self._filtered_status_last_emit = now
         self._emit_status_update()
+
+    async def _flush_filtered_status_update(self, delay: float) -> None:
+        """Publish the trailing status update for a burst of filtered events.
+
+        Waits out the rest of the interval, then publishes the counters the
+        burst left behind.
+        """
+        await asyncio.sleep(delay)
+        self._filtered_status_flush_pending = False
+        self._filtered_status_last_emit = time.monotonic()
+        self._emit_status_update()
+
     def _should_admit_realtime_event(
         self,
         event_type: str,
@@ -622,6 +669,28 @@ class RealtimePipelineMixin:
             return
 
         self._event_queue_overflow_current_burst_dropped += 1
+    def _record_inotify_overflow(self) -> None:
+        """Resync after the kernel dropped inotify events.
+
+        Runs on the loop. watchdog has already rebuilt its watches, so changes
+        lost before the rebuild are found by the scan and later ones arrive as
+        events.
+        """
+        # An inotify thread can outlive the observer join in _stop_observer.
+        if self._stopping or self._service_state in {"stopping", "stopped"}:
+            return
+        self._inotify_overflow_count += 1
+        self._inotify_overflow_last_at = self._utc_now()
+        logger.warning("Kernel inotify queue overflowed; requesting a resync")
+        self._set_warning("kernel inotify queue overflowed; resyncing")
+        self._schedule_loss_of_sync_resync(
+            "Watchdog",
+            {
+                "backend": "watchdog",
+                "loss_of_sync_reason": "inotify_queue_overflow",
+                "overflow_count": self._inotify_overflow_count,
+            },
+        )
     def _complete_event_queue_overflow_burst(self, *, success: bool) -> None:
         if self._event_queue_overflow_state == "idle":
             return
@@ -699,6 +768,23 @@ class RealtimePipelineMixin:
             self._dispatch_resync()
         )
         return True
+    def _schedule_loss_of_sync_resync(
+        self, source: str, details: dict[str, object] | None
+    ) -> None:
+        """Request a loss-of-sync resync without blocking the caller.
+
+        Starts a transient task that awaits ``request_resync``; a failure is
+        recorded as "<source> resync request failed: <error>" instead of being
+        left as an unretrieved task exception.
+        """
+
+        async def _dispatch() -> None:
+            try:
+                await self.request_resync("realtime_loss_of_sync", details)
+            except Exception as error:
+                self._set_error(f"{source} resync request failed: {error}")
+
+        self._start_transient_task(_dispatch())
     async def _dispatch_resync(self) -> None:
         """Coalesce resync requests and run the callback on the trailing edge."""
         try:
@@ -717,6 +803,7 @@ class RealtimePipelineMixin:
                 self._set_error(self._last_resync_error)
                 return
 
+            self._resync_retry_count = 0
             while True:
                 started_request_at = self._last_resync_request_monotonic
                 self._resync_in_progress = True
@@ -724,13 +811,19 @@ class RealtimePipelineMixin:
                 self._last_resync_error = None
                 self._emit_status_update()
 
+                scan_raised = False
                 try:
-                    result = await callback(reason, details)
+                    try:
+                        result = await callback(reason, details)
+                    except Exception:
+                        scan_raised = True
+                        raise
                     callback_error = self._resync_callback_error(result)
                     if callback_error is not None:
                         raise RuntimeError(callback_error)
                     self._needs_resync = False
                     self._resync_performed_count += 1
+                    self._resync_retry_count = 0
                     self._last_resync_completed_at = self._utc_now()
                     self._complete_event_queue_overflow_burst(success=True)
                     if self._service_state not in {"stopping", "stopped"}:
@@ -739,13 +832,26 @@ class RealtimePipelineMixin:
                     self._last_resync_error = str(e)
                     self._complete_event_queue_overflow_burst(success=False)
                     self._set_error(f"Realtime resync failed: {e}")
-                    break
                 finally:
                     self._resync_in_progress = False
                     self._emit_status_update()
 
-                if started_request_at == self._last_resync_request_monotonic:
+                # A scan that raised (e.g. a failed Rust handover) is
+                # retried after a backoff. An error status from the embedding
+                # follow-up is not: re-running the scan cannot fix it.
+                delays = self._RESYNC_RETRY_DELAYS_SECONDS
+                if scan_raised and self._resync_retry_count < len(delays):
+                    delay = delays[self._resync_retry_count]
+                    self._resync_retry_count += 1
+                    self._resync_retry_pending = True
+                    self._emit_status_update()
+                    try:
+                        await asyncio.sleep(delay)
+                    finally:
+                        self._resync_retry_pending = False
+                elif started_request_at == self._last_resync_request_monotonic:
                     break
+                # Otherwise a request arrived during the run, failed or not: run it.
                 reason = self._last_resync_reason or reason
                 details = self._last_resync_details
         finally:
@@ -1072,6 +1178,14 @@ class RealtimePipelineMixin:
                             in self._active_change_generations
                         )
                     ):
+                        if event_type in ("created", "modified"):
+                            # Still a write: keep a pending debounce horizon
+                            # fresh, as add_file would. A burst of saves is
+                            # then indexed once, after the last one, and a
+                            # file written without pause once it goes quiet.
+                            pending_key = str(self._normalize_mutation_path(file_path))
+                            if pending_key in self._pending_debounce:
+                                self._pending_debounce[pending_key] = time.monotonic()
                         logger.debug(
                             "Suppressing duplicate "
                             f"{event_type} event for {file_path} "
@@ -1148,6 +1262,7 @@ class RealtimePipelineMixin:
                         self.event_handler,
                         dir_path,
                         recursive=True,  # Keep new directories recursively covered.
+                        event_filter=watchdog_event_filter(),
                     )
                     self.watched_directories.add(dir_path)
                     logger.debug(f"Added recursive watch for new directory: {dir_path}")
@@ -1561,9 +1676,6 @@ class RealtimePipelineMixin:
                         self._indexed_files.add(normalized)
                         self._file_condition.notify_all()
 
-                    # Clear event dedup entry so future modifications aren't suppressed
-                    self._recent_file_events.pop(str(file_path), None)
-
                     # If we skipped embeddings, queue for embedding generation
                     if skip_embeddings:
                         await self.add_file(file_path, priority="embed")
@@ -1592,6 +1704,11 @@ class RealtimePipelineMixin:
                     processing_error = error
                 finally:
                     self._record_processing_finished(file_path, completed=completed)
+                    # Clear the event dedup entry whether or not processing
+                    # succeeded: once the path is no longer active, a same-type
+                    # write inside the window would be suppressed, and after a
+                    # failed attempt nothing else would index it.
+                    self._recent_file_events.pop(str(file_path), None)
                     if active_change_path is not None:
                         self._active_change_generations.pop(active_change_path, None)
                         await self._drain_reserved_follow_up_change(
