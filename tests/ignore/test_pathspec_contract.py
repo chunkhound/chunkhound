@@ -2,8 +2,11 @@
 
 pathspec has no upper version bound. If its pattern objects change shape, the
 rules degrade to pathspec's own matching (no pruning, no git-exact
-re-includes) and log a warning. This test compares the engine with git on a
-layout that pathspec alone decides differently, so such a change fails here.
+re-includes) and log a warning. These tests use the installed pathspec, so
+they guard whichever version is installed (0.12 and 1.x spell a pattern's
+regex differently). The first compares the engine with git on a layout that
+pathspec alone decides differently; the second checks that a plain file
+pattern leaves ignored directories pruned.
 """
 
 from __future__ import annotations
@@ -14,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.utils.ignore_engine import build_ignore_engine
+from chunkhound.utils.ignore_engine import (
+    build_ignore_engine,
+    build_repo_aware_ignore_engine,
+)
 
 # git ignores dir/keep.py (a file under an excluded directory cannot be
 # re-included) and contents/sub/x.py (!contents/sub/ re-includes only the
@@ -54,3 +60,27 @@ def test_ignore_engine_agrees_with_git_where_pathspec_alone_does_not(
     }
 
     assert engine_ignored == git_ignored
+
+
+def test_a_plain_file_pattern_keeps_ignored_directories_pruned(tmp_path: Path) -> None:
+    """A .gitignore that names a file (Thumbs.db) beside node_modules/.
+
+    Under pathspec 1.x such a line once stopped all directory pruning: the
+    walks entered node_modules, while each file in it was still excluded.
+    """
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    (root / ".gitignore").write_text(
+        "Thumbs.db\n*.log\nnode_modules/\n", encoding="utf-8"
+    )
+    engine = build_repo_aware_ignore_engine(
+        root, ["gitignore"], ".chignore", ["**/dist/**"]
+    )
+
+    assert engine.matches(root / "node_modules", is_dir=True) is not None
+    assert engine.matches(root / "pkg" / "node_modules", is_dir=True) is not None
+    assert engine.matches(root / "web" / "dist", is_dir=True) is not None
+    assert engine.matches(root / "src", is_dir=True) is None
+    assert engine.matches(root / "src" / "Thumbs.db", is_dir=False) is not None
+    assert engine.matches(root / "src" / "debug.log", is_dir=False) is not None
+    assert engine.matches(root / "src" / "app.py", is_dir=False) is None
