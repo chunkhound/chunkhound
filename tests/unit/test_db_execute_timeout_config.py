@@ -9,7 +9,7 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.providers.database.serial_executor import (
-    _COMPACTION_OPERATION_TIMEOUT_SECONDS,
+    COMPACTION_OPERATION_TIMEOUT_SECONDS,
     SerialDatabaseExecutor,
 )
 
@@ -163,11 +163,11 @@ class TestSerialExecutorTimeoutResolution:
         assert executor.resolve_timeout("search_semantic") == 30.0
         assert (
             executor.resolve_timeout("compact_database")
-            == _COMPACTION_OPERATION_TIMEOUT_SECONDS
+            == COMPACTION_OPERATION_TIMEOUT_SECONDS
         )
         assert (
             executor.resolve_timeout("compact_if_needed")
-            == _COMPACTION_OPERATION_TIMEOUT_SECONDS
+            == COMPACTION_OPERATION_TIMEOUT_SECONDS
         )
 
     def test_explicit_timeout_applies_to_all_ops(self) -> None:
@@ -228,7 +228,7 @@ class TestSerialExecutorTimeoutResolution:
         executor.execute_sync(provider, "compact_database")
 
         mock_future.result.assert_called_once_with(
-            timeout=_COMPACTION_OPERATION_TIMEOUT_SECONDS
+            timeout=COMPACTION_OPERATION_TIMEOUT_SECONDS
         )
 
 
@@ -278,5 +278,5 @@ class TestProviderWiresExecutorTimeout:
         assert provider._executor.resolve_timeout("search") == 30.0
         assert (
             provider._executor.resolve_timeout("compact_database")
-            == _COMPACTION_OPERATION_TIMEOUT_SECONDS
+            == COMPACTION_OPERATION_TIMEOUT_SECONDS
         )
