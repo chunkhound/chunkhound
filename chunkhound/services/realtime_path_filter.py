@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,11 @@ class RealtimePathFilterSettings:
 class RealtimePathFilter:
     """Apply ChunkHound's realtime path filtering independently of the backend."""
 
+    # Bound on memoised directory decisions. A burst touches a few thousand
+    # directories at most; past the bound the memo starts over rather than
+    # growing with the tree.
+    _DIR_DECISIONS_MAX = 8192
+
     def __init__(
         self,
         *,
@@ -73,8 +79,20 @@ class RealtimePathFilter:
         self._include_degraded = False
         self._include_degraded_warned = False
         self._pattern_cache: dict[str, Any] = {}
+        # Directory -> "it, or a directory above it, is excluded". Only valid
+        # for the engine it was computed with (see _directory_excluded).
+        self._dir_decisions: dict[Path, bool] = {}
+        self._dir_decisions_engine: Any | None = None
+        # Kept only when the engine's rules cannot change while it lives. The
+        # libgit2 evaluator rereads .gitignore files, so a kept decision would
+        # outlive an edited rule; it is asked each time instead, and already
+        # applies an excluded parent directory itself.
+        self._keep_dir_decisions = False
         self._settings = settings or RealtimePathFilterSettings.from_config(config)
         self._root = self._resolve_root(config=config, root_path=root_path)
+        # The root as an in-tree path (normalized, links not resolved), for
+        # the lexical "is this under the root" test of the directory memo.
+        self._in_tree_root = Path(os.path.abspath(self._root))
 
     @staticmethod
     def _resolve_root(*, config: Config | None, root_path: Path | None) -> Path:
@@ -103,15 +121,90 @@ class RealtimePathFilter:
             or self._include_degraded
         )
 
-    def should_index(self, file_path: Path) -> bool:
-        """Return whether a path should enter the realtime indexing pipeline."""
+    def excludes_directory(self, dir_path: Path) -> bool:
+        """Return whether an ignore rule excludes this directory where it sits.
+
+        Pass the directory's path in the tree, before resolving links: a link
+        under ``node_modules/`` is excluded by its place there, not by its
+        target. A directory below an excluded directory is excluded too.
+        Returns False when the ignore policy cannot be evaluated; each file
+        under the directory is then still checked, and rejected, by
+        ``should_index``.
+        """
+        if not self._ensure_engine() or self._ignore_engine_degraded:
+            return False
+        if self._engine is None:
+            return False
+        try:
+            if self._keep_dir_decisions:
+                in_tree = self._in_tree_under_root(dir_path)
+                if in_tree is not None:
+                    return self._directory_excluded(in_tree)
+            return self._engine.matches(dir_path, is_dir=True) is not None
+        except Exception:
+            return False
+
+    def _in_tree_under_root(self, path: Path) -> Path | None:
+        """``path`` normalized without resolving links, if strictly below the root."""
+        in_tree = Path(os.path.abspath(path))
+        if in_tree != self._in_tree_root and in_tree.is_relative_to(
+            self._in_tree_root
+        ):
+            return in_tree
+        return None
+
+    def _directory_excluded(self, dir_path: Path) -> bool:
+        """Whether ``dir_path``, or a directory above it below the root, is excluded.
+
+        Each directory is matched once, where it sits in the tree, and the
+        answer is kept, so every later file under an excluded directory is
+        rejected without matching the file itself. That is the rule the
+        startup scan applies (it never descends into an excluded directory)
+        and the rule Git applies (a file cannot be re-included below an
+        excluded directory). The kept answers belong to the engine that
+        produced them: a different engine starts from none. Used only for an
+        engine whose rules are fixed (see ``_keep_dir_decisions``).
+
+        ``dir_path`` must come from ``_in_tree_under_root``. Raises whatever
+        the engine raises.
+        """
+        engine = self._engine
+        if self._dir_decisions_engine is not engine:
+            self._dir_decisions = {}
+            self._dir_decisions_engine = engine
+        decisions = self._dir_decisions
+
+        # Climb to the nearest directory already decided (or the root), then
+        # decide the ones below it top-down: once one is excluded, everything
+        # under it is, with no further matching.
+        pending: list[Path] = []
+        current = dir_path
+        excluded = False
+        while current != self._in_tree_root:
+            known = decisions.get(current)
+            if known is not None:
+                excluded = known
+                break
+            pending.append(current)
+            current = current.parent
+
+        if len(decisions) + len(pending) > self._DIR_DECISIONS_MAX:
+            decisions.clear()
+        for directory in reversed(pending):
+            if not excluded:
+                excluded = engine.matches(directory, is_dir=True) is not None
+            decisions[directory] = excluded
+        return excluded
+
+    def _ensure_engine(self) -> bool:
+        """Build the ignore engine once; False if it could not be built."""
         settings = self._settings
         if settings is None:
-            return self._language_fallback(file_path)
-
+            return False
         if not self._engine_initialized and not self._engine_initialization_failed:
             try:
                 from chunkhound.utils.ignore_engine import (
+                    RepoAwareLibgit2Evaluator,
                     build_repo_aware_ignore_engine,
                 )
 
@@ -125,6 +218,9 @@ class RealtimePathFilter:
                         settings.workspace_root_only_gitignore
                     ),
                 )
+                self._keep_dir_decisions = not isinstance(
+                    self._engine, RepoAwareLibgit2Evaluator
+                )
                 self._engine_initialized = True
             except Exception as error:
                 self._engine_initialization_failed = True
@@ -136,15 +232,28 @@ class RealtimePathFilter:
                 )
                 return False
 
-        if self._engine_initialization_failed:
+        return not self._engine_initialization_failed
+
+    def should_index(self, file_path: Path) -> bool:
+        """Return whether a path should enter the realtime indexing pipeline."""
+        settings = self._settings
+        if settings is None:
+            return self._language_fallback(file_path)
+
+        if not self._ensure_engine():
             return False
 
         if not self._ignore_engine_degraded:
             try:
-                if self._engine is not None and self._engine.matches(
-                    file_path, is_dir=False
-                ):
-                    return False
+                if self._engine is not None:
+                    if self._keep_dir_decisions:
+                        in_tree = self._in_tree_under_root(file_path)
+                        if in_tree is not None and self._directory_excluded(
+                            in_tree.parent
+                        ):
+                            return False
+                    if self._engine.matches(file_path, is_dir=False):
+                        return False
             except Exception as error:
                 self._ignore_engine_degraded = True
                 self._engine = None
