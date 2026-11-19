@@ -275,12 +275,17 @@ async def handle_tool_call(
             tool_name == "search"
             and parsed_args.get("type") == "semantic"
             and parsed_args.get("vector_source", "diff") == "diff"
+            and services is not None
         ):
-            diff_only = _resolve_commit_range(
-                parsed_args.get("commit_range"),
-                parsed_args.get("commit_hash"),
-                parsed_args.get("last_n_commits"),
-            ) is not None
+            diff_only = (
+                await _resolve_commit_range(
+                    parsed_args.get("commit_range"),
+                    parsed_args.get("commit_hash"),
+                    parsed_args.get("last_n_commits"),
+                    services,
+                )
+                is not None
+            )
 
         resolved_services = services
         if tool.requires_db:

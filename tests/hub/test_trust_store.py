@@ -37,6 +37,17 @@ def _grant_worker(
         results.put(None)
 
 
+def test_hub_home_is_isolated_for_trust_store(
+    isolated_hub_home: Path,
+) -> None:
+    assert os.environ["HOME"] == str(isolated_hub_home)
+    assert os.environ["USERPROFILE"] == str(isolated_hub_home)
+    assert trust_store_path() == (
+        isolated_hub_home / ".config" / "chunkhound" / "hub-trust.json"
+    )
+    assert isolated_hub_home.is_dir()
+
+
 def test_missing_store_is_untrusted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

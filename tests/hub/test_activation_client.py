@@ -133,9 +133,7 @@ def test_unowned_cold_probe_suppresses_filesystem_uncertainty(
 
 
 @pytest.fixture(autouse=True)
-def isolated_trust_store(tmp_path, monkeypatch):
-    (tmp_path / "home").mkdir()
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+def isolated_trust_store(monkeypatch):
     # Existing activation contracts predate persisted consent and exercise later
     # boundaries. Focused authorization tests below restore the real matcher.
     monkeypatch.setattr(hub_client, "is_trusted", lambda checkout, url: True)

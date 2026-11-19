@@ -8,10 +8,25 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import anyio
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_hub_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Keep each hub test's user-owned state in its own temporary home."""
+    home = tmp_path / "home"
+    # DuckDB requires the configured home to exist when hub tests build artifacts.
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
 
 
 @contextmanager
