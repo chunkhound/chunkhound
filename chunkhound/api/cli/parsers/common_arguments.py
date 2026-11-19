@@ -188,7 +188,8 @@ def add_git_diff_arguments(parser: argparse.ArgumentParser) -> None:
         dest="last_n_commits",
         help=(
             "Last N commits reachable from HEAD (merge commits count). "
-            "A value above the available history covers the full history."
+            "A value above the available history covers the full history. "
+            "With merged branches the range may include a few extra commits."
         ),
     )
     parser.add_argument(
