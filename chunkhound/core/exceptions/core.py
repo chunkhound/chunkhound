@@ -350,12 +350,21 @@ class RustPipelineError(ChunkHoundError):
     can raise, instead of both collapsing into an indistinguishable generic error.
     """
 
-    def __init__(self, reason: str, context: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        reason: str,
+        context: dict[str, Any] | None = None,
+        *,
+        transient: bool = False,
+    ):
         """Initialize Rust pipeline error.
 
         Args:
             reason: The underlying PyO3 exception's message
             context: Optional additional context
+            transient: The run failed because a parse-pool worker died. The
+                pool has been discarded, so running again gets new workers.
         """
         super().__init__(f"Rust pipeline failed: {reason}", context)
         self.reason = reason
+        self.transient = transient
