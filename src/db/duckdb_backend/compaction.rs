@@ -6,6 +6,11 @@ use super::DuckDbHnswBackend;
 use crate::db::DbBackend;
 use crate::error::DbError;
 
+// Each data entry in the scalar primary key represents one stored row.
+// Its validity bitmap and the embedding column's array elements have separate segments.
+const STORED_ROWS_SQL: &str = "SELECT COALESCE(SUM(count), 0)::BIGINT FROM pragma_storage_info(?) \
+                               WHERE column_name = 'id' AND segment_type <> 'VALIDITY'";
+
 /// Two-signal compaction metrics (Phase 0).
 #[derive(Debug, Clone)]
 struct CompactionStats {
@@ -271,39 +276,16 @@ impl DuckDbHnswBackend {
             total
         };
 
-        // MAX(count) per row_group avoids counting the same row N times (once
-        // per column segment).
-        let stored_chunks: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(cnt), 0) FROM (\
-                   SELECT row_group_id, MAX(count) AS cnt \
-                   FROM pragma_storage_info('chunks') \
-                   GROUP BY row_group_id)",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-
-        let stored_embeddings: i64 = {
-            let mut total = 0i64;
-            for &dims in &self.known_dims {
-                let table_name = format!("embeddings_{dims}");
-                let safe = table_name.replace('"', "\"\"");
-                if let Ok(cnt) = conn.query_row(
-                    &format!(
-                        "SELECT COALESCE(SUM(cnt), 0) FROM (\
-                           SELECT row_group_id, MAX(count) AS cnt \
-                           FROM pragma_storage_info('\"{safe}\"') \
-                           GROUP BY row_group_id)"
-                    ),
-                    [],
-                    |r| r.get::<_, i64>(0),
-                ) {
-                    total += cnt;
-                }
-            }
-            total
+        let stored_rows = |table: &str| {
+            conn.query_row(STORED_ROWS_SQL, [table], |r| r.get::<_, i64>(0))
+                .unwrap_or(0)
         };
+        let stored_chunks = stored_rows("chunks");
+        let stored_embeddings: i64 = self
+            .known_dims
+            .iter()
+            .map(|dims| stored_rows(&format!("embeddings_{dims}")))
+            .sum();
 
         let total_stored = stored_chunks + stored_embeddings;
         let total_live = live_chunks + live_embeddings;
@@ -360,6 +342,59 @@ pub(super) fn run_compaction(backend: &mut DuckDbHnswBackend) -> Result<(), DbEr
 #[cfg(test)]
 mod compaction_threshold_tests {
     use super::*;
+
+    #[test]
+    fn compaction_counts_stored_rows() {
+        use super::super::test_support::{config, embedding_batch};
+        use crate::types::DbWriterBatch;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = config(tmp.path().join("index.db").to_string_lossy().into_owned());
+        config.compaction_min_size_bytes = 0;
+        let mut backend = DuckDbHnswBackend::new(config);
+        backend.open().expect("open");
+        let batch = embedding_batch("file", 256, 16);
+        backend.write_batch(&batch).expect("write files");
+        backend
+            .conn_or_err()
+            .expect("connection")
+            .execute_batch("SET checkpoint_threshold='8GB'; CHECKPOINT")
+            .expect("checkpoint before deletions");
+
+        let check = |backend: &DuckDbHnswBackend, deleted: i64| {
+            let conn = backend.conn_or_err().expect("connection");
+            let live: i64 = conn
+                .query_row("SELECT COUNT(*) FROM embeddings_256", [], |r| r.get(0))
+                .expect("count live embeddings");
+            let stored: i64 = conn
+                .query_row(STORED_ROWS_SQL, ["embeddings_256"], |r| r.get(0))
+                .expect("count stored embeddings");
+            assert_eq!(live, 16 - deleted);
+            assert_eq!(stored, live + deleted, "stored embedding rows");
+            let stats = backend.compaction_stats().expect("compaction stats");
+            let expected_waste = deleted as f64 / 16.0;
+            assert_eq!(stats.row_waste_ratio, expected_waste);
+            assert!(stats.free_ratio < 0.30, "{stats:?}");
+            assert_eq!(
+                backend.needs_compaction().expect("compaction decision"),
+                expected_waste >= 0.30
+            );
+        };
+        check(&backend, 0);
+        let delete_paths = batch
+            .files
+            .iter()
+            .step_by(2)
+            .map(|f| f.path.clone())
+            .collect();
+        backend
+            .write_batch(&DbWriterBatch {
+                files: vec![],
+                delete_paths,
+            })
+            .expect("delete half the files");
+        check(&backend, 8);
+    }
 
     #[test]
     fn none_threshold_disables_compaction_without_opening_db() {
