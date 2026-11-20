@@ -78,6 +78,17 @@ pub struct DbConfig {
     pub insert_batch_size: usize,
 }
 
+/// Convert a leased canonical target for the String-backed database interface.
+/// Never substitute filename bytes: that would access a different, unleased DB.
+pub(crate) fn database_path_string(target: &std::path::Path) -> Result<String, DbError> {
+    target.to_str().map(str::to_owned).ok_or_else(|| {
+        crate::database_coordination::error::LeaseError::Layout(
+            "native database access requires a UTF-8 canonical target",
+        )
+        .into()
+    })
+}
+
 pub fn create_backend(cfg: DbConfig) -> Box<dyn DbBackend> {
     Box::new(DuckDbHnswBackend::new(cfg))
 }

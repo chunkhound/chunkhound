@@ -2,7 +2,6 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -181,55 +180,8 @@ class TestSerialExecutorTimeoutResolution:
         assert executor.resolve_timeout("ensure_all_hnsw_indexes") == 30.0
         assert executor.resolve_timeout("drop_all_hnsw_indexes") == 30.0
 
-    def test_execute_sync_passes_timeout_to_future_result(self) -> None:
-        """User-visible timeout must reach future.result(timeout=...)."""
-        executor = SerialDatabaseExecutor(execute_timeout_seconds=42.0)
-
-        provider = MagicMock()
-        provider.get_base_directory.return_value = None
-        # Bypass connection/thread-local path; only assert timeout wiring
-        captured: list[float] = []
-
-        mock_future = MagicMock()
-        mock_future.result.side_effect = lambda timeout=None: (
-            captured.append(timeout),
-            "ok",
-        )[1]
-
-        # Skip real executor work and auto-compaction side effects
-        executor._db_executor = MagicMock()
-        executor._db_executor.submit.return_value = mock_future
-        executor._maybe_run_sampled_auto_compaction = MagicMock()  # type: ignore[method-assign]
-
-        # Provide a no-op executor method so getattr succeeds if called
-        provider._executor_search_semantic = MagicMock(return_value="ok")
-
-        result = executor.execute_sync(provider, "search_semantic")
-
-        assert result == "ok"
-        assert captured == [42.0]
-        mock_future.result.assert_called_once_with(timeout=42.0)
-
-    def test_execute_sync_default_compact_timeout_to_future_result(
-        self,
-    ) -> None:
-        executor = SerialDatabaseExecutor()
-
-        provider = MagicMock()
-        provider.get_base_directory.return_value = None
-        mock_future = MagicMock()
-        mock_future.result.return_value = True
-
-        executor._db_executor = MagicMock()
-        executor._db_executor.submit.return_value = mock_future
-        executor._maybe_run_sampled_auto_compaction = MagicMock()  # type: ignore[method-assign]
-        provider._executor_compact_database = MagicMock(return_value=True)
-
-        executor.execute_sync(provider, "compact_database")
-
-        mock_future.result.assert_called_once_with(
-            timeout=_COMPACTION_OPERATION_TIMEOUT_SECONDS
-        )
+    # Public operation deadlines and retained ownership are exercised with real
+    # providers in tests/hub/test_provider_ownership.py, not mocked Future internals.
 
 
 class TestProviderWiresExecutorTimeout:

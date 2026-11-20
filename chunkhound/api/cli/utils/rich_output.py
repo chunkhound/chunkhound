@@ -31,11 +31,11 @@ from chunkhound.services.progress_utils import format_bytes
 def default_sink_filter(record: "Record") -> bool:
     """Loguru filter for the CLI's default (non-verbose) log sink.
 
-    Rust pipeline progress (log::info!, tagged via the `rust_native` extra)
-    should be visible without --verbose, but everything else stays gated at
-    WARNING.
+    Rust pipeline progress (`rust_native`) and sanitized hub messages
+    (`hub_client`) should be visible without --verbose, but everything else
+    stays gated at WARNING.
     """
-    if record["extra"].get("rust_native"):
+    if record["extra"].get("rust_native") or record["extra"].get("hub_client"):
         return True
     return bool(record["level"].no >= logger.level("WARNING").no)
 

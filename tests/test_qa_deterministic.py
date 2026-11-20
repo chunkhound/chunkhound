@@ -108,8 +108,9 @@ class TestQADeterministic:
         # This test suite is intended to be deterministic and fast. When real API
         # keys are present, enabling embeddings can drastically increase runtime
         # (network calls + embedding generation), often exceeding pytest-timeout.
+        enable_embeddings = os.getenv("CH_TEST_QA_ENABLE_EMBEDDINGS") == "1"
         embedding_config = None
-        if os.getenv("CH_TEST_QA_ENABLE_EMBEDDINGS") == "1":
+        if enable_embeddings:
             config_dict = get_embedding_config_for_tests()
             embedding_config = build_embedding_config_from_dict(config_dict)
 
@@ -121,6 +122,7 @@ class TestQADeterministic:
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
             embedding=embedding_config,
+            embeddings_disabled=not enable_embeddings,
             indexing={
                 "include": ["*"],
                 "exclude": ["*.log", "__pycache__/"],

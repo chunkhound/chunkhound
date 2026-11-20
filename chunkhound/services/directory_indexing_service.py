@@ -187,8 +187,8 @@ class DirectoryIndexingService:
                 else None
             )
             t0 = time.time()
-            # Cancellation stops waiting for the operation. Already-running DDL
-            # stays on the serial executor, ahead of queued provider disconnect.
+            # DDL runs off-loop; cancellation waits for the admitted operation
+            # to finish, ahead of queued provider disconnect.
             await db.drop_all_hnsw_indexes_async()
             elapsed_ms = (time.time() - t0) * 1000
             if task is not None:

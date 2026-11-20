@@ -140,6 +140,12 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
     # Add config-specific arguments
     add_config_arguments(run_parser, ["database", "embedding", "indexing", "mcp"])
 
+    run_parser.add_argument(
+        "--trust",
+        action="store_true",
+        help="Validate and trust the configured hub source for cold index bootstrap",
+    )
+
     # Simulate mode as a flag to preserve backward-compatible positional path usage
     run_parser.add_argument(
         "--simulate",
@@ -168,7 +174,7 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="With --simulate: sort output by path or size (desc for largest first)",
     )
 
-    # Debug ignores: print ignore context for troubleshooting without breaking JSON output
+    # Debug ignores without breaking JSON output.
     run_parser.add_argument(
         "--debug-ignores",
         action="store_true",
@@ -196,8 +202,8 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
         "--profile-startup",
         action="store_true",
         help=(
-            "Emit startup phase timings (discovery/cleanup/change-scan) as JSON to stderr; "
-            "minimal overhead when enabled"
+            "Emit startup phase timings (discovery/cleanup/change-scan) as JSON "
+            "to stderr; minimal overhead when enabled"
         ),
     )
 

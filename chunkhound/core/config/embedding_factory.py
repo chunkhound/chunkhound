@@ -96,31 +96,11 @@ class EmbeddingProviderFactory:
         if not model:
             raise ValueError("Model not specified in provider configuration")
 
-        # Log Azure configuration if present
+        # Configuration strings, including model names, can contain credentials.
         if azure_endpoint:
-            logger.debug(
-                f"Creating Azure OpenAI provider: model={model}, "
-                f"azure_endpoint={azure_endpoint}, api_version={api_version}, "
-                f"azure_deployment={azure_deployment}, "
-                f"api_key={'***' if api_key else None}, "
-                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}, "
-                f"timeout={config.get('timeout', 30)}, "
-                f"batch_size={config.get('batch_size', 100)}, "
-                f"max_retries={config.get('max_retries', 3)}"
-            )
+            logger.debug("Creating Azure OpenAI provider")
         else:
-            logger.debug(
-                f"Creating OpenAI provider: model={model}, "
-                f"base_url={base_url}, api_key={'***' if api_key else None}, "
-                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}, "
-                f"output_dims={output_dims}, "
-                f"client_side_truncation={client_side_truncation}, "
-                f"timeout={config.get('timeout', 30)}, "
-                f"batch_size={config.get('batch_size', 100)}, "
-                f"max_retries={config.get('max_retries', 3)}"
-            )
+            logger.debug("Creating OpenAI provider")
 
         try:
             return create_openai_provider(
@@ -177,12 +157,8 @@ class EmbeddingProviderFactory:
         if not model:
             raise ValueError("Model not specified in provider configuration")
 
-        logger.debug(
-            f"Creating VoyageAI provider: model={model}, "
-            f"base_url={base_url}, api_key={'***' if api_key else None}, "
-            f"rerank_model={rerank_model}, rerank_url={rerank_url}, "
-            f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
-        )
+        # Configuration strings, including model names, can contain credentials.
+        logger.debug("Creating VoyageAI provider")
 
         try:
             # Build kwargs, only including rerank params if explicitly set

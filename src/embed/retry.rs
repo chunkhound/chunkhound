@@ -1,6 +1,25 @@
+#[cfg(test)]
+mod cancellation_contracts {
+    use super::*;
+    #[test]
+    fn stop_prevents_a_new_request() {
+        let stop = crate::cancellation::StopToken::default();
+        stop.cancel();
+        let result: Result<(), PipelineError> = embed_with_retry(
+            RetryPolicy {
+                max_attempts: 3,
+                base_delay: Duration::from_secs(1),
+            },
+            &stop,
+            || panic!("request admitted after cancellation"),
+        );
+        assert!(matches!(result, Err(PipelineError::Cancelled)));
+    }
+}
+
+use crate::cancellation::StopToken;
 use crate::error::PipelineError;
 use rand::Rng;
-use std::thread;
 use std::time::Duration;
 
 /// Hard ceiling on any single sleep — mirrors Python's `min(..., 120.0)` cap.
@@ -36,15 +55,14 @@ pub(crate) fn should_retry(error: &PipelineError) -> bool {
 /// `total_delay = retry_after + random.uniform(0, min(retry_after * 0.1, 5.0))`
 /// pattern, which guarantees the Retry-After contract is honoured: the client
 /// always waits at least as long as the server requested.
-pub(crate) fn sleep_with_jitter(base: Duration) {
-    let base_secs = base.as_secs_f64();
-    let max_jitter_secs = (base_secs * 0.1).min(5.0);
-    let jitter_secs = rand::thread_rng().gen_range(0.0..=max_jitter_secs);
-    thread::sleep(base + Duration::from_secs_f64(jitter_secs));
+pub(crate) fn sleep_with_jitter(base: Duration, stop: &StopToken) -> Result<(), PipelineError> {
+    let jitter = rand::thread_rng().gen_range(0.0..=(base.as_secs_f64() * 0.1).min(5.0));
+    stop.wait(base + Duration::from_secs_f64(jitter))
 }
 
 pub(crate) fn embed_with_retry<T, F>(
     policy: RetryPolicy,
+    stop: &StopToken,
     mut request: F,
 ) -> Result<T, PipelineError>
 where
@@ -52,9 +70,11 @@ where
 {
     let attempts = policy.max_attempts.max(1);
     let mut backoff = policy.base_delay;
-    let mut last_error = None;
     for attempt in 0..attempts {
-        match request() {
+        stop.check()?;
+        let result = request();
+        stop.check()?;
+        match result {
             Ok(value) => return Ok(value),
             Err(error) if should_retry(&error) && attempt + 1 < attempts => {
                 // If the server supplied a Retry-After value, honour it exactly
@@ -66,14 +86,13 @@ where
                     Some(secs) => Duration::from_secs(secs.min(MAX_RETRY_DELAY_SECS)),
                     None => backoff.min(Duration::from_secs(MAX_RETRY_DELAY_SECS)),
                 };
-                last_error = Some(error);
-                sleep_with_jitter(sleep);
+                sleep_with_jitter(sleep, stop)?;
                 backoff = backoff.saturating_mul(2);
             }
             Err(error) => return Err(error),
         }
     }
-    Err(last_error.unwrap_or(PipelineError::Cancelled))
+    unreachable!("at least one attempt returns its final result")
 }
 
 /// Apply a request to a batch, recursively halving only when the provider
@@ -83,19 +102,24 @@ where
 /// half -- only the indices belonging to the failed half are marked `Err`.
 pub(crate) fn embed_with_split<T, F>(
     texts: &[String],
+    stop: &StopToken,
     request: &mut F,
-) -> Vec<Result<T, PipelineError>>
+) -> Result<Vec<Result<T, PipelineError>>, PipelineError>
 where
     F: FnMut(&[String]) -> Result<Vec<T>, PipelineError>,
 {
-    match request(texts) {
-        Ok(values) => values.into_iter().map(Ok).collect(),
+    stop.check()?;
+    let result = request(texts);
+    stop.check()?;
+    match result {
+        Ok(values) => Ok(values.into_iter().map(Ok).collect()),
+        Err(PipelineError::Cancelled) => Err(PipelineError::Cancelled),
         Err(PipelineError::ContextLengthExceeded) if texts.len() > 1 => {
             let midpoint = texts.len() / 2;
-            let mut left = embed_with_split(&texts[..midpoint], request);
-            left.extend(embed_with_split(&texts[midpoint..], request));
-            left
+            let mut left = embed_with_split(&texts[..midpoint], stop, request)?;
+            left.extend(embed_with_split(&texts[midpoint..], stop, request)?);
+            Ok(left)
         }
-        Err(error) => texts.iter().map(|_| Err(error.clone())).collect(),
+        Err(error) => Ok(texts.iter().map(|_| Err(error.clone())).collect()),
     }
 }

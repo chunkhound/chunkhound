@@ -184,15 +184,27 @@ impl OpenAiProvider {
         })
     }
 
-    fn request_with_retry(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PipelineError> {
-        super::common::default_retry(|| self.request_once(texts))
+    fn request_with_retry(
+        &self,
+        texts: &[String],
+        stop: &crate::cancellation::StopToken,
+    ) -> Result<Vec<Vec<f32>>, PipelineError> {
+        super::common::default_retry(stop, || self.request_once(texts))
     }
 }
 
 impl EmbedBatchFn for OpenAiProvider {
     fn embed_batch(&self, texts: &[String]) -> Result<EmbedBatchResult, String> {
-        super::common::run_embed_batch(texts, &self.config, &self.observed_dims, |batch| {
-            self.request_with_retry(batch)
+        self.embed_batch_cancellable(texts, &crate::cancellation::StopToken::default())
+            .map_err(|error| error.to_string())
+    }
+    fn embed_batch_cancellable(
+        &self,
+        texts: &[String],
+        stop: &crate::cancellation::StopToken,
+    ) -> Result<EmbedBatchResult, PipelineError> {
+        super::common::run_embed_batch(texts, &self.config, &self.observed_dims, stop, |batch| {
+            self.request_with_retry(batch, stop)
         })
     }
 }

@@ -29,14 +29,11 @@ entirely:
   exception.
 
 Both deliberately avoid going through `ProcessPoolExecutor.map()`: the
-Python indexing path calls `multiprocessing.set_start_method("spawn")`
-globally and permanently for the process (see
-`IndexingCoordinator._ensure_mp_start_method`), so once any earlier test in
-the same session exercises that path, monkeypatching a production module
-attribute would silently stop working for any later fork-reliant test —
-spawned workers re-import modules fresh and never see the patch. Testing at
-these two boundaries instead is deterministic regardless of test order or
-which multiprocessing start method is active.
+Python indexing path and native bridge explicitly request spawn contexts
+for their parser pools, without changing the global start method. Spawned
+workers re-import modules fresh and never see a parent-process monkeypatch.
+Testing at these two boundaries instead is deterministic regardless of test
+order or the process's global multiprocessing start method.
 """
 
 from pathlib import Path

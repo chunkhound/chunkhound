@@ -7,17 +7,42 @@ import os
 import sys
 from collections.abc import Callable
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+import chunkhound_native as native
 from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config.config import Config
 from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
 from chunkhound.core.embedding_model_drift import ModelDrift, format_drift_warning
+from chunkhound.core.index_format import IndexFormatError
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.daemon.process import pid_alive
+from chunkhound.hub.client import (
+    ValidatedHubSource,
+    automatic_target_absent,
+    automatic_target_appears_cold,
+    fetch_validated_manifest,
+    pull,
+)
+from chunkhound.hub.errors import (
+    FATAL_HUB_ERRORS,
+    HUB_PULL_CANCELLATION_DIAGNOSTIC,
+    HUB_PULL_FAILURE_GUIDANCE,
+    HubLocalStateError,
+    HubUnavailable,
+)
+from chunkhound.hub.install import installation_failure, installation_target
+from chunkhound.hub.trust import (
+    HubTrustError,
+    checkout_digest,
+    grant_trust,
+    is_trusted,
+    manifest_url_digest,
+)
 from chunkhound.registry import (
     configure_registry,
     create_indexing_coordinator,
@@ -37,9 +62,235 @@ from ..utils.validation import (
 from . import autodoc_prompts as prompts
 
 
+class HubIndexDecision(Enum):
+    CONTINUE_LOCAL = "continue-local"
+    HUB_INSTALLED = "hub-installed"
+    STOP = "stop"
+
+
 def _mcp_mode() -> bool:
     """True under an MCP server, which must never prompt or print to stdout."""
     return os.environ.get("CHUNKHOUND_MCP_MODE") == "1"
+
+
+def _hub_prompts_allowed() -> bool:
+    return (
+        not _mcp_mode()
+        and os.environ.get("CHUNKHOUND_NO_PROMPTS") != "1"
+        and prompts.is_interactive()
+    )
+
+
+def _choose_untrusted_cold_action(formatter: RichOutputFormatter) -> str:
+    formatter.info(
+        "A hub database may be available and could avoid a full local index."
+    )
+    formatter.info(
+        "The configured source is not trusted. Run chunkhound index --trust "
+        "to validate and authorize it."
+    )
+    answer = prompts.prompt_text(
+        "Continue with local indexing or cancel? (local/cancel)",
+        default="cancel",
+    )
+    return "local" if (answer or "").strip().lower() == "local" else "cancel"
+
+
+def _choose_hub_failure_action() -> str:
+    return prompts.prompt_choice(
+        "The configured hub could not provide a usable database",
+        choices=("local", "cancel"),
+        default="cancel",
+    )
+
+
+def _hub_authorized_failure_guidance(formatter: RichOutputFormatter) -> None:
+    formatter.info(HUB_PULL_FAILURE_GUIDANCE)
+
+
+def _save_hub_trust(
+    checkout: Path,
+    hub_url: str,
+    formatter: RichOutputFormatter,
+) -> None:
+    try:
+        grant_trust(checkout, hub_url)
+    except HubTrustError:
+        formatter.warning(
+            "Hub manifest was authorized for this index, but future automatic "
+            "hub use was not enabled"
+        )
+
+
+async def _prepare_hub_index(
+    args: argparse.Namespace,
+    config: Config,
+    formatter: RichOutputFormatter,
+) -> HubIndexDecision:
+    """Authorize and attempt a cold hub base before local index setup."""
+    if (
+        getattr(args, "simulate", False)
+        or getattr(args, "check_ignores", False)
+        or getattr(args, "no_embeddings", False)
+        or config.embeddings_disabled
+        or _mcp_mode()
+    ):
+        return HubIndexDecision.CONTINUE_LOCAL
+
+    hub_url = config.hub.url
+    explicit_trust = bool(getattr(args, "trust", False))
+
+    if not hub_url:
+        if explicit_trust:
+            formatter.error(
+                "No hub source is configured. Configure hub.url before using "
+                "index --trust."
+            )
+            return HubIndexDecision.STOP
+        return HubIndexDecision.CONTINUE_LOCAL
+
+    try:
+        authorized_checkout = (config.target_dir or Path.cwd()).expanduser().resolve()
+        authorized_checkout_digest = checkout_digest(authorized_checkout)
+        authorized_url_digest = manifest_url_digest(hub_url)
+    except OSError:
+        checkout_error = HubLocalStateError("Hub checkout identity is unavailable")
+        formatter.error(str(checkout_error))
+        raise checkout_error from None
+    authorized = False
+    if not explicit_trust:
+        try:
+            authorized = is_trusted(authorized_checkout, hub_url)
+        except HubTrustError:
+            formatter.warning(
+                "Hub trust settings could not be read; the hub will not be used."
+            )
+
+    if not explicit_trust and not authorized:
+        if not _hub_prompts_allowed():
+            return HubIndexDecision.CONTINUE_LOCAL
+        target = installation_target(config)
+        if not automatic_target_appears_cold(target, config.database.provider):
+            return HubIndexDecision.CONTINUE_LOCAL
+        if _choose_untrusted_cold_action(formatter) == "local":
+            return HubIndexDecision.CONTINUE_LOCAL
+        return HubIndexDecision.STOP
+
+    source: ValidatedHubSource | None = None
+    if explicit_trust:
+        try:
+            source = await fetch_validated_manifest(config)
+            try:
+                current_checkout_digest = checkout_digest(
+                    config.target_dir or Path.cwd()
+                )
+            except OSError:
+                raise HubLocalStateError(
+                    "Hub checkout identity is unavailable"
+                ) from None
+            if (
+                source.checkout_digest != authorized_checkout_digest
+                or source.url_digest != authorized_url_digest
+                or current_checkout_digest != authorized_checkout_digest
+                or config.hub.url != hub_url
+            ):
+                raise HubUnavailable(
+                    "Validated hub source no longer matches authorized configuration"
+                )
+        except HubUnavailable as exc:
+            formatter.error(str(exc))
+            return HubIndexDecision.STOP
+        except FATAL_HUB_ERRORS as exc:
+            formatter.error(str(exc))
+            raise
+        except OSError:
+            filesystem_error = HubLocalStateError(
+                "Hub local filesystem is unavailable"
+            )
+            formatter.error(str(filesystem_error))
+            raise filesystem_error from None
+        _save_hub_trust(authorized_checkout, hub_url, formatter)
+
+    try:
+        target = installation_target(config)
+        target_absent = automatic_target_absent(target, config.database.provider)
+    except HubUnavailable as exc:
+        formatter.error(str(exc))
+        if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
+            return HubIndexDecision.CONTINUE_LOCAL
+        formatter.info(
+            "No usable hub database was obtained from the authorized source. "
+            "Rerun interactively and choose local indexing, or disable hub.url "
+            "and rerun."
+        )
+        return HubIndexDecision.STOP
+    except (
+        native.DatabaseBusyError,
+        native.DatabaseInterruptedError,
+        native.DatabaseLayoutError,
+        native.DatabaseFilesystemError,
+    ) as exc:
+        error = installation_failure(exc)
+        formatter.error(str(error))
+        raise error from None
+    except FATAL_HUB_ERRORS as exc:
+        formatter.error(str(exc))
+        raise
+    except OSError:
+        filesystem_error = HubLocalStateError("Hub local filesystem is unavailable")
+        formatter.error(str(filesystem_error))
+        raise filesystem_error from None
+
+    try:
+        if not target_absent:
+            return HubIndexDecision.CONTINUE_LOCAL
+        if source is None:
+            installed = await pull(config, automatic=True)
+        else:
+            installed = await pull(config, automatic=True, source=source)
+    except asyncio.CancelledError:
+        formatter.error(HUB_PULL_CANCELLATION_DIAGNOSTIC)
+        _hub_authorized_failure_guidance(formatter)
+        return HubIndexDecision.STOP
+    except HubUnavailable as exc:
+        formatter.error(str(exc))
+        _hub_authorized_failure_guidance(formatter)
+        return HubIndexDecision.STOP
+    except FATAL_HUB_ERRORS:
+        _hub_authorized_failure_guidance(formatter)
+        raise
+
+    if installed:
+        return HubIndexDecision.HUB_INSTALLED
+
+    # Another process can win the exclusive publication race successfully.
+    try:
+        target_absent = automatic_target_absent(target, config.database.provider)
+    except (
+        native.DatabaseBusyError,
+        native.DatabaseInterruptedError,
+        native.DatabaseLayoutError,
+        native.DatabaseFilesystemError,
+    ) as exc:
+        error = installation_failure(exc)
+        formatter.error(str(error))
+        _hub_authorized_failure_guidance(formatter)
+        raise error from None
+    except FATAL_HUB_ERRORS as exc:
+        formatter.error(str(exc))
+        _hub_authorized_failure_guidance(formatter)
+        raise
+    except OSError:
+        filesystem_error = HubLocalStateError("Hub local filesystem is unavailable")
+        formatter.error(str(filesystem_error))
+        _hub_authorized_failure_guidance(formatter)
+        raise filesystem_error from None
+
+    if not target_absent:
+        return HubIndexDecision.CONTINUE_LOCAL
+
+    _hub_authorized_failure_guidance(formatter)
+    return HubIndexDecision.STOP
 
 
 def _make_model_drift_prompt(
@@ -118,16 +369,39 @@ def _suggest_model_upgrade(formatter: RichOutputFormatter) -> None:
 
 
 def _is_db_lock_error(exc: Exception) -> bool:
-    """Return True if *exc* looks like a DuckDB exclusive-lock failure."""
-    msg = str(exc).lower()
+    """Recognize local lock failures without displaying a sanitized cause."""
+    wrapped_format_error = isinstance(exc, IndexFormatError)
+    if wrapped_format_error:
+        # Preflight deliberately hides engine text (paths and other details).
+        # Inspect only its explicit DuckDB IO cause, not arbitrary format text
+        # or exception chains: an unsupported/corrupt format is not contention.
+        import duckdb
+
+        cause = exc.__cause__
+        if not isinstance(cause, duckdb.IOException):
+            return False
+        exc = cause
+    msg = str(exc).lower().removeprefix("io error: ").strip()
+    # Match diagnostic forms, never phrases anywhere in engine text: even a
+    # corrupt file's quoted path may contain every one of these lock phrases.
     return (
-        "could not set lock" in msg
-        or "database is locked" in msg
-        # Windows: DuckDB reports "being used by another process" in IOException
-        or "being used by another process" in msg
+        msg.startswith("could not set lock on file")
+        or msg == "database is locked"
+        # Windows puts the path and OS sharing diagnostic on the first line;
+        # DuckDB may append lock-owner process details on subsequent lines.
+        or (
+            msg.startswith("cannot open file")
+            and msg.partition("\n")[0].rstrip("\r").endswith(
+                "the process cannot access the file because it is being used "
+                "by another process."
+            )
+        )
         # Windows: WAL file locked — PermissionError raised by WAL recovery code
         or (isinstance(exc, PermissionError) and ".wal" in msg)
-        or ("locked" in msg and "duckdb" in type(exc).__module__.lower())
+        or (
+            msg == "locked by another process"
+            and "duckdb" in type(exc).__module__.lower()
+        )
     )
 
 
@@ -250,6 +524,13 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     args.db = db_path
     if not _validate_run_arguments(args, formatter, config):
         sys.exit(1)
+
+    try:
+        decision = await _prepare_hub_index(args, config, formatter)
+    except FATAL_HUB_ERRORS:
+        raise SystemExit(1) from None
+    if decision is HubIndexDecision.STOP:
+        raise SystemExit(1)
 
     # MCP has no interactive layer and must not write to stdout, so it gets no
     # decision hook at all; the registry then keeps the indexed model and logs
@@ -508,7 +789,10 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(0)
     except Exception as e:
         formatter.error(f"Run command failed: {e}")
-        logger.exception("Run command error details")
+        # Expected format refusals deliberately retain a typed engine cause for
+        # lock recovery. Rendering its chain would defeat the sanitized message.
+        if not isinstance(e, IndexFormatError):
+            logger.exception("Run command error details")
         sys.exit(1)
 
 
