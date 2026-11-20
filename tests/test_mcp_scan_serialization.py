@@ -144,7 +144,10 @@ class TestScanLockSerialization:
         process_calls: list[str] = []  # tracks which triggers were executed
 
         async def monitored_process(
-            target_path: Path, *, no_embeddings: bool = False  # noqa: ARG001
+            target_path: Path,  # noqa: ARG001
+            *,
+            no_embeddings: bool = False,  # noqa: ARG001
+            check_missing_embeddings: bool = False,  # noqa: ARG001
         ) -> MagicMock:
             trigger = _current_trigger  # captured from outer scope
             process_calls.append(trigger)
@@ -207,7 +210,10 @@ class TestScanLockSerialization:
     ) -> None:
         """A scan that raises must clear ``is_scanning`` and record the error."""
         async def failing_process(
-            target_path: Path, *, no_embeddings: bool = False  # noqa: ARG001
+            target_path: Path,  # noqa: ARG001
+            *,
+            no_embeddings: bool = False,  # noqa: ARG001
+            check_missing_embeddings: bool = False,  # noqa: ARG001
         ) -> MagicMock:
             raise RuntimeError("Simulated scan failure")
 

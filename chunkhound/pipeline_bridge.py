@@ -188,19 +188,20 @@ def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
     A lock guards creation because multiple concurrent IndexingPipeline.run()
     calls (e.g. two simultaneous indexing operations in one long-lived MCP
     process) each spawn their own dedicated parse thread, so a first-use race
-    across threads is a real scenario here, not a hypothetical one.
+    across threads is a real scenario here, not a hypothetical one. The pool
+    is also read under that lock: _discard_broken_parse_pool() clears it under
+    the same lock, so a read outside it could return None.
     """
     global _parse_pool
-    if _parse_pool is None:
-        with _parse_pool_lock:
-            if _parse_pool is None:
-                pool = ProcessPoolExecutor(
-                    max_workers=max(1, max_workers),
-                    initializer=exit_when_parent_dies,
-                )
-                atexit.register(pool.shutdown, cancel_futures=True)
-                _parse_pool = pool
-    return _parse_pool
+    with _parse_pool_lock:
+        if _parse_pool is None:
+            pool = ProcessPoolExecutor(
+                max_workers=max(1, max_workers),
+                initializer=exit_when_parent_dies,
+            )
+            atexit.register(pool.shutdown, cancel_futures=True)
+            _parse_pool = pool
+        return _parse_pool
 
 
 def _discard_broken_parse_pool(

@@ -23,6 +23,7 @@ import pytest
 from loguru import logger
 
 import chunkhound.pipeline_bridge as pipeline_bridge
+import chunkhound.services.indexing_coordinator as indexing_coordinator
 from chunkhound.core.config.config import Config
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import (
@@ -83,14 +84,14 @@ def test_a_dead_worker_is_logged_and_the_next_batch_gets_new_workers(
     assert chunks
 
 
-@pytest.mark.asyncio
-async def test_a_scan_that_lost_a_worker_fails_as_transient(
-    broken_shared_pool: None, tmp_path: Path
-) -> None:
-    """The real indexing chain marks the failure as one a retry can fix."""
+async def _scan_failure(
+    tmp_path: Path, file_names: tuple[str, ...]
+) -> DirectoryIndexingError:
+    """Index copies of the fixture through the real chain; return the failure."""
     project = tmp_path / "project"
     project.mkdir()
-    shutil.copy(FIXTURE_FILE, project / FIXTURE_FILE.name)
+    for name in file_names:
+        shutil.copy(FIXTURE_FILE, project / name)
     config = Config(
         target_dir=project,
         database={"provider": "duckdb", "path": str(tmp_path / "db")},
@@ -105,6 +106,33 @@ async def test_a_scan_that_lost_a_worker_fails_as_transient(
             await service.process_directory(project, no_embeddings=True)
     finally:
         disconnect_registry_db()
+    return failure.value
 
-    assert failure.value.transient is True
-    assert "BrokenProcessPool" in str(failure.value)
+
+@pytest.mark.asyncio
+async def test_a_scan_that_lost_a_worker_fails_as_transient(
+    broken_shared_pool: None, tmp_path: Path
+) -> None:
+    """The real indexing chain marks the failure as one a retry can fix."""
+    failure = await _scan_failure(tmp_path, (FIXTURE_FILE.name,))
+
+    assert failure.transient is True
+    assert "BrokenProcessPool" in str(failure)
+
+
+@pytest.mark.asyncio
+async def test_a_python_path_scan_that_lost_a_worker_fails_as_transient(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without the Rust pipeline, the run's own parse pool breaks. A retry gets a
+    new pool, so this failure is transient too."""
+    monkeypatch.setenv("CHUNKHOUND_USE_RUST", "0")
+    monkeypatch.setattr(
+        indexing_coordinator,
+        "ProcessPoolExecutor",
+        lambda *args, **kwargs: _pool_whose_worker_dies(),
+    )
+    # Two files: a single file is parsed without a process pool.
+    failure = await _scan_failure(tmp_path, ("a.py", "b.py"))
+
+    assert failure.transient is True

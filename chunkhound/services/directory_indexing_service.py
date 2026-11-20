@@ -90,7 +90,10 @@ class DirectoryIndexingService:
             self.indexing_coordinator.progress = progress
 
     async def process_directory(
-        self, target_path: Path, no_embeddings: bool = False
+        self,
+        target_path: Path,
+        no_embeddings: bool = False,
+        check_missing_embeddings: bool = False,
     ) -> IndexingStats:
         """
         Main processing pipeline - extracted from run.py.
@@ -98,6 +101,10 @@ class DirectoryIndexingService:
         Args:
             target_path: Directory to process
             no_embeddings: Skip embedding generation
+            check_missing_embeddings: Run the missing-embedding pass even after
+                a Rust run that reported no errors. For a retry of a run that
+                failed partway: that run may have committed files without
+                embeddings, and the retry skips them as unchanged.
 
         Returns:
             IndexingStats with processing results
@@ -146,7 +153,9 @@ class DirectoryIndexingService:
             # date — without this pass it would never be retried.
             used_rust_pipeline = process_result.get("pipeline") == "rust"
             rust_had_errors = used_rust_pipeline and process_result.get("errors", 0) > 0
-            if not no_embeddings and (not used_rust_pipeline or rust_had_errors):
+            if not no_embeddings and (
+                not used_rust_pipeline or rust_had_errors or check_missing_embeddings
+            ):
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 generated = embed_result.get("generated", 0)

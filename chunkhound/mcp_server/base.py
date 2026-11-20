@@ -1048,7 +1048,9 @@ class MCPServerBase(ABC):
         worker pool is replaced at that point, so a later scan can succeed,
         but nothing else would scan again until a realtime resync. Retries
         wait _INITIAL_SCAN_RETRY_DELAYS_SECONDS first, and a retry is skipped
-        when a newer scan has succeeded meanwhile.
+        when a newer scan has succeeded meanwhile. A retry also runs the
+        missing-embedding pass: the failed run may have committed files
+        without embeddings, which the retry skips as unchanged.
 
         Raises:
             Exception: A non-transient failure at once, or the last transient
@@ -1077,6 +1079,7 @@ class MCPServerBase(ABC):
                     trigger="initial",
                     reason=f"retry {attempt}/{len(delays)}",
                     superseded_after=failed_generation,
+                    check_missing_embeddings=True,
                 )
                 return
             except DirectoryIndexingError as error:
@@ -1092,6 +1095,7 @@ class MCPServerBase(ABC):
         reason: str | None = None,
         no_embeddings: bool = False,
         superseded_after: int | None = None,
+        check_missing_embeddings: bool = False,
     ) -> bool:
         """Perform an initial or reconciliation scan without overlapping other scans.
 
@@ -1103,6 +1107,8 @@ class MCPServerBase(ABC):
             superseded_after: A scan generation. If a scan started after it
                 has succeeded by the time this one holds the lock, this scan
                 is skipped: that scan already brought the index up to date.
+            check_missing_embeddings: Always run the missing-embedding pass;
+                see DirectoryIndexingService.process_directory().
 
         Returns:
             True if the scan ran and succeeded, False if it was skipped.
@@ -1173,7 +1179,9 @@ class MCPServerBase(ABC):
 
                 # Perform scan with lower priority
                 stats = await indexing_service.process_directory(
-                    target_path, no_embeddings=no_embeddings
+                    target_path,
+                    no_embeddings=no_embeddings,
+                    check_missing_embeddings=check_missing_embeddings,
                 )
 
                 # Update final stats
