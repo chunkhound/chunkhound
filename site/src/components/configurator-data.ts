@@ -338,6 +338,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_UBERLLM_API_KEY>",
     },
     {
+        id: "aigrow",
+        name: "AIGROW",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M5 20 12 4l7 16M8.1 13h7.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+        config: {
+            provider: "aigrow",
+            model: "claude-haiku-5.5",
+        },
+        apiKeyPlaceholder: "<YOUR_AIGROW_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,
