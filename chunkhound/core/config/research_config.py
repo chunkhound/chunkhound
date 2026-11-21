@@ -27,6 +27,9 @@ _DEFAULT_QUERY_EXPANSION_ENABLED = True
 _DEFAULT_NUM_EXPANDED_QUERIES = 2
 # Use the query-expansion utility budget as the depth exploration default.
 _DEFAULT_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS = 10_000
+# Gap detection output per shard: shard_budget (<= 60k) + prompt overhead + this
+# budget must fit the model context. Same default and ceiling as depth exploration.
+_DEFAULT_GAP_DETECTION_MAX_COMPLETION_TOKENS = 10_000
 
 
 class ResearchConfig(BaseSettings):
@@ -44,6 +47,7 @@ class ResearchConfig(BaseSettings):
         CHUNKHOUND_RESEARCH_QUERY_EXPANSION_ENABLED=true
         CHUNKHOUND_RESEARCH_NUM_EXPANDED_QUERIES=2
         CHUNKHOUND_RESEARCH_DEPTH_EXPLORATION_MAX_COMPLETION_TOKENS=10000
+        CHUNKHOUND_RESEARCH_GAP_DETECTION_MAX_COMPLETION_TOKENS=10000
         CHUNKHOUND_RESEARCH_EXHAUSTIVE_MODE=false
     """
 
@@ -215,6 +219,18 @@ class ResearchConfig(BaseSettings):
         ge=20_000,
         le=60_000,
         description="Token budget per gap detection shard for LLM processing",
+    )
+
+    gap_detection_max_completion_tokens: int = Field(
+        default=_DEFAULT_GAP_DETECTION_MAX_COMPLETION_TOKENS,
+        ge=1,
+        le=50_000,
+        description=(
+            "Maximum completion token budget for each gap detection shard call "
+            "(includes reasoning tokens for thinking models). The prompt carries "
+            "up to shard_budget tokens of code, so shard_budget plus this value "
+            "plus prompt overhead must fit the model context window"
+        ),
     )
 
     min_cluster_size: int = Field(
@@ -447,6 +463,11 @@ class ResearchConfig(BaseSettings):
 
         if shard_budget := os.getenv("CHUNKHOUND_RESEARCH_SHARD_BUDGET"):
             config["shard_budget"] = int(shard_budget)
+
+        if gap_tokens := os.getenv(
+            "CHUNKHOUND_RESEARCH_GAP_DETECTION_MAX_COMPLETION_TOKENS"
+        ):
+            config["gap_detection_max_completion_tokens"] = int(gap_tokens)
 
         if min_cluster := os.getenv("CHUNKHOUND_RESEARCH_MIN_CLUSTER_SIZE"):
             config["min_cluster_size"] = int(min_cluster)

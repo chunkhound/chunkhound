@@ -53,6 +53,7 @@ from chunkhound.services.research.shared.elbow_detection import (
 from chunkhound.services.research.shared.evidence_ledger import (
     CONSTANTS_INSTRUCTION_SHORT,
 )
+from chunkhound.services.research.shared.failure_tracker import FailureMetrics
 from chunkhound.services.research.shared.gap_models import GapCandidate, UnifiedGap
 from chunkhound.services.research.shared.import_context import ImportContextService
 from chunkhound.services.research.shared.import_resolution_helper import (
@@ -135,6 +136,7 @@ class GapDetectionService(ProgressEmitterMixin):
                 "gaps_found": 0,
                 "gaps_filled": 0,
                 "chunks_added": 0,
+                **self._shard_stats(FailureMetrics(total_operations=0)),
             }
 
         t_total = perf_counter()
@@ -168,29 +170,45 @@ class GapDetectionService(ProgressEmitterMixin):
 
         # Step 2.3: Detect gaps in parallel
         t = perf_counter()
-        raw_gaps = await self._detect_gaps_parallel(
+        raw_gaps, shard_metrics = await self._detect_gaps_parallel(
             root_query, shards, constants_context
         )
-        logger.info(f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates")
+        shard_stats = self._shard_stats(shard_metrics)
+        shard_summary = (
+            f"shards={shard_stats['shards_total']} "
+            f"succeeded={shard_stats['shards_succeeded']} "
+            f"failed={shard_stats['shards_failed']}"
+        )
+        logger.info(
+            f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates ({shard_summary})"
+        )
+        if shard_stats["degraded"]:
+            logger.warning(
+                f"Gap detection degraded: {shard_summary}. Gaps from the failed "
+                f"shards were not detected, so coverage may be incomplete"
+            )
         await self._emit_event(
             "gap_step",
             f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates"
-            f" (from {len(shards)} shards)",
+            f" (from {len(shards)} shards)"
+            + (f" - DEGRADED: {shard_summary}" if shard_stats["degraded"] else ""),
             duration=perf_counter() - t,
         )
 
         if not raw_gaps:
-            logger.info("No gaps detected, returning original coverage")
             elapsed = perf_counter() - t_total
-            await self._emit_event(
-                "gap_step",
-                "Gap detection complete: no gaps found",
-                duration=elapsed,
-            )
+            if shard_stats["degraded"]:
+                # Not a clean zero-gap run: some or all shards never reported.
+                summary = f"Gap detection DEGRADED: no gaps found ({shard_summary})"
+            else:
+                summary = "Gap detection complete: no gaps found"
+                logger.info("No gaps detected, returning original coverage")
+            await self._emit_event("gap_step", summary, duration=elapsed)
             return covered_chunks, {
                 "gaps_found": 0,
                 "gaps_filled": 0,
                 "chunks_added": 0,
+                **shard_stats,
             }
 
         # Step 2.4a: Embed gap queries
@@ -244,6 +262,7 @@ class GapDetectionService(ProgressEmitterMixin):
                 "gaps_unified": len(unified_gaps),
                 "gaps_filled": 0,
                 "chunks_added": 0,
+                **shard_stats,
             }
 
         # Step 2.7: Fill gaps in parallel (INDEPENDENT - no shared mutable state)
@@ -346,9 +365,21 @@ class GapDetectionService(ProgressEmitterMixin):
             "import_chunks_added": import_chunks_added,
             "total_chunks": len(all_chunks),
             "gap_queries": gap_queries,  # For compound context in Phase 3
+            **shard_stats,
         }
 
         return all_chunks, gap_stats
+
+    @staticmethod
+    def _shard_stats(metrics: FailureMetrics) -> dict[str, Any]:
+        """Per-shard counters for gap_stats; degraded is True if any shard failed."""
+        return {
+            "shards_total": metrics.total_operations,
+            "shards_succeeded": metrics.success_count,
+            "shards_failed": metrics.failure_count,
+            "degraded": metrics.failure_count > 0,
+            "shard_failures": metrics.to_dict(),
+        }
 
     async def _cluster_chunks_kmeans(self, chunks: list[dict]) -> list[list[dict]]:
         """Step 2.1: Cluster chunks using k-means with token-based cluster count.
@@ -463,7 +494,7 @@ class GapDetectionService(ProgressEmitterMixin):
         root_query: str,
         shards: list[list[dict]],
         constants_context: str = "",
-    ) -> list[GapCandidate]:
+    ) -> tuple[list[GapCandidate], FailureMetrics]:
         """Step 2.3: Detect gaps in parallel across shards.
 
         CRITICAL: Includes ROOT query in every LLM prompt to maintain focus.
@@ -474,7 +505,9 @@ class GapDetectionService(ProgressEmitterMixin):
             constants_context: Constants ledger context for LLM prompts
 
         Returns:
-            List of gap candidates from all shards
+            Tuple of (gap candidates from the shards that succeeded, failure
+            metrics with one entry per failed shard). A failed shard is never
+            returned as an empty gap list; it is counted in the metrics.
         """
         llm = self._llm_manager.get_utility_provider()
         # Get concurrency limit from utility provider
@@ -543,47 +576,50 @@ CODE COVERAGE:
 
 Output JSON with gaps array."""
 
-                try:
-                    result = await llm.complete_structured(
-                        prompt=prompt,
-                        json_schema=schema,
-                        max_completion_tokens=2048,
+                # A failure propagates to the loop below, which logs it at
+                # warning with the shard index and counts it in the returned
+                # FailureMetrics, instead of it becoming a silent [] (#514).
+                result = await llm.complete_structured(
+                    prompt=prompt,
+                    json_schema=schema,
+                    max_completion_tokens=(
+                        self._config.gap_detection_max_completion_tokens
+                    ),
+                )
+
+                gap_candidates = [
+                    GapCandidate(
+                        query=g["query"],
+                        rationale=g["rationale"],
+                        confidence=g["confidence"],
+                        source_shard=shard_idx,
                     )
+                    for g in result.get("gaps", [])
+                ]
 
-                    gaps = result.get("gaps", [])
-                    gap_candidates = [
-                        GapCandidate(
-                            query=g["query"],
-                            rationale=g["rationale"],
-                            confidence=g["confidence"],
-                            source_shard=shard_idx,
-                        )
-                        for g in gaps
-                    ]
-
-                    logger.debug(
-                        f"Shard {shard_idx}: Detected {len(gap_candidates)} gaps"
-                    )
-                    return gap_candidates
-
-                except Exception as e:
-                    logger.warning(f"Gap detection failed for shard {shard_idx}: {e}")
-                    return []
+                logger.debug(f"Shard {shard_idx}: Detected {len(gap_candidates)} gaps")
+                return gap_candidates
 
         # Run gap detection in parallel
         tasks = [detect_gaps_in_shard(i, shard) for i, shard in enumerate(shards)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Flatten results
+        # Flatten results with failure tracking
         all_gaps: list[GapCandidate] = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning(f"Gap detection task failed: {result}")
+        shard_metrics = FailureMetrics(total_operations=len(shards))
+        for shard_idx, result in enumerate(results):
+            if isinstance(result, BaseException):
+                failure = (
+                    result
+                    if isinstance(result, Exception)
+                    else RuntimeError(repr(result))
+                )
+                shard_metrics.add_failure(f"shard {shard_idx}", failure)
+                logger.warning(f"Gap detection failed for shard {shard_idx}: {failure}")
                 continue
-            if isinstance(result, list):
-                all_gaps.extend(result)
+            all_gaps.extend(result)
 
-        return all_gaps
+        return all_gaps, shard_metrics
 
     async def _embed_gap_queries(self, gaps: list[GapCandidate]) -> np.ndarray:
         """Step 2.4a: Embed gap queries for clustering.
