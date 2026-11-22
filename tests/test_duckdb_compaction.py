@@ -845,6 +845,49 @@ class TestCompactionCrashRecovery:
         assert inserted_id > 0
         _assert_db_integrity(populated_db.db_path)
 
+    def test_finalize_failure_restores_custom_hnsw_metric_after_swap(
+        self, populated_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-swap finalize failure restores the original vector index metadata."""
+        manager_conn = populated_db._connection_manager.connection
+        assert manager_conn is not None
+        manager_conn.execute("DROP INDEX IF EXISTS idx_hnsw_16")
+        manager_conn.execute(
+            "CREATE INDEX idx_hnsw_16 ON embeddings_16 USING HNSW (embedding) "
+            "WITH (metric = 'l2sq')"
+        )
+        before = [
+            info for info in populated_db.get_existing_vector_indexes()
+            if info["index_name"] == "idx_hnsw_16"
+        ]
+        assert len(before) == 1 and before[0]["metric"] == "l2sq"
+
+        original_finalize = populated_db._compact_finalize
+        original_restore = populated_db._compact_restore
+        restore_calls: list[list[dict[str, Any]] | None] = []
+
+        def _fail_after_swap(*args, **kwargs):
+            original_finalize(*args, **kwargs)
+            raise RuntimeError("simulated post-swap finalize failure")
+
+        def _record_restore(*args, **kwargs):
+            restore_calls.append(kwargs.get("vector_indexes"))
+            return original_restore(*args, **kwargs)
+
+        monkeypatch.setattr(populated_db, "_compact_finalize", _fail_after_swap)
+        monkeypatch.setattr(populated_db, "_compact_restore", _record_restore)
+
+        with pytest.raises(RuntimeError, match="simulated post-swap finalize failure"):
+            populated_db.compact_database()
+
+        assert len(restore_calls) == 1
+        assert restore_calls[0] is not None
+        restored = [
+            info for info in populated_db.get_existing_vector_indexes()
+            if info["index_name"] == "idx_hnsw_16"
+        ]
+        assert len(restored) == 1 and restored[0]["metric"] == "l2sq"
+
     def test_provider_remains_usable_after_restore_path_failure(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1288,7 +1331,9 @@ class TestHNSWCatalogAwareContracts:
             db.compact_database()
 
             remaining_indexes = _fetch_index_names(db.db_path)
-            assert "idx_hnsw_3" in remaining_indexes
+            # Source records are restored exactly: the custom name survives and
+            # no canonical name is synthesized.
+            assert "alt_live_idx" in remaining_indexes
         finally:
             db.disconnect()
 
@@ -3358,6 +3403,59 @@ def test_non_cosine_hnsw_metric_survives_index_rebuild(
         db._execute_in_db_thread_sync("delete_chunks_batch", [original_chunk_id])
 
         after = [i for i in db.get_existing_vector_indexes() if i["index_name"] == "idx_hnsw_3"]
+        assert len(after) == 1
+        assert after[0]["metric"] == "l2sq"
+    finally:
+        db.disconnect()
+
+
+def test_auto_compaction_preserves_non_cosine_hnsw_metric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sampled auto-compaction keeps custom HNSW index name and metric."""
+    from chunkhound.providers.database import serial_executor
+
+    db = DuckDBProvider(tmp_path / "metric-auto.duckdb", base_directory=tmp_path)
+    db.connect()
+    try:
+        _, chunk_id = _seed_embedding_dims_3(db)
+        db.execute_query("DROP INDEX IF EXISTS idx_hnsw_3", [])
+        db.execute_query(
+            "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) "
+            "WITH (metric = 'l2sq')",
+            [],
+        )
+        before = [
+            i for i in db.get_existing_vector_indexes()
+            if i["index_name"] == "idx_hnsw_3"
+        ]
+        assert len(before) == 1
+        assert before[0]["metric"] == "l2sq"
+
+        sampled: list[str] = []
+        monkeypatch.setattr(
+            serial_executor,
+            "_should_sample_auto_compaction",
+            lambda operation_name: sampled.append(operation_name)
+            or operation_name == "delete_chunks_batch",
+        )
+        db.config = DatabaseConfig(fragmentation_threshold_pct=0.0)
+        compacted: list[bool] = []
+        original_compact = db._executor_compact_database
+
+        def compact(conn: Any, state: dict[str, Any]) -> int:
+            compacted.append(True)
+            return original_compact(conn, state)
+
+        monkeypatch.setattr(db, "_executor_compact_database", compact)
+        db._execute_in_db_thread_sync("delete_chunks_batch", [chunk_id])
+        assert sampled
+        assert compacted
+
+        after = [
+            i for i in db.get_existing_vector_indexes()
+            if i["index_name"] == "idx_hnsw_3"
+        ]
         assert len(after) == 1
         assert after[0]["metric"] == "l2sq"
     finally:

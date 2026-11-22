@@ -1437,7 +1437,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _compact_copy_data(
         self, backup_path: Path, compacted_path: Path, state: dict[str, Any]
-    ) -> tuple[list[tuple[str]], bool]:
+    ) -> tuple[list[tuple[str]], list[dict[str, Any]]]:
         """Step 3: rebuild the compacted DB from ChunkHound-owned canonical tables.
 
         Compaction intentionally preserves only the canonical ChunkHound schema:
@@ -1445,11 +1445,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         dropped by design so the compacted file is a clean ChunkHound-owned DB,
         not a generic DuckDB passthrough.
 
-        HNSW indexes are NOT created during copy — they are rebuilt eagerly
-        after the atomic swap in ``_compact_finalize`` only if the original DB
-        had HNSW indexes before compaction began (``had_hnsw`` flag).
+        HNSW indexes are NOT created during copy — they are recreated after the
+        atomic swap in ``_compact_finalize`` from the source catalog records
+        (name, table, dims, metric) discovered here.
 
-        Returns (embedding_table_names, had_hnsw).
+        Returns (embedding_table_names, vector_indexes).
         """
         tgt_conn = duckdb.connect(str(compacted_path))
         try:
@@ -1488,17 +1488,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             tgt_conn.execute(f"CREATE TABLE files ({_FILES_TABLE_COLUMNS})")
             tgt_conn.execute(f"CREATE TABLE chunks ({_CHUNKS_TABLE_COLUMNS})")
 
-            # Check whether the source catalog already had HNSW indexes.
-            # Compaction only restores HNSW when the pre-compaction source DB
-            # had one, so a false negative here would silently degrade search.
-            # Treat source-catalog discovery as fatal instead of best-effort.
-            had_hnsw = (
-                len(
-                    self._executor_get_existing_vector_indexes_from_catalog(
-                        tgt_conn, catalog="src", fail_on_error=True
-                    )
-                )
-                > 0
+            # Discover source HNSW index records (name/table/dims/metric).
+            # Treat discovery as fatal instead of best-effort: a false negative
+            # would silently drop indexes or their custom metric.
+            vector_indexes = self._executor_get_existing_vector_indexes_from_catalog(
+                tgt_conn, catalog="src", fail_on_error=True
             )
 
             tgt_conn.execute(
@@ -1574,7 +1568,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     )
 
             tgt_conn.execute("CHECKPOINT")
-            return emb_tables, had_hnsw
+            return emb_tables, vector_indexes
         finally:
             tgt_conn.close()
 
@@ -1585,7 +1579,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         compacted_path: Path,
         backup_path: Path,
         original_size: int,
-        had_hnsw: bool,
+        vector_indexes: list[dict[str, Any]],
         _t0: float,
     ) -> int:
         """Steps 4-8: atomic swap, reconnect, restore indexes, cleanup.
@@ -1608,11 +1602,11 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         self._executor_create_indexes(new_conn, state)
 
-        # Only recreate HNSW if the original DB had it before compaction.
-        # During batch CLI indexing, HNSW is dropped at the start (bookends)
-        # and intermediate compactions must not recreate it mid-pipeline.
-        if had_hnsw:
-            self._executor_ensure_all_hnsw_indexes(new_conn, state)
+        # Recreate exactly the source HNSW indexes (empty list = none existed).
+        for index_info in vector_indexes:
+            self._executor_recreate_vector_index_from_info(
+                new_conn, state, index_info
+            )
 
         backup_path.unlink(missing_ok=True)
 
@@ -1647,9 +1641,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         db_path: Path,
         state: dict[str, Any],
         *,
-        had_hnsw: bool = False,
+        vector_indexes: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Restore original DB from backup after a compaction failure."""
+        """Restore original DB from backup after a compaction failure.
+
+        ``vector_indexes`` is None only when failure happened before catalog
+        discovery; it is normalized to ``[]`` (no index records to restore).
+        """
+        vector_indexes = vector_indexes or []
         if not db_path or not backup_path:
             log_if_not_mcp(
                 "warning", "Cannot restore: compaction paths not initialized"
@@ -1672,11 +1671,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         _executor_local.connection = restored_conn
         self._executor_create_schema(restored_conn, state)
         self._executor_create_indexes(restored_conn, state)
-        # Restore HNSW only if the backup DB had it.  During batch CLI
-        # indexing the backup won't have HNSW (dropped at start), so
-        # intermediate compaction failures won't recreate it.
-        if had_hnsw:
-            self._executor_ensure_all_hnsw_indexes(restored_conn, state)
+        for index_info in vector_indexes:
+            self._executor_recreate_vector_index_from_info(
+                restored_conn, state, index_info
+            )
         self._connection_manager.connection = (
             self._create_connection_manager_connection()
         )
@@ -1711,13 +1709,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
         compacted_path = db_path.with_suffix(db_path.suffix + ".compact_new")
         original_size = 0
-        had_hnsw = False
+        vector_indexes: list[dict[str, Any]] = []
 
         try:
             original_size = self._compact_prepare(
                 conn, state, db_path, backup_path, compacted_path
             )
-            _, had_hnsw = self._compact_copy_data(
+            _, vector_indexes = self._compact_copy_data(
                 backup_path, compacted_path, state
             )
             return self._compact_finalize(
@@ -1726,7 +1724,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 compacted_path,
                 backup_path,
                 original_size,
-                had_hnsw,
+                vector_indexes,
                 _t0,
             )
         except Exception as e:
@@ -1734,7 +1732,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             try:
                 self._compact_restore(
                     backup_path, compacted_path, db_path, state,
-                    had_hnsw=had_hnsw,
+                    vector_indexes=vector_indexes,
                 )
             except Exception as restore_err:
                 log_if_not_mcp(
