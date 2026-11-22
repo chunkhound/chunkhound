@@ -12,6 +12,7 @@ import pytest
 from loguru import logger
 
 import chunkhound_native as native
+from chunkhound.core.config.hub_config import HubConfig
 from chunkhound.hub.client import ValidatedHubSource
 from chunkhound.hub.errors import (
     HUB_PULL_FAILURE_GUIDANCE,
@@ -19,6 +20,7 @@ from chunkhound.hub.errors import (
     HubUnavailable,
 )
 from chunkhound.hub.inspect import inspect_database
+from chunkhound.hub.manifest import parse_manifest
 from chunkhound.hub.trust import HubTrustError, checkout_digest, manifest_url_digest
 from tests.hub.activation_support import (
     ROOT,
@@ -32,6 +34,33 @@ from tests.hub.activation_support import (
 from tests.hub.artifacts import build_database
 from tests.hub.conftest import hub_server
 from tests.hub.test_index_format import snapshot
+
+
+def valid_source(checkout, hub_url):
+    artifact = {"url": "http://127.0.0.1:1/base.tar.gz", "bytes": 1, "sha256": "0" * 64}
+    variant = {
+        "embedding_id": "test-base",
+        "db_provider": "duckdb",
+        "provider": "openai",
+        "model": "hub-test",
+        "dims": 8,
+        "index_format_version": 1,
+        "versions": [{"rel": r, "artifact": artifact} for r in ("latest", "-1", "-2")],
+    }
+    manifest = parse_manifest(
+        json.dumps(
+            {
+                "manifest_version": 2,
+                "project_id": "fixture-project",
+                "embeddings": [variant],
+            }
+        ).encode()
+    )
+    return ValidatedHubSource(
+        manifest=manifest,
+        checkout_digest=checkout_digest(checkout),
+        url_digest=manifest_url_digest(hub_url),
+    )
 
 
 def grant_cli_trust(project, checkout, hub_url):
@@ -128,14 +157,18 @@ async def test_trusted_plain_pull_uses_explicit_replacement_path(
     pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
     trust_check = Mock(return_value=True)
     artifact_pull = AsyncMock(return_value=True)
+    source = valid_source(checkout, config.hub.url)
+    fetch = AsyncMock(return_value=source)
     monkeypatch.setattr(pull_module, "is_trusted", trust_check, raising=False)
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fetch)
     monkeypatch.setattr(pull_module, "pull", artifact_pull)
     args = argparse.Namespace(trust=False, path=checkout, version="-1")
 
     await pull_module.pull_command(args, config)
 
     trust_check.assert_called_once_with(checkout.resolve(), config.hub.url)
-    artifact_pull.assert_awaited_once_with(config, rel="-1", source=None)
+    fetch.assert_awaited_once_with(config)
+    artifact_pull.assert_awaited_once_with(config, rel="-1", source=source)
 
 
 @pytest.mark.parametrize(
@@ -157,6 +190,11 @@ async def test_attempted_explicit_pull_failure_stops_with_local_retry_guidance(
         AsyncMock(return_value=outcome)
         if outcome is False
         else AsyncMock(side_effect=outcome)
+    )
+    monkeypatch.setattr(
+        pull_module,
+        "fetch_validated_manifest",
+        AsyncMock(return_value=valid_source(checkout, config.hub.url)),
     )
     monkeypatch.setattr(pull_module, "pull", artifact_pull)
     args = argparse.Namespace(trust=False, path=checkout, version="latest")
@@ -180,6 +218,11 @@ async def test_attempted_explicit_pull_cancellation_exits_with_exact_guidance(
     config = config_for(checkout, hub_http)
     pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
     monkeypatch.setattr(pull_module, "is_trusted", Mock(return_value=True))
+    monkeypatch.setattr(
+        pull_module,
+        "fetch_validated_manifest",
+        AsyncMock(return_value=valid_source(checkout, config.hub.url)),
+    )
     monkeypatch.setattr(
         pull_module, "pull", AsyncMock(side_effect=asyncio.CancelledError())
     )
@@ -209,11 +252,7 @@ async def test_pull_trust_revalidates_even_when_source_is_already_trusted(
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     config = config_for(checkout, hub_http)
-    source = ValidatedHubSource(
-        manifest=Mock(),
-        checkout_digest=checkout_digest(checkout),
-        url_digest=manifest_url_digest(config.hub.url),
-    )
+    source = valid_source(checkout, config.hub.url)
     pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
     trust_check = Mock(return_value=True)
     fetch = AsyncMock(return_value=source)
@@ -231,6 +270,68 @@ async def test_pull_trust_revalidates_even_when_source_is_already_trusted(
     fetch.assert_awaited_once_with(config)
     grant.assert_called_once_with(checkout.resolve(), config.hub.url)
     artifact_pull.assert_awaited_once_with(config, rel="latest", source=source)
+
+
+def test_pull_consent_shows_only_origin_and_selected_embedding(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    write_config(
+        project, "duckdb", hub_http.url + "/catalogue?token=secret", embedding_http.url
+    )
+    publish(hub_http, build_database(tmp_path / "published"))
+    result = cli(project, "pull", project, "--trust")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"Hub source origin={hub_http.url} " in output
+    assert 'embedding provider="openai" model="hub-test" dimensions=8' in output
+    assert "/catalogue" not in output and "token=secret" not in output
+    assert hub_http.requests.count(("/catalogue?token=secret", None)) == 1
+
+
+def test_pull_rejects_userinfo_before_any_request(tmp_path, hub_http, embedding_http):
+    project = tmp_path / "checkout"
+    host = hub_http.url.removeprefix("http://")
+    write_config(
+        project,
+        "duckdb",
+        f"http://user:pw@{host}/catalogue?token=secret",
+        embedding_http.url,
+    )
+    result = cli(project, "pull", project, "--trust")
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert hub_http.requests == []
+    assert "user:pw" not in output and "token=secret" not in output
+
+
+async def test_consent_origin_brackets_ipv6_literal(tmp_path, hub_http, monkeypatch):
+    checkout = tmp_path / "checkout"
+    url = "http://[::1]:8080/catalogue?token=secret"
+    config = config_for(checkout, hub_http).model_copy(
+        update={"hub": HubConfig(url=url)}
+    )
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    monkeypatch.setattr(pull_module, "is_trusted", Mock(return_value=True))
+    monkeypatch.setattr(
+        pull_module,
+        "fetch_validated_manifest",
+        AsyncMock(return_value=valid_source(checkout, url)),
+    )
+    monkeypatch.setattr(pull_module, "pull", AsyncMock(return_value=True))
+    messages = []
+    sink = logger.add(
+        lambda m: messages.append(m.record["message"]),
+        filter=lambda r: r["level"].name == "INFO",
+    )
+    try:
+        await pull_module.pull_command(
+            argparse.Namespace(trust=False, path=checkout, version="latest"), config
+        )
+    finally:
+        logger.remove(sink)
+    assert any("Hub source origin=http://[::1]:8080 " in m for m in messages), messages
+    assert not any("token=secret" in m for m in messages)
 
 
 def test_untrusted_plain_pull_makes_zero_requests_and_explains_trust(
@@ -269,9 +370,7 @@ def test_explicit_relative_version_is_installed_and_searchable(
         versions.extend(manifest["embeddings"][0]["versions"])
     manifest["embeddings"][0]["versions"] = versions
     hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
-    grant_cli_trust(
-        project, project, hub_http.url + "/catalogue?token=secret"
-    )
+    grant_cli_trust(project, project, hub_http.url + "/catalogue?token=secret")
     prefix = names[rel]
     result = cli(project, "pull", project, "--version", rel)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -289,9 +388,7 @@ def test_explicit_relative_version_is_installed_and_searchable(
     ]
     assert "token=secret" not in result.stdout + result.stderr
     assert "/catalogue?" not in result.stdout + result.stderr
-    assert cli_is_trusted(
-        project, project, hub_http.url + "/catalogue?token=secret"
-    )
+    assert cli_is_trusted(project, project, hub_http.url + "/catalogue?token=secret")
 
 
 def test_trusted_plain_pull_explicitly_replaces_prior_database(
@@ -420,11 +517,7 @@ async def test_pull_trust_post_fetch_identity_failure_is_sanitized_once(
     checkout = tmp_path / "checkout"
     config = config_for(checkout, hub_http)
     captured_url = config.hub.url
-    source = ValidatedHubSource(
-        manifest=Mock(),
-        checkout_digest=checkout_digest(checkout),
-        url_digest=manifest_url_digest(captured_url),
-    )
+    source = valid_source(checkout, captured_url)
     raw = "raw post-fetch checkout path?token=secret"
     pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
     digest_calls = 0
@@ -470,11 +563,7 @@ async def test_pull_trust_revalidates_captured_identity_before_grant_or_artifact
     second_checkout.mkdir()
     config = config_for(first_checkout, hub_http)
     captured_url = config.hub.url
-    source = ValidatedHubSource(
-        manifest=Mock(),
-        checkout_digest=checkout_digest(first_checkout),
-        url_digest=manifest_url_digest(captured_url),
-    )
+    source = valid_source(first_checkout, captured_url)
 
     async def fetch_and_mutate(_config):
         if change == "checkout":
@@ -1129,9 +1218,7 @@ def test_cli_failure_taxonomy_is_real_not_a_mocked_registry_assertion(
         )
     hub_http.resources["/catalogue?token=secret"] = json.dumps(manifest).encode()
     if mode == "pull":
-        grant_cli_trust(
-            project, project, hub_http.url + "/catalogue?token=secret"
-        )
+        grant_cli_trust(project, project, hub_http.url + "/catalogue?token=secret")
     if failure == "space":
         script = """
 import shutil
@@ -1212,9 +1299,7 @@ def test_preinstall_busy_has_fixed_fatal_diagnostic(
     target.parent.mkdir(parents=True)
     publish(hub_http, build_database(tmp_path / "published"))
     if mode == "pull":
-        grant_cli_trust(
-            project, project, hub_http.url + "/catalogue?token=secret"
-        )
+        grant_cli_trust(project, project, hub_http.url + "/catalogue?token=secret")
     # This owner excludes installation but owns no backend writer connection.
     held = native.acquire_database_lease(str(target))
     try:
