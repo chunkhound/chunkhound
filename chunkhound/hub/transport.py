@@ -30,10 +30,6 @@ for name in ("httpx", "httpcore"):
     logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def url_scheme_ok(url: str) -> bool:
-    return http_destination_ok(url)
-
-
 def require_space(directory: Path, needed: int) -> None:
     if shutil.disk_usage(directory).free < needed + RESERVE:
         raise HubUnavailable("Insufficient disk space for hub candidate")
