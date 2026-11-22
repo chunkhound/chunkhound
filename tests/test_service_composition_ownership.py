@@ -178,7 +178,7 @@ async def test_failed_decision_retries_on_next_action_without_reopening_or_repla
             payload = DecisionPayload()
             payloads.append(weakref.ref(payload))
             error = failure_type(payload)
-            error.add_note("api_key=private-note-secret")
+            error.__notes__ = ["api_key=private-note-secret"]
             raise error from ValueError("context https://private.invalid/cause-secret")
         # A reopened executor loses this session-local state.
         assert database.execute_query("SELECT value FROM retained") == [{"value": 42}]
@@ -340,7 +340,7 @@ async def test_rust_completion_preserves_sanitized_control_flow_and_retries(
             payload = Payload()
             payloads.append(weakref.ref(payload))
             error = failure_type(payload)
-            error.add_note("api_key=private-note-secret")
+            error.__notes__ = ["api_key=private-note-secret"]
             raise error from ValueError("context https://private.invalid/cause-secret")
         return original_update(**kwargs)
 
@@ -453,7 +453,7 @@ def test_rust_caller_keeps_own_failure_when_public_recovery_overtakes_delivery(
             payloads.append(weakref.ref(payload))
             kind = initial_type if mode == "initial" else recovery_type
             error = kind(payload)
-            error.add_note("api_key=private-note-secret")
+            error.__notes__ = ["api_key=private-note-secret"]
             raise error from ValueError(
                 f"{mode} cause https://private.invalid/cause-secret"
             )

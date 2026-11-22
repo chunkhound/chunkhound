@@ -181,12 +181,10 @@ def _shutdown_embed_thread_resources(cache: _EmbedThreadCache) -> None:
             with cache.lock:
                 cache.loops.pop(tid, None)
     if failures:
-        aggregate = RuntimeError("Embedding resource cleanup incomplete")
-        aggregate.__cause__ = failures[0].exception()
-        getattr(aggregate, "add_note")(
-            "; ".join(f"{item.kind.__name__}: {item.message}" for item in failures)
-        )
-        raise aggregate from aggregate.__cause__
+        details = "; ".join(f"{item.kind.__name__}: {item.message}" for item in failures)
+        raise RuntimeError(
+            f"Embedding resource cleanup incomplete: {details}"
+        ) from failures[0].exception()
 
 
 _parse_pool: ProcessPoolExecutor | None = None
