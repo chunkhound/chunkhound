@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import subprocess
+import sys
 import textwrap
 import threading
 import weakref
@@ -696,7 +697,7 @@ def test_unacknowledged_native_failure_requires_restart_not_retry(tmp_path):
         asyncio.run(main())
     ''')
     result = subprocess.run(
-        ["uv", "run", "--no-sync", "python", "-c", script, str(tmp_path)],
+        [sys.executable, "-c", script, str(tmp_path)],
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr

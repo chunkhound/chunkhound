@@ -3,7 +3,10 @@
 import errno
 import hashlib
 import logging
+import os
 import shutil
+import subprocess
+import sys
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +17,7 @@ from chunkhound.hub.errors import HubUnavailable
 from chunkhound.hub.manifest import Artifact
 from chunkhound.hub.transport import download, fetch_manifest
 
+ROOT = Path(__file__).resolve().parents[2]
 OBJECT = "/opaque%2Fobject?signature=url-secret&x=a%2Fb&x=2"
 BODY = bytes(range(256)) * 12288
 
@@ -174,10 +178,13 @@ async def test_https_rejects_invalid_certificates_without_sending_http(
 @pytest.mark.parametrize("operation", ["manifest", "artifact"])
 @pytest.mark.parametrize("transition", ["http-http", "http-https", "https-https"])
 async def test_http_and_https_redirects_allow_non_downgrade_transitions(
-    hub_http, hub_https, hub_trusted_certificate, tmp_path, operation, transition
+    hub_http, request, tmp_path, operation, transition
 ):
+    servers = {"http": hub_http}
+    if "https" in transition:
+        servers["https"] = request.getfixturevalue("hub_https")
+        request.getfixturevalue("hub_trusted_certificate")
     source_scheme, target_scheme = transition.split("-")
-    servers = {"http": hub_http, "https": hub_https}
     source, target = servers[source_scheme], servers[target_scheme]
     artifact_at(target, b"payload")
     source.redirects["/redirect"] = target.url + OBJECT
@@ -194,6 +201,25 @@ async def test_http_and_https_redirects_allow_non_downgrade_transitions(
     else:
         assert source.requests == [("/redirect", None)]
         assert target.requests == [(OBJECT, None)]
+
+
+def test_https_fixtures_skip_without_openssl_while_http_contracts_still_run(tmp_path):
+    empty_path = tmp_path / "no-tools"
+    empty_path.mkdir()
+    nodes = [
+        "tests/hub/test_transport.py::test_exact_manifest_url_and_relative_redirect",
+        "tests/hub/test_transport.py::test_https_accepts_a_valid_trusted_certificate[manifest]",
+    ]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", *nodes],
+        cwd=ROOT,
+        env={**os.environ, "PATH": str(empty_path)},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed, 1 skipped" in result.stdout
 
 
 @pytest.mark.parametrize("operation", ["manifest", "artifact"])

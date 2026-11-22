@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import shutil
 import ssl
 import subprocess
 import threading
@@ -188,8 +189,20 @@ def embedding_http() -> Iterator[SimpleNamespace]:
         yield server
 
 
+def openssl_supports_san() -> bool:
+    executable = shutil.which("openssl")
+    if executable is None:
+        return False
+    probe = subprocess.run(
+        [executable, "req", "-help"], capture_output=True, text=True, check=False
+    )
+    return "-addext" in probe.stdout + probe.stderr
+
+
 @pytest.fixture(scope="session")
 def hub_certificate(tmp_path_factory):
+    if not openssl_supports_san():
+        pytest.skip("HTTPS hub fixtures need an OpenSSL req command with -addext")
     directory = tmp_path_factory.mktemp("hub-tls")
     certificate, key = directory / "cert.pem", directory / "key.pem"
     # The repository's existing TLS tests also use the OpenSSL executable.
