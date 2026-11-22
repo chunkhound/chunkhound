@@ -277,3 +277,24 @@ def test_manifest_force_include_entries_cover_supported_platforms() -> None:
     assert entries[str(windows_manifest)] == (
         "chunkhound/watchman_runtime/platforms/windows-x86_64/manifest.json"
     )
+
+
+def test_metadata_hook_links_package_to_built_commit() -> None:
+    metadata: dict = {"urls": {"Homepage": "https://example.test"}}
+
+    hatch_build._add_source_commit_url(metadata, hatch_build._REPO_ROOT)
+
+    sha = hatch_build._source_commit(hatch_build._REPO_ROOT)
+    assert sha is not None
+    assert metadata["urls"]["Source commit"] == (
+        f"https://github.com/chunkhound/chunkhound/commit/{sha}"
+    )
+    assert metadata["urls"]["Homepage"] == "https://example.test"
+
+
+def test_metadata_hook_adds_no_link_outside_git(tmp_path) -> None:
+    metadata: dict = {}
+
+    hatch_build._add_source_commit_url(metadata, tmp_path)
+
+    assert "urls" not in metadata or "Source commit" not in metadata["urls"]
