@@ -159,7 +159,7 @@ jobs:
             uv run pytest tests/ -v
             -p scripts.pytest_equal_shard
             --junit-xml="$directory/test-results.xml"
-            --durations-path="$directory/durations.json"
+            --store-durations --durations-path="$directory/durations.json"
             --ci-splits 3 --ci-group ${{ matrix.split }}
             ${{ matrix.pytest_extra_args || '' }}
             2>&1 | tee "$directory/pytest.log";
