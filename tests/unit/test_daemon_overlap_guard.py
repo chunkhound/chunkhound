@@ -1246,6 +1246,10 @@ def test_module_subprocess_excludes_project_from_import_path(
     from importlib.metadata import version
 
     _set_runtime_dir_env(monkeypatch, tmp_path)
+    # The fix covers the working directory only. -P leaves PYTHONPATH alone, so
+    # a relative entry such as "." would still put the project on the path, and
+    # that is the user's own setting. PYTHONSAFEPATH gives -P's effect without
+    # the flag, which would let the command main builds pass this test.
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
     project_dir = tmp_path / "project"
