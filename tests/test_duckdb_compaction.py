@@ -848,7 +848,11 @@ class TestCompactionCrashRecovery:
     def test_finalize_failure_restores_custom_hnsw_metric_after_swap(
         self, populated_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A post-swap finalize failure restores the original vector index metadata."""
+        """A failure after the real swap but before backup deletion restores the
+        original DB and its custom-named, non-cosine HNSW index."""
+        db_path = Path(cast(str, populated_db.db_path))
+        backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
+
         manager_conn = populated_db._connection_manager.connection
         assert manager_conn is not None
         manager_conn.execute("DROP INDEX IF EXISTS idx_hnsw_16")
@@ -862,31 +866,70 @@ class TestCompactionCrashRecovery:
         ]
         assert len(before) == 1 and before[0]["metric"] == "l2sq"
 
-        original_finalize = populated_db._compact_finalize
+        original_create_indexes = populated_db._executor_create_indexes
         original_restore = populated_db._compact_restore
-        restore_calls: list[list[dict[str, Any]] | None] = []
+        original_recreate = populated_db._executor_recreate_vector_index_from_info
+        create_index_calls = 0
+        restore_calls: list[dict[str, Any]] = []
+        backup_present_at_restore: list[bool] = []
+        recreated: list[dict[str, Any]] = []
 
-        def _fail_after_swap(*args, **kwargs):
-            original_finalize(*args, **kwargs)
-            raise RuntimeError("simulated post-swap finalize failure")
+        def _fail_after_swap_before_backup_delete(conn: Any, state: dict[str, Any]) -> None:
+            # Finalize calls this right after the real swap and before it deletes
+            # the backup. Fail only that first call so the real restore can run.
+            nonlocal create_index_calls
+            create_index_calls += 1
+            if create_index_calls == 1:
+                raise RuntimeError("simulated post-swap finalize failure")
+            original_create_indexes(conn, state)
 
         def _record_restore(*args, **kwargs):
-            restore_calls.append(kwargs.get("vector_indexes"))
+            restore_calls.append({"vector_indexes": kwargs.get("vector_indexes")})
+            backup_present_at_restore.append(backup_path.exists())
             return original_restore(*args, **kwargs)
 
-        monkeypatch.setattr(populated_db, "_compact_finalize", _fail_after_swap)
+        def _record_recreate(conn: Any, state: dict[str, Any], index_info: dict[str, Any]) -> None:
+            recreated.append(index_info)
+            return original_recreate(conn, state, index_info)
+
+        monkeypatch.setattr(
+            populated_db, "_executor_create_indexes", _fail_after_swap_before_backup_delete
+        )
         monkeypatch.setattr(populated_db, "_compact_restore", _record_restore)
+        monkeypatch.setattr(
+            populated_db, "_executor_recreate_vector_index_from_info", _record_recreate
+        )
 
         with pytest.raises(RuntimeError, match="simulated post-swap finalize failure"):
             populated_db.compact_database()
 
+        # Backup restoration really ran: the backup existed at restore entry and
+        # was moved back into place (so it is gone afterwards).
+        assert backup_present_at_restore == [True]
+        assert not backup_path.exists()
+
+        # Captured metadata is nonempty and includes the custom name + l2sq.
         assert len(restore_calls) == 1
-        assert restore_calls[0] is not None
+        captured = restore_calls[0]["vector_indexes"]
+        assert captured
+        assert any(
+            info["index_name"] == "idx_hnsw_16" and info["metric"] == "l2sq"
+            for info in captured
+        )
+
+        # Restore's recreation loop must have re-created the captured index.
+        # Removing that loop must fail this test.
+        assert any(
+            info["index_name"] == "idx_hnsw_16" and info["metric"] == "l2sq"
+            for info in recreated
+        )
+
         restored = [
             info for info in populated_db.get_existing_vector_indexes()
             if info["index_name"] == "idx_hnsw_16"
         ]
         assert len(restored) == 1 and restored[0]["metric"] == "l2sq"
+        assert populated_db.get_stats()["files"] == 2
 
     def test_provider_remains_usable_after_restore_path_failure(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
@@ -3444,13 +3487,16 @@ def test_auto_compaction_preserves_non_cosine_hnsw_metric(
         original_compact = db._executor_compact_database
 
         def compact(conn: Any, state: dict[str, Any]) -> int:
+            # Record only after the real compaction returns, so a failure that
+            # the sampler swallows cannot satisfy the assertion below.
+            result = original_compact(conn, state)
             compacted.append(True)
-            return original_compact(conn, state)
+            return result
 
         monkeypatch.setattr(db, "_executor_compact_database", compact)
         db._execute_in_db_thread_sync("delete_chunks_batch", [chunk_id])
         assert sampled
-        assert compacted
+        assert compacted == [True]
 
         after = [
             i for i in db.get_existing_vector_indexes()
