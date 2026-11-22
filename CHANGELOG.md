@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Hub index pull** — `chunkhound pull` installs a compatible published DuckDB or LanceDB base. Run `chunkhound index` afterward to overlay local changes.
-- **Configurable artifact download deadline** — `hub.download_timeout_seconds` defaults to 3600 seconds; set it through configuration or `CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS` using existing configuration precedence. One cooperative deadline covers all artifact download attempts, separately from network inactivity and archive extraction limits.
+- **Configurable artifact download deadline** — `hub.download_timeout_seconds` defaults to 3600 seconds; set it through configuration or `CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS` using existing configuration precedence. One cooperative deadline covers all artifact download attempts, separately from network inactivity and archive extraction limits. Archive budgets use `hub.archive_limits`: `max_members` 100000, `max_path_depth` 32, `max_path_bytes` 4096, `max_total_path_bytes` 33554432 (32 MiB), `max_extracted_bytes` 34359738368 (32 GiB), `max_decompressed_bytes` 42949672960 (40 GiB); override each with `CHUNKHOUND_HUB__ARCHIVE_LIMITS__<UPPERCASE_FIELD>`.
 
 ### Removed
 - **`_quickresearch` subcommand, `run_git_diff`, and `IndexingConfig.reset_user_include_exclude()`** — superseded by in-process streaming (`stream_git_diff_fragments`, `run_websearch`).
