@@ -51,8 +51,8 @@ from typing import Any
 import pytest
 from loguru import logger
 
+import chunkhound.hub.trust as hub_trust
 from chunkhound.core.config.remote import run_remote_config_fetch
-from chunkhound.hub.trust import trust_store_path
 from tests.hub.activation_support import ROOT, cli_env, write_config
 from tests.hub.conftest import embedding_server, hub_server
 
@@ -1791,7 +1791,7 @@ async def test_remote_hub_declaration_cannot_authorize_cold_index(
     assert result.returncode == 0, result.stdout + result.stderr
     assert hub_http.requests == []
     assert embedding_http.requests
-    assert not trust_store_path().exists()
+    assert not hub_trust.trust_store_path().exists()
     assert (project / ".chunkhound" / "db" / "chunks.db").exists()
 
 
@@ -1819,7 +1819,7 @@ async def test_remote_hub_cannot_configure_trust_store_path(
         for message in messages
     )
     assert not alternate_trust_store.exists()
-    assert not trust_store_path().exists()
+    assert not hub_trust.trust_store_path().exists()
 
 
 @pytest.mark.parametrize(

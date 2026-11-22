@@ -16,18 +16,17 @@ from chunkhound.hub.trust import (
     forget_checkout_trust,
     grant_trust,
     is_trusted,
-    trust_store_path,
 )
 
 
 def _grant_worker(
-    home: str,
+    trust_path: str,
     checkout: str,
     manifest_url: str,
     barrier: Any,
     results: Any,
 ) -> None:
-    os.environ["HOME"] = home
+    trust_module.trust_store_path = lambda: Path(trust_path)
     try:
         barrier.wait(timeout=10)
         grant_trust(Path(checkout), manifest_url)
@@ -39,10 +38,12 @@ def _grant_worker(
 
 def test_hub_home_is_isolated_for_trust_store(
     isolated_hub_home: Path,
+    original_home_environment: tuple[str | None, str | None],
 ) -> None:
-    assert os.environ["HOME"] == str(isolated_hub_home)
-    assert os.environ["USERPROFILE"] == str(isolated_hub_home)
-    assert trust_store_path() == (
+    assert (os.environ.get("HOME"), os.environ.get("USERPROFILE")) == (
+        original_home_environment
+    )
+    assert trust_module.trust_store_path() == (
         isolated_hub_home / ".config" / "chunkhound" / "hub-trust.json"
     )
     assert isolated_hub_home.is_dir()
@@ -54,7 +55,7 @@ def test_missing_store_is_untrusted(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     assert not is_trusted(tmp_path / "checkout", "https://hub.invalid/manifest")
-    assert not trust_store_path().exists()
+    assert not trust_module.trust_store_path().exists()
 
 
 def test_grant_matches_only_canonical_checkout_and_exact_url(
@@ -75,7 +76,7 @@ def test_grant_matches_only_canonical_checkout_and_exact_url(
     assert is_trusted(checkout.resolve(), url)
     assert not is_trusted(checkout, url + "&revision=2")
     assert not is_trusted(tmp_path / "other-checkout", url)
-    text = trust_store_path().read_text()
+    text = trust_module.trust_store_path().read_text()
     assert "token=secret" not in text
     assert hashlib.sha256(url.encode("utf-8")).hexdigest() in text
     assert str(checkout) not in text
@@ -103,7 +104,7 @@ def test_forget_is_idempotent_and_does_not_create_store(
     checkout = tmp_path / "checkout"
 
     assert not forget_checkout_trust(checkout)
-    assert not trust_store_path().exists()
+    assert not trust_module.trust_store_path().exists()
 
 
 def test_forget_removes_only_selected_checkout(
@@ -146,7 +147,7 @@ def test_invalid_store_fails_closed_and_is_not_overwritten(
     payload: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    store = trust_store_path()
+    store = trust_module.trust_store_path()
     store.parent.mkdir(parents=True)
     store.write_text(payload)
 
@@ -173,7 +174,7 @@ def test_trust_store_path_failures_are_sanitized(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     grant_trust(tmp_path / "original", "https://hub.invalid/original")
-    store = trust_store_path()
+    store = trust_module.trust_store_path()
     original_text = store.read_text()
     secret_path = tmp_path / "secret-home"
 
@@ -210,7 +211,7 @@ def test_checkout_resolution_failures_are_sanitized_without_overwriting(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     grant_trust(tmp_path / "original", "https://hub.invalid/original")
-    store = trust_store_path()
+    store = trust_module.trust_store_path()
     original_text = store.read_text()
     secret_path = tmp_path / "secret-checkout"
 
@@ -235,7 +236,7 @@ def test_unreadable_store_path_has_sanitized_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    store = trust_store_path()
+    store = trust_module.trust_store_path()
     store.mkdir(parents=True)
     secret_url = "https://hub.invalid/manifest?token=secret"
 
@@ -255,7 +256,7 @@ def test_store_and_lock_have_private_posix_mode(
 
     grant_trust(tmp_path / "checkout", "https://hub.invalid/manifest")
 
-    store = trust_store_path()
+    store = trust_module.trust_store_path()
     lock = store.with_name("hub-trust.lock")
     assert stat.S_IMODE(store.stat().st_mode) == 0o600
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
@@ -268,7 +269,7 @@ def test_atomic_write_failure_is_sanitized_and_preserves_existing_grants(
     original_checkout = tmp_path / "original"
     original_url = "https://hub.invalid/original"
     grant_trust(original_checkout, original_url)
-    original_text = trust_store_path().read_text()
+    original_text = trust_module.trust_store_path().read_text()
     secret_url = "https://hub.invalid/new?token=secret"
 
     def fail_write(*args: object, **kwargs: object) -> None:
@@ -281,7 +282,7 @@ def test_atomic_write_failure_is_sanitized_and_preserves_existing_grants(
 
     assert str(caught.value) == "Hub trust store cannot be updated safely"
     assert secret_url not in str(caught.value)
-    assert trust_store_path().read_text() == original_text
+    assert trust_module.trust_store_path().read_text() == original_text
 
 
 def test_two_concurrent_writers_preserve_both_grants(
@@ -289,6 +290,7 @@ def test_two_concurrent_writers_preserve_both_grants(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
+    trust_path = str(home / ".config" / "chunkhound" / "hub-trust.json")
     context = multiprocessing.get_context("spawn")
     try:
         barrier = context.Barrier(2)
@@ -302,11 +304,11 @@ def test_two_concurrent_writers_preserve_both_grants(
     processes = [
         context.Process(
             target=_grant_worker,
-            args=(str(home), str(checkout_a), url_a, barrier, results),
+            args=(trust_path, str(checkout_a), url_a, barrier, results),
         ),
         context.Process(
             target=_grant_worker,
-            args=(str(home), str(checkout_b), url_b, barrier, results),
+            args=(trust_path, str(checkout_b), url_b, barrier, results),
         ),
     ]
 
@@ -323,6 +325,6 @@ def test_two_concurrent_writers_preserve_both_grants(
     assert outcomes == [None, None]
     assert is_trusted(checkout_a, url_a)
     assert is_trusted(checkout_b, url_b)
-    data = json.loads(trust_store_path().read_text())
+    data = json.loads(trust_module.trust_store_path().read_text())
     assert data["version"] == 1
     assert len(data["grants"]) == 2

@@ -41,7 +41,6 @@ from chunkhound.hub.trust import (
     checkout_digest,
     grant_trust,
     manifest_url_digest,
-    trust_store_path,
 )
 from chunkhound.providers.database import ownership
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
@@ -407,7 +406,7 @@ async def test_validated_source_authorizes_without_reading_malformed_store(
     config = config_for(tmp_path / "checkout", hub_http)
     publish(hub_http, build_database(tmp_path / "published"))
     source = await fetch_validated_manifest(config)
-    store = trust_store_path()
+    store = hub_trust.trust_store_path()
     store.parent.mkdir(parents=True, exist_ok=True)
     store.write_text("not-json")
     hub_http.requests.clear()

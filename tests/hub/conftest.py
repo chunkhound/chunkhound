@@ -1,6 +1,7 @@
 """Local HTTP(S) publisher used only at the transport's external boundary."""
 
 import json
+import os
 import socket
 import ssl
 import subprocess
@@ -14,18 +15,27 @@ from types import SimpleNamespace
 import anyio
 import pytest
 
+import chunkhound.hub.trust as trust_module
+
+_ORIGINAL_HOME = os.environ.get("HOME")
+_ORIGINAL_USERPROFILE = os.environ.get("USERPROFILE")
+
+
+@pytest.fixture
+def original_home_environment() -> tuple[str | None, str | None]:
+    return _ORIGINAL_HOME, _ORIGINAL_USERPROFILE
+
 
 @pytest.fixture(autouse=True)
 def isolated_hub_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path:
-    """Keep each hub test's user-owned state in its own temporary home."""
+    """Isolate hub trust state without replacing the process home."""
     home = tmp_path / "home"
-    # DuckDB requires the configured home to exist when hub tests build artifacts.
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+    trust_path = home / ".config" / "chunkhound" / "hub-trust.json"
+    monkeypatch.setattr(trust_module, "trust_store_path", lambda: trust_path)
     return home
 
 
