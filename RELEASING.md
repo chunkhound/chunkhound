@@ -117,7 +117,11 @@ No tag, GitHub App, PAT, or `contents: write` is used for alphas.
 - Under one alpha lock, the workflow queries both PyPI projects (`chunkhound`
   and `chunkhound-native`) and allocates from their published state. The allocator
   accepts no core override.
-- Stable tags are ignored. Prerelease tags are not used for allocation.
+- Beta, RC, dev, post, and local releases are ignored when choosing the line. Only
+  plain stable and plain alpha releases choose it. If a beta or RC already exists on
+  the selected core (for example, `6.2.0` is stable and `6.3.0b1` is published, so
+  the next core is `6.3.0`), the alpha job stops with a clear error and publishes
+  nothing. This case needs a maintainer decision.
 - The chosen version, `source_sha`, and `channel=alpha` are passed explicitly to
   the build. The version is never derived from Git tags. The initial serial is
   canonical `a1` (not `a01`).

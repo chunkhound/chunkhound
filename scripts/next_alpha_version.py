@@ -9,8 +9,10 @@ the line:
 - latest stable X.Y.Z            -> X.(Y+1).0a1
 - latest alpha X.Y.Z aN          -> X.Y.Z a(max N for that exact core + 1),
                                     counted across both packages
-- anything else (beta, RC, dev,  -> fail; no guessing
-  post, local, unsupported)
+
+Only plain stable and plain alpha releases choose the line. Beta, RC, dev,
+post, and local releases are ignored for that choice. If a beta or RC exists
+on the selected core, the script fails instead of allocating an alpha.
 
 Writes version= to GITHUB_OUTPUT when set, otherwise prints it.
 """
@@ -88,44 +90,45 @@ def _is_plain_stable(version: Version) -> bool:
     )
 
 
+def _next_alpha_on_core(core_text: str, all_versions: list[Version]) -> str:
+    """Return the next alpha on core_text, refusing when a non-alpha release exists."""
+    # Normally this starts at a1. If native was partially published first,
+    # advance past it rather than trying to reuse an immutable PyPI version.
+    on_core = [v for v in all_versions if v.base_version == core_text]
+    if any(not _is_plain_alpha(v) for v in on_core):
+        raise ValueError(
+            f"A non-alpha release of {core_text} already exists (beta, RC, or "
+            "stable); an alpha of it is unsafe, so no alpha is allocated"
+        )
+    highest = max((v.pre[1] for v in on_core if _is_plain_alpha(v)), default=0)
+    return str(Version(f"{core_text}a{highest + 1}"))
+
+
 def next_version(main: Iterable[Version], others: Iterable[Version]) -> str:
-    """Return the next automatic alpha given chunkhound and native versions."""
+    """Return the next automatic alpha given chunkhound and native versions.
+
+    Only plain stable and plain alpha chunkhound releases choose the line.
+    Beta, RC, dev, post, and local releases are ignored for that choice.
+    """
     main_versions = list(main)
     if not main_versions:
         raise ValueError(
             f"{MAIN_PACKAGE} has no published releases; cannot determine release core"
         )
-    latest = max(main_versions)
+    candidates = [v for v in main_versions if _is_plain_stable(v) or _is_plain_alpha(v)]
+    if not candidates:
+        raise ValueError(
+            f"{MAIN_PACKAGE} has no stable or alpha release to pick the line from; "
+            "refusing to guess the next alpha"
+        )
+    latest = max(candidates)
     all_versions = [*main_versions, *others]
 
     if _is_plain_stable(latest):
         core_text = f"{latest.major}.{latest.minor + 1}.0"
-        # Normally this starts at a1. If native was partially published first,
-        # advance past it rather than trying to reuse an immutable PyPI version.
-        on_core = [v for v in all_versions if v.base_version == core_text]
-        if any(not _is_plain_alpha(v) for v in on_core):
-            raise ValueError(
-                f"A non-alpha release of {core_text} already exists; "
-                "an alpha of it is unsafe"
-            )
-        highest = max((v.pre[1] for v in on_core if _is_plain_alpha(v)), default=0)
-        return str(Version(f"{core_text}a{highest + 1}"))
-
-    if not _is_plain_alpha(latest):
-        raise ValueError(
-            f"Latest {MAIN_PACKAGE} version {latest} is not a stable or alpha "
-            "release; refusing to guess the next alpha"
-        )
-
-    core_text = f"{latest.major}.{latest.minor}.{latest.micro}"
-    on_core = [v for v in all_versions if v.base_version == core_text]
-    if any(not _is_plain_alpha(v) for v in on_core):
-        raise ValueError(
-            f"A non-alpha release of {core_text} already exists; "
-            "an alpha of it is unsafe"
-        )
-    highest = max((v.pre[1] for v in on_core if _is_plain_alpha(v)), default=0)
-    return str(Version(f"{core_text}a{highest + 1}"))
+    else:
+        core_text = f"{latest.major}.{latest.minor}.{latest.micro}"
+    return _next_alpha_on_core(core_text, all_versions)
 
 
 def allocate(fetch: Fetch = pypi_json) -> str:

@@ -69,6 +69,24 @@ def test_non_alpha_non_stable_latest_fails_instead_of_guessing(latest):
         run({"chunkhound": [latest], "chunkhound-native": []})
 
 
+@pytest.mark.parametrize(
+    ("main", "native", "expected"),
+    [
+        (["6.2.0", "6.2.1rc1"], [], "6.3.0a1"),
+        (["6.2.0", "6.2.1b1"], ["6.2.1.dev2"], "6.3.0a1"),
+        (["6.2.0a5", "6.2.1b1"], [], "6.2.0a6"),
+        (["6.2.0a5", "6.2.1rc1"], ["6.2.0a7"], "6.2.0a8"),
+    ],
+)
+def test_beta_or_rc_latest_does_not_choose_the_line(main, native, expected):
+    assert run({"chunkhound": main, "chunkhound-native": native}) == expected
+
+
+def test_beta_on_new_core_stops_alpha_with_clear_error():
+    with pytest.raises(ValueError, match="non-alpha release of 6.3.0"):
+        run({"chunkhound": ["6.2.0", "6.3.0b1"], "chunkhound-native": []})
+
+
 def test_non_alpha_release_on_selected_core_makes_alpha_unsafe():
     with pytest.raises(ValueError, match="non-alpha release"):
         run({"chunkhound": ["6.2.0a1"], "chunkhound-native": ["6.2.0"]})
