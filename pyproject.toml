@@ -40,8 +40,8 @@ classifiers = [
 ]
 [tool.hatch.metadata.hooks.custom]
 path = "hatch_build.py"
-# Stable builds keep this dependency range. Alpha release builds replace only
-# chunkhound-native with the exact main version and persist it in the sdist.
+# Ordinary builds keep this dependency range. Official release-artifact builds
+# replace only chunkhound-native with the exact main version and persist it in the sdist.
 dependencies = [
     "duckdb==1.5.4",
     "openai>=1.0.0",

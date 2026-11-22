@@ -1,9 +1,68 @@
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import zipfile
+from email.parser import Parser
+from pathlib import Path
+
 import pytest
+from packaging.requirements import Requirement
 from packaging.tags import Tag
+from packaging.utils import canonicalize_name
 
 import hatch_build
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("version", ["6.2.0a10", "6.2.0b1", "6.2.0rc1", "6.2.0"])
+def test_release_artifact_build_pins_native_to_resolved_version(
+    tmp_path: Path, version: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for filename in ("pyproject.toml", "hatch_build.py", "README.md", "LICENSE"):
+        shutil.copy2(ROOT / filename, source / filename)
+    shutil.copytree(ROOT / "chunkhound", source / "chunkhound")
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("SETUPTOOLS_SCM_PRETEND_VERSION")
+        and key
+        not in {
+            "CHUNKHOUND_BUILD_RELEASE_ARTIFACT",
+            "CHUNKHOUND_BUILD_ALPHA_RELEASE",
+        }
+    }
+    environment.update(
+        SETUPTOOLS_SCM_PRETEND_VERSION=version,
+        CHUNKHOUND_BUILD_RELEASE_ARTIFACT="1",
+    )
+    result = subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(tmp_path / "dist")],
+        cwd=source,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    wheel = next((tmp_path / "dist").glob("*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_path = next(
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        )
+        metadata = Parser().parsestr(archive.read(metadata_path).decode())
+    native = [
+        Requirement(value)
+        for value in metadata.get_all("Requires-Dist", [])
+        if canonicalize_name(Requirement(value).name) == "chunkhound-native"
+    ]
+    assert len(native) == 1
+    assert str(native[0].specifier) == f"=={version}"
+    assert native[0].marker is None and not native[0].extras and native[0].url is None
 
 
 def test_load_supported_watchman_platforms_matches_declared_slots() -> None:
