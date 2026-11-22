@@ -142,8 +142,10 @@ class MCPServerBase(ABC):
         self._realtime_failure_recorded = False
         self._scan_task: asyncio.Task | None = None
         self._scan_lock = asyncio.Lock()
-        # Both guarded by _scan_lock: the number of scans started, and the
-        # number of the latest scan that succeeded.
+        # The number of scans started, and the number of the latest scan that
+        # succeeded. Both are written under _scan_lock. The initial-scan retry
+        # reads _scan_generation without it: on the event loop that read is
+        # atomic, and a stale value costs at most one redundant scan.
         self._scan_generation = 0
         self._last_successful_scan_generation = 0
         self._scan_target_path: Path | None = None

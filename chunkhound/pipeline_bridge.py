@@ -57,6 +57,10 @@ _EMBED_PROVIDER_SHUTDOWN_TIMEOUT_SECS = 10.0
 """Per-provider bound on provider.shutdown() during cleanup -- a hung
 close (e.g. a stuck socket) must not block the whole indexing run."""
 
+_BROKEN_POOL_REAP_TIMEOUT_SECS = 2.0
+"""Longest time _discard_broken_parse_pool() waits for the executor's manager
+thread to reap a broken pool's workers, so that it can log their exit codes."""
+
 
 def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
     """Close this run's per-thread embedding HTTP clients and event loops.
@@ -212,18 +216,32 @@ def _discard_broken_parse_pool(
     A broken executor fails every later submit, so keeping it as the shared
     pool would fail every later parse in this process. Logs each worker's pid
     and exit code and the batch that was in flight; the worker list is read
-    before shutdown(), which drops it. A shutdown error is logged, never
-    raised, so it cannot replace the BrokenProcessPool.
+    before shutdown(), which drops it. Exit codes are read once the executor
+    has reaped the workers, or logged as unknown if it has not within
+    _BROKEN_POOL_REAP_TIMEOUT_SECS. A shutdown error is logged, never raised,
+    so it cannot replace the BrokenProcessPool.
     """
     global _parse_pool
     with _parse_pool_lock:
         if _parse_pool is pool:
             _parse_pool = None
-    # _processes is CPython's private worker map; no public API exposes the
-    # workers' pids and exit codes.
+    # _processes and _executor_manager_thread are CPython's private executor
+    # state; no public API exposes the workers' pids and exit codes. The map is
+    # read without the executor's lock, while its manager thread may still
+    # change it; dict() takes a copy.
     workers = dict(getattr(pool, "_processes", None) or {})
+    # The manager thread fails the batch first, then terminates and joins the
+    # workers while holding the executor's shutdown lock. Until it has joined
+    # them an exit code reads None, and a second reaper could read a wrong one
+    # (forkserver hands each exit status to one reader only). So wait for the
+    # manager, up to a deadline, and read the codes only once it is done.
+    manager = getattr(pool, "_executor_manager_thread", None)
+    if manager is not None:
+        manager.join(_BROKEN_POOL_REAP_TIMEOUT_SECS)
+    reaped = manager is None or not manager.is_alive()
     worker_states = ", ".join(
-        f"pid={pid} exitcode={process.exitcode}" for pid, process in workers.items()
+        f"pid={pid} exitcode={process.exitcode if reaped else 'unknown'}"
+        for pid, process in workers.items()
     )
     shown = ", ".join(file_paths[:3])
     more = f" (+{len(file_paths) - 3} more)" if len(file_paths) > 3 else ""
@@ -235,6 +253,10 @@ def _discard_broken_parse_pool(
         shown,
         more,
     )
+    if not reaped:
+        # shutdown() takes the lock the manager still holds, so it would wait
+        # for the manager too. The manager finishes the cleanup on its own.
+        return
     try:
         pool.shutdown(wait=False, cancel_futures=True)
     except Exception as error:
