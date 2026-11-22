@@ -246,6 +246,74 @@ async def test_attempted_explicit_pull_cancellation_exits_with_exact_guidance(
     assert config.hub.url not in "\n".join(messages)
 
 
+def _capture_errors(fn):
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["level"].name == "ERROR",
+    )
+    try:
+        return fn(messages)
+    finally:
+        logger.remove(sink)
+
+
+async def test_trusted_plain_pull_fetch_local_state_error_is_logged_once(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    monkeypatch.setattr(pull_module, "is_trusted", Mock(return_value=True))
+    monkeypatch.setattr(
+        pull_module,
+        "fetch_validated_manifest",
+        AsyncMock(side_effect=HubLocalStateError("unsafe local state")),
+    )
+    artifact_pull = AsyncMock(return_value=True)
+    monkeypatch.setattr(pull_module, "pull", artifact_pull)
+    args = argparse.Namespace(trust=False, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert messages.count("unsafe local state") == 1
+    assert HUB_PULL_FAILURE_GUIDANCE in messages
+    artifact_pull.assert_not_awaited()
+
+
+async def test_trusted_plain_pull_fetch_unavailable_emits_retry_guidance(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    monkeypatch.setattr(pull_module, "is_trusted", Mock(return_value=True))
+    monkeypatch.setattr(
+        pull_module,
+        "fetch_validated_manifest",
+        AsyncMock(side_effect=HubUnavailable("sanitized unavailable")),
+    )
+    monkeypatch.setattr(pull_module, "pull", AsyncMock(return_value=True))
+    args = argparse.Namespace(trust=False, path=checkout, version="latest")
+    messages = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]))
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert stopped.value.code == 1
+    assert "Hub pull unavailable: sanitized unavailable" in messages
+    assert HUB_PULL_FAILURE_GUIDANCE in messages
+
+
 async def test_pull_trust_revalidates_even_when_source_is_already_trusted(
     tmp_path, hub_http, monkeypatch
 ):

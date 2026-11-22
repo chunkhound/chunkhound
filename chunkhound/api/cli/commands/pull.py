@@ -62,7 +62,6 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
         except OSError:
             raise HubLocalStateError("Hub checkout identity is unavailable") from None
         url_binding = manifest_url_digest(authorized_url)
-        key = configured_key(config)
         if not args.trust:
             try:
                 trusted = is_trusted(checkout, authorized_url)
@@ -75,7 +74,11 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
                     "This hub source is not trusted. Review the configured source "
                     "and run chunkhound pull --trust to authorize and pull it."
                 )
-        pre_client_fatal = bool(args.trust)
+        # Resolve the configured key before any hub request so unknown dimensions
+        # never probe the hub or embedding service; it stays after the trust gate.
+        key = configured_key(config)
+        # Plain pull keeps its failure guidance for pre-client fetch failures.
+        pull_attempted = not args.trust
         source = await fetch_validated_manifest(config)
         try:
             current_checkout_digest = checkout_digest(
