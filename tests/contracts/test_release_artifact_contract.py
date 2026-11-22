@@ -229,13 +229,12 @@ def test_release_workflows_keep_native_first_and_isolate_alpha_approvals():
         build = next(
             step
             for step in jobs[job_name]["steps"]
-            if "CHUNKHOUND_BUILD_ALPHA_RELEASE" in step.get("env", {})
+            if "CHUNKHOUND_BUILD_RELEASE_ARTIFACT" in step.get("env", {})
         )
-        assert build["env"]["CHUNKHOUND_BUILD_ALPHA_RELEASE"] == (
-            "${{ needs.prepare.outputs.alpha == 'true' && '1' || '' }}"
-        )
+        assert build["env"]["CHUNKHOUND_BUILD_RELEASE_ARTIFACT"] == "1"
     validation = jobs["validate-artifacts"]["steps"][-1]
-    assert validation["env"]["ALPHA_RELEASE"] == "${{ needs.prepare.outputs.alpha }}"
+    assert validation["env"] == {"RELEASE_TAG": "${{ inputs.release_tag }}"}
+    assert "ALPHA_RELEASE" not in validation["env"]
     for job_name, suffix in [("publish", ""), ("publish-native", "-native")]:
         assert jobs[job_name]["environment"] == (
             "${{ needs.prepare.outputs.alpha == 'true' && "

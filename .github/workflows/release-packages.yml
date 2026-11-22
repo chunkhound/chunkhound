@@ -59,7 +59,7 @@ jobs:
       - name: Build source distribution
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.prepare.outputs.version }}
-          CHUNKHOUND_BUILD_ALPHA_RELEASE: ${{ needs.prepare.outputs.alpha == 'true' && '1' || '' }}
+          CHUNKHOUND_BUILD_RELEASE_ARTIFACT: "1"
         run: uv build --sdist --out-dir dist
 
       - name: Upload source distribution artifact
@@ -93,7 +93,7 @@ jobs:
         env:
           CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
           SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.prepare.outputs.version }}
-          CHUNKHOUND_BUILD_ALPHA_RELEASE: ${{ needs.prepare.outputs.alpha == 'true' && '1' || '' }}
+          CHUNKHOUND_BUILD_RELEASE_ARTIFACT: "1"
         run: uv build --wheel --clear
 
       - name: Upload runtime wheel artifact
@@ -193,7 +193,6 @@ jobs:
       - name: Validate all versions and rebuild final sdist
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          ALPHA_RELEASE: ${{ needs.prepare.outputs.alpha }}
         run: >-
           uv run --no-project --python 3.12 --with packaging
           python scripts/validate_release_artifacts.py

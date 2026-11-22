@@ -126,9 +126,12 @@ automatic publication-retry system.
 The requested tag supplies the exact version to both builds. Main builds override
 Hatch discovery with `SETUPTOOLS_SCM_PRETEND_VERSION`; native builds receive the
 explicit tag. Multiple tags on a source commit cannot select a different version.
-Alpha main artifacts require the matching native alpha version exactly, including
-when a wheel is rebuilt from the published sdist. Stable and beta/RC dependency
-semantics remain unchanged.
+Every official alpha, beta, RC, and stable `chunkhound` artifact requires the
+matching `chunkhound-native` version exactly, including when a wheel is rebuilt
+from the published sdist. This release-artifact rule does not change the
+`chunkhound-native>=6.1.0` dependency range used by ordinary local, editable, and
+non-release builds. Alpha-specific allocation and approval routing remain
+separate from artifact dependency pairing.
 
 For testing, install an exact alpha, for example:
 
