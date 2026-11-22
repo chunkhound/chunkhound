@@ -940,6 +940,28 @@ def test_untrusted_no_prompt_index_builds_searchable_local_database_offline(
     search = cli(project, "search", "local_only", project, "--regex")
     assert search.returncode == 0, search.stdout + search.stderr
     assert "source.py" in search.stdout + search.stderr
+    output = result.stdout + result.stderr
+    assert output.count("Configured hub source is not trusted") == 1
+    assert "token=secret" not in output
+
+
+def test_untrusted_trust_read_failure_warns_once_and_indexes_offline(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    write_config(
+        project, "duckdb", hub_http.url + "/catalogue?token=secret", embedding_http.url
+    )
+    (project / "source.py").write_text("def local_only(): return 1\n")
+    store = project.parent / "home" / ".config" / "chunkhound" / "hub-trust.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text("{not json", encoding="utf-8")  # unreadable trust store
+    result = cli(project, "index", project)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert hub_http.requests == []
+    assert output.count("Hub trust settings could not be read") == 1
+    assert output.count("Configured hub source is not trusted") == 0
 
 
 def test_interactive_local_choice_allows_full_index_without_hub_request(

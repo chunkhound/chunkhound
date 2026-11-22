@@ -23,6 +23,7 @@ from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.daemon.process import pid_alive
 from chunkhound.hub.client import (
     ValidatedHubSource,
+    automatic_pull_eligible,
     automatic_target_absent,
     automatic_target_appears_cold,
     fetch_validated_manifest,
@@ -158,16 +159,28 @@ async def _prepare_hub_index(
         formatter.error(str(checkout_error))
         raise checkout_error from None
     authorized = False
+    trust_read_failed = False
     if not explicit_trust:
         try:
             authorized = is_trusted(authorized_checkout, hub_url)
         except HubTrustError:
+            trust_read_failed = True
             formatter.warning(
                 "Hub trust settings could not be read; the hub will not be used."
             )
-
     if not explicit_trust and not authorized:
+        if not automatic_pull_eligible(
+            config,
+            mcp_mode=_mcp_mode(),
+            no_embeddings=bool(getattr(args, "no_embeddings", False)),
+        ):
+            return HubIndexDecision.CONTINUE_LOCAL
         if not _hub_prompts_allowed():
+            if not trust_read_failed:
+                formatter.warning(
+                    "Configured hub source is not trusted; no hub request was made. "
+                    "Continuing with local indexing."
+                )
             return HubIndexDecision.CONTINUE_LOCAL
         target = installation_target(config)
         if not automatic_target_appears_cold(target, config.database.provider):
