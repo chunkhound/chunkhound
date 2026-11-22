@@ -74,12 +74,21 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
                     "This hub source is not trusted. Review the configured source "
                     "and run chunkhound pull --trust to authorize and pull it."
                 )
-        # Resolve the configured key before any hub request so unknown dimensions
-        # never probe the hub or embedding service; it stays after the trust gate.
-        key = configured_key(config)
-        # Plain pull keeps its failure guidance for pre-client fetch failures.
+        # Once a plain pull is authorized, failures resolving its configured
+        # embedding key should retain the established retry guidance. Keep this
+        # after the trust gate so untrusted pulls remain entirely offline.
         pull_attempted = not args.trust
-        source = await fetch_validated_manifest(config)
+        # Resolve the key before any hub request so unknown dimensions never
+        # probe the hub or embedding service.
+        key = configured_key(config)
+        try:
+            source = await fetch_validated_manifest(config)
+        except asyncio.CancelledError:
+            if pull_attempted:
+                logger.error("{}", HUB_PULL_CANCELLATION_DIAGNOSTIC)
+                logger.error("{}", HUB_PULL_FAILURE_GUIDANCE)
+                raise SystemExit(1) from None
+            raise
         try:
             current_checkout_digest = checkout_digest(
                 config.target_dir or Path(args.path)
