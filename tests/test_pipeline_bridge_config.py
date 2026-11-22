@@ -640,7 +640,8 @@ async def test_run_rust_pipeline_does_not_touch_a_sibling_runs_embed_cache(
             sibling_loop.close()
 
 
-def test_embed_cleanup_aggregates_every_sanitized_failure_with_detached_first_cause() -> None:
+def test_embed_cleanup_aggregates_every_sanitized_failure_with_detached_first_cause(
+) -> None:
     from chunkhound import pipeline_bridge
     first_error = RuntimeError("first https://user:pw@first.test/p?token=one")
     second_error = RuntimeError("second https://second.test/?api_key=two")
@@ -654,7 +655,9 @@ def test_embed_cleanup_aggregates_every_sanitized_failure_with_detached_first_ca
         cache.providers[tid] = MagicMock(shutdown=shutdown)
         cache.loops[tid] = loops[tid]
     try:
-        with pytest.raises(RuntimeError, match="Embedding resource cleanup incomplete") as caught:
+        with pytest.raises(
+            RuntimeError, match="Embedding resource cleanup incomplete"
+        ) as caught:
             pipeline_bridge._shutdown_embed_thread_resources(cache)
     finally:
         for loop in loops.values():

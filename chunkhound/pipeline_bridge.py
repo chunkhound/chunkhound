@@ -181,7 +181,9 @@ def _shutdown_embed_thread_resources(cache: _EmbedThreadCache) -> None:
             with cache.lock:
                 cache.loops.pop(tid, None)
     if failures:
-        details = "; ".join(f"{item.kind.__name__}: {item.message}" for item in failures)
+        details = "; ".join(
+            f"{item.kind.__name__}: {item.message}" for item in failures
+        )
         raise RuntimeError(
             f"Embedding resource cleanup incomplete: {details}"
         ) from failures[0].exception()
