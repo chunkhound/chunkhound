@@ -14,12 +14,29 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def make_artifacts(directory: Path, *, version: str, native_requirement: str) -> None:
+def _project_config(native_requirement: str) -> str:
+    return (
+        "[tool.hatch.metadata.hooks.custom]\n"
+        'path = "hatch_build.py"\n'
+        'dependencies = ["chunkhound-native'
+        + native_requirement
+        + '", "packaging>=21.0"]\n'
+    )
+
+
+def make_artifacts(
+    directory: Path,
+    *,
+    version: str,
+    native_requirement: str,
+    sdist_native_requirement: str | None = None,
+    embedded_version: str | None = None,
+) -> None:
     metadata = (
         f"Metadata-Version: 2.4\nName: chunkhound\nVersion: {version}\n"
         f"Requires-Dist: chunkhound-native{native_requirement}\n"
     )
-    embedded = f"__version__ = version = {version!r}\n"
+    embedded = f"__version__ = version = {(embedded_version or version)!r}\n"
     with zipfile.ZipFile(
         directory / f"chunkhound-{version}-py3-none-any.whl", "w"
     ) as archive:
@@ -33,10 +50,12 @@ def make_artifacts(directory: Path, *, version: str, native_requirement: str) ->
             f"chunkhound_native-{version}.dist-info/METADATA",
             f"Name: chunkhound-native\nVersion: {version}\n",
         )
+    sdist_requirement = sdist_native_requirement or native_requirement
     with tarfile.open(directory / f"chunkhound-{version}.tar.gz", "w:gz") as archive:
         for filename, content in {
             "PKG-INFO": metadata,
             "chunkhound/_version.py": embedded,
+            "pyproject.toml": _project_config(sdist_requirement),
         }.items():
             payload = content.encode()
             member = tarfile.TarInfo(f"chunkhound-{version}/{filename}")
@@ -44,55 +63,71 @@ def make_artifacts(directory: Path, *, version: str, native_requirement: str) ->
             archive.addfile(member, io.BytesIO(payload))
 
 
-@pytest.mark.parametrize(
-    ("version", "tag", "alpha", "requirement", "valid"),
-    [
-        ("6.2.0a43", "v6.2.0a43", True, "==6.2.0a43", True),
-        ("6.2.0", "v6.2.0", False, ">=5.2.0", True),
-        ("6.2.0a43", "v6.2.0a44", True, "==6.2.0a43", False),
-        ("6.2.0a43", "v6.2.0a43", True, ">=5.2.0", False),
-        ("6.2.0", "v6.2.0", True, "==6.2.0", False),
-    ],
-)
-def test_publication_gate_requires_requested_version_and_alpha_pairing(
-    tmp_path, version, tag, alpha, requirement, valid
-):
-    make_artifacts(tmp_path, version=version, native_requirement=requirement)
-    result = subprocess.run(
+def run_gate(tmp_path: Path, tag: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             sys.executable,
             str(ROOT / "scripts/validate_release_artifacts.py"),
             "--dist",
             str(tmp_path),
         ],
-        env={**os.environ, "RELEASE_TAG": tag, "ALPHA_RELEASE": str(alpha).lower()},
+        env={**os.environ, "RELEASE_TAG": tag},
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("version", "tag", "requirement", "valid"),
+    [
+        ("6.2.0a10", "v6.2.0a10", "==6.2.0a10", True),
+        ("6.2.0b1", "v6.2.0b1", "==6.2.0b1", True),
+        ("6.2.0rc1", "v6.2.0rc1", "==6.2.0rc1", True),
+        ("6.2.0", "v6.2.0", "==6.2.0", True),
+        ("6.2.0", "v6.2.0", ">=6.1.0", False),
+        ("6.2.0", "v6.2.0", "==6.1.0", False),
+        ("6.2.0", "v6.2.0", "==6.2.0,!=6.2.1", False),
+        ("6.2.0a10", "v6.2.0a11", "==6.2.0a10", False),
+    ],
+)
+def test_publication_gate_requires_exact_tagged_native_pairing(
+    tmp_path: Path, version: str, tag: str, requirement: str, valid: bool
+) -> None:
+    make_artifacts(tmp_path, version=version, native_requirement=requirement)
+    result = run_gate(tmp_path, tag)
     assert (result.returncode == 0) == valid, result.stdout + result.stderr
 
 
-def test_publication_gate_rejects_incorrect_embedded_version(tmp_path):
-    make_artifacts(tmp_path, version="6.2.0", native_requirement=">=5.2.0")
-    wheel = tmp_path / "chunkhound-6.2.0-py3-none-any.whl"
-    with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr(
-            "chunkhound-6.2.0.dist-info/METADATA", "Name: chunkhound\nVersion: 6.2.0\n"
-        )
-        archive.writestr("chunkhound/_version.py", "__version__ = version = '5.2.0'\n")
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts/validate_release_artifacts.py"),
-            "--dist",
-            str(tmp_path),
-        ],
-        env={**os.environ, "RELEASE_TAG": "v6.2.0", "ALPHA_RELEASE": "false"},
-        capture_output=True,
-        text=True,
+def test_publication_gate_rejects_wrong_sdist_config_pin(tmp_path: Path) -> None:
+    make_artifacts(
+        tmp_path,
+        version="6.2.0",
+        native_requirement="==6.2.0",
+        sdist_native_requirement="==6.1.0",
     )
+    result = run_gate(tmp_path, "v6.2.0")
+    assert result.returncode != 0
+    assert "persist chunkhound-native==6.2.0 in pyproject.toml" in result.stderr
+
+
+def test_publication_gate_rejects_wrong_embedded_version(tmp_path: Path) -> None:
+    make_artifacts(
+        tmp_path,
+        version="6.2.0",
+        native_requirement="==6.2.0",
+        embedded_version="6.1.0",
+    )
+    result = run_gate(tmp_path, "v6.2.0")
     assert result.returncode != 0
     assert "Embedded main version" in result.stderr
+
+
+def test_publication_gate_accepts_equivalent_pep440_artifact_version(
+    tmp_path: Path,
+) -> None:
+    make_artifacts(tmp_path, version="6.2.0.0", native_requirement="==6.2.0.0")
+    result = run_gate(tmp_path, "v6.2.0")
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
