@@ -874,7 +874,9 @@ class TestCompactionCrashRecovery:
         backup_present_at_restore: list[bool] = []
         recreated: list[dict[str, Any]] = []
 
-        def _fail_after_swap_before_backup_delete(conn: Any, state: dict[str, Any]) -> None:
+        def _fail_after_swap_before_backup_delete(
+            conn: Any, state: dict[str, Any]
+        ) -> None:
             # Finalize calls this right after the real swap and before it deletes
             # the backup. Fail only that first call so the real restore can run.
             nonlocal create_index_calls
@@ -888,12 +890,16 @@ class TestCompactionCrashRecovery:
             backup_present_at_restore.append(backup_path.exists())
             return original_restore(*args, **kwargs)
 
-        def _record_recreate(conn: Any, state: dict[str, Any], index_info: dict[str, Any]) -> None:
+        def _record_recreate(
+            conn: Any, state: dict[str, Any], index_info: dict[str, Any]
+        ) -> None:
             recreated.append(index_info)
             return original_recreate(conn, state, index_info)
 
         monkeypatch.setattr(
-            populated_db, "_executor_create_indexes", _fail_after_swap_before_backup_delete
+            populated_db,
+            "_executor_create_indexes",
+            _fail_after_swap_before_backup_delete,
         )
         monkeypatch.setattr(populated_db, "_compact_restore", _record_restore)
         monkeypatch.setattr(
