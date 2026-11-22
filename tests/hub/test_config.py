@@ -2,6 +2,7 @@ import argparse
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from chunkhound.core.config.config import Config
 
@@ -320,3 +321,37 @@ def test_download_timeout_obeys_existing_config_precedence(tmp_path, monkeypatch
         Config(target_dir=tmp_path, skip_layers={"cli"}).hub.download_timeout_seconds
         == 11
     )
+
+
+@pytest.mark.parametrize("layer", ["direct", "global", "local", "explicit"])
+def test_unknown_top_level_hub_key_fails_closed_in_every_layer(
+    tmp_path, monkeypatch, layer
+):
+    hub = {"url": "https://hub.invalid/manifest", "urll": "typo"}
+    global_file = tmp_path / "global.json"
+    global_file.write_text(json.dumps({"hub": hub}))
+    monkeypatch.setenv("CHUNKHOUND_GLOBAL_CONFIG_FILE", str(global_file))
+    (tmp_path / ".chunkhound.json").write_text(json.dumps({"hub": hub}))
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text(json.dumps({"hub": hub}))
+    all_but = {"global", "env", "local_config", "config_file", "cli"}
+    cases = {
+        "direct": lambda: Config(
+            target_dir=tmp_path, hub=hub, skip_layers=all_but
+        ),
+        "global": lambda: Config(
+            target_dir=tmp_path,
+            skip_layers={"env", "local_config", "config_file", "cli"},
+        ),
+        "local": lambda: Config(
+            target_dir=tmp_path,
+            skip_layers={"global", "env", "config_file", "cli"},
+        ),
+        "explicit": lambda: Config(
+            target_dir=tmp_path,
+            args=argparse.Namespace(config=str(explicit)),
+            skip_layers={"global", "env", "local_config", "cli"},
+        ),
+    }
+    with pytest.raises(ValidationError, match="urll"):
+        cases[layer]()

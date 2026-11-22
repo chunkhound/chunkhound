@@ -829,34 +829,30 @@ def test_index_trust_persists_and_installs_cold_base(
 
 
 @pytest.mark.parametrize("source", ["environment", "explicit", "project", "global"])
-def test_hub_declaration_sources_cannot_authorize_or_redirect_trust_store(
+def test_trust_store_path_declaration_cannot_authorize_or_redirect(
     tmp_path, hub_http, embedding_http, source
 ):
     project = tmp_path / "checkout"
     hub_url = hub_http.url + "/catalogue?token=secret"
-    alternate_trust_store = tmp_path / "attacker" / "grants.json"
-    malicious_hub = {
-        "url": hub_url,
-        "trust_store_path": str(alternate_trust_store),
-    }
+    alternate = tmp_path / "attacker" / "grants.json"
+    malicious = {"url": hub_url, "trust_store_path": str(alternate)}
     data = write_config(project, "duckdb", None, embedding_http.url)
     data.pop("hub")
     (project / "source.py").write_text("def must_not_index(): return 1\n")
-    explicit = tmp_path / "explicit.json"
-    args: list[str | Path] = ["index", project]
-    env = cli_env(project)
+    env, args = cli_env(project), ["index", project]
 
     if source == "environment":
         env["CHUNKHOUND_HUB__URL"] = hub_url
-        env["CHUNKHOUND_HUB__TRUST_STORE_PATH"] = str(alternate_trust_store)
+        env["CHUNKHOUND_HUB__TRUST_STORE_PATH"] = str(alternate)
     elif source == "explicit":
-        explicit.write_text(json.dumps({"hub": malicious_hub}))
+        explicit = tmp_path / "explicit.json"
+        explicit.write_text(json.dumps({"hub": malicious}))
         args.extend(("--config", explicit))
     elif source == "project":
-        data["hub"] = malicious_hub
+        data["hub"] = malicious
     else:
         Path(env["CHUNKHOUND_GLOBAL_CONFIG_FILE"]).write_text(
-            json.dumps({"hub": malicious_hub})
+            json.dumps({"hub": malicious})
         )
     (project / ".chunkhound.json").write_text(json.dumps(data))
 
@@ -869,17 +865,22 @@ def test_hub_declaration_sources_cannot_authorize_or_redirect_trust_store(
         timeout=180,
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    # tmp_path embeds the test name, so scrub it before checking diagnostics.
+    output = (result.stdout + result.stderr).replace(str(tmp_path), "<tmp>")
+    central_trust = Path(env["HOME"]) / ".config" / "chunkhound" / "hub-trust.json"
     assert hub_http.requests == []
-    assert embedding_http.requests
-    assert not alternate_trust_store.exists()
-    assert not (
-        Path(env["HOME"])
-        / ".config"
-        / "chunkhound"
-        / "hub-trust.json"
-    ).exists()
-    assert (project / ".chunkhound" / "db" / "chunks.db").exists()
+    assert not alternate.exists()
+    assert not central_trust.exists()
+    if source == "environment":
+        assert result.returncode == 0, output
+        assert "trust_store_path" not in output
+        assert embedding_http.requests
+        assert (project / ".chunkhound" / "db" / "chunks.db").exists()
+    else:
+        assert result.returncode == 1, output
+        assert "trust_store_path" in output
+        assert embedding_http.requests == []
+        assert not (project / ".chunkhound" / "db" / "chunks.db").exists()
 
 
 def test_trusted_manifest_delegates_artifact_redirect_chain(

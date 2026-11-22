@@ -21,7 +21,7 @@ class ArchiveLimits(BaseModel):
 
 
 class HubConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
     url: str | None = Field(default=None, repr=False)
     download_timeout_seconds: float = Field(
         default=3600.0, strict=True, gt=0, allow_inf_nan=False

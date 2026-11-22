@@ -135,6 +135,30 @@ def _target_path(home: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize("op", ["set", "merge"])
+async def test_hub_unknown_key_is_schema_error_and_next_rule_applies(
+    _isolate, monkeypatch, op
+):
+    target = _target_path(_isolate)
+    original_hub = {"url": "https://publisher.test/catalogue"}
+    target.write_text(json.dumps({"hub": original_hub}))
+    rules = [
+        {"id": "hub", "op": op, "value": {"urll": "typo"}},
+        {"id": "mcp.host", "op": "set", "value": "127.0.0.1"},
+    ]
+    _install_fetch(monkeypatch, {"version": 1, "rules": rules})
+    messages = []
+    handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+    data = _read_target(target)
+    assert data["hub"] == original_hub
+    assert data["mcp"]["host"] == "127.0.0.1"
+    assert any("schema_error" in m and "urll" in m for m in messages), messages
+
+
 async def test_successful_apply_writes_expected_dict(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
