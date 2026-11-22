@@ -357,7 +357,9 @@ class WatchmanRealtimeAdapter:
         file_path: Path,
         path_filter: RealtimePathFilter,
     ) -> bool:
-        if event_type in {"dir_created", "dir_deleted"}:
+        if event_type == "dir_created":
+            return not path_filter.excludes_directory(file_path)
+        if event_type == "dir_deleted":
             return True
         return path_filter.should_index(file_path)
 
