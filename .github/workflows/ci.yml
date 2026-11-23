@@ -38,6 +38,9 @@ jobs:
         run: echo "docs_version=$CHUNKHOUND_DOCS_VERSION" >> "$GITHUB_OUTPUT"
       - run: npm ci --prefix site
       - run: npm run build --prefix site
+      - name: Record built docs version
+        shell: bash
+        run: printf '%s\n' "$CHUNKHOUND_DOCS_VERSION" > site/dist/docs-version.txt
       - name: Create .nojekyll sentinel
         run: touch site/dist/.nojekyll
       - uses: actions/upload-artifact@v4
@@ -127,6 +130,14 @@ jobs:
         with:
           name: site-dist
           path: site/dist
+
+      # A retried job may see newer Git tags than the original site build.
+      - name: Load built docs version
+        shell: bash
+        run: |
+          version="$(cat site/dist/docs-version.txt)"
+          test -n "$version"
+          printf 'CHUNKHOUND_DOCS_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Build Rust extension
         uses: ./.github/actions/build-rust-extension

@@ -390,7 +390,6 @@ class TestDocsVersionWorkflowContract:
         [
             (".github/workflows/ci.yml", "site-build"),
             (".github/workflows/ci.yml", "site-build-validation"),
-            (".github/workflows/ci.yml", "tests"),
         ],
     )
     def test_docs_build_jobs_checkout_with_full_history(
@@ -480,6 +479,90 @@ class TestDocsVersionWorkflowContract:
         assert download_step["with"]["name"] == "site-dist"
         assert download_step["with"]["path"] == "site/dist"
         assert tests_step["env"]["CHUNKHOUND_USE_EXISTING_SITE_DIST"] == "1"
+        load_index = _find_step_index(
+            steps,
+            "load artifact version",
+            lambda step: step.get("name") == "Load built docs version",
+        )
+        assert download_index < load_index < tests_index
+        assert not any(
+            "resolve_docs_version.sh" in step.get("run", "") for step in steps
+        )
+
+    def test_reused_site_keeps_build_version_after_git_tags_change(self) -> None:
+        build_steps = _job_steps(".github/workflows/ci.yml", "site-build")
+        record_index = _find_step_index(
+            build_steps,
+            "record artifact version",
+            lambda step: step.get("name") == "Record built docs version",
+        )
+        build_index = _find_step_index(
+            build_steps,
+            "site build",
+            lambda step: step.get("run") == "npm run build --prefix site",
+        )
+        upload_index = _find_step_index(
+            build_steps,
+            "upload artifact",
+            lambda step: step.get("with", {}).get("name") == "site-dist",
+        )
+        assert build_index < record_index < upload_index
+        record_step = build_steps[record_index]
+        test_steps = _job_steps(".github/workflows/ci.yml", "tests")
+        load_step = test_steps[
+            _find_step_index(
+                test_steps,
+                "load artifact version",
+                lambda step: step.get("name") == "Load built docs version",
+            )
+        ]
+        assert record_step["shell"] == load_step["shell"] == "bash"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_dir = Path(temp_dir)
+            _create_tagged_repo(repo_dir, "v6.1.0")
+            github_env = repo_dir / "github.env"
+            _run_resolver(
+                repo_dir, check=True, env_updates={"GITHUB_ENV": str(github_env)}
+            )
+            build_version = (
+                github_env.read_text(encoding="utf-8").strip().split("=", 1)[1]
+            )
+            (repo_dir / "site" / "dist").mkdir(parents=True)
+            env = {**_resolver_env(), "CHUNKHOUND_DOCS_VERSION": build_version}
+            subprocess.run(
+                [_resolver_command()[0], "-eu", "-c", record_step["run"]],
+                cwd=repo_dir,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # Simulate a later retry seeing a new tag but reusing the old dist.
+            _run(["git", "tag", "-d", "v6.1.0"], repo_dir)
+            _run(["git", "tag", "v6.2.0a1"], repo_dir)
+            github_env.write_text("", encoding="utf-8")
+            _run_resolver(
+                repo_dir, check=True, env_updates={"GITHUB_ENV": str(github_env)}
+            )
+            assert (
+                github_env.read_text(encoding="utf-8")
+                == "CHUNKHOUND_DOCS_VERSION=6.2.0a1\n"
+            )
+            github_env.write_text("", encoding="utf-8")
+            subprocess.run(
+                [_resolver_command()[0], "-eu", "-c", load_step["run"]],
+                cwd=repo_dir,
+                env={**_resolver_env(), "GITHUB_ENV": str(github_env)},
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert (
+                github_env.read_text(encoding="utf-8")
+                == "CHUNKHOUND_DOCS_VERSION=6.1.0\n"
+            )
 
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(

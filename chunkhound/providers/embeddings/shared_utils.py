@@ -1,11 +1,12 @@
 """Shared utilities for embedding providers."""
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
+    EmbeddingProviderError,
 )
 from chunkhound.core.utils.token_utils import LLM_CHARS_PER_TOKEN
 
@@ -47,6 +48,56 @@ def validate_text_input(texts: list[str]) -> list[str]:
         validated.append(text.strip())
 
     return validated
+
+
+def require_non_blank_queries(texts: Sequence[str]) -> None:
+    """Raise ValueError if any search query is blank (it has no embedding)."""
+    if any(not t.strip() for t in texts):
+        raise ValueError("Search query must not be blank")
+
+
+async def embed_preserving_positions(
+    texts: list[str],
+    embed_non_blank: Callable[[list[str]], Awaitable[list[list[float]]]],
+    fallback_dims: int | None = None,
+) -> list[list[float]]:
+    """Embed ``texts`` returning exactly one vector per input, in order.
+
+    Blank/whitespace-only texts are never sent to the API (providers reject or
+    silently drop them). Their slots get a zero vector whose length is taken
+    from the vectors the API actually returned, so custom or unknown models
+    work regardless of what ``provider.dims`` claims.
+
+    Zero vectors have undefined direction under cosine similarity, so callers
+    must not persist them: indexing paths filter blank chunks before embedding
+    and query paths reject blank queries. This padding exists only to keep the
+    one-vector-per-input contract. If every text is blank no request is made, so
+    the length comes from ``fallback_dims`` (best guess, e.g. ``provider.dims``);
+    without it this raises ``ValueError``.
+    """
+    non_blank = validate_text_input(texts)
+    if not non_blank:
+        if fallback_dims is None:
+            raise ValueError("Cannot embed: all input texts are blank")
+        return [[0.0] * fallback_dims for _ in texts]
+    embedded = await embed_non_blank(non_blank)
+    if len(embedded) != len(non_blank):
+        raise EmbeddingProviderError(
+            f"Embedding API returned {len(embedded)} vectors for "
+            f"{len(non_blank)} non-blank texts"
+        )
+    zero = [0.0] * len(embedded[0])
+    results = iter(embedded)
+    return [next(results) if text.strip() else list(zero) for text in texts]
+
+
+def ensure_vector_count(vectors: Sequence[Any], texts: Sequence[Any]) -> None:
+    """Raise a clear provider error if a provider returned the wrong count."""
+    if len(vectors) != len(texts):
+        raise EmbeddingProviderError(
+            f"Embedding provider returned {len(vectors)} vectors for "
+            f"{len(texts)} texts"
+        )
 
 
 def get_usage_stats_dict(
