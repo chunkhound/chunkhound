@@ -647,9 +647,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         status["pipeline"].update(pipeline)
         status["startup"] = self._startup_tracker.snapshot()
         # Read once, so the state and its hint cannot disagree within one read.
-        rust_hold_stall = self._stalled_rust_hold()
-        live_indexing_state = self._derive_live_indexing_state(
-            pipeline, rust_hold_stall
+        live_indexing_state, rust_hold_stall = self._derive_live_indexing_state(
+            pipeline
         )
         status["live_indexing_state"] = live_indexing_state
         status["live_indexing_hint"] = self._derive_live_indexing_hint(
@@ -889,35 +888,39 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         return pipeline
 
     def _derive_live_indexing_state(
-        self,
-        pipeline: dict[str, Any],
-        rust_hold_stall: tuple[float, str | None] | None,
-    ) -> str:
+        self, pipeline: dict[str, Any]
+    ) -> tuple[str, tuple[float, str | None] | None]:
+        """Return the live state, and the stalled Rust hold when that is why.
+
+        The database provider is read only once the service is neither
+        degraded nor uninitialized, so those states never touch it.
+        """
         if (
             self._service_state == "degraded"
             or self._last_error is not None
             or self._last_resync_error is not None
             or self._needs_resync
         ):
-            return "degraded"
+            return "degraded", None
         if (
             self._effective_backend == "uninitialized"
             or not self.monitoring_ready.is_set()
         ):
-            return "uninitialized"
+            return "uninitialized", None
 
         # Ahead of busy and idle: a hung initial scan holds with no backlog.
+        rust_hold_stall = self._stalled_rust_hold()
         if rust_hold_stall is not None:
-            return "stalled"
+            return "stalled", rust_hold_stall
 
         if self._active_processing_count > 0:
-            return "busy"
+            return "busy", None
 
         backlog_size = (
             self.event_queue.qsize() + self.file_queue.qsize() + len(self.pending_files)
         )
         if backlog_size <= 0:
-            return "idle"
+            return "idle", None
 
         accepted_at = self._parse_status_timestamp(pipeline["last_accepted_event_at"])
         latest_progress_at = self._latest_timestamp(
@@ -937,8 +940,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 accepted_age_seconds > self._STALL_THRESHOLD_SECONDS
                 and progress_is_stale
             ):
-                return "stalled"
-        return "busy"
+                return "stalled", None
+        return "busy", None
 
     def _stalled_rust_hold(self) -> tuple[float, str | None] | None:
         """Return (idle seconds, last phase) when a Rust hold has stopped progressing.
