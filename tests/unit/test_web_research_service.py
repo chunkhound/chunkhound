@@ -137,7 +137,15 @@ async def test_web_chunks_fit_openai_embedding_limit_without_losing_text(
     )
 
     assert len(results) > 1
-    assert "".join(result["content"] for result in results) == content
+    # Exact preservation: chunks appear in order and the only text that may be
+    # missing between them is whole whitespace-only chunks (never embedded).
+    cursor = 0
+    for result in results:
+        found = content.find(result["content"], cursor)
+        assert found >= 0
+        assert not content[cursor:found].strip()
+        cursor = found + len(result["content"])
+    assert not content[cursor:].strip()
     assert len({result["symbol"] for result in results}) == len(results)
     for result in results:
         assert result["file_path"] == url
@@ -814,3 +822,33 @@ def test_large_markdown_page_is_cached_once_counted() -> None:
     provider = _TransientProvider()
     provider._store((url, ".md", text), text, _text_chunks(url, text))
     assert provider.get_transient_file_content(url) == text
+
+
+@pytest.mark.asyncio
+async def test_pdf_blank_chunks_are_not_exposed(monkeypatch) -> None:
+    from chunkhound.services import web_research_service as web
+
+    def pdf_chunk(symbol: str, code: str) -> Chunk:
+        return Chunk(
+            symbol=symbol,
+            start_line=LineNumber(1),
+            end_line=LineNumber(1),
+            code=code,
+            chunk_type=ChunkType.BLOCK,
+            file_id=FileId(0),
+            language=Language.PDF,
+        )
+
+    parsed = [
+        pdf_chunk("blank_page", " \n\t" * 10),
+        pdf_chunk("long_page", "word " * 3000 + " " * 9000 + "tail"),
+    ]
+    monkeypatch.setattr(web, "_WEB_VECTOR_CACHE", VectorCache(max_entries=0))
+    monkeypatch.setattr(web, "_parse_pdf_isolated", _fake_pdf_parser(parsed))
+
+    results = await _research_results(
+        [("https://example.invalid/a.pdf", ".pdf", b"%PDF")]
+    )
+
+    assert results
+    assert all(r["content"].strip() for r in results)

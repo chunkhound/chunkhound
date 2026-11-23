@@ -41,6 +41,9 @@ jobs:
         env:
           # Build-time contributor receipt; authenticated avoids the 60/h limit.
           GITHUB_TOKEN: ${{ github.token }}
+      - name: Record built docs version
+        shell: bash
+        run: printf '%s\n' "$CHUNKHOUND_DOCS_VERSION" > site/dist/docs-version.txt
       - name: Create .nojekyll sentinel
         run: touch site/dist/.nojekyll
       - uses: actions/upload-artifact@v4
@@ -206,6 +209,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           site: "true"
+
+      # A retried job may see newer Git tags than the original site build.
+      - name: Load built docs version
+        shell: bash
+        run: |
+          version="$(cat site/dist/docs-version.txt)"
+          test -n "$version"
+          printf 'CHUNKHOUND_DOCS_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Test collection check
         run: uv run pytest tests/site --collect-only -q --tb=no
