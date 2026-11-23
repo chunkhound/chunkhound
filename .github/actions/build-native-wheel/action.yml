@@ -26,9 +26,16 @@ description: >
 inputs:
   release-tag:
     description: >
-      Explicit requested release tag (for example v6.2.0a43). Release callers
-      must pass this; omitted input falls back to GITHUB_REF_NAME for legacy
-      callers. Non-release smoke builds may skip the version patch entirely.
+      Explicit requested release tag (for example v6.2.0b1 or v6.2.0). Mutually
+      exclusive with release-version. Omitted input falls back to GITHUB_REF_NAME
+      for legacy callers when no release-version is given.
+    required: false
+    default: ''
+  release-version:
+    description: >
+      Explicit canonical alpha version without a tag (for example 6.2.0a43),
+      used by tagless automatic alpha releases. Mutually exclusive with
+      release-tag. Non-release smoke builds may skip the version patch entirely.
     required: false
     default: ''
   out-dir:
@@ -39,8 +46,8 @@ inputs:
     description: >
       Set to "true" for non-release callers (e.g. a CI smoke build) where
       GITHUB_REF_NAME isn't a release tag. Leaving this false (the default)
-      requires a valid explicit release-tag (or legacy GITHUB_REF_NAME): a
-      malformed/missing tag crashes the build loudly instead of silently
+      requires exactly one explicit release-tag or release-version: a
+      malformed/missing selector crashes the build loudly instead of silently
       publishing the Cargo.toml placeholder version.
     required: false
     default: 'false'
@@ -88,14 +95,24 @@ runs:
       shell: bash
       env:
         REQUESTED_RELEASE_TAG: ${{ inputs.release-tag }}
+        REQUESTED_RELEASE_VERSION: ${{ inputs.release-version }}
         SKIP_TAG_VERSION_PATCH: ${{ inputs.skip-tag-version-patch }}
       run: |
         # maturin reads Cargo.toml; the shared tag helper converts PEP 440
         # to Cargo's hyphenated prerelease version before the build.
         if [[ "$SKIP_TAG_VERSION_PATCH" != "true" ]]; then
-          release_tag="${REQUESTED_RELEASE_TAG:-$GITHUB_REF_NAME}"
-          uv run --no-project --python 3.12 python scripts/release_tag.py \
-            patch-cargo --tag "$release_tag"
+          if [[ -n "$REQUESTED_RELEASE_TAG" && -n "$REQUESTED_RELEASE_VERSION" ]]; then
+            echo "Pass exactly one of release-tag or release-version" >&2
+            exit 1
+          fi
+          if [[ -n "$REQUESTED_RELEASE_VERSION" ]]; then
+            uv run --no-project --python 3.12 python scripts/release_tag.py \
+              patch-cargo --version "$REQUESTED_RELEASE_VERSION"
+          else
+            release_tag="${REQUESTED_RELEASE_TAG:-$GITHUB_REF_NAME}"
+            uv run --no-project --python 3.12 python scripts/release_tag.py \
+              patch-cargo --tag "$release_tag"
+          fi
         fi
 
     - name: Build native wheel (Linux, manylinux_2_31 container)
@@ -229,6 +246,15 @@ runs:
         # dependency instead of fixing it.
         uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
         mv pyproject.toml.hidden pyproject.toml
+
+    - name: Add source commit link to native wheel
+      shell: bash
+      run: |
+        # Native wheels are built with pyproject.toml hidden, so the hatch
+        # metadata hook never adds the "Source commit" link. Add it to the
+        # built wheel with the same helper the main package uses.
+        uv run --no-project --python 3.12 --with packaging python scripts/add_source_commit_link.py \
+          "${{ inputs.out-dir }}"/chunkhound_native-*.whl
 
     - name: Smoke test native wheel API
       shell: bash

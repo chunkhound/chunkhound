@@ -1,19 +1,30 @@
 name: Release packages
 
-# All callers pass an immutable tag and the tested commit explicitly.
-# The validated tag alone selects the publication channel.
+# Exactly one of release_tag (stable, beta, or RC; tagged alphas rejected) or
+# automatic_alpha (tagless PyPI-allocated version) is required. source_sha is
+# always the tested commit. Automatic alpha allocation, builds, validation, and
+# publication share one global concurrency lock.
 on:
   workflow_call:
     inputs:
       release_tag:
-        required: true
+        required: false
         type: string
+        default: ''
+      automatic_alpha:
+        required: false
+        type: boolean
+        default: false
       source_sha:
         required: true
         type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ inputs.automatic_alpha && 'chunkhound-automatic-alpha' || format('chunkhound-release-{0}', inputs.release_tag) }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
@@ -23,6 +34,8 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       alpha: ${{ steps.release.outputs.alpha }}
       source_sha: ${{ steps.release.outputs.source_sha }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      release_version: ${{ steps.release.outputs.release_version }}
     steps:
       - name: Checkout requested source
         uses: actions/checkout@v6
@@ -31,15 +44,53 @@ jobs:
           fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-      - name: Validate requested tag and source
+      - name: Select and validate release
         id: release
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          AUTOMATIC_ALPHA: ${{ inputs.automatic_alpha }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: >-
-          uv run --no-project python scripts/release_tag.py validate
-          --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ( -n "$RELEASE_TAG" && "$AUTOMATIC_ALPHA" == true ) || ( -z "$RELEASE_TAG" && "$AUTOMATIC_ALPHA" != true ) ]]; then
+            echo "Exactly one of release_tag or automatic_alpha is required" >&2
+            exit 1
+          fi
+          if [[ -n "$RELEASE_TAG" ]]; then
+            # Tagged alphas are prohibited: automatic alphas are the only alpha
+            # publication path, which avoids allocation races with manual tags.
+            alpha_tag='^v[0-9]+\.[0-9]+\.[0-9]+a[0-9]+$'
+            if [[ "$RELEASE_TAG" =~ $alpha_tag ]]; then
+              echo "Tagged alpha publication is prohibited: $RELEASE_TAG" >&2
+              exit 1
+            fi
+            uv run --no-project python scripts/release_tag.py validate \
+              --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
+            {
+              echo "release_tag=$RELEASE_TAG"
+              echo "release_version="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Retain an in-lock current-main check for visibility, but do not
+          # skip: the pre-queue caller check is the supersession gate, and an
+          # admitted tested snapshot always publishes even if main moves.
+          # Informational only: a transient network failure must not abort the release.
+          main_sha="$(git ls-remote "https://github.com/$REPOSITORY.git" refs/heads/main | awk '{print $1}' || true)"
+          if [[ "$main_sha" != "$SOURCE_SHA" ]]; then
+            echo "Main advanced after this tested snapshot entered the release lock; publishing $SOURCE_SHA (main is $main_sha)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          allocated="$(env -u GITHUB_OUTPUT uv run --no-project --with packaging python scripts/next_alpha_version.py)"
+          version="${allocated#version=}"
+          uv run --no-project python scripts/release_tag.py validate \
+            --version "$version" --source-sha "$SOURCE_SHA"
+          {
+            echo "release_tag="
+            echo "release_version=$version"
+          } >> "$GITHUB_OUTPUT"
 
   build-sdist:
     needs: prepare
@@ -126,7 +177,8 @@ jobs:
       - name: Build native wheel
         uses: ./.github/actions/build-native-wheel
         with:
-          release-tag: ${{ inputs.release_tag }}
+          release-tag: ${{ needs.prepare.outputs.release_tag }}
+          release-version: ${{ needs.prepare.outputs.release_version }}
 
       - name: Upload native wheel artifact
         uses: actions/upload-artifact@v4
@@ -192,7 +244,8 @@ jobs:
         uses: astral-sh/setup-uv@v3
       - name: Validate all versions and rebuild final sdist
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
           ALPHA_RELEASE: ${{ needs.prepare.outputs.alpha }}
         run: >-
           uv run --no-project --python 3.12 --with packaging
@@ -222,12 +275,17 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-          skip-existing: true
+          # Tagged releases keep skip-existing; tagless automatic alphas never
+          # reuse a version, so an existing file must fail the publish.
+          skip-existing: ${{ needs.prepare.outputs.release_tag != '' }}
           # Attestations name the caller workflow, but PyPI trusts this reusable
           # workflow. Disable them until PyPI supports that identity mismatch.
           attestations: false
 
   publish-native:
+    # Once a tested snapshot enters this serialized workflow, publish it even if
+    # main moves while its artifacts are building. A later tested snapshot waits
+    # for the lock and receives the next alpha serial.
     needs: [prepare, build-native-wheel, validate-release, validate-artifacts]
     runs-on: ubuntu-latest
     # Separate environment so this job carries an OIDC token scoped to the
@@ -260,7 +318,8 @@ jobs:
 
       - name: Validate native wheel versions
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
         run: uv run --no-project python scripts/validate_native_wheel_versions.py
 
       - name: Publish chunkhound-native to PyPI
@@ -268,7 +327,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-native
-          skip-existing: true
+          skip-existing: ${{ needs.prepare.outputs.release_tag != '' }}
           # Same caller/reusable-workflow attestation mismatch as the main package.
           attestations: false
 
@@ -279,10 +338,10 @@ jobs:
         if: failure()
         uses: ./.github/actions/alert-native-publish-failure
         with:
-          tag: ${{ inputs.release_tag }}
+          version-or-tag: ${{ needs.prepare.outputs.release_tag || needs.prepare.outputs.release_version }}
 
   alert-native-prepublish-failure:
-    needs: [build-native-wheel, validate-release, validate-artifacts]
+    needs: [prepare, build-native-wheel, validate-release, validate-artifacts]
     if: ${{ always() && (needs['build-native-wheel'].result == 'failure' || needs['validate-release'].result == 'failure' || needs['validate-artifacts'].result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -299,4 +358,4 @@ jobs:
       - name: Alert on native build or validation failure
         uses: ./.github/actions/alert-native-publish-failure
         with:
-          tag: ${{ inputs.release_tag }}
+          version-or-tag: ${{ needs.prepare.outputs.release_tag || needs.prepare.outputs.release_version }}

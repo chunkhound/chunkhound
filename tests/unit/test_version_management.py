@@ -2,11 +2,8 @@
 """Tests for version management utilities."""
 
 import pytest
-from scripts.update_version import (
-    validate_version,
-    parse_version,
-    bump_version,
-)
+
+from scripts.update_version import bump_version, parse_version, validate_version
 
 
 class TestValidateVersion:
@@ -19,14 +16,18 @@ class TestValidateVersion:
         validate_version("99.99.99")
 
     def test_canonical_prereleases(self):
-        """Canonical pre-release formats should pass."""
-        validate_version("4.1.0a1")
+        """Canonical tagged pre-release formats should pass."""
         validate_version("4.1.0b2")
         validate_version("4.1.0rc3")
 
+    def test_alpha_versions_are_ci_owned(self):
+        """Automatic alpha versions must never be created as Git tags."""
+        for version in ("4.1.0a1", "4.1.0alpha1"):
+            with pytest.raises(ValueError, match="automatic"):
+                validate_version(version)
+
     def test_alternative_spellings(self):
-        """Alternative pre-release spellings should pass."""
-        validate_version("4.1.0alpha1")
+        """Alternative tagged pre-release spellings should pass."""
         validate_version("4.1.0beta2")
         validate_version("4.1.0c1")  # Alternative to rc
         validate_version("4.1.0preview1")
@@ -105,10 +106,13 @@ class TestBumpVersion:
         assert bump_version("1.0.0", "patch") == "1.0.1"
 
     def test_bump_with_prerelease(self):
-        """Bump with pre-release suffix."""
+        """Bump with a tagged pre-release suffix."""
         assert bump_version("4.0.1", "minor", "b1") == "4.1.0b1"
         assert bump_version("4.0.1", "major", "rc1") == "5.0.0rc1"
-        assert bump_version("4.0.1", "patch", "a1") == "4.0.2a1"
+
+    def test_bump_rejects_ci_owned_alpha(self):
+        with pytest.raises(ValueError, match="automatic"):
+            bump_version("4.0.1", "patch", "a1")
 
     def test_bump_removes_existing_prerelease(self):
         """Bumping a pre-release removes the suffix unless new one provided."""
