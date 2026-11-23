@@ -328,7 +328,8 @@ def test_release_workflows_keep_native_first_and_isolate_alpha_approvals():
     assert "--with packaging" in prepare["run"]
     assert "--core" not in prepare["run"]
     assert "main advanced after this tested snapshot" in prepare["run"].lower()
-    assert 'echo "proceed=false"' not in prepare["run"]
+    assert "proceed" not in prepare["run"]
+    assert "|| true)" in prepare["run"]
     assert "Tagged alpha publication is prohibited" in prepare["run"]
     tag_gate = prerelease["jobs"]["validate-tag"]["steps"][-1]
     assert "scripts/release_tag.py validate" in tag_gate["run"]

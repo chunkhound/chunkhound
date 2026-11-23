@@ -31,7 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      proceed: ${{ steps.release.outputs.proceed }}
       version: ${{ steps.release.outputs.version }}
       alpha: ${{ steps.release.outputs.alpha }}
       source_sha: ${{ steps.release.outputs.source_sha }}
@@ -70,7 +69,6 @@ jobs:
             uv run --no-project python scripts/release_tag.py validate \
               --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
             {
-              echo "proceed=true"
               echo "release_tag=$RELEASE_TAG"
               echo "release_version="
             } >> "$GITHUB_OUTPUT"
@@ -80,7 +78,8 @@ jobs:
           # Retain an in-lock current-main check for visibility, but do not
           # skip: the pre-queue caller check is the supersession gate, and an
           # admitted tested snapshot always publishes even if main moves.
-          main_sha="$(git ls-remote "https://github.com/$REPOSITORY.git" refs/heads/main | awk '{print $1}')"
+          # Informational only: a transient network failure must not abort the release.
+          main_sha="$(git ls-remote "https://github.com/$REPOSITORY.git" refs/heads/main | awk '{print $1}' || true)"
           if [[ "$main_sha" != "$SOURCE_SHA" ]]; then
             echo "Main advanced after this tested snapshot entered the release lock; publishing $SOURCE_SHA (main is $main_sha)." >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -89,15 +88,12 @@ jobs:
           uv run --no-project python scripts/release_tag.py validate \
             --version "$version" --source-sha "$SOURCE_SHA"
           {
-            echo "proceed=true"
             echo "release_tag="
             echo "release_version=$version"
           } >> "$GITHUB_OUTPUT"
 
   build-sdist:
     needs: prepare
-    # Superseded automatic alphas skip here; every dependent job skips with it.
-    if: needs.prepare.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -127,7 +123,6 @@ jobs:
 
   build-runtime-wheels:
     needs: prepare
-    if: needs.prepare.outputs.proceed == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -162,7 +157,6 @@ jobs:
 
   build-native-wheel:
     needs: prepare
-    if: needs.prepare.outputs.proceed == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
