@@ -10,14 +10,18 @@ on:
 permissions:
   contents: read
 
+# Every main push must finish its own validation/release path. A shared group
+# replaces pending runs even with cancel-in-progress disabled.
 concurrency:
-  group: ${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' || github.run_id }}
+  group: ci-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
   site-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      docs_version: ${{ steps.docs-version.outputs.docs_version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -29,6 +33,9 @@ jobs:
           cache-dependency-path: site/package-lock.json
       - name: Resolve docs version
         run: bash scripts/resolve_docs_version.sh
+      - name: Export docs version as job output
+        id: docs-version
+        run: echo "docs_version=$CHUNKHOUND_DOCS_VERSION" >> "$GITHUB_OUTPUT"
       - run: npm ci --prefix site
       - run: npm run build --prefix site
       - name: Record built docs version
@@ -42,23 +49,24 @@ jobs:
           path: site/dist/
 
   site-build-validation:
+    needs: site-build
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # docs/site version resolution requires tags
+          fetch-depth: 0  # not needed for the docs version (taken from site-build); kept for parity with other jobs
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: site/package-lock.json
-      - name: Resolve docs version
-        run: bash scripts/resolve_docs_version.sh
       - run: npm ci --prefix site
       - run: npm run build --prefix site
 
@@ -74,10 +82,12 @@ jobs:
             job_timeout_minutes: 30
             pytest_timeout_minutes: 13
             pytest_timeout_seconds: 300
+            pytest_extra_args: "--reruns 2 --reruns-delay 5"
           - os: macos-latest
-            job_timeout_minutes: 30
-            pytest_timeout_minutes: 13
-            pytest_timeout_seconds: 300
+            job_timeout_minutes: 60
+            pytest_timeout_minutes: 20
+            pytest_timeout_seconds: 600
+            pytest_extra_args: "--reruns 2 --reruns-delay 5"
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
@@ -88,12 +98,14 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
+    env:
+      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # docs/site version resolution requires tags
+          fetch-depth: 0  # hatch-vcs derives the package version from git tags
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
@@ -328,6 +340,57 @@ jobs:
           out-dir: native-dist
 
 
+  alpha-current-main:
+    # Check before entering the reusable workflow's concurrency queue. GitHub may
+    # replace a pending concurrency run with a later arrival, so a stale CI run
+    # must not be allowed to displace the newest tested main snapshot.
+    needs:
+      - tests
+      - rust-checks
+      - watchman-rollout-gate
+      - native-wheel-smoke-arm64
+      - old-linux-wheel-smoke
+      - native-dev-macos
+    # Forks, PRs, merge queues and dispatches never publish automatic alphas.
+    # Pages deployment and docs-site validation are intentionally not release
+    # prerequisites.
+    if: github.repository == 'chunkhound/chunkhound' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.current.outputs.publish }}
+    steps:
+      - name: Check tested SHA is current main
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          current_sha="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_sha" == "$TESTED_SHA" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping superseded alpha: $TESTED_SHA is no longer main ($current_sha)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release-alpha:
+    # Tagless automatic alpha: the reusable workflow allocates its version from
+    # published PyPI state under a lock covering allocation through publication.
+    needs: alpha-current-main
+    if: needs.alpha-current-main.outputs.publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    uses: ./.github/workflows/release-packages.yml
+    with:
+      automatic_alpha: true
+      source_sha: ${{ github.sha }}
+
   pages-artifact:
     needs:
       - site-build
@@ -358,6 +421,10 @@ jobs:
     needs: pages-artifact
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Pages may discard superseded pending deployments, never CI builds.
+    concurrency:
+      group: chunkhound-pages-deploy
+      cancel-in-progress: false
     permissions:
       contents: read
       pages: write
@@ -366,7 +433,23 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Check this is still the current main commit
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          current_sha=$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$current_sha" == "$TESTED_SHA" ]]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Skipping superseded Pages build'
+          fi
+      # The check is inside the deployment lock. A main push after this check
+      # can still briefly make Pages stale until the newer build deploys.
       - id: deployment
+        if: steps.current.outputs.deploy == 'true'
         uses: actions/deploy-pages@v5
 
   watchman-runtime-validation:

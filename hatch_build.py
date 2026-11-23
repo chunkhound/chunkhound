@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from platform import machine as current_machine
 from platform import system as current_system
 
 from packaging import tags
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
@@ -18,8 +25,13 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 build env
 
 try:
     from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+    from hatchling.metadata.plugin.interface import MetadataHookInterface
 except ModuleNotFoundError:  # pragma: no cover - local test env without hatchling
+
     class BuildHookInterface:
+        pass
+
+    class MetadataHookInterface:
         pass
 
 
@@ -34,6 +46,73 @@ _SYSTEM_ALIASES = {
     "darwin": "macos",
 }
 _PACKAGED_RUNTIME_BUILD_ENV = "CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME"
+_ALPHA_RELEASE_BUILD_ENV = "CHUNKHOUND_BUILD_ALPHA_RELEASE"
+
+
+def _alpha_native_requirement(version: str) -> str:
+    parsed = Version(version)
+    if (
+        parsed.pre is None
+        or parsed.pre[0] != "a"
+        or parsed.dev is not None
+        or parsed.local
+    ):
+        raise RuntimeError("Alpha release builds require an alpha release version")
+    return f"chunkhound-native=={version}"
+
+
+_SOURCE_COMMIT_URL_LABEL = "Source commit"
+_REPOSITORY_URL = "https://github.com/chunkhound/chunkhound"
+
+
+def _source_commit(root: Path) -> str | None:
+    """Return the checked-out commit SHA, or None outside a git checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    sha = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return None
+    return sha
+
+
+def _add_source_commit_url(metadata: dict, root: Path) -> None:
+    """Link the package page to the exact commit the wheel was built from."""
+    sha = _source_commit(root)
+    if sha is None:
+        return
+    urls = metadata.setdefault("urls", {})
+    urls[_SOURCE_COMMIT_URL_LABEL] = f"{_REPOSITORY_URL}/commit/{sha}"
+
+
+class CustomMetadataHook(MetadataHookInterface):
+    """Keep stable dependencies, pairing alpha releases with their native build."""
+
+    PLUGIN_NAME = "custom"
+
+    def update(self, metadata: dict) -> None:
+        _add_source_commit_url(metadata, _REPO_ROOT)
+        dependencies = list(self.config["dependencies"])
+        if os.environ.get(_ALPHA_RELEASE_BUILD_ENV) == "1":
+            pin = _alpha_native_requirement(metadata["version"])
+            native = [
+                index
+                for index, value in enumerate(dependencies)
+                if canonicalize_name(Requirement(value).name) == "chunkhound-native"
+            ]
+            if len(native) != 1:
+                raise RuntimeError(
+                    "Exactly one chunkhound-native dependency is required"
+                )
+            dependencies[native[0]] = pin
+        metadata["dependencies"] = dependencies
 
 
 def _hydrate_runtime_for_build() -> dict[str, str]:
@@ -169,11 +248,39 @@ def _platform_only_tag(allowed_platform_tags: set[str] | None = None) -> str:
 
 
 class CustomBuildHook(BuildHookInterface):
-    """Force platform-specific wheel tags for Watchman-carrying artifacts."""
+    """Persist alpha sdist pins and tag Watchman-carrying wheels by platform."""
 
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
+        if getattr(self, "target_name", None) == "sdist":
+            if os.environ.get(_ALPHA_RELEASE_BUILD_ENV) == "1":
+                # Change only the archived config, never the checkout. This makes
+                # source rebuilds independent of CI flags (even without PKG-INFO).
+                pin = _alpha_native_requirement(self.metadata.version)
+                source = _PYPROJECT_PATH.read_text(encoding="utf-8")
+                dependencies = self.metadata.hatch.metadata.hooks["custom"].config[
+                    "dependencies"
+                ]
+                native = [
+                    value
+                    for value in dependencies
+                    if canonicalize_name(Requirement(value).name) == "chunkhound-native"
+                ]
+                if len(native) != 1 or source.count(json.dumps(native[0])) != 1:
+                    raise RuntimeError("Cannot persist the alpha native dependency pin")
+                source = source.replace(json.dumps(native[0]), json.dumps(pin))
+                self._alpha_sdist_directory = tempfile.TemporaryDirectory(
+                    prefix="chunkhound-alpha-sdist-"
+                )
+                config_path = Path(self._alpha_sdist_directory.name) / "pyproject.toml"
+                config_path.write_text(source, encoding="utf-8")
+                force_include = build_data["force_include"]
+                for path, destination in list(force_include.items()):
+                    if destination == "pyproject.toml":
+                        del force_include[path]
+                force_include[str(config_path)] = "pyproject.toml"
+            return
         if _should_skip_native_runtime_for_build_version(version):
             return
         if not _should_build_packaged_runtime(version):
@@ -191,3 +298,10 @@ class CustomBuildHook(BuildHookInterface):
         force_include.update(_hydrate_runtime_for_build())
         build_data["pure_python"] = False
         build_data["tag"] = _platform_only_tag(allowed_platform_tags)
+
+    def finalize(
+        self, version: str, build_data: dict[str, object], artifact_path: str
+    ) -> None:
+        directory = getattr(self, "_alpha_sdist_directory", None)
+        if directory is not None:
+            directory.cleanup()

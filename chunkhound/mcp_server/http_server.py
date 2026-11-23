@@ -1,9 +1,10 @@
 """HTTP MCP server implementation using the base class pattern.
 
 This module implements the Streamable HTTP transport for MCP, built on top
-of the official MCP SDK's ``StreamableHTTPSessionManager``. It shares tool
-dispatch and service lifecycle management with the stdio transport via
-``MCPServerBase``.
+of the official MCP SDK's ``StreamableHTTPSessionManager`` (obtained from
+``MCPServerBase.build_streamable_http_app()``, so this module imports no
+``mcp`` symbols directly). It shares tool dispatch and service lifecycle
+management with the stdio transport via ``MCPServerBase``.
 
 NOTE: Unlike stdio.py, this module intentionally does NOT silence Python
 logging or loguru. Stdio needs silence because log output on stdout would
@@ -29,11 +30,6 @@ from chunkhound.core.config.config import Config
 from .base import _MCP_AVAILABLE, MCPServerBase
 from .status import derive_daemon_status
 
-if _MCP_AVAILABLE:
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-else:  # pragma: no cover - optional dependency path
-    StreamableHTTPSessionManager = None  # type: ignore[assignment,misc]
-
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
     from starlette.applications import Starlette
     from starlette.types import Receive, Scope, Send
@@ -47,7 +43,7 @@ class _StreamableHttpEndpoint:
     Wrapping it in a plain callable object keeps Route's raw-ASGI dispatch.
     Also: unlike ``Mount``, which only matches ``/mcp/*`` and 307-redirects
     a bare ``/mcp`` to ``/mcp/``, ``Route`` matches the exact ``/mcp`` path
-    that MCP clients (and the issue's own curl example) are configured with.
+    that MCP clients are configured with.
 
     Session teardown: this class is a plain callable (not a function/method),
     so Starlette's ``Route`` never restricts it to specific HTTP methods —
@@ -137,13 +133,9 @@ class HttpMCPServer(MCPServerBase):
         self.auth_token: str | None = config.mcp.auth_token
         self.cors: bool = config.mcp.cors
 
-        if _MCP_AVAILABLE:
-            self._session_manager = StreamableHTTPSessionManager(
-                app=self.server,  # type: ignore[arg-type]
-                stateless=False,
-            )
-        else:
-            self._session_manager = None  # type: ignore[assignment]
+        self._session_manager = (
+            self.build_streamable_http_app(stateless=False) if _MCP_AVAILABLE else None
+        )
 
     def _register_tools(self) -> None:
         """Register tool handlers with the HTTP server."""
@@ -156,11 +148,8 @@ class HttpMCPServer(MCPServerBase):
         from starlette.routing import Route
 
         async def health(request: Any) -> JSONResponse:
-            # Deliberately unauthenticated (see _BearerAuthMiddleware) so
-            # load balancers/readiness probes can reach it without a token.
-            # derive_daemon_status can include scan_error/last_error text
-            # (e.g. file paths from a failed scan) — an accepted tradeoff
-            # for operational visibility, not an oversight.
+            # Unauthenticated so probes/load balancers can reach it (see
+            # _BearerAuthMiddleware). May include scan_error/last_error text.
             return JSONResponse(derive_daemon_status(self._current_scan_progress()))
 
         from starlette.middleware import Middleware
@@ -208,6 +197,10 @@ class HttpMCPServer(MCPServerBase):
             self._initialization_complete.set()
             self.debug_log("HTTP server initialization complete")
 
+            # Only None when _MCP_AVAILABLE is False, in which case run()
+            # raises before _lifespan is reached (see run() below), so this
+            # assertion documents an invariant rather than guarding input.
+            assert self._session_manager is not None
             async with self._session_manager.run():
                 yield
         finally:

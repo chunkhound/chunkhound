@@ -970,13 +970,7 @@ class WatchmanRealtimeAdapter:
     def _schedule_resync_request(
         self, reason: str, details: dict[str, object] | None = None
     ) -> None:
-        async def _dispatch() -> None:
-            try:
-                await self._context.request_resync("realtime_loss_of_sync", details)
-            except Exception as error:
-                self._context.set_error(f"Watchman resync request failed: {error}")
-
-        self._context.start_transient_task(_dispatch())
+        self._context.schedule_loss_of_sync_resync("Watchman", details)
 
     async def _request_post_restore_resync(self) -> None:
         details = {
