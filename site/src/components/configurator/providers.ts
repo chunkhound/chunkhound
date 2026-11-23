@@ -22,6 +22,7 @@ import {
   REQUESTY_SVG,
   RUNCRATE_SVG,
   UBERLLM_SVG,
+  AIGROW_SVG,
   VERCEL_SVG,
   VLLM_SVG,
   VOYAGEAI_SVG,
@@ -394,6 +395,18 @@ export const llmProviders: ConfiguratorProviderOption[] = [
     group: "cloud",
     requirements: [requirements.uberllmApiKey],
     recommendation: `<strong>DeepSeek V4.1 Flash</strong> (<code>${RESEARCH_MODEL}</code>) — the OpenAI-compatible route through UberLLM.`,
+  },
+  {
+    id: "aigrow",
+    name: "AIGROW",
+    svg: AIGROW_SVG,
+    description: "Recommended model: Claude Haiku 5.5",
+    config: { provider: "aigrow", model: "claude-haiku-5.5" },
+    apiKeyPlaceholder: "<YOUR_AIGROW_API_KEY>",
+    group: "cloud",
+    requirements: [requirements.aigrowApiKey],
+    recommendation:
+      "<strong>Claude Haiku 5.5</strong> — the OpenAI-compatible route through AIGROW.",
   },
   {
     id: "anthropic",

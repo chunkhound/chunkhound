@@ -878,6 +878,70 @@ def test_api_route_config_passes_research_validation(
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_opper_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "opper")
+
+    assert config["provider"] == "opper"
+    assert config["model"] == "claude-sonnet-5"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_obscurify_ai_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "obscurify-ai")
+
+    assert config["provider"] == "obscurify-ai"
+    assert config["model"] == "deepseek/deepseek-v4-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_atlascloud_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "atlascloud")
+
+    assert config["provider"] == "atlascloud"
+    assert config["model"] == "deepseek-ai/deepseek-v4-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_runcrate_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "runcrate")
+
+    assert config["provider"] == "runcrate"
+    assert config["model"] == "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_cheapaimodel_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "cheapaimodel")
+
+    assert config["provider"] == "cheapaimodel"
+    assert config["model"] == "deepseek-v4-1-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_uberllm_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "uberllm")
+
+    assert config["provider"] == "uberllm"
+    assert config["model"] == "deepseek/deepseek-v4.1-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_aigrow_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "aigrow")
+
+    assert config["provider"] == "aigrow"
+    assert config["model"] == "claude-haiku-5.5"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_gemini_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "gemini")
+
+    assert config["provider"] == "gemini"
+    assert config["model"] == "gemini-3.5-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_deepseek_config_passes_research_validation(
     tmp_path, clean_environment
 ) -> None:
@@ -1096,6 +1160,7 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
         "runcrate": "deepseek-ai/DeepSeek-V4.1-Flash",
         "cheapaimodel": "deepseek-v4-1-flash",
         "uberllm": "deepseek/deepseek-v4.1-flash",
+        "aigrow": "claude-haiku-5.5",
         "ollama-llm": "qwen3-coder:30b",
         "vllm-llm": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         "opencode-cli": "opencode/deepseek-v4.1-flash",

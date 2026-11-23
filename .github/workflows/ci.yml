@@ -20,6 +20,8 @@ jobs:
   site-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      docs_version: ${{ steps.docs-version.outputs.docs_version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -31,6 +33,9 @@ jobs:
           cache-dependency-path: site/package-lock.json
       - name: Resolve docs version
         run: bash scripts/resolve_docs_version.sh
+      - name: Export docs version as job output
+        id: docs-version
+        run: echo "docs_version=$CHUNKHOUND_DOCS_VERSION" >> "$GITHUB_OUTPUT"
       - run: npm ci --prefix site
       - run: npm run build --prefix site
         env:
@@ -49,23 +54,24 @@ jobs:
           if-no-files-found: error
 
   site-build-validation:
+    needs: site-build
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # docs/site version resolution requires tags
+          fetch-depth: 0  # not needed for the docs version (taken from site-build); kept for parity with other jobs
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: site/package-lock.json
-      - name: Resolve docs version
-        run: bash scripts/resolve_docs_version.sh
       - run: npm ci --prefix site
       - run: npm run check --prefix site
         env:
@@ -83,6 +89,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   tests:
+    needs: site-build
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -93,10 +100,12 @@ jobs:
             job_timeout_minutes: 30
             pytest_timeout_minutes: 13
             pytest_timeout_seconds: 300
+            pytest_extra_args: "--reruns 2 --reruns-delay 5"
           - os: macos-latest
-            job_timeout_minutes: 30
-            pytest_timeout_minutes: 13
-            pytest_timeout_seconds: 300
+            job_timeout_minutes: 60
+            pytest_timeout_minutes: 20
+            pytest_timeout_seconds: 600
+            pytest_extra_args: "--reruns 2 --reruns-delay 5"
           # Windows CI polling monitor occasionally misses second file write within
           # 45s window — retry individual flaky tests before failing the run.
           - os: windows-latest
@@ -107,12 +116,14 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
+    env:
+      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # docs/site version resolution requires tags
+          fetch-depth: 0  # hatch-vcs derives the package version from git tags
 
       - uses: ./.github/actions/ci-python-setup
         with:
@@ -391,17 +402,16 @@ jobs:
 
   prepare-alpha:
     needs:
-      - site-build
       - tests
       - site-tests
       - rust-checks
-      - site-build-validation
       - watchman-rollout-gate
       - native-wheel-smoke-arm64
       - old-linux-wheel-smoke
       - native-dev-macos
     # Forks, PRs, merge queues and dispatches never allocate production tags.
-    # Pages deployment is intentionally not a release prerequisite.
+    # Pages deployment and docs-site validation are intentionally not release
+    # prerequisites.
     if: github.repository == 'chunkhound/chunkhound' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10

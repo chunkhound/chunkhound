@@ -1,6 +1,7 @@
 import type { ConfiguratorRequirement } from "./types.ts";
 import { backendAuthUrl } from "./catalog.ts";
 import {
+  AIGROW_SVG,
   ANTHROPIC_SVG,
   API_ROUTE_SVG,
   ATLASCLOUD_SVG,
@@ -260,5 +261,11 @@ export const requirements = {
     label: "UberLLM API key",
     provider: "uberllm",
     svg: UBERLLM_SVG,
+  }),
+  aigrowApiKey: apiKeyRequirement({
+    id: "aigrow-api-key",
+    label: "AIGROW API key",
+    provider: "aigrow",
+    svg: AIGROW_SVG,
   }),
 } satisfies Record<string, ConfiguratorRequirement>;

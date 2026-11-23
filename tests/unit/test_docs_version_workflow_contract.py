@@ -171,19 +171,6 @@ def _setup_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
-def _resolver_anchor_index(job: dict[str, Any]) -> int:
-    """Job-level step index at which docs version resolution happens."""
-    steps = cast(list[dict[str, Any]], job["steps"])
-    for index, step in enumerate(steps):
-        if step.get("run") == RESOLVER_RUN:
-            return index
-    return _find_step_index(
-        steps,
-        "ci-python-setup composite action step",
-        lambda step: step.get("uses") == CI_PYTHON_SETUP_USES,
-    )
-
-
 def _assert_checkout_uses_full_history(steps: list[dict]) -> None:
     checkout_index = _find_step_index(
         steps,
@@ -420,79 +407,47 @@ class TestDocsVersionWorkflowContract:
             (".github/workflows/ci.yml", "site-tests"),
         ],
     )
-    def test_docs_build_jobs_use_shared_resolver_script(
-        self, path: str, job_name: str
-    ) -> None:
-        steps = _setup_steps(_job(path, job_name))
-        resolve_index = _find_step_index(
-            steps,
-            "shared docs version resolver step",
-            lambda step: step.get("run") == RESOLVER_RUN,
-        )
-
-        assert steps[resolve_index]["run"] == RESOLVER_RUN
-
-    @pytest.mark.parametrize(
-        ("path", "job_name"),
-        [
-            (".github/workflows/ci.yml", "site-build"),
-            (".github/workflows/ci.yml", "site-build-validation"),
-            (".github/workflows/ci.yml", "tests"),
-            (".github/workflows/ci.yml", "site-tests"),
-        ],
-    )
     def test_docs_build_jobs_checkout_with_full_history(
         self, path: str, job_name: str
     ) -> None:
         _assert_checkout_uses_full_history(_job_steps(path, job_name))
 
-    @pytest.mark.parametrize(
-        ("job_name", "consumer_description", "consumer_predicate"),
-        [
-            (
-                "site-build",
-                "site build step",
-                lambda step: step.get("run") == "npm run build --prefix site",
-            ),
-            (
-                "site-build-validation",
-                "site build step",
-                lambda step: step.get("run") == "npm run build --prefix site",
-            ),
-            (
-                "tests",
-                "retry-backed test runner step",
-                lambda step: step.get("id") == "tests"
-                and str(step.get("uses", "")).startswith("nick-fields/retry@"),
-            ),
-            (
-                "site-tests",
-                "retry-backed site test runner step",
-                lambda step: step.get("id") == "site-tests"
-                and str(step.get("uses", "")).startswith("nick-fields/retry@"),
-            ),
-        ],
-    )
-    def test_docs_version_is_resolved_before_consumer_steps(
-        self,
-        job_name: str,
-        consumer_description: str,
-        consumer_predicate: Callable[[dict], bool],
+    def test_site_build_resolves_docs_version_once_and_exports_it(self) -> None:
+        job = _job(".github/workflows/ci.yml", "site-build")
+        steps = cast(list[dict[str, Any]], job["steps"])
+        resolve_index = _find_step_index(
+            steps,
+            "shared docs version resolver step",
+            lambda step: step.get("run") == "bash scripts/resolve_docs_version.sh",
+        )
+        export_index = _find_step_index(
+            steps,
+            "docs version job-output export step",
+            lambda step: step.get("id") == "docs-version",
+        )
+
+        assert resolve_index < export_index
+        assert job["outputs"]["docs_version"] == (
+            "${{ steps.docs-version.outputs.docs_version }}"
+        )
+
+    @pytest.mark.parametrize("job_name", ["site-build-validation", "tests"])
+    def test_consumer_jobs_use_site_build_docs_version_output(
+        self, job_name: str
     ) -> None:
         job = _job(".github/workflows/ci.yml", job_name)
-        resolve_index = _resolver_anchor_index(job)
-        consumer_index = _find_step_index(
-            cast("list[dict[str, Any]]", job["steps"]),
-            consumer_description,
-            consumer_predicate,
-        )
 
-        assert resolve_index < consumer_index
+        assert job["needs"] in ("site-build", ["site-build"])
+        assert job["env"]["CHUNKHOUND_DOCS_VERSION"] == (
+            "${{ needs.site-build.outputs.docs_version }}"
+        )
+        assert all(
+            step.get("run") != "bash scripts/resolve_docs_version.sh"
+            for step in cast(list[dict[str, Any]], job["steps"])
+        )
 
     def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
-        contents = (ROOT / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
-        )
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
@@ -552,9 +507,7 @@ class TestDocsVersionWorkflowContract:
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(
             list[dict[str, Any]],
-            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
-                "include"
-            ],
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"]["include"],
         )
 
         assert all("pytest_timeout_minutes" in entry for entry in matrix)

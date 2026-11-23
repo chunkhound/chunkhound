@@ -1,6 +1,12 @@
 {
   "llm": [
     {
+      "id": "aigrow",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://aigrow.gg/dashboard/api"
+    },
+    {
       "id": "anthropic",
       "requiresModel": false,
       "customEndpointRequiresModel": false,
