@@ -268,3 +268,22 @@ async def test_mcp_resolver_uses_the_real_range_for_last_n_commits(merge_repo: P
         "f2.py",
         "m3.py",
     }
+
+
+async def test_mcp_resolver_finds_repo_root_from_db_in_subdirectory(
+    merge_repo: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch
+):
+    # The DB can live below the repo root (--db flows). The repo must be found
+    # by walking up from the DB path, not from the process cwd.
+    from types import SimpleNamespace
+
+    from chunkhound.mcp_server.tools import _resolve_commit_range
+
+    db_dir = merge_repo / "data" / "index"
+    db_dir.mkdir(parents=True)
+    services = SimpleNamespace(provider=SimpleNamespace(db_path=db_dir / "db"))
+    monkeypatch.chdir(tmp_path_factory.mktemp("unrelated_cwd"))
+
+    commit_range = await _resolve_commit_range(None, None, 5, services)  # type: ignore[arg-type]
+
+    assert commit_range == await resolve_last_n_commits_range(5, merge_repo)
