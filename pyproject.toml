@@ -133,8 +133,7 @@ dependencies = [
     # 6.1.0 is the first release with AnalyticsRecorder, which
     # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
     # command; an older native satisfies a lower bound and then fails there.
-    # 6.2.0 adds llama.cpp context-length detection to the Rust embedding path.
-    "chunkhound-native>=6.2.0",
+    "chunkhound-native>=6.1.0",
 ]
 
 [project.optional-dependencies]

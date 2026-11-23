@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single-threaded OpenBLAS by default** — NumPy's OpenBLAS runs single-threaded unless you set its thread count yourself, so it no longer competes with ChunkHound's own workers.
 - **Quieter realtime status** — Status updates for filtered file events are published at most twice a second.
 - **`last_n_commits` means N commits** — Git-history search now takes the last N commits instead of N first-parent commits.
-- **Native dependency floor raised** — ChunkHound now requires `chunkhound-native` 6.2.0 or later, so the Rust embedding path also splits and retries texts that llama.cpp rejects as too long.
+- **Native dependency floor raised** — ChunkHound now requires `chunkhound-native` 6.1.0 or later, the first release with the analytics recorder.
 
 ### Fixed
 - **Windows on Python 3.12: parse workers no longer die at start-up under load** — On Python 3.12 (and 3.13 before 3.13.4), a WMI query that the standard library's `platform` module made while a parse worker started could close one of the worker's handles under CPU load (CPython gh-130727). The worker then failed with `[WinError 6] The handle is invalid` or stalled the pool, and the initial scan failed or never finished. On those Python versions ChunkHound now keeps `platform` on its non-WMI fallback, which reports the same values.
