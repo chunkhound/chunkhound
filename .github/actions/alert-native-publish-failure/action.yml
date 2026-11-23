@@ -39,5 +39,5 @@ runs:
 
         Next steps:
         - For tagged releases, re-run the native publish job if the failure looks transient; already-uploaded files are skipped.
-        - For automatic alpha releases, do not retry publication of the same version after a partial upload. Re-run the full workflow to allocate a fresh version.
-        - After native publication succeeds, re-run the main publish job."
+        - For automatic alpha releases, retry the failed native publish job only if no native files reached PyPI. After a partial native upload, use Re-run all jobs on the current main CI run to allocate a fresh version.
+        - After native publication succeeds, tagged releases can retry the main publish job. For alphas, retry it only if no main files reached PyPI; after a partial main upload, use Re-run all jobs on the current main CI run to allocate a fresh version."

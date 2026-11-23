@@ -49,6 +49,34 @@ def test_alpha_line_follows_latest_chunkhound_and_counts_both_packages(
     assert run({"chunkhound": main, "chunkhound-native": native}) == expected
 
 
+@pytest.mark.parametrize(
+    ("main", "native", "expected"),
+    [
+        (["6.1.0"], ["6.2a2"], "6.2.0a3"),
+        (["6.2.0a1"], ["6.2a2"], "6.2.0a3"),
+        (["6.2.0a1"], ["6.2.0.0a7"], "6.2.0a8"),
+        (["6.2a3"], ["6.2.0a5"], "6.2.0a6"),
+        (["6.2.0.0a3"], ["6.2a5"], "6.2.0a6"),
+    ],
+)
+def test_equivalent_pep440_cores_share_alpha_serials(main, native, expected):
+    assert run({"chunkhound": main, "chunkhound-native": native}) == expected
+
+
+@pytest.mark.parametrize("main", ["6.1.0", "6.2.0a1"])
+@pytest.mark.parametrize("native", ["6.2b1", "6.2.0.0rc1", "6.2"])
+def test_non_alpha_on_equivalent_pep440_core_blocks_allocation(main, native):
+    with pytest.raises(ValueError, match="non-alpha release of 6.2.0"):
+        run({"chunkhound": [main], "chunkhound-native": [native]})
+
+
+def test_different_epoch_does_not_share_alpha_core():
+    assert (
+        run({"chunkhound": ["6.2.0a1"], "chunkhound-native": ["1!6.2a9", "1!6.2b1"]})
+        == "6.2.0a2"
+    )
+
+
 def test_stable_latest_starts_next_minor_alpha_one():
     assert run({"chunkhound": ["6.1.0", "6.2.0"], "chunkhound-native": []}) == (
         "6.3.0a1"

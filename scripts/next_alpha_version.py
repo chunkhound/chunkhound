@@ -94,7 +94,10 @@ def _next_alpha_on_core(core_text: str, all_versions: list[Version]) -> str:
     """Return the next alpha on core_text, refusing when a non-alpha release exists."""
     # Normally this starts at a1. If native was partially published first,
     # advance past it rather than trying to reuse an immutable PyPI version.
-    on_core = [v for v in all_versions if v.base_version == core_text]
+    # PEP 440 treats trailing release zeros as equivalent (6.2 == 6.2.0).
+    # Compare Version objects so equivalent cores match without merging epochs.
+    core = Version(core_text)
+    on_core = [v for v in all_versions if Version(v.base_version) == core]
     if any(not _is_plain_alpha(v) for v in on_core):
         raise ValueError(
             f"A non-alpha release of {core_text} already exists (beta, RC, or "

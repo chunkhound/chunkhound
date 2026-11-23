@@ -160,12 +160,17 @@ beta/RC dependency semantics remain unchanged.
   jobs** on the current `main` CI run. That performs a fresh allocation. Do not
   rerun an older CI run that was skipped as stale.
 - **Re-run failed jobs** keeps the original workflow state and allocated version.
-  Use it only for a transient failure before any file for that version reached
-  PyPI.
-- If native publication succeeded but main publication failed, rerunning only the
-  failed main publish job is safe because it reuses the same validated main
-  artifacts. If that cannot be done, re-run all jobs; the union of both PyPI
-  projects allocates the next serial and leaves a gap.
+  For a transient native publish failure, use it only if no native file for that
+  version reached PyPI. After a partial native upload, use **Re-run all jobs** on
+  the current `main` CI run to allocate a fresh version.
+- If native publication succeeded but main publication failed **before any main
+  file reached PyPI**, rerunning only the failed main publish job is safe: it
+  reuses the same validated main artifacts and matching native version.
+- If **any main file reached PyPI** before the failure, do not retry that main
+  publish job. Alpha uploads do not skip existing files, so a retry would fail
+  on those immutable files. Use **Re-run all jobs** on the current `main` CI run
+  to allocate a fresh version from both PyPI projects. Leave the incomplete old
+  version in place; the fresh run publishes both packages under the new serial.
 - Do not create or push alpha tags to "fix" a failure. Tags for alpha versions are
   prohibited.
 
