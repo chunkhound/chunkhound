@@ -20,6 +20,8 @@ jobs:
   site-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      docs_version: ${{ steps.docs-version.outputs.docs_version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -31,8 +33,14 @@ jobs:
           cache-dependency-path: site/package-lock.json
       - name: Resolve docs version
         run: bash scripts/resolve_docs_version.sh
+      - name: Export docs version as job output
+        id: docs-version
+        run: echo "docs_version=$CHUNKHOUND_DOCS_VERSION" >> "$GITHUB_OUTPUT"
       - run: npm ci --prefix site
       - run: npm run build --prefix site
+      - name: Record built docs version
+        shell: bash
+        run: printf '%s\n' "$CHUNKHOUND_DOCS_VERSION" > site/dist/docs-version.txt
       - name: Create .nojekyll sentinel
         run: touch site/dist/.nojekyll
       - uses: actions/upload-artifact@v4
@@ -41,23 +49,24 @@ jobs:
           path: site/dist/
 
   site-build-validation:
+    needs: site-build
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # docs/site version resolution requires tags
+          fetch-depth: 0  # not needed for the docs version (taken from site-build); kept for parity with other jobs
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: site/package-lock.json
-      - name: Resolve docs version
-        run: bash scripts/resolve_docs_version.sh
       - run: npm ci --prefix site
       - run: npm run build --prefix site
 
@@ -89,12 +98,14 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
+    env:
+      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # docs/site version resolution requires tags
+          fetch-depth: 0  # hatch-vcs derives the package version from git tags
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
@@ -103,9 +114,6 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-
-      - name: Resolve docs version
-        run: bash scripts/resolve_docs_version.sh
 
       - uses: actions/setup-node@v6
         with:
@@ -122,6 +130,14 @@ jobs:
         with:
           name: site-dist
           path: site/dist
+
+      # A retried job may see newer Git tags than the original site build.
+      - name: Load built docs version
+        shell: bash
+        run: |
+          version="$(cat site/dist/docs-version.txt)"
+          test -n "$version"
+          printf 'CHUNKHOUND_DOCS_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Build Rust extension
         uses: ./.github/actions/build-rust-extension
@@ -362,7 +378,10 @@ jobs:
           out-dir: native-dist
 
 
-  prepare-alpha:
+  alpha-current-main:
+    # Check before entering the reusable workflow's concurrency queue. GitHub may
+    # replace a pending concurrency run with a later arrival, so a stale CI run
+    # must not be allowed to displace the newest tested main snapshot.
     needs:
       - tests
       - rust-checks
@@ -370,45 +389,45 @@ jobs:
       - native-wheel-smoke-arm64
       - old-linux-wheel-smoke
       - native-dev-macos
-    # Forks, PRs, merge queues and dispatches never allocate production tags.
+    # Forks, PRs, merge queues and dispatches never publish automatic alphas.
     # Pages deployment and docs-site validation are intentionally not release
     # prerequisites.
     if: github.repository == 'chunkhound/chunkhound' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     permissions:
-      contents: write
+      contents: read
     outputs:
-      release_tag: ${{ steps.alpha.outputs.release_tag }}
-      source_sha: ${{ steps.alpha.outputs.source_sha }}
+      publish: ${{ steps.current.outputs.publish }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@v3
-      - name: Allocate or reuse tested alpha tag
-        id: alpha
+      - name: Check tested SHA is current main
+        id: current
         env:
-          SOURCE_SHA: ${{ github.sha }}
-          BUILD_RUN_ID: ${{ github.run_id }}
-          BUILD_REPOSITORY: ${{ github.repository }}
-        run: >
-          uv run --no-project --python 3.11 python scripts/create_next_alpha_tag.py
-          --source-sha "$SOURCE_SHA"
-          --run-id "$BUILD_RUN_ID"
-          --repository "$BUILD_REPOSITORY"
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          current_sha="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_sha" == "$TESTED_SHA" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping superseded alpha: $TESTED_SHA is no longer main ($current_sha)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   release-alpha:
-    needs: prepare-alpha
+    # Tagless automatic alpha: the reusable workflow allocates its version from
+    # published PyPI state under a lock covering allocation through publication.
+    needs: alpha-current-main
+    if: needs.alpha-current-main.outputs.publish == 'true'
     permissions:
       contents: read
       id-token: write
       issues: write
     uses: ./.github/workflows/release-packages.yml
     with:
-      release_tag: ${{ needs.prepare-alpha.outputs.release_tag }}
-      source_sha: ${{ needs.prepare-alpha.outputs.source_sha }}
+      automatic_alpha: true
+      source_sha: ${{ github.sha }}
 
   pages-artifact:
     needs:

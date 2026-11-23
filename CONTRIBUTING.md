@@ -160,7 +160,8 @@ Releases are fully automated via GitHub Actions (OIDC Trusted Publishing). Do **
 2. **Run smoke tests**: `uv run pytest tests/test_smoke.py -v -n auto` (MANDATORY)
 3. **Create a GitHub Release** from the tag — `release.yml` builds and uploads to PyPI automatically.
 
-For pre-releases (alpha/beta/RC), pushing the tag triggers `release-rc.yml`, which publishes to TestPyPI.
+Automatic alpha releases are tagless and CI-owned. Pushing a beta or RC tag
+triggers `release-rc.yml`, which publishes the pre-release to real PyPI.
 
 ## Community
 

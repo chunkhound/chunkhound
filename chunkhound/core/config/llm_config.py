@@ -149,6 +149,7 @@ LLMProviderLiteral = Literal[
     "runcrate",
     "cheapaimodel",
     "uberllm",
+    "aigrow",
     "opencode-cli",
 ]
 
@@ -196,6 +197,7 @@ CLI_PROVIDER_CHOICES = (
     "runcrate",
     "cheapaimodel",
     "uberllm",
+    "aigrow",
     "opencode-cli",
 )
 

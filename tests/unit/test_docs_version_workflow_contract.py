@@ -390,28 +390,6 @@ class TestDocsVersionWorkflowContract:
         [
             (".github/workflows/ci.yml", "site-build"),
             (".github/workflows/ci.yml", "site-build-validation"),
-            (".github/workflows/ci.yml", "tests"),
-        ],
-    )
-    def test_docs_build_jobs_use_shared_resolver_script(
-        self, path: str, job_name: str
-    ) -> None:
-        steps = _job_steps(path, job_name)
-        resolve_index = _find_step_index(
-            steps,
-            "shared docs version resolver step",
-            lambda step: step.get("run") == "bash scripts/resolve_docs_version.sh",
-        )
-        resolve_step = steps[resolve_index]
-
-        assert resolve_step["run"] == "bash scripts/resolve_docs_version.sh"
-
-    @pytest.mark.parametrize(
-        ("path", "job_name"),
-        [
-            (".github/workflows/ci.yml", "site-build"),
-            (".github/workflows/ci.yml", "site-build-validation"),
-            (".github/workflows/ci.yml", "tests"),
         ],
     )
     def test_docs_build_jobs_checkout_with_full_history(
@@ -419,49 +397,42 @@ class TestDocsVersionWorkflowContract:
     ) -> None:
         _assert_checkout_uses_full_history(_job_steps(path, job_name))
 
-    @pytest.mark.parametrize(
-        ("job_name", "consumer_description", "consumer_predicate"),
-        [
-            (
-                "site-build",
-                "site build step",
-                lambda step: step.get("run") == "npm run build --prefix site",
-            ),
-            (
-                "site-build-validation",
-                "site build step",
-                lambda step: step.get("run") == "npm run build --prefix site",
-            ),
-            (
-                "tests",
-                "retry-backed test runner step",
-                lambda step: step.get("id") == "tests"
-                and str(step.get("uses", "")).startswith("nick-fields/retry@"),
-            ),
-        ],
-    )
-    def test_docs_version_is_resolved_before_consumer_steps(
-        self,
-        job_name: str,
-        consumer_description: str,
-        consumer_predicate: Callable[[dict], bool],
-    ) -> None:
-        steps = _job_steps(".github/workflows/ci.yml", job_name)
+    def test_site_build_resolves_docs_version_once_and_exports_it(self) -> None:
+        job = _job(".github/workflows/ci.yml", "site-build")
+        steps = cast(list[dict[str, Any]], job["steps"])
         resolve_index = _find_step_index(
             steps,
             "shared docs version resolver step",
             lambda step: step.get("run") == "bash scripts/resolve_docs_version.sh",
         )
-        consumer_index = _find_step_index(
-            steps, consumer_description, consumer_predicate
+        export_index = _find_step_index(
+            steps,
+            "docs version job-output export step",
+            lambda step: step.get("id") == "docs-version",
         )
 
-        assert resolve_index < consumer_index
+        assert resolve_index < export_index
+        assert job["outputs"]["docs_version"] == (
+            "${{ steps.docs-version.outputs.docs_version }}"
+        )
+
+    @pytest.mark.parametrize("job_name", ["site-build-validation", "tests"])
+    def test_consumer_jobs_use_site_build_docs_version_output(
+        self, job_name: str
+    ) -> None:
+        job = _job(".github/workflows/ci.yml", job_name)
+
+        assert job["needs"] in ("site-build", ["site-build"])
+        assert job["env"]["CHUNKHOUND_DOCS_VERSION"] == (
+            "${{ needs.site-build.outputs.docs_version }}"
+        )
+        assert all(
+            step.get("run") != "bash scripts/resolve_docs_version.sh"
+            for step in cast(list[dict[str, Any]], job["steps"])
+        )
 
     def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
-        contents = (ROOT / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
-        )
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
@@ -508,13 +479,95 @@ class TestDocsVersionWorkflowContract:
         assert download_step["with"]["name"] == "site-dist"
         assert download_step["with"]["path"] == "site/dist"
         assert tests_step["env"]["CHUNKHOUND_USE_EXISTING_SITE_DIST"] == "1"
+        load_index = _find_step_index(
+            steps,
+            "load artifact version",
+            lambda step: step.get("name") == "Load built docs version",
+        )
+        assert download_index < load_index < tests_index
+        assert not any(
+            "resolve_docs_version.sh" in step.get("run", "") for step in steps
+        )
+
+    def test_reused_site_keeps_build_version_after_git_tags_change(self) -> None:
+        build_steps = _job_steps(".github/workflows/ci.yml", "site-build")
+        record_index = _find_step_index(
+            build_steps,
+            "record artifact version",
+            lambda step: step.get("name") == "Record built docs version",
+        )
+        build_index = _find_step_index(
+            build_steps,
+            "site build",
+            lambda step: step.get("run") == "npm run build --prefix site",
+        )
+        upload_index = _find_step_index(
+            build_steps,
+            "upload artifact",
+            lambda step: step.get("with", {}).get("name") == "site-dist",
+        )
+        assert build_index < record_index < upload_index
+        record_step = build_steps[record_index]
+        test_steps = _job_steps(".github/workflows/ci.yml", "tests")
+        load_step = test_steps[
+            _find_step_index(
+                test_steps,
+                "load artifact version",
+                lambda step: step.get("name") == "Load built docs version",
+            )
+        ]
+        assert record_step["shell"] == load_step["shell"] == "bash"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_dir = Path(temp_dir)
+            _create_tagged_repo(repo_dir, "v6.1.0")
+            github_env = repo_dir / "github.env"
+            _run_resolver(
+                repo_dir, check=True, env_updates={"GITHUB_ENV": str(github_env)}
+            )
+            build_version = (
+                github_env.read_text(encoding="utf-8").strip().split("=", 1)[1]
+            )
+            (repo_dir / "site" / "dist").mkdir(parents=True)
+            env = {**_resolver_env(), "CHUNKHOUND_DOCS_VERSION": build_version}
+            subprocess.run(
+                [_resolver_command()[0], "-eu", "-c", record_step["run"]],
+                cwd=repo_dir,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # Simulate a later retry seeing a new tag but reusing the old dist.
+            _run(["git", "tag", "-d", "v6.1.0"], repo_dir)
+            _run(["git", "tag", "v6.2.0a1"], repo_dir)
+            github_env.write_text("", encoding="utf-8")
+            _run_resolver(
+                repo_dir, check=True, env_updates={"GITHUB_ENV": str(github_env)}
+            )
+            assert (
+                github_env.read_text(encoding="utf-8")
+                == "CHUNKHOUND_DOCS_VERSION=6.2.0a1\n"
+            )
+            github_env.write_text("", encoding="utf-8")
+            subprocess.run(
+                [_resolver_command()[0], "-eu", "-c", load_step["run"]],
+                cwd=repo_dir,
+                env={**_resolver_env(), "GITHUB_ENV": str(github_env)},
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert (
+                github_env.read_text(encoding="utf-8")
+                == "CHUNKHOUND_DOCS_VERSION=6.1.0\n"
+            )
 
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(
             list[dict[str, Any]],
-            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
-                "include"
-            ],
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"]["include"],
         )
 
         assert all("pytest_timeout_minutes" in entry for entry in matrix)

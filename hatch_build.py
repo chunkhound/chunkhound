@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -60,12 +62,44 @@ def _release_native_requirement(version: str) -> str:
     return f"chunkhound-native=={parsed}"
 
 
+_SOURCE_COMMIT_URL_LABEL = "Source commit"
+_REPOSITORY_URL = "https://github.com/chunkhound/chunkhound"
+
+
+def _source_commit(root: Path) -> str | None:
+    """Return the checked-out commit SHA, or None outside a git checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    sha = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return None
+    return sha
+
+
+def _add_source_commit_url(metadata: dict, root: Path) -> None:
+    """Link the package page to the exact commit the wheel was built from."""
+    sha = _source_commit(root)
+    if sha is None:
+        return
+    urls = metadata.setdefault("urls", {})
+    urls[_SOURCE_COMMIT_URL_LABEL] = f"{_REPOSITORY_URL}/commit/{sha}"
+
+
 class CustomMetadataHook(MetadataHookInterface):
     """Pair official release-artifact metadata with the matching native build."""
 
     PLUGIN_NAME = "custom"
 
     def update(self, metadata: dict) -> None:
+        _add_source_commit_url(metadata, _REPO_ROOT)
         dependencies = list(self.config["dependencies"])
         if os.environ.get(_RELEASE_ARTIFACT_BUILD_ENV) == "1":
             pin = _release_native_requirement(metadata["version"])

@@ -1,9 +1,10 @@
 """Gate publication on the requested release tag, exact pins, and a clean sdist rebuild.
 
-Run with RELEASE_TAG=vX.Y.Z[(a|b|rc)N]. The tag alone selects the version and
-channel for every official release (alpha, beta, release candidate, or stable).
-Each channel must pin chunkhound-native to the exact main version, both in the
-wheel metadata and in the source distribution's persisted pyproject.toml.
+Run with exactly one of RELEASE_TAG=vX.Y.Z[(a|b|rc)N] (tagged release) or
+RELEASE_VERSION=X.Y.ZaN (explicit canonical alpha, no tag). ALPHA_RELEASE=true
+requires an alpha version in either form. Every official channel must pin
+chunkhound-native to the exact main version, both in the wheel metadata and in the
+source distribution's persisted pyproject.toml.
 The sdist rebuild deliberately receives neither a VCS version override nor any
 build-release flag: the published source must retain both contracts on its own.
 """
@@ -34,7 +35,7 @@ except ModuleNotFoundError:  # Python < 3.11 validator environments
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.release_tag import parse_release_tag
+from scripts.release_tag import resolve_release
 
 # Inherited build controls that must not influence a clean sdist rebuild.
 RELEASE_BUILD_CONTROLS = {
@@ -225,11 +226,17 @@ def main() -> None:
     parser.add_argument("--rebuild-sdist", action="store_true")
     args = parser.parse_args()
     try:
-        release = parse_release_tag(os.environ["RELEASE_TAG"])
+        release = resolve_release(
+            os.environ.get("RELEASE_TAG") or None,
+            os.environ.get("RELEASE_VERSION") or None,
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     version = str(Version(release.version))
     release_artifact = True
+    alpha = os.environ.get("ALPHA_RELEASE", "false") == "true"
+    if alpha and not release.alpha:
+        raise SystemExit("Alpha publication requires an alpha tag or version")
     wheels = sorted(args.dist.glob("*.whl"))
     names = {check_wheel(wheel, version, release_artifact) for wheel in wheels}
     if names != {"chunkhound", "chunkhound-native"}:

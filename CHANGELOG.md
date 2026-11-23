@@ -11,27 +11,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hub index pull** — `chunkhound pull` installs a compatible published DuckDB or LanceDB base. Run `chunkhound index` afterward to overlay local changes.
 - **Configurable artifact download deadline** — `hub.download_timeout_seconds` defaults to 3600 seconds; set it through configuration or `CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS` using existing configuration precedence. One cooperative deadline covers all artifact download attempts, separately from network inactivity and archive extraction limits. Archive budgets use `hub.archive_limits`: `max_members` 100000, `max_path_depth` 32, `max_path_bytes` 4096, `max_total_path_bytes` 33554432 (32 MiB), `max_extracted_bytes` 34359738368 (32 GiB), `max_decompressed_bytes` 42949672960 (40 GiB); override each with `CHUNKHOUND_HUB__ARCHIVE_LIMITS__<UPPERCASE_FIELD>`.
 
+### Changed
+- **Trusted cold hub bootstrap during indexing** — Eligible embedding-enabled indexing can install a hub base only when the source is trusted and an exhaustive inventory proves the destination is genuinely cold. Existing, interrupted, recovery, associated, or ambiguous database state never artifact-pulls or gets replaced during indexing and instead reaches ordinary local handling. Use a trusted explicit `chunkhound pull` when replacement is intended.
+- **Parser workers always use spawn** — `CHUNKHOUND_MP_START_METHOD` is retired and ignored. Startup warns once when it is present, including an empty setting; remove it from your environment.
+
+### Fixed
+- **Attempted hub pulls fail closed** — A hub pull that begins but does not complete now stops with opt-out guidance instead of falling back to local indexing.
+- **Compatibility and installation admission** — Unsupported or uninspectable index formats are refused before recovery can mutate them. Active database owners and workers exclude hub installation; incompatible or interrupted local state retains actionable preservation and recovery guidance.
+- **Cancellation and next-action recovery** — Cancellation drains admitted database work and cleanup without releasing ownership early. After a retryable initialization, cleanup, or reconnect failure, the next database-backed search or indexing action attempts recovery on the same provider and proceeds only when recovery succeeds. Failed indexing is not replayed automatically, explicitly closed providers stay closed, and unsafe or unsuccessful recovery remains unavailable with actionable diagnostics.
+
+## [6.2.0] - 2026-11-23
+
+### Added
+- **More OpenAI-compatible LLM providers** — Opper, API Route, Obscurify.ai, Atlas Cloud, Runcrate, cheapaimodel, UberLLM and AIGROW can be selected as the LLM provider.
+
 ### Removed
 - **`_quickresearch` subcommand, `run_git_diff`, and `IndexingConfig.reset_user_include_exclude()`** — superseded by in-process streaming (`stream_git_diff_fragments`, `run_websearch`).
 
 ### Changed
-- **Trusted cold hub bootstrap during indexing** — Eligible embedding-enabled indexing can install a hub base only when the source is trusted and an exhaustive inventory proves the destination is genuinely cold. Existing, interrupted, recovery, associated, or ambiguous database state never artifact-pulls or gets replaced during indexing and instead reaches ordinary local handling. Use a trusted explicit `chunkhound pull` when replacement is intended.
-- **Parser workers always use spawn** — `CHUNKHOUND_MP_START_METHOD` is retired and ignored. Startup warns once when it is present, including an empty setting; remove it from your environment.
 - **`CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` is now the websearch response deadline** — It previously bounded only the research subprocess; it now covers query expansion, DDG, fetch, and research. Discovery is capped at `min(60, total/4)`. Cancellation cleanup can outlive the deadline, so a one-shot CLI process may wait briefly during event-loop shutdown. If you tuned this value, add headroom (up to 60s) for discovery. Non-positive or non-finite values fall back to the 600s default.
 - **Websearch pages chunk by line window** — Fetched pages are split into ≤1,200-character line windows (`page:N` symbols) instead of markdown-heading chunks, to stay under embedding provider limits.
 - **Transient search streams in-process** — Git-history and web-page search stream chunks through a bounded vector cache and top-K heap instead of loading everything into memory; `MAX_DIFF_CHUNKS` truncation and the `_quickresearch` subprocess are gone. Set `CHUNKHOUND_VECTOR_CACHE_MAX_ENTRIES=0` to disable the cache, `CHUNKHOUND_VECTOR_CACHE_TTL_SECONDS` to change expiry, and `CHUNKHOUND_VECTOR_SEARCH_OVERFETCH_FACTOR` to tune the candidate pool (default 5). With `--vector-source both`, each page merges overfetch-sized heaps from diff and DB (`total` is a lower bound on that merged top-K); `offset+page_size` cannot exceed the candidate window `min(max(page_size × overfetch factor, 50), 2000)`, and requests outside it fail explicitly. `CHUNKHOUND_WEBSEARCH_TIMEOUT_SECONDS` is the response deadline: discovery (query expansion + DDG) is capped at 60s or a quarter of the total; fetch and research share the remainder. Cancellation cleanup can outlive the deadline, including during one-shot CLI shutdown.
 - **Diff/web `path_filter` matches indexed search** — `vector_source=diff|both` now applies the same path rules as DB search: file filters (`src/foo.py`) match by path suffix instead of returning nothing, and directory filters match a nested folder anywhere in the path (`services` matches `chunkhound/services/...`).
 - **Web research survives unstable pages** — A fetched page evicted from the in-process source cache is refetched on demand; if the refetch fails or the content changed since first read, that page is dropped from the rest of the research with a `Dropped from research: …` fetch warning instead of failing the run. Research still fails if every usable source is dropped.
 - **Removed `DiffAwareSearchService`** — The unused preloaded-vector git-diff search facade is gone; use `TransientSearchService`, which git-history search already uses.
+- **MCP SDK 2.x** — ChunkHound now runs on the MCP Python SDK 2.x, with a single dispatch point for MCP requests.
+- **Faster semantic search on DuckDB** — Embeddings are scored before they are joined to chunk data, which cuts the cost of large searches.
+- **Single-threaded OpenBLAS by default** — NumPy's OpenBLAS runs single-threaded unless you set its thread count yourself, so it no longer competes with ChunkHound's own workers.
+- **Quieter realtime status** — Status updates for filtered file events are published at most twice a second.
+- **`last_n_commits` means N commits** — Git-history search now takes the last N commits instead of N first-parent commits.
+- **Native dependency floor raised** — ChunkHound now requires `chunkhound-native` 6.1.0 or later, the first release with the analytics recorder.
 
 ### Fixed
-- **Attempted hub pulls fail closed** — A hub pull that begins but does not complete now stops with opt-out guidance instead of falling back to local indexing.
-- **Compatibility and installation admission** — Unsupported or uninspectable index formats are refused before recovery can mutate them. Active database owners and workers exclude hub installation; incompatible or interrupted local state retains actionable preservation and recovery guidance.
-- **Cancellation and next-action recovery** — Cancellation drains admitted database work and cleanup without releasing ownership early. After a retryable initialization, cleanup, or reconnect failure, the next database-backed search or indexing action attempts recovery on the same provider and proceeds only when recovery succeeds. Failed indexing is not replayed automatically, explicitly closed providers stay closed, and unsafe or unsuccessful recovery remains unavailable with actionable diagnostics.
 - **Windows on Python 3.12: parse workers no longer die at start-up under load** — On Python 3.12 (and 3.13 before 3.13.4), a WMI query that the standard library's `platform` module made while a parse worker started could close one of the worker's handles under CPU load (CPython gh-130727). The worker then failed with `[WinError 6] The handle is invalid` or stalled the pool, and the initial scan failed or never finished. On those Python versions ChunkHound now keeps `platform` on its non-WMI fallback, which reports the same values.
+- **Stopping realtime indexing during start-up cancels the start** — `stop()` could not cancel a start that was still running the indexed-root identity check, because the start registered itself only after that check. The start then went on to set up the watcher after `stop()` had returned. It now registers before the check, so `stop()` cancels it at any point.
 - **Semantic search totals match the results you can page through** — With a stored embedding that has NULL elements (what a NaN vector is stored as) in scope, DuckDB semantic search skipped that row but still counted it, so `total` and `has_more` overstated the results and could offer a page that came back empty. The total is now computed from the same scored rows as the page. Searches with a `threshold` also no longer score every embedding twice.
 - **Search pagination only advertises reachable pages** — `total` now counts just what the paging window can serve, rounded down to a whole `page_size`, and `next_offset` is always a page the same search accepts. Previously a diff/web search could report `total=2000` at `page_size=30` and hand out a `next_offset` whose request raised, and the MCP footer derived an unreachable page count from it. The unbounded match count moved to a new `corpus_total` field, which the CLI header shows when it exceeds `total`; transient hybrid search omits it because it ranks only a bounded snapshot. `--vector-source both` keeps its existing snapshot-bounded `total`.
+- **`fetchurl` validates redirect destinations** — A redirect from a public URL to a private, loopback or link-local address was followed, because only the initial URL was checked. Every urllib redirect hop is now validated before it is requested, and the Chrome branch validates the final URL before returning its content, as websearch already did. A blocked hop raises `SsrfBlockedError` and is not retried (#478).
 - **VoyageAI semantic search ranks better** — Search queries are now embedded with Voyage `input_type="query"` instead of `"document"`. Voyage models embed queries and documents differently, and a query embedded as a document was matched as one document against another, which pushed relevant code far down the results. Indexed chunks were always embedded as documents and still are, so no re-index is needed. Other providers are unchanged.
+- **On Python 3.11 and later, the daemon no longer puts the project directory on its import path** — `python -m` puts the working directory first on `sys.path`, and the daemon runs in the project directory. So when the indexed project was itself a ChunkHound checkout, its daemon imported that checkout's `chunkhound` package and native module instead of the installed build. On Python 3.11 and later the daemon and the Watchman Python bridge now start with `-P`, which stops `python -m` from adding the working directory to `sys.path`. Python 3.10 has no `-P`, so on 3.10 a daemon serving a ChunkHound checkout still imports that checkout's code. `-P` does not filter `PYTHONPATH`, so a relative entry such as `.` still resolves against the project directory.
+- **Realtime indexing is more reliable** — A write is now one executor submission and a failed resync is retried. Duplicate events are never dropped while the path's change is being processed. A failed attempt no longer leaves a dedup record that suppresses the next write. Read-only watcher events take no event-queue slot. A kernel inotify queue overflow now requests a resync. Windows in-place writes reported as attribute changes are indexed. `process_file` keeps a file's content hash, and a file confirmed unchanged by hash keeps its mtime.
+- **`daemon_status` is current** — It reports the realtime state as of the read.
+- **Unchanged incremental runs leave the database available** — An incremental run with nothing to write no longer takes the database from readers.
+- **DuckDB recovery is safer** — A database held by another process is never treated as WAL-corrupt, and a checkpoint right after WAL replay keeps replayed rows in the indexes.
+- **Parse workers exit with their parent** — Pool and timeout workers no longer linger after the parent process dies.
+- **Faster parse-worker start-up** — PyMuPDF is imported lazily, so parse workers no longer load its ONNX layout model.
+- **JavaScript and TypeScript chunking** — Top-level imports and call statements are now chunked in JS, TS, JSX and TSX.
+- **Git-history diffs ignore user git config** — Diffs are isolated from your git configuration, so results no longer vary with it.
+- **Claude Code CLI provider runs without your hooks** — User-configured hooks no longer interfere with research calls.
+- **VoyageAI configuration** — Look-alike hosts are rejected when checking for the official endpoint, and `VOYAGE_API_KEY` is applied after config layers are merged.
+- **llama.cpp long inputs** — A text the server rejects as too long is split and retried.
+- **LanceDB `path_filter`** — `find_similar_chunks` now honors `path_filter`.
+- **Websearch rejects private-network URLs** — Search results pointing at private addresses, and redirects to them, are no longer fetched.
+- **Deep research input handling** — Object-shaped exploration queries are accepted, and relative imports are anchored to the project root.
 
 ## [6.1.0] - 2026-10-20
 
@@ -879,7 +911,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.1.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.2.0...HEAD
+[6.2.0]: https://github.com/chunkhound/chunkhound/compare/v6.1.0...v6.2.0
 [6.1.0]: https://github.com/chunkhound/chunkhound/compare/v6.0.0...v6.1.0
 [6.0.0]: https://github.com/chunkhound/chunkhound/compare/v5.2.1...v6.0.0
 [5.2.0]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...v5.2.0
