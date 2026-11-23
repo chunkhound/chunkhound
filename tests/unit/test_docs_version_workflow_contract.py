@@ -393,75 +393,47 @@ class TestDocsVersionWorkflowContract:
             (".github/workflows/ci.yml", "tests"),
         ],
     )
-    def test_docs_build_jobs_use_shared_resolver_script(
-        self, path: str, job_name: str
-    ) -> None:
-        steps = _job_steps(path, job_name)
-        resolve_index = _find_step_index(
-            steps,
-            "shared docs version resolver step",
-            lambda step: step.get("run") == "bash scripts/resolve_docs_version.sh",
-        )
-        resolve_step = steps[resolve_index]
-
-        assert resolve_step["run"] == "bash scripts/resolve_docs_version.sh"
-
-    @pytest.mark.parametrize(
-        ("path", "job_name"),
-        [
-            (".github/workflows/ci.yml", "site-build"),
-            (".github/workflows/ci.yml", "site-build-validation"),
-            (".github/workflows/ci.yml", "tests"),
-        ],
-    )
     def test_docs_build_jobs_checkout_with_full_history(
         self, path: str, job_name: str
     ) -> None:
         _assert_checkout_uses_full_history(_job_steps(path, job_name))
 
-    @pytest.mark.parametrize(
-        ("job_name", "consumer_description", "consumer_predicate"),
-        [
-            (
-                "site-build",
-                "site build step",
-                lambda step: step.get("run") == "npm run build --prefix site",
-            ),
-            (
-                "site-build-validation",
-                "site build step",
-                lambda step: step.get("run") == "npm run build --prefix site",
-            ),
-            (
-                "tests",
-                "retry-backed test runner step",
-                lambda step: step.get("id") == "tests"
-                and str(step.get("uses", "")).startswith("nick-fields/retry@"),
-            ),
-        ],
-    )
-    def test_docs_version_is_resolved_before_consumer_steps(
-        self,
-        job_name: str,
-        consumer_description: str,
-        consumer_predicate: Callable[[dict], bool],
-    ) -> None:
-        steps = _job_steps(".github/workflows/ci.yml", job_name)
+    def test_site_build_resolves_docs_version_once_and_exports_it(self) -> None:
+        job = _job(".github/workflows/ci.yml", "site-build")
+        steps = cast(list[dict[str, Any]], job["steps"])
         resolve_index = _find_step_index(
             steps,
             "shared docs version resolver step",
             lambda step: step.get("run") == "bash scripts/resolve_docs_version.sh",
         )
-        consumer_index = _find_step_index(
-            steps, consumer_description, consumer_predicate
+        export_index = _find_step_index(
+            steps,
+            "docs version job-output export step",
+            lambda step: step.get("id") == "docs-version",
         )
 
-        assert resolve_index < consumer_index
+        assert resolve_index < export_index
+        assert job["outputs"]["docs_version"] == (
+            "${{ steps.docs-version.outputs.docs_version }}"
+        )
+
+    @pytest.mark.parametrize("job_name", ["site-build-validation", "tests"])
+    def test_consumer_jobs_use_site_build_docs_version_output(
+        self, job_name: str
+    ) -> None:
+        job = _job(".github/workflows/ci.yml", job_name)
+
+        assert job["needs"] in ("site-build", ["site-build"])
+        assert job["env"]["CHUNKHOUND_DOCS_VERSION"] == (
+            "${{ needs.site-build.outputs.docs_version }}"
+        )
+        assert all(
+            step.get("run") != "bash scripts/resolve_docs_version.sh"
+            for step in cast(list[dict[str, Any]], job["steps"])
+        )
 
     def test_workflows_do_not_inline_docs_version_resolution(self) -> None:
-        contents = (ROOT / ".github/workflows/ci.yml").read_text(
-            encoding="utf-8"
-        )
+        contents = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         assert INLINE_RESOLVE_SNIPPET not in contents
 
@@ -512,9 +484,7 @@ class TestDocsVersionWorkflowContract:
     def test_tests_job_matrix_uses_pytest_timeout_minutes_consistently(self) -> None:
         matrix = cast(
             list[dict[str, Any]],
-            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"][
-                "include"
-            ],
+            _job(".github/workflows/ci.yml", "tests")["strategy"]["matrix"]["include"],
         )
 
         assert all("pytest_timeout_minutes" in entry for entry in matrix)
@@ -579,10 +549,8 @@ class TestDocsVersionWorkflowContract:
         workflow = _load_workflow(".github/workflows/ci.yml")
         concurrency = cast(dict[str, Any], workflow.get("concurrency", {}))
 
-        assert concurrency["group"] == (
-            "${{ github.ref == 'refs/heads/main' && 'ch-test-deploy' "
-            "|| github.run_id }}"
-        )
+        # Main builds must not replace each other before allocating an alpha.
+        assert concurrency["group"] == "ci-${{ github.run_id }}"
         assert concurrency["cancel-in-progress"] is False
 
     def test_deploy_job_contract(self) -> None:
@@ -591,7 +559,15 @@ class TestDocsVersionWorkflowContract:
 
         assert job["needs"] == "pages-artifact"
         assert job["if"] == "github.ref == 'refs/heads/main'"
-        assert "concurrency" not in job
+        # Serialize only Pages deployments, not the validation/release builds.
+        concurrency = cast(dict[str, Any], job["concurrency"])
+        assert concurrency["group"] == "chunkhound-pages-deploy"
+        assert concurrency["cancel-in-progress"] is False
+        steps = cast(list[dict[str, Any]], job["steps"])
+        current = next(step for step in steps if step.get("id") == "current")
+        assert '"$current_sha" == "$TESTED_SHA"' in current["run"]
+        deployment = next(step for step in steps if step.get("id") == "deployment")
+        assert deployment["if"] == "steps.current.outputs.deploy == 'true'"
         assert permissions["contents"] == "read"
         assert permissions["pages"] == "write"
         assert permissions["id-token"] == "write"

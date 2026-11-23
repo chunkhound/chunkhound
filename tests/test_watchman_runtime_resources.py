@@ -7,6 +7,7 @@ import os
 import queue
 import stat
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -145,12 +146,7 @@ def test_build_watchman_runtime_command_prefix_uses_current_interpreter_for_brid
 ) -> None:
     runtime = replace(resolve_packaged_watchman_runtime(), launch_mode="python_bridge")
     binary_path = Path("/tmp/watchman")
-    monkeypatch.setattr(
-        watchman_runtime_loader_module.sys,
-        "executable",
-        "/tmp/chunkhound-python",
-        raising=False,
-    )
+    monkeypatch.setattr(sys, "executable", "/tmp/chunkhound-python")
 
     command = build_watchman_runtime_command_prefix(
         runtime=runtime,
@@ -159,6 +155,7 @@ def test_build_watchman_runtime_command_prefix_uses_current_interpreter_for_brid
 
     assert command == [
         "/tmp/chunkhound-python",
+        *(["-P"] if sys.version_info >= (3, 11) else []),
         "-m",
         "chunkhound.watchman_runtime.bridge",
     ]

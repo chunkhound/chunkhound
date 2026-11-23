@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A hung Rust indexing run is reported** — `daemon_status` reads `stalled` (aggregate `degraded`) when a Rust run holds the database with no progress for 10 minutes (22 for a compaction or index-build step, or before the run first writes), instead of `idle` or `initializing`. A hung native run still cannot be stopped from Python; it is reported so it can be restarted.
+
+## [6.2.0] - 2026-11-23
+
+### Added
+- **More OpenAI-compatible LLM providers** — Opper, API Route, Obscurify.ai, Atlas Cloud, Runcrate, cheapaimodel, UberLLM and AIGROW can be selected as the LLM provider.
+
 ### Removed
 - **`_quickresearch` subcommand, `run_git_diff`, and `IndexingConfig.reset_user_include_exclude()`** — superseded by in-process streaming (`stream_git_diff_fragments`, `run_websearch`).
 
@@ -17,11 +25,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Diff/web `path_filter` matches indexed search** — `vector_source=diff|both` now applies the same path rules as DB search: file filters (`src/foo.py`) match by path suffix instead of returning nothing, and directory filters match a nested folder anywhere in the path (`services` matches `chunkhound/services/...`).
 - **Web research survives unstable pages** — A fetched page evicted from the in-process source cache is refetched on demand; if the refetch fails or the content changed since first read, that page is dropped from the rest of the research with a `Dropped from research: …` fetch warning instead of failing the run. Research still fails if every usable source is dropped.
 - **Removed `DiffAwareSearchService`** — The unused preloaded-vector git-diff search facade is gone; use `TransientSearchService`, which git-history search already uses.
+- **MCP SDK 2.x** — ChunkHound now runs on the MCP Python SDK 2.x, with a single dispatch point for MCP requests.
+- **Faster semantic search on DuckDB** — Embeddings are scored before they are joined to chunk data, which cuts the cost of large searches.
+- **Single-threaded OpenBLAS by default** — NumPy's OpenBLAS runs single-threaded unless you set its thread count yourself, so it no longer competes with ChunkHound's own workers.
+- **Quieter realtime status** — Status updates for filtered file events are published at most twice a second.
+- **`last_n_commits` means N commits** — Git-history search now takes the last N commits instead of N first-parent commits.
+- **Native dependency floor raised** — ChunkHound now requires `chunkhound-native` 6.1.0 or later, the first release with the analytics recorder.
 
 ### Fixed
+- **Windows on Python 3.12: parse workers no longer die at start-up under load** — On Python 3.12 (and 3.13 before 3.13.4), a WMI query that the standard library's `platform` module made while a parse worker started could close one of the worker's handles under CPU load (CPython gh-130727). The worker then failed with `[WinError 6] The handle is invalid` or stalled the pool, and the initial scan failed or never finished. On those Python versions ChunkHound now keeps `platform` on its non-WMI fallback, which reports the same values.
+- **Stopping realtime indexing during start-up cancels the start** — `stop()` could not cancel a start that was still running the indexed-root identity check, because the start registered itself only after that check. The start then went on to set up the watcher after `stop()` had returned. It now registers before the check, so `stop()` cancels it at any point.
 - **Semantic search totals match the results you can page through** — With a stored embedding that has NULL elements (what a NaN vector is stored as) in scope, DuckDB semantic search skipped that row but still counted it, so `total` and `has_more` overstated the results and could offer a page that came back empty. The total is now computed from the same scored rows as the page. Searches with a `threshold` also no longer score every embedding twice.
+- **Search pagination only advertises reachable pages** — `total` now counts just what the paging window can serve, rounded down to a whole `page_size`, and `next_offset` is always a page the same search accepts. Previously a diff/web search could report `total=2000` at `page_size=30` and hand out a `next_offset` whose request raised, and the MCP footer derived an unreachable page count from it. The unbounded match count moved to a new `corpus_total` field, which the CLI header shows when it exceeds `total`; transient hybrid search omits it because it ranks only a bounded snapshot. `--vector-source both` keeps its existing snapshot-bounded `total`.
+- **`fetchurl` validates redirect destinations** — A redirect from a public URL to a private, loopback or link-local address was followed, because only the initial URL was checked. Every urllib redirect hop is now validated before it is requested, and the Chrome branch validates the final URL before returning its content, as websearch already did. A blocked hop raises `SsrfBlockedError` and is not retried (#478).
 - **VoyageAI semantic search ranks better** — Search queries are now embedded with Voyage `input_type="query"` instead of `"document"`. Voyage models embed queries and documents differently, and a query embedded as a document was matched as one document against another, which pushed relevant code far down the results. Indexed chunks were always embedded as documents and still are, so no re-index is needed. Other providers are unchanged.
-- **A hung Rust indexing run is reported** — `daemon_status` reads `stalled` (aggregate `degraded`) when a Rust run holds the database with no progress for 10 minutes (22 for a compaction or index-build step, or before the run first writes), instead of `idle` or `initializing`. A hung native run still cannot be stopped from Python; it is reported so it can be restarted.
+- **On Python 3.11 and later, the daemon no longer puts the project directory on its import path** — `python -m` puts the working directory first on `sys.path`, and the daemon runs in the project directory. So when the indexed project was itself a ChunkHound checkout, its daemon imported that checkout's `chunkhound` package and native module instead of the installed build. On Python 3.11 and later the daemon and the Watchman Python bridge now start with `-P`, which stops `python -m` from adding the working directory to `sys.path`. Python 3.10 has no `-P`, so on 3.10 a daemon serving a ChunkHound checkout still imports that checkout's code. `-P` does not filter `PYTHONPATH`, so a relative entry such as `.` still resolves against the project directory.
+- **Realtime indexing is more reliable** — A write is now one executor submission and a failed resync is retried. Duplicate events are never dropped while the path's change is being processed. A failed attempt no longer leaves a dedup record that suppresses the next write. Read-only watcher events take no event-queue slot. A kernel inotify queue overflow now requests a resync. Windows in-place writes reported as attribute changes are indexed. `process_file` keeps a file's content hash, and a file confirmed unchanged by hash keeps its mtime.
+- **`daemon_status` is current** — It reports the realtime state as of the read.
+- **Unchanged incremental runs leave the database available** — An incremental run with nothing to write no longer takes the database from readers.
+- **DuckDB recovery is safer** — A database held by another process is never treated as WAL-corrupt, and a checkpoint right after WAL replay keeps replayed rows in the indexes.
+- **Parse workers exit with their parent** — Pool and timeout workers no longer linger after the parent process dies.
+- **Faster parse-worker start-up** — PyMuPDF is imported lazily, so parse workers no longer load its ONNX layout model.
+- **JavaScript and TypeScript chunking** — Top-level imports and call statements are now chunked in JS, TS, JSX and TSX.
+- **Git-history diffs ignore user git config** — Diffs are isolated from your git configuration, so results no longer vary with it.
+- **Claude Code CLI provider runs without your hooks** — User-configured hooks no longer interfere with research calls.
+- **VoyageAI configuration** — Look-alike hosts are rejected when checking for the official endpoint, and `VOYAGE_API_KEY` is applied after config layers are merged.
+- **llama.cpp long inputs** — A text the server rejects as too long is split and retried.
+- **LanceDB `path_filter`** — `find_similar_chunks` now honors `path_filter`.
+- **Websearch rejects private-network URLs** — Search results pointing at private addresses, and redirects to them, are no longer fetched.
+- **Deep research input handling** — Object-shaped exploration queries are accepted, and relative imports are anchored to the project root.
 
 ## [6.1.0] - 2026-10-20
 
@@ -869,7 +901,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.1.0...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v6.2.0...HEAD
+[6.2.0]: https://github.com/chunkhound/chunkhound/compare/v6.1.0...v6.2.0
 [6.1.0]: https://github.com/chunkhound/chunkhound/compare/v6.0.0...v6.1.0
 [6.0.0]: https://github.com/chunkhound/chunkhound/compare/v5.2.1...v6.0.0
 [5.2.0]: https://github.com/chunkhound/chunkhound/compare/v5.1.0...v5.2.0

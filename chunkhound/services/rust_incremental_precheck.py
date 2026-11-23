@@ -25,14 +25,21 @@ A file is called unchanged only when its bytes are unchanged: either the hash
 matches, or mtime and size both match (the same trust Rust's mtime fast path
 places in them). A disagreement with Rust over the mtime read (the two DuckDB
 builds' session time zones) can only make this check hash more files.
+
+A file confirmed unchanged by hash gets its current mtime stored (on Python's
+connection, before any handoff to Rust), so the next start does not hash it
+again; the Rust differ classifies it the same way but never writes it back.
+A failed refresh only costs the next run a re-hash.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
@@ -55,6 +62,10 @@ class RustIncrementalWork:
     changed: list[Path]
     removed: list[str]
     skipped_by_hash: int
+    # (stored path, current st_mtime, confirmed content_hash) per file
+    # confirmed unchanged by hash; its stored mtime is refreshed.
+    refresh: list[tuple[str, float, str]] = field(default_factory=list)
+    mtimes_refreshed: int = 0
 
     def has_work(self, *, do_cleanup: bool) -> bool:
         """Return whether the Rust run would write or remove anything.
@@ -76,6 +87,7 @@ def classify_files(
     changed: list[Path] = []
     seen: set[str] = set()
     skipped_by_hash = 0
+    refresh: list[tuple[str, float, str]] = []
     for path in files:
         try:
             rel = get_relative_path_safe(path, project_root).as_posix()
@@ -105,13 +117,17 @@ def classify_files(
                 same_bytes = False
             if same_bytes:
                 skipped_by_hash += 1
+                refresh.append((rel, st.st_mtime, str(stored_hash)))
             else:
                 changed.append(path)
         elif row.get("size") is not None and int(row["size"]) != st.st_size:
             changed.append(path)
     removed = sorted(p for p in db_state if p not in seen)
     return RustIncrementalWork(
-        changed=changed, removed=removed, skipped_by_hash=skipped_by_hash
+        changed=changed,
+        removed=removed,
+        skipped_by_hash=skipped_by_hash,
+        refresh=refresh,
     )
 
 
@@ -125,12 +141,21 @@ async def find_rust_incremental_work(
 
     Reads the rows through the provider's ordinary (shared) connection. Runs
     off the event loop: hashing a fresh worktree reads every file, and the MCP
-    server must keep answering meanwhile.
+    server must keep answering meanwhile. Stores the current mtime of every
+    file confirmed unchanged by hash, still before any handoff to Rust.
     """
 
     def _run() -> RustIncrementalWork:
         rows = db.execute_query(_FILE_STATE_SELECT, [])
-        return classify_files(rows, files, project_root, mtime_epsilon)
+        work = classify_files(rows, files, project_root, mtime_epsilon)
+        if not work.refresh:
+            return work
+        try:
+            refreshed = db.refresh_file_mtimes(work.refresh)
+        except Exception as e:
+            logger.warning(f"Could not refresh stored mtimes: {e}")
+            return work
+        return replace(work, mtimes_refreshed=refreshed)
 
     return await asyncio.to_thread(_run)
 
@@ -159,6 +184,8 @@ async def plan_rust_run(
     Returns *files_to_process* and *do_cleanup* unchanged unless the run can be
     narrowed to the changed files, and ``skip=True`` when it has nothing to
     write or remove -- the caller then never hands the database to Rust.
+    Stores the current mtime of every file confirmed unchanged by hash (see
+    ``find_rust_incremental_work``).
     """
     work = await find_rust_incremental_work(db, files, project_root, mtime_epsilon)
     rust_do_cleanup = do_cleanup

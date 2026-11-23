@@ -5,9 +5,10 @@ import multiprocessing
 import os
 import socket
 import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -1233,6 +1234,70 @@ def test_format_startup_failure_parses_prefixed_breadcrumbs_and_keeps_legacy_sup
     assert "Last known startup phase: watchman_watch_project" in message
     assert "Elapsed startup duration so far: 12.000s" in message
     assert "Last startup error: watchman session bootstrap exploded" in message
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="Python 3.10 lacks safe-path mode"
+)
+def test_module_subprocess_excludes_project_from_import_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import argparse
+    from importlib.metadata import version
+
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+    # The fix covers the working directory only. -P leaves PYTHONPATH alone, so
+    # a relative entry such as "." would still put the project on the path, and
+    # that is the user's own setting. PYTHONSAFEPATH gives -P's effect without
+    # the flag, which would let the command main builds pass this test.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    args = argparse.Namespace(command="_daemon", verbose=False, debug=False)
+    with patch.object(subprocess, "Popen") as popen:
+        DaemonDiscovery(project_dir)._start_daemon_subprocess(
+            args, socket_path="tcp:127.0.0.1:54999"
+        )
+
+    cmd = popen.call_args.args[0]
+    cwd = Path(popen.call_args.kwargs["cwd"])
+    env = popen.call_args.kwargs["env"]
+    assert cwd.resolve() == project_dir.resolve()
+    module_index = cmd.index("chunkhound.api.cli.main")
+    assert cmd[module_index - 1] == "-m"
+    interpreter = cmd[: module_index - 1]
+    path_probe = "import json, sys; print(json.dumps(sys.path))"
+    paths = subprocess.run(
+        [*interpreter, "-c", path_probe],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+
+    def normalize(path: Path) -> str:
+        return os.path.normcase(os.path.realpath(path))
+
+    # With -c, an empty sys.path entry denotes the child's working directory.
+    child_paths = [normalize(cwd / entry) for entry in json.loads(paths.stdout)]
+    project_path = normalize(cwd)
+    assert project_path not in child_paths, (
+        f"Project cwd on child import path: {project_path}"
+    )
+
+    cli = subprocess.run(
+        [*cmd[: module_index + 1], "--version"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    assert cli.stdout.strip() == f"chunkhound {version('chunkhound')}"
 
 
 def test_start_daemon_subprocess_scrubs_mcp_mode_from_child_env(
