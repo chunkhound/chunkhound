@@ -115,25 +115,6 @@ runs:
           fi
         fi
 
-    - name: Link native package to its source commit
-      shell: bash
-      run: |
-        # Native wheels are built with the Python pyproject.toml hidden, so the
-        # hatch metadata hook never runs for them. maturin only reads project
-        # URLs from pyproject.toml, but it does map Cargo's `repository` field to
-        # a "Source Code" project URL, so point that at the built commit here.
-        sha="$(git rev-parse --verify HEAD)"
-        if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-          echo "Could not resolve the checked-out commit SHA" >&2
-          exit 1
-        fi
-        if [[ "$(grep -c '^edition = ' Cargo.toml)" != "1" ]]; then
-          echo "Expected exactly one edition line in Cargo.toml" >&2
-          exit 1
-        fi
-        sed -i "s|^edition = \"2021\"\$|&\nrepository = \"https://github.com/chunkhound/chunkhound/commit/$sha\"|" Cargo.toml
-        grep -q "^repository = \"https://github.com/chunkhound/chunkhound/commit/$sha\"\$" Cargo.toml
-
     - name: Build native wheel (Linux, manylinux_2_31 container)
       if: runner.os == 'Linux'
       shell: bash
@@ -265,6 +246,15 @@ runs:
         # dependency instead of fixing it.
         uvx --python 3.12 maturin build --release --auditwheel repair --out "${{ inputs.out-dir }}/"
         mv pyproject.toml.hidden pyproject.toml
+
+    - name: Add source commit link to native wheel
+      shell: bash
+      run: |
+        # Native wheels are built with pyproject.toml hidden, so the hatch
+        # metadata hook never adds the "Source commit" link. Add it to the
+        # built wheel with the same helper the main package uses.
+        uv run --no-project --python 3.12 --with packaging python scripts/add_source_commit_link.py \
+          "${{ inputs.out-dir }}"/chunkhound_native-*.whl
 
     - name: Smoke test native wheel API
       shell: bash

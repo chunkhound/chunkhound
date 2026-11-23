@@ -298,3 +298,36 @@ def test_metadata_hook_adds_no_link_outside_git(tmp_path) -> None:
     hatch_build._add_source_commit_url(metadata, tmp_path)
 
     assert "urls" not in metadata or "Source commit" not in metadata["urls"]
+
+
+def test_native_wheel_gets_source_commit_link(tmp_path) -> None:
+    import base64
+    import hashlib
+    import zipfile
+
+    from scripts import add_source_commit_link
+
+    wheel = tmp_path / "chunkhound_native-0.0.0-py3-none-any.whl"
+    dist = "chunkhound_native-0.0.0.dist-info"
+    metadata_text = "Metadata-Version: 2.4\nName: chunkhound-native\n\nbody\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("chunkhound_native/__init__.py", "")
+        archive.writestr(f"{dist}/METADATA", metadata_text)
+        archive.writestr(f"{dist}/RECORD", "")
+
+    add_source_commit_link.add_source_commit_link(wheel, hatch_build._REPO_ROOT)
+
+    with zipfile.ZipFile(wheel) as archive:
+        metadata = archive.read(f"{dist}/METADATA").decode()
+        record = archive.read(f"{dist}/RECORD").decode()
+        for name in archive.namelist():
+            if name == f"{dist}/RECORD":
+                continue
+            digest = base64.urlsafe_b64encode(
+                hashlib.sha256(archive.read(name)).digest()
+            ).rstrip(b"=")
+            assert f"{name},sha256={digest.decode()}," in record
+
+    sha = hatch_build._source_commit(hatch_build._REPO_ROOT)
+    assert metadata.count("Project-URL: Source commit, ") == 1
+    assert f"/commit/{sha}" in metadata
