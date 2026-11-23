@@ -1141,6 +1141,10 @@ class TransientSearchService:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         from chunkhound.services.search.result_enhancer import ResultEnhancer
 
+        blank_query = not query.strip()
+        if blank_query and not regex_pattern:
+            raise ValueError("Search query must not be blank")
+
         if self._vector_source == "both":
             logger.warning(
                 "Hybrid search with vector_source='both' may process up to {} "
@@ -1226,11 +1230,16 @@ class TransientSearchService:
                 regex_pattern, page_size=fetch_size, offset=0
             )
 
-        semantic_task = asyncio.create_task(frozen_snapshot(fetch_semantic))
-        if regex_pattern is None:
-            semantic_results = await semantic_task
-            regex_results: list[dict[str, Any]] = []
+        regex_results: list[dict[str, Any]]
+        if blank_query:
+            # A blank query has no embedding; regex-only hybrid still works.
+            semantic_results: list[dict[str, Any]] = []
+            regex_results = await frozen_snapshot(fetch_regex)
+        elif regex_pattern is None:
+            semantic_results = await frozen_snapshot(fetch_semantic)
+            regex_results = []
         else:
+            semantic_task = asyncio.create_task(frozen_snapshot(fetch_semantic))
             regex_task = asyncio.create_task(frozen_snapshot(fetch_regex))
             semantic_results, regex_results = await _await_pair(
                 semantic_task, regex_task
