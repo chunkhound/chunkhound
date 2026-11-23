@@ -21,3 +21,21 @@ def test_load_from_env_parses_depth_exploration_token_budget(
 def test_depth_exploration_token_budget_is_positive() -> None:
     with pytest.raises(ValueError):
         ResearchConfig(depth_exploration_max_completion_tokens=0)
+
+
+def test_load_from_env_parses_gap_detection_token_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CHUNKHOUND_RESEARCH_GAP_DETECTION_MAX_COMPLETION_TOKENS",
+        "12345",
+    )
+
+    config = ResearchConfig.load_from_env()
+
+    assert config["gap_detection_max_completion_tokens"] == 12345
+
+
+def test_gap_detection_token_budget_is_positive() -> None:
+    with pytest.raises(ValueError):
+        ResearchConfig(gap_detection_max_completion_tokens=0)

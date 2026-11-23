@@ -672,6 +672,7 @@ Controls the `code_research` MCP tool and `chunkhound research` command.
 | `max_gaps` | `int` | `10` | `CHUNKHOUND_RESEARCH_MAX_GAPS` | Maximum gaps to fill after selection (5-30) |
 | `gap_similarity_threshold` | `number` | `0.25` | `CHUNKHOUND_RESEARCH_GAP_SIMILARITY_THRESHOLD` | Cosine distance threshold for clustering similar gaps (0.1-0.5) |
 | `shard_budget` | `int` | `40000` | `CHUNKHOUND_RESEARCH_SHARD_BUDGET` | Token budget per gap detection shard for LLM processing (20000-60000) |
+| `gap_detection_max_completion_tokens` | `int` | `10000` | `CHUNKHOUND_RESEARCH_GAP_DETECTION_MAX_COMPLETION_TOKENS` | Completion token budget per gap detection shard call; `shard_budget` plus this value plus prompt overhead must fit the model context (1-50000) |
 | `min_cluster_size` | `int` | `5` | `CHUNKHOUND_RESEARCH_MIN_CLUSTER_SIZE` | Minimum cluster size for HDBSCAN clustering (1-20) |
 | `target_tokens` | `int` | `20000` | `CHUNKHOUND_RESEARCH_TARGET_TOKENS` | Output token budget for final synthesis (10000-100000) |
 | `max_compression_iterations` | `int` | `5` | `CHUNKHOUND_RESEARCH_MAX_COMPRESSION_ITERATIONS` | Max compression loop iterations before error (1-10) |

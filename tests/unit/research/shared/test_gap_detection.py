@@ -1,12 +1,14 @@
 """Unit tests for Gap Detection Service helper methods.
 
-Tests the synchronous helper methods:
+Tests detect_and_fill_gaps shard-failure reporting (#514) and the synchronous
+helper methods:
 - _shard_by_tokens(): Token-based sharding of chunk clusters
 - _select_gaps_by_elbow(): Gap selection using elbow detection
 - _global_dedup(): Cross-gap deduplication (via deduplicate_chunks)
 """
 
 import pytest
+from loguru import logger as _loguru_logger
 
 from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.services.research.shared.gap_detection import GapDetectionService
@@ -359,3 +361,184 @@ class TestEdgeCases:
         # Only chunk with ID should remain
         assert len(deduplicated) == 1
         assert deduplicated[0]["chunk_id"] == "c1"
+
+
+# -----------------------------------------------------------------------------
+# Tests: per-shard failure reporting (#514)
+# -----------------------------------------------------------------------------
+
+# ~12,500 tokens each; with shard_budget=20_000 every chunk gets its own shard.
+_SHARD_SIZED_CONTENT = "x" * 50_000
+
+# Mirrors the message the providers raise when a structured completion is cut off.
+_TRUNCATED_MESSAGE = (
+    "LLM structured completion truncated - token limit exceeded "
+    "(prompt=42,935, completion=2,039). This indicates insufficient "
+    "max_completion_tokens for the structured output."
+)
+
+
+def _covered_chunks(count: int) -> list[dict]:
+    """One shard-sized chunk per expected shard, tagged with its file name."""
+    return [
+        {
+            "chunk_id": f"c{i}",
+            "file_path": f"f{i}.py",
+            "content": f"# marker-f{i}\n" + _SHARD_SIZED_CONTENT,
+            "rerank_score": 0.9,
+        }
+        for i in range(count)
+    ]
+
+
+class _RecordingProgress:
+    """Stand-in for TreeProgressDisplay that records gap_step messages."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def emit_event(self, event_type, message, **kwargs) -> None:
+        self.messages.append(message)
+
+
+@pytest.fixture
+def warnings_logged():
+    """Collect loguru WARNING messages for the duration of a test."""
+    messages: list[str] = []
+    sink_id = _loguru_logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        _loguru_logger.remove(sink_id)
+
+
+class TestShardFailureReporting:
+    """A failed shard is counted and reported, never an empty gap list."""
+
+    @pytest.mark.asyncio
+    async def test_truncated_completion_counts_as_failed_shard(
+        self, gap_service, fake_llm_provider, warnings_logged, monkeypatch
+    ):
+        """A truncated completion gives shards_failed == 1 and a shard warning."""
+
+        async def truncated(*args, **kwargs):
+            raise RuntimeError(_TRUNCATED_MESSAGE)
+
+        monkeypatch.setattr(fake_llm_provider, "complete_structured", truncated)
+        covered = _covered_chunks(1)
+
+        chunks, stats = await gap_service.detect_and_fill_gaps(
+            root_query="q", covered_chunks=covered, phase1_threshold=0.5
+        )
+
+        assert chunks == covered
+        assert stats["shards_total"] == 1
+        assert stats["shards_succeeded"] == 0
+        assert stats["shards_failed"] == 1
+        assert stats["shard_failures"]["items"][0]["item"] == "shard 0"
+        assert any("shard 0" in m and "truncated" in m for m in warnings_logged)
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_names_the_failed_shard(
+        self, gap_service, fake_llm_provider, warnings_logged, monkeypatch
+    ):
+        """One failing shard among several is counted; the others still succeed."""
+
+        async def fail_on_second_shard(prompt, **kwargs):
+            if "marker-f1" in prompt:
+                raise RuntimeError(_TRUNCATED_MESSAGE)
+            return {"gaps": []}
+
+        monkeypatch.setattr(
+            fake_llm_provider, "complete_structured", fail_on_second_shard
+        )
+
+        _, stats = await gap_service.detect_and_fill_gaps(
+            root_query="q", covered_chunks=_covered_chunks(3), phase1_threshold=0.5
+        )
+
+        assert (
+            stats["shards_total"],
+            stats["shards_succeeded"],
+            stats["shards_failed"],
+        ) == (3, 2, 1)
+        assert stats["degraded"] is True
+        assert any("shard 1" in m for m in warnings_logged)
+
+    @pytest.mark.asyncio
+    async def test_every_shard_failing_reports_degraded_not_clean_zero_gaps(
+        self, gap_service, fake_llm_provider, warnings_logged, monkeypatch
+    ):
+        """All shards failing is an explicit degraded result, not 'no gaps found'."""
+
+        async def truncated(*args, **kwargs):
+            raise RuntimeError(_TRUNCATED_MESSAGE)
+
+        monkeypatch.setattr(fake_llm_provider, "complete_structured", truncated)
+        progress = _RecordingProgress()
+        gap_service._progress = progress
+        covered = _covered_chunks(3)
+
+        chunks, stats = await gap_service.detect_and_fill_gaps(
+            root_query="q", covered_chunks=covered, phase1_threshold=0.5
+        )
+
+        assert chunks == covered
+        assert stats["gaps_found"] == 0
+        assert stats["shards_total"] == 3
+        assert stats["shards_succeeded"] == 0
+        assert stats["shards_failed"] == 3
+        assert stats["degraded"] is True
+        assert stats["shard_failures"]["count"] == 3
+        # The step events must not read like a clean run either.
+        assert any("DEGRADED" in m for m in progress.messages)
+        assert not any("complete: no gaps found" in m for m in progress.messages)
+        assert any("failed=3" in m for m in warnings_logged)
+
+    @pytest.mark.asyncio
+    async def test_clean_corpus_has_no_gaps_and_no_warning(
+        self, gap_service, fake_llm_provider, warnings_logged, monkeypatch
+    ):
+        """Every shard succeeding with no gaps keeps the fast path and stays quiet."""
+
+        async def no_gaps(*args, **kwargs):
+            return {"gaps": []}
+
+        monkeypatch.setattr(fake_llm_provider, "complete_structured", no_gaps)
+        progress = _RecordingProgress()
+        gap_service._progress = progress
+        covered = _covered_chunks(3)
+
+        chunks, stats = await gap_service.detect_and_fill_gaps(
+            root_query="q", covered_chunks=covered, phase1_threshold=0.5
+        )
+
+        assert chunks == covered
+        assert stats["gaps_found"] == 0
+        assert stats["shards_total"] == 3
+        assert stats["shards_succeeded"] == 3
+        assert stats["shards_failed"] == 0
+        assert stats["degraded"] is False
+        assert warnings_logged == []
+        assert any("complete: no gaps found" in m for m in progress.messages)
+        assert not any("DEGRADED" in m for m in progress.messages)
+
+    @pytest.mark.asyncio
+    async def test_configured_completion_budget_reaches_the_llm_call(
+        self, gap_service, fake_llm_provider, monkeypatch
+    ):
+        """gap_detection_max_completion_tokens replaces the old hardcoded 2048."""
+        gap_service._config.gap_detection_max_completion_tokens = 12_345
+        captured: list[int] = []
+
+        async def capturing(*args, **kwargs):
+            captured.append(kwargs["max_completion_tokens"])
+            return {"gaps": []}
+
+        monkeypatch.setattr(fake_llm_provider, "complete_structured", capturing)
+
+        await gap_service.detect_and_fill_gaps(
+            root_query="q", covered_chunks=_covered_chunks(2), phase1_threshold=0.5
+        )
+
+        assert captured == [12_345, 12_345]
