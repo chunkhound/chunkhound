@@ -28,6 +28,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.release_tag import resolve_release
+from scripts.validate_wheel_record import check_wheel as check_wheel_record
 
 
 def check_metadata(text: str, name: str, version: str, alpha: bool) -> None:
@@ -93,6 +94,12 @@ def check_wheel(path: Path, version: str, alpha: bool) -> str:
             check_embedded_version(
                 archive.read("chunkhound/_version.py").decode(), version
             )
+    # PyPI rejects uploads whose ZIP contents disagree with RECORD; the Linux
+    # native wheels are the ones at risk (auditwheel's repack emits directory
+    # members maturin never writes). Fail before publishing, not during upload.
+    record_problems = check_wheel_record(path)
+    if record_problems:
+        raise SystemExit("\n".join(record_problems))
     return name
 
 
