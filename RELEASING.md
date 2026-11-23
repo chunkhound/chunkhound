@@ -12,11 +12,13 @@ Run the smoke suite before creating a release tag:
 uv run pytest tests/test_smoke.py -v -n auto
 ```
 
-A stable release is published when its GitHub Release is published. An
-alpha/beta/RC tag triggers `release-rc.yml` and publishes the pre-release to
-PyPI. Successful upstream `main` push builds also create alpha tags and call the
-same reusable `release-packages.yml` workflow directly. Create manual release
-tags with `uv run scripts/update_version.py`; never edit version strings manually.
+A stable release is published when its GitHub Release is published. A
+beta/RC tag triggers `release-rc.yml` and publishes the pre-release to PyPI.
+Successful upstream `main` push builds publish automatic alphas through the
+serialized, tagless alpha path described below, which calls the reusable
+`release-packages.yml` workflow directly. Alphas are never created by tags.
+Create manual beta/RC/stable tags with `uv run scripts/update_version.py`;
+never edit version strings manually.
 
 ## Prerequisites (one-time setup)
 
@@ -78,17 +80,18 @@ index (see `release-rc.yml`), not TestPyPI.
 
 In **Settings → Rules → Rulesets**, create a ruleset:
 
-- Protect `v*` tags against updates and deletion, including alpha tags.
-- Protect `alpha-build/**` tags against updates and deletion. They record immutable
-  allocator identity, not package versions or release artifacts.
-- Allow the Actions identity to **create** alpha tags and `alpha-build/**` tags;
-  do not give it blanket bypass permission for stable/beta/RC tags.
+- Protect `v*` tags against updates and deletion.
+- Remove any `alpha-build/**` ruleset or tags left from the previous design.
+- Do **not** grant the Actions identity permission to create alpha tags or
+  `alpha-build/**` tags. Automatic alphas are tagless and need no tag creation.
+- Prohibit tags that name alpha versions (`v*a*`). Any such tag is a
+  misconfiguration and must not be pushed.
 - Keep stable/beta/RC tag creation restricted to maintainers.
 
-Use separate creation and update/deletion rules so allowing CI creation does not
-allow it to move a release. Verify the effective rules with repository admins:
-`contents: write` does not bypass a restrictive ruleset. Both tag refs are pushed
-atomically, so a rejected identity ref also prevents creation of the alpha tag.
+Use separate creation and update/deletion rules so the release tag set cannot be
+moved. Verify the effective rules with repository admins: a tag-creation rule
+applies to `GITHUB_TOKEN` too. The alpha workflow needs no `contents: write`
+permission for tags.
 
 ### 4. Deprecation secret
 
@@ -96,55 +99,80 @@ Add `PYPI_API_TOKEN` to the `maintainers` environment secrets. This token must h
 
 ---
 
-## Continuous Alpha Releases
+## Automatic Alpha Releases
 
-Every successful push build on upstream `chunkhound/chunkhound` main allocates the
-next available `vX.Y.ZaN` tag after existing CI validation. PR, merge-queue, manual,
-and fork CI runs do not allocate tags. No GitHub App or PAT is required: CI creates
-the tag using `GITHUB_TOKEN`, then directly calls the reusable release workflow.
+Automatic alphas are **tagless**. Every successful push build on upstream
+`chunkhound/chunkhound` main publishes the next alpha selected from PyPI state.
+PR, merge-queue, manual, and fork CI runs do not publish.
+No tag, GitHub App, PAT, or `contents: write` is used for alphas.
 
-The alpha base is the next minor after the highest stable `vX.Y.Z` tag on the
-remote (compared numerically; prerelease tags are ignored): stable `6.1.0` gives
-alphas `v6.2.0aN`, and stable `6.2.0` or a hotfix `6.2.1` moves the line to
-`v6.3.0aN`. Stable `7.0.0` gives `v7.1.0aN`. If no stable tag exists, allocation
-fails. Numbers reflect allocation order, not commit order: an older source commit
-can finish CI later and receive a higher alpha number.
+### Allocation
 
-Publication order is not guaranteed either. Main CI runs are independent, so
-alpha N+1 can reach PyPI before alpha N, and alpha N may be missing if its
-publication fails. This is accepted. Installers choose the highest version, so
-users still end up on the newest published alpha. Do not assume that PyPI
-upload order or a gap-free sequence matches the tag order.
+- The latest published `chunkhound` stable `X.Y.Z` selects the next minor core:
+  `X.(Y+1).0a1`. If a native-only partial alpha already exists on that new core,
+  allocation advances past it. If latest `chunkhound` is alpha `X.Y.ZaN`, the
+  core remains exactly `X.Y.Z` and the next serial is `max(aN across both
+  published projects for that core) + 1` (for example, `6.2.0a12` becomes
+  `6.2.0a13`).
+- Under one alpha lock, the workflow queries both PyPI projects (`chunkhound`
+  and `chunkhound-native`) and allocates from their published state. The allocator
+  accepts no core override.
+- Beta, RC, dev, post, and local releases are ignored when choosing the line. Only
+  plain stable and plain alpha releases choose it. If a beta or RC already exists on
+  the selected core (for example, `6.2.0` is stable and `6.3.0b1` is published, so
+  the next core is `6.3.0`), the alpha job stops with a clear error and publishes
+  nothing. This case needs a maintainer decision.
+- The chosen version, `source_sha`, and `channel=alpha` are passed explicitly to
+  the build. The version is never derived from Git tags. The initial serial is
+  canonical `a1` (not `a01`).
 
-The allocator atomically creates the release tag and
-`alpha-build/chunkhound/chunkhound/<run-id>`. The identity tag points to a metadata
-blob, not a commit, so it does not influence Git version discovery. Rerunning the
-same CI run reuses its original tag even if a newer stable tag moves the base.
-Concurrent allocations refetch and retry tag-name collisions. This is not an
-automatic publication-retry system.
+### Serialization and superseded runs
 
-The requested tag supplies the exact version to both builds. Main builds override
-Hatch discovery with `SETUPTOOLS_SCM_PRETEND_VERSION`; native builds receive the
-explicit tag. Multiple tags on a source commit cannot select a different version.
-Alpha main artifacts require the matching native alpha version exactly, including
-when a wheel is rebuilt from the published sdist. Stable and beta/RC dependency
-semantics remain unchanged.
+- One alpha workflow runs at a time. Allocation, builds, validation, and uploads
+  share one concurrency group.
+- A run that is already stale when it finishes CI is skipped before it enters the
+  release queue. Once a tested snapshot enters the release lock, it always finishes
+  publication even if `main` moves while its artifacts are building. A later tested
+  snapshot waits and receives the next alpha serial.
+- Uploads for alphas do not use `skip-existing`. If the selected version already
+  exists on PyPI, the run fails instead of mixing artifacts from different commits.
 
-For testing, install an exact alpha, for example:
+### Gaps and ordering
+
+Partial publication is possible. If native `aN` publishes but main `aN` fails,
+PyPI keeps the native file. The next fresh run allocates `aN+1` from the union of
+both projects, so `aN` remains a permanent gap. Reusing `aN` is never done.
+Installers choose the highest version, so users still reach the newest alpha.
+
+### Testing
 
 ```bash
 pip install 'chunkhound==6.2.0a1'
 ```
 
-Alphas sort below beta, RC, and stable releases of the same base version. No
-lockfile upgrade is required for every automatic alpha; local development keeps
-using the reviewed locked native dependency until deliberately upgraded.
+Alphas sort below beta, RC, and stable releases of the same base version. Alpha
+main artifacts require the matching native alpha version exactly. Stable and
+beta/RC dependency semantics remain unchanged.
 
-On failure, use existing manual Actions reruns. Prefer rerunning failed publication
-jobs, which normally reuse the built artifacts. Uploads keep `skip-existing: true`.
-A full workflow rerun can rebuild and overwrite Actions artifacts; after partial
-publication, PyPI may retain earlier files. This existing limitation is accepted;
-no special artifact storage, checksum registry, or automatic upload retry is added.
+### Failures and reruns
+
+- If the run fails before native publication, fix the cause and use **Re-run all
+  jobs** on the current `main` CI run. That performs a fresh allocation. Do not
+  rerun an older CI run that was skipped as stale.
+- **Re-run failed jobs** keeps the original workflow state and allocated version.
+  For a transient native publish failure, use it only if no native file for that
+  version reached PyPI. After a partial native upload, use **Re-run all jobs** on
+  the current `main` CI run to allocate a fresh version.
+- If native publication succeeded but main publication failed **before any main
+  file reached PyPI**, rerunning only the failed main publish job is safe: it
+  reuses the same validated main artifacts and matching native version.
+- If **any main file reached PyPI** before the failure, do not retry that main
+  publish job. Alpha uploads do not skip existing files, so a retry would fail
+  on those immutable files. Use **Re-run all jobs** on the current `main` CI run
+  to allocate a fresh version from both PyPI projects. Leave the incomplete old
+  version in place; the fresh run publishes both packages under the new serial.
+- Do not create or push alpha tags to "fix" a failure. Tags for alpha versions are
+  prohibited.
 
 ## RC Release
 
@@ -157,8 +185,9 @@ git push origin v1.2.0rc1
 ```
 
 The `release-rc.yml` wrapper calls `release-packages.yml` to publish to real PyPI.
-Alpha tags use the alpha environments without required reviewers. Beta/RC tags use
-`pypi` and `pypi-native` and retain those environments' configured approval rules.
+Automatic alphas use the alpha environments without required reviewers and never
+go through this tag path. Beta/RC tags use `pypi` and `pypi-native` and retain
+those environments' configured approval rules.
 
 Both release workflows use the same publication order:
 

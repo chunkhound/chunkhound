@@ -1,11 +1,9 @@
-"""Validate that downloaded chunkhound-native wheel artifacts match a release tag.
+"""Validate downloaded chunkhound-native wheels against the requested release.
 
 Checks both the wheel filename version and the package's actual dist-info
 METADATA (name + version), guarding against a mismatched build artifact
-reaching PyPI. Reads the release tag from the RELEASE_TAG env var and the
-wheels from a "dist-native" directory relative to the current working
-directory. Shared by release.yml and release-rc.yml's publish-native jobs,
-which previously each carried their own byte-identical copy of this check.
+reaching PyPI. Exactly one of RELEASE_TAG (tagged releases) or RELEASE_VERSION
+(tagless automatic alpha) selects the expected version.
 """
 
 from __future__ import annotations
@@ -21,13 +19,15 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.release_tag import parse_release_tag
+from scripts.release_tag import resolve_release
 
 
 def main() -> None:
-    tag = os.environ["RELEASE_TAG"]
     try:
-        expected_version = parse_release_tag(tag).version
+        expected_version = resolve_release(
+            os.environ.get("RELEASE_TAG") or None,
+            os.environ.get("RELEASE_VERSION") or None,
+        ).version
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 

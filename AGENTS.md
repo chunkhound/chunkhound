@@ -41,22 +41,28 @@ git_hash:   uv run chunkhound search "<query>" --commit-hash <hash>
 ```
 
 ## VERSION_MANAGEMENT
-Dynamic versioning via hatch-vcs - version derived from git tags.
+Stable, beta, and RC versions use hatch-vcs and are derived from Git tags.
+Automatic alpha versions are tagless and CI-owned. From the latest published
+`chunkhound` stable `X.Y.Z`, CI starts the `X.(Y+1).0` alpha line; from the
+latest published alpha, CI keeps that exact core. CI increments only `aN`
+across both published packages. NEVER create alpha tags or use `scripts/update_version.py`
+for alpha releases.
 
 ```bash
-# Create release
+# Create stable release tag
 uv run scripts/update_version.py 4.1.0
 
-# Create pre-release
+# Create beta or RC tag
 uv run scripts/update_version.py 4.1.0b1
 uv run scripts/update_version.py 4.1.0rc1
 
-# Bump version
+# Bump tagged versions
 uv run scripts/update_version.py --bump minor      # v4.0.1 → v4.1.0
 uv run scripts/update_version.py --bump minor b1   # v4.0.1 → v4.1.0b1
 ```
 
-NEVER manually edit version strings - ALWAYS create git tags instead.
+NEVER manually edit version strings. Use Git tags for stable/beta/RC releases;
+let CI allocate automatic alpha versions without tags.
 
 ## RUST_RULES
 **NEVER:**
