@@ -12,7 +12,6 @@ import re
 import shutil
 import socket
 import stat
-import sys
 import tarfile
 import tempfile
 import time
@@ -32,6 +31,7 @@ from typing import Literal, cast
 # the isolated build environment, where chunkhound.core's package __init__ (and its
 # runtime-only parser dependencies) are unavailable.
 from chunkhound.utils.cache_paths import platform_cache_root
+from chunkhound.utils.python_command import python_module_command
 
 if os.name == "nt":
     import msvcrt
@@ -580,7 +580,7 @@ def build_watchman_runtime_command_prefix(
     """Build the ChunkHound-owned command prefix for the resolved runtime."""
 
     if runtime.launch_mode == _PYTHON_BRIDGE_LAUNCH_MODE:
-        return [sys.executable, "-m", "chunkhound.watchman_runtime.bridge"]
+        return python_module_command("chunkhound.watchman_runtime.bridge")
     if runtime.launch_mode == _NATIVE_BINARY_LAUNCH_MODE:
         return [str(binary_path)]
     raise ValueError(f"Unsupported Watchman runtime launch mode: {runtime.launch_mode}")

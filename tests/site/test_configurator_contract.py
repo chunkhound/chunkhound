@@ -278,6 +278,14 @@ def test_uberllm_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_aigrow_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "aigrow")
+
+    assert config["provider"] == "aigrow"
+    assert config["model"] == "claude-haiku-5.5"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 

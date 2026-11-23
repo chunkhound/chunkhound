@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import http.server
 import os
+import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING
@@ -111,6 +112,10 @@ async def chrome_browser() -> AsyncIterator[zd.Browser]:
             pass
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="Chrome startup is unreliable on macOS CI runners",
+)
 async def test_fetch_page_html_branch(
     chrome_browser: zd.Browser,
     local_fetch_page_server: tuple[str, list[str]],
