@@ -9,9 +9,10 @@ whole point of using persistent worker processes (see design doc §10, "Rayon
 threads vs ProcessPoolExecutor?" — process spin-up cost should be paid once,
 not per batch).
 
-The fix makes the pool a lazy, process-wide singleton (`_get_parse_pool()`),
+The fix makes the pool a lazy, process-wide singleton (`_leased_parse_pool()`),
 created on first use and reused for every subsequent call — both within one
-`IndexingPipeline.run()` and across multiple runs in the same process.
+`IndexingPipeline.run()` and across runs in the same process, until it has
+been idle for `_PARSE_POOL_IDLE_SECONDS`.
 
 Also formalizes item 15 (callback contracts): the design originally imagined
 Rust parallelizing per-file via rayon; the implementation instead made the
@@ -42,11 +43,11 @@ def _get_pid_probe(_args) -> int:
 class TestParsePoolReused:
     """The parse worker pool must be created once and reused, not per batch."""
 
-    def test_parse_pool_reuses_worker_processes(self, monkeypatch):
+    def test_parse_pool_reuses_worker_processes(self):
         """The same worker process must serve calls across separate
-        _get_parse_pool() lookups.
+        _leased_parse_pool() leases.
 
-        `_get_parse_pool()` is the narrowest seam that exposes this: the
+        `_leased_parse_pool()` is the narrowest seam that exposes this: the
         externally observable contract ("no per-batch process respawn cost")
         has no other surface, since parse_batch_callback() doesn't return
         anything pool-related. Asserts on worker PID equality — an actual
@@ -58,13 +59,17 @@ class TestParsePoolReused:
         """
         import chunkhound.pipeline_bridge as pipeline_bridge
 
-        monkeypatch.setattr(pipeline_bridge, "_parse_pool", None)
+        # Start from no pool and no pending idle timer, whatever ran before;
+        # the default 60 s idle time cannot elapse between the two leases.
+        pipeline_bridge._shut_down_parse_pool_at_exit()
+        try:
+            with pipeline_bridge._leased_parse_pool(1) as pool1:
+                pid_a = pool1.submit(_get_pid_probe, None).result()
 
-        pool1 = pipeline_bridge._get_parse_pool(1)
-        pid_a = pool1.submit(_get_pid_probe, None).result()
-
-        pool2 = pipeline_bridge._get_parse_pool(1)
-        pid_b = pool2.submit(_get_pid_probe, None).result()
+            with pipeline_bridge._leased_parse_pool(1) as pool2:
+                pid_b = pool2.submit(_get_pid_probe, None).result()
+        finally:
+            pipeline_bridge._shut_down_parse_pool_at_exit()
 
         assert pid_a == pid_b, (
             "expected the same worker process to serve both calls "
