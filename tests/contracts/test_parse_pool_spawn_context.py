@@ -19,9 +19,7 @@ import chunkhound.pipeline_bridge as pb
 
 
 def _reset_pool() -> None:
-    if pb._parse_pool is not None:
-        pb._parse_pool.shutdown(wait=True)
-        pb._parse_pool = None
+    pb._shut_down_parse_pool_at_exit()
 
 
 def test_parse_pool_is_created_with_a_spawn_context(monkeypatch):
@@ -35,7 +33,8 @@ def test_parse_pool_is_created_with_a_spawn_context(monkeypatch):
 
     monkeypatch.setattr(pb, "ProcessPoolExecutor", RecordingPool)
     try:
-        pb._get_parse_pool(1)
+        with pb._leased_parse_pool(1):
+            pass
     finally:
         _reset_pool()
 

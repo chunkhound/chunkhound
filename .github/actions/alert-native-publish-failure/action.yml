@@ -4,17 +4,11 @@ description: >
   released. Shared by
   release.yml's publish-native job and release-rc.yml's publish-rc-native
   job. Native publication is intentionally first, so this alert means the
-  main package was not released and the workflow can be retried safely.
+  main package was not released; retry guidance depends on the release channel.
 
 inputs:
-  tag:
-    description: >
-      The published tag to reference in the issue title/body. Callers must
-      resolve this themselves before invoking the action -- release.yml
-      (a `release: published` trigger) uses `github.event.release.tag_name`;
-      release-rc.yml (a `push: tags` trigger) uses `github.ref_name`. These
-      are NOT interchangeable: `github.event.release` is unset outside a
-      `release` event.
+  version-or-tag:
+    description: Version or tag to reference in the issue title/body.
     required: true
 
 runs:
@@ -32,17 +26,18 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        ALERT_TAG: ${{ inputs.tag }}
+        ALERT_VERSION_OR_TAG: ${{ inputs.version-or-tag }}
         ALERT_REPO: ${{ github.repository }}
         ALERT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         gh issue create \
           --repo "$ALERT_REPO" \
-          --title "chunkhound-native publish failed for $ALERT_TAG" \
-          --body "chunkhound-native failed to publish for $ALERT_TAG before chunkhound could be released to PyPI.
+          --title "chunkhound-native publish failed for $ALERT_VERSION_OR_TAG" \
+          --body "chunkhound-native failed to publish for $ALERT_VERSION_OR_TAG before chunkhound could be released to PyPI.
 
         Workflow run: $ALERT_RUN_URL
 
         Next steps:
-        - Re-run the native publish job if the failure looks transient (flaky runner, wheel-repair issue, or PyPI propagation). The publish workflow skips native artifacts that were already uploaded, so the retry is safe after a partial upload.
-        - After native publication succeeds, re-run the main publish job."
+        - For tagged releases, re-run the native publish job if the failure looks transient; already-uploaded files are skipped.
+        - For automatic alpha releases, retry the failed native publish job only if no native files reached PyPI. After a partial native upload, use Re-run all jobs on the current main CI run to allocate a fresh version.
+        - After native publication succeeds, tagged releases can retry the main publish job. For alphas, retry it only if no main files reached PyPI; after a partial main upload, use Re-run all jobs on the current main CI run to allocate a fresh version."

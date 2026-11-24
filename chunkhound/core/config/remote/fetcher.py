@@ -48,10 +48,11 @@ import ipaddress
 import os
 import re
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from chunkhound.core.utils.url_redaction import url_for_log
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 _TIMEOUT_SECONDS: float = 10.0
@@ -65,17 +66,6 @@ class _FetchAbortedError(Exception):
 
     WARNING already logged at the point of raise.
     """
-
-
-def _url_for_log(raw: str) -> str:
-    """Scheme + host + port + path only.
-
-    Drops userinfo, query, and fragment so credentials and pre-signed
-    tokens don't copy into WARNING lines.
-    """
-    parts = urlsplit(raw)
-    _, _, netloc = parts.netloc.rpartition("@")
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _is_loopback_host(hostname: str | None) -> bool:
@@ -96,7 +86,12 @@ def _is_loopback_host(hostname: str | None) -> bool:
 
 def url_scheme_ok(url: str) -> bool:
     """True iff URL is ``https`` or points at a loopback host over ``http``."""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # Malformed authorities are refused, never raised: the caller logs a
+        # safe refusal and treats the URL as unrecoverable.
+        return False
     if parts.scheme == "https":
         return True
     return parts.scheme == "http" and _is_loopback_host(parts.hostname)
@@ -156,7 +151,7 @@ async def _fetch_with_redirects(
     ``_FetchAbortedError`` on disallowed scheme or exhausted hop budget
     (WARNING already emitted).
     """
-    origin_url = _url_for_log(url)
+    origin_url = url_for_log(url)
     current_url = url
     request_headers = dict(headers)
     for _ in range(_MAX_REDIRECTS + 1):
@@ -172,7 +167,7 @@ async def _fetch_with_redirects(
                 "WARNING",
                 "Remote-config redirect refused: URL scheme must be https "
                 "(or http to a loopback host): {} (via {})",
-                _url_for_log(next_url),
+                url_for_log(next_url),
                 origin_url,
             )
             raise _FetchAbortedError
@@ -183,7 +178,7 @@ async def _fetch_with_redirects(
         "WARNING",
         "Remote-config fetch aborted after {} redirects: {} (via {})",
         _MAX_REDIRECTS,
-        _url_for_log(current_url),
+        url_for_log(current_url),
         origin_url,
     )
     raise _FetchAbortedError
@@ -197,7 +192,7 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
         recoverable failure (timeout, transport error, non-2xx, JSON parse
         failure of the response body, disallowed scheme, redirect loop).
     """
-    origin_url = _url_for_log(url)
+    origin_url = url_for_log(url)
 
     if not url_scheme_ok(url):
         log_if_not_mcp(
@@ -251,7 +246,7 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
         )
         return None
 
-    final_url_for_log = _url_for_log(final_url)
+    final_url_for_log = url_for_log(final_url)
     logged_url = (
         f"{final_url_for_log} (via {origin_url})"
         if final_url_for_log != origin_url

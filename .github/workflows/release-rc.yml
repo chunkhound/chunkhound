@@ -1,13 +1,13 @@
 name: RC Release
 
 # A maintainer tag push is the prerelease gate (protected by tag rules).
+# Tagged alphas are rejected; automatic alphas are tagless (release-alpha in ci.yml).
 # After native publication, update uv.lock in a follow-up commit.
 on:
   push:
     tags:
       - 'v*rc*'
       - 'v*b*'
-      - 'v*a*'
 
 permissions:
   contents: read
