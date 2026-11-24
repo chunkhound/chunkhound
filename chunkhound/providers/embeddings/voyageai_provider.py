@@ -1,4 +1,7 @@
-"""VoyageAI embedding provider implementation for ChunkHound - concrete embedding provider using VoyageAI API."""
+"""VoyageAI embedding provider for ChunkHound.
+
+Concrete provider using the VoyageAI API.
+"""
 
 import asyncio
 import os
@@ -14,8 +17,16 @@ from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERAN
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingProviderError,
+    RerankEndpointError,
 )
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
+from chunkhound.core.utils.rerank_url import (
+    drop_invalid_rerank_url_message,
+    drop_relative_rerank_url_message,
+    normalize_rerank_url,
+    resolve_rerank_url,
+)
+from chunkhound.core.utils.url_redaction import url_for_log
 from chunkhound.core.utils.voyageai_utils import (
     OFFICIAL_VOYAGEAI_BASE_V1,
     is_official_voyageai_endpoint,
@@ -28,8 +39,11 @@ from .shared_utils import (
     build_dimension_request_param,
     build_runtime_supported_dimensions,
     chunk_text_by_words,
+    embed_preserving_positions,
+    ensure_vector_count,
     get_dimensions_for_model,
     get_usage_stats_dict,
+    require_non_blank_queries,
     validate_embedding_dims,
     validate_positive_output_dims,
     validate_runtime_output_dims_config,
@@ -241,7 +255,7 @@ def _classify_voyageai_error(e: Exception) -> str | None:
 
 
 class VoyageAIEmbeddingProvider:
-    """VoyageAI embedding provider using voyage-3.5 by default."""
+    """VoyageAI embedding provider; defaults to VOYAGE_DEFAULT_MODEL."""
 
     # Recommended concurrent batches for VoyageAI API
     # Aggressive value (40) leverages VoyageAI's high rate limits:
@@ -282,7 +296,8 @@ class VoyageAIEmbeddingProvider:
             retry_attempts: Number of retry attempts for failed requests
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
-            rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            rerank_batch_size: Max documents per rerank batch
+                (overrides default of 1000).
             output_dims: Optional server-side output dimension override. Known
                 official Voyage models keep their whitelist. Unknown/custom
                 Voyage-compatible endpoints are trusted instead and prove
@@ -292,8 +307,9 @@ class VoyageAIEmbeddingProvider:
                 provider construction may defer the missing-output_dims failure
                 until the first embed() call, but it will fail explicitly.
             base_url: Custom API base URL (overrides https://api.voyageai.com/v1)
-            rerank_url: Separate reranker endpoint URL (absolute http/https).
-                When set, reranking uses HTTP instead of the VoyageAI SDK.
+            rerank_url: Reranker endpoint URL. An absolute http/https URL is
+                used as-is; a relative path resolves against base_url. When
+                set, reranking uses HTTP instead of the VoyageAI SDK.
             rerank_format: Reranking API format when using rerank_url.
                 'cohere' for Cohere-compatible APIs (requires rerank_model),
                 'tei' for HuggingFace TEI (model set at deployment),
@@ -332,7 +348,28 @@ class VoyageAIEmbeddingProvider:
         self._max_tokens = max_tokens or model_config["context_length"]
         self._api_key = api_key
         self._base_url = base_url
-        self._rerank_url = rerank_url
+        # Same contract as the factory: an unusable endpoint must not break
+        # construction and must not silently become an HTTP rerank target, so
+        # dropping it leaves the VoyageAI SDK reranker in charge. An empty
+        # endpoint is unset, not an HTTP target, so it collapses to None.
+        if rerank_url:
+            try:
+                rerank_url = normalize_rerank_url(rerank_url)
+            except ValueError as exc:
+                logger.warning(
+                    drop_invalid_rerank_url_message("VoyageAI", rerank_url, exc)
+                )
+                rerank_url = None
+            else:
+                if base_url:
+                    rerank_url = resolve_rerank_url(rerank_url, base_url, join=True)
+                elif not rerank_url.startswith(("http://", "https://")):
+                    # A relative path needs base_url to resolve against.
+                    logger.warning(
+                        drop_relative_rerank_url_message("VoyageAI", rerank_url)
+                    )
+                    rerank_url = None
+        self._rerank_url = rerank_url or None
         self._rerank_format = rerank_format
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
@@ -387,9 +424,7 @@ class VoyageAIEmbeddingProvider:
         # endpoints; the official VoyageAI API keeps the higher recommended
         # concurrency even when callers pass its base_url explicitly.
         if max_concurrent_batches is None:
-            max_concurrent_batches = (
-                1 if is_custom else self.RECOMMENDED_CONCURRENCY
-            )
+            max_concurrent_batches = 1 if is_custom else self.RECOMMENDED_CONCURRENCY
         self._embed_semaphore = asyncio.Semaphore(max_concurrent_batches)
 
     @property
@@ -529,11 +564,12 @@ class VoyageAIEmbeddingProvider:
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts with automatic retry on network errors.
+        """Generate embeddings for a list of texts.
 
-        Internally sub-batches to self._batch_size so that custom endpoints
-        (e.g. Azure ML) are never overwhelmed by a single oversized request.
-        Texts are embedded as documents (what gets indexed).
+        Retries automatically on network errors. Internally sub-batches to
+        self._batch_size so that custom endpoints (e.g. Azure ML) are never
+        overwhelmed by a single oversized request. Texts are embedded as
+        documents (what gets indexed).
         """
         return await self._embed_as(texts, "document")
 
@@ -545,6 +581,7 @@ class VoyageAIEmbeddingProvider:
         the indexed chunks. Callers reach this through
         ``EmbeddingProvider.embed_query``.
         """
+        require_non_blank_queries(texts)
         return await self._embed_as(texts, "query")
 
     async def _embed_as(
@@ -553,21 +590,27 @@ class VoyageAIEmbeddingProvider:
         if not texts:
             return []
 
-        validated_texts = validate_text_input(texts)
-        if not validated_texts:
-            return []
+        return await embed_preserving_positions(
+            texts,
+            lambda non_blank: self._embed_non_blank(non_blank, input_type),
+            fallback_dims=self.dims,
+        )
 
-        # Sub-batch when input exceeds batch_size (protects custom/low-throughput endpoints)
-        if len(validated_texts) > self._batch_size:
+    async def _embed_non_blank(
+        self, texts: list[str], input_type: VoyageInputType
+    ) -> list[list[float]]:
+        # Sub-batch when input exceeds batch_size
+        # (protects custom/low-throughput endpoints).
+        if len(texts) > self._batch_size:
             all_embeddings: list[list[float]] = []
-            for i in range(0, len(validated_texts), self._batch_size):
-                sub_batch = validated_texts[i : i + self._batch_size]
+            for i in range(0, len(texts), self._batch_size):
+                sub_batch = texts[i : i + self._batch_size]
                 all_embeddings.extend(
                     await self._embed_single_batch(sub_batch, input_type)
                 )
             return all_embeddings
 
-        return await self._embed_single_batch(validated_texts, input_type)
+        return await self._embed_single_batch(texts, input_type)
 
     async def _embed_single_batch(
         self, texts: list[str], input_type: VoyageInputType
@@ -603,7 +646,10 @@ class VoyageAIEmbeddingProvider:
             )
 
     def _validate_output_dims_config(self) -> None:
-        """Validate output_dims and client_side_truncation, enforcing VoyageAI whitelist."""
+        """Validate output_dims and client_side_truncation.
+
+        Enforces the VoyageAI whitelist.
+        """
         self._validate_output_dims_config_for(
             model=self._model,
             model_config=self._model_config,
@@ -708,9 +754,7 @@ class VoyageAIEmbeddingProvider:
                 # Validate raw API response dims before any client-side truncation
                 expected_raw = self._expected_raw_dims()
                 if raw_dims is not None and expected_raw is not None:
-                    validate_embedding_dims(
-                        raw_dims, expected_raw, model=self._model
-                    )
+                    validate_embedding_dims(raw_dims, expected_raw, model=self._model)
 
                 # Apply client-side truncation when server doesn't support dim param
                 if self._client_side_truncation:
@@ -747,11 +791,14 @@ class VoyageAIEmbeddingProvider:
                 else:
                     if category is not None:
                         logger.error(
-                            f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
+                            "VoyageAI embedding failed after {} attempts: {}",
+                            self._retry_attempts,
+                            e,
                         )
                     else:
                         logger.error(
-                            f"VoyageAI embedding failed with non-retryable error: {e}"
+                            "VoyageAI embedding failed with non-retryable error: {}",
+                            e,
                         )
                     raise RuntimeError(f"Embedding generation failed: {e}") from e
 
@@ -772,6 +819,16 @@ class VoyageAIEmbeddingProvider:
         if not texts:
             return []
 
+        return await embed_preserving_positions(
+            texts,
+            lambda non_blank: self._embed_non_blank_batches(non_blank, batch_size),
+            fallback_dims=self.dims,
+        )
+
+    async def _embed_non_blank_batches(
+        self, texts: list[str], batch_size: int | None
+    ) -> list[list[float]]:
+        """Batch non-blank texts before padding the complete logical batch."""
         effective_batch_size = batch_size or self._batch_size
         max_tokens_per_batch = self._model_config["max_tokens_per_batch"]
 
@@ -796,6 +853,7 @@ class VoyageAIEmbeddingProvider:
         if current_batch:
             all_embeddings.extend(await self.embed(current_batch))
 
+        ensure_vector_count(all_embeddings, texts)
         return all_embeddings
 
     async def embed_streaming(self, texts: list[str]) -> AsyncIterator[list[float]]:
@@ -1033,7 +1091,9 @@ class VoyageAIEmbeddingProvider:
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
-                    f"VoyageAI reranking {len(documents)} documents with model {rerank_model}"
+                    "VoyageAI reranking {} documents with model {}",
+                    len(documents),
+                    rerank_model,
                 )
 
                 try:
@@ -1072,10 +1132,12 @@ class VoyageAIEmbeddingProvider:
                             RerankResult(index=item.index, score=item.relevance_score)
                         )
                     else:
-                        logger.warning(f"Skipping invalid rerank result: {item}")
+                        logger.warning("Skipping invalid rerank result: {}", item)
 
                 logger.debug(
-                    f"VoyageAI reranked {len(documents)} documents, got {len(rerank_results)} results"
+                    "VoyageAI reranked {} documents, got {} results",
+                    len(documents),
+                    len(rerank_results),
                 )
                 return rerank_results
 
@@ -1102,11 +1164,14 @@ class VoyageAIEmbeddingProvider:
                 else:
                     if category is not None:
                         logger.error(
-                            f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
+                            "VoyageAI reranking failed after {} attempts: {}",
+                            self._retry_attempts,
+                            e,
                         )
                     else:
                         logger.error(
-                            f"VoyageAI reranking failed with non-retryable error: {e}"
+                            "VoyageAI reranking failed with non-retryable error: {}",
+                            e,
                         )
                     raise RuntimeError(f"Reranking failed: {e}") from e
 
@@ -1150,7 +1215,8 @@ class VoyageAIEmbeddingProvider:
             raise RuntimeError("HTTP reranking requires rerank_url")
 
         logger.debug(
-            f"HTTP reranking {len(documents)} documents at {rerank_url} "
+            f"HTTP reranking {len(documents)} documents at "
+            f"{url_for_log(rerank_url)} "
             f"(format={self._rerank_format})"
         )
 
@@ -1163,9 +1229,7 @@ class VoyageAIEmbeddingProvider:
                 if self._api_key:
                     headers["Authorization"] = f"Bearer {self._api_key}"
 
-                response = await client.post(
-                    rerank_url, json=payload, headers=headers
-                )
+                response = await client.post(rerank_url, json=payload, headers=headers)
                 response.raise_for_status()
                 data = response.json()
         except Exception as rerank_call_error:
@@ -1176,6 +1240,9 @@ class VoyageAIEmbeddingProvider:
                 False,
                 error_type=type(rerank_call_error).__name__,
             )
+            if isinstance(rerank_call_error, httpx.HTTPError):
+                # httpx text embeds the configured URL; callers log it.
+                raise RerankEndpointError(rerank_call_error, rerank_url) from None
             raise
         ch_analytics.record_provider_call("reranker", self.name, rerank_model, True)
 
@@ -1220,7 +1287,8 @@ class VoyageAIEmbeddingProvider:
             data = {"results": data["data"]}
         if "results" not in data:
             raise ValueError(
-                f"Invalid rerank response: missing 'results' field. Got: {list(data.keys())}"
+                "Invalid rerank response: missing 'results' field. "
+                f"Got: {list(data.keys())}"
             )
 
         results = []
