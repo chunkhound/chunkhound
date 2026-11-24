@@ -58,9 +58,11 @@ class HubReaderCloseError(RuntimeError):
 
     @property
     def ownership(self) -> DatabaseOwnership:
+        """Database ownership held by the underlying reader error."""
         return self.reader_error.ownership
 
     def retry_close(self) -> None:
+        """Retry closing the retained readers, then run any extra cleanup."""
         self.reader_error.retry_close()
         if self._cleanup is not None:
             self._cleanup()
@@ -76,6 +78,7 @@ FATAL_HUB_ERRORS: tuple[type[Exception], ...] = (
 
 
 def safe_label(value: object) -> str:
+    """Render a value for logs, redacting anything that looks like a URL or query."""
     text = json.dumps(value, ensure_ascii=True, default=str)
     return (
         "[redacted metadata]" if any(s in text for s in ("://", "?")) else text[:2048]

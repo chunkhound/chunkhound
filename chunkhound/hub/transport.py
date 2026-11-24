@@ -31,6 +31,7 @@ for name in ("httpx", "httpcore"):
 
 
 def require_space(directory: Path, needed: int) -> None:
+    """Fail if the directory lacks room for the download plus a reserve."""
     if shutil.disk_usage(directory).free < needed + RESERVE:
         raise HubUnavailable("Insufficient disk space for hub candidate")
 
@@ -47,6 +48,7 @@ def _validate_hub_destination(url: str, previous: str | None) -> None:
 async def response(
     client: httpx.AsyncClient, url: str, headers: dict[str, str]
 ) -> AsyncIterator[httpx.Response]:
+    """Open a response, following redirects only to validated destinations."""
     try:
         chain = RedirectChain(
             url, headers, validate=_validate_hub_destination, max_redirects=5
@@ -65,6 +67,8 @@ async def response(
 
 
 async def fetch_manifest(url: str) -> bytes:
+    """Download the manifest bytes, refusing non-200 and encoded responses."""
+
     async def fetch() -> bytes:
         async with httpx.AsyncClient(
             timeout=10, follow_redirects=False, trust_env=False

@@ -16,6 +16,8 @@ from chunkhound.utils.http_redirects import http_destination_ok
 
 @dataclass(frozen=True)
 class MatchKey:
+    """What a published base must match: backend, provider, model, dims, format."""
+
     db_provider: str
     provider: str
     model: str
@@ -24,10 +26,14 @@ class MatchKey:
 
 
 class WireModel(BaseModel):
+    """Base for manifest records: strict types, unknown fields ignored."""
+
     model_config = ConfigDict(extra="ignore", strict=True)
 
 
 class Artifact(WireModel):
+    """A downloadable archive with its size and SHA-256."""
+
     url: str = Field(repr=False)
     bytes: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
@@ -35,12 +41,15 @@ class Artifact(WireModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, value: str) -> str:
+        """Reject artifact URLs that are not allowed destinations."""
         if not http_destination_ok(value):
             raise ValueError("artifact URL is unsupported")
         return value
 
 
 class Version(WireModel):
+    """One published release of a base (latest, -1, or -2)."""
+
     rel: Literal["latest", "-1", "-2"]
     artifact: Artifact
     build_id: str = ""
@@ -49,6 +58,8 @@ class Version(WireModel):
 
 
 class Variant(WireModel):
+    """A base published for one embedding provider, model, and format."""
+
     embedding_id: str
     db_provider: str
     provider: str
@@ -58,6 +69,7 @@ class Variant(WireModel):
     versions: list[Version] = Field(max_length=3)
 
     def key(self) -> MatchKey:
+        """The match key this variant publishes."""
         return MatchKey(
             self.db_provider,
             self.provider,
@@ -68,6 +80,8 @@ class Variant(WireModel):
 
 
 class Manifest(WireModel):
+    """The published list of base variants."""
+
     manifest_version: Literal[2]
     project_id: str = ""
     index_root: Any = None
@@ -77,12 +91,15 @@ class Manifest(WireModel):
 
 @dataclass(frozen=True)
 class Selected:
+    """The manifest entry chosen for this checkout."""
+
     manifest: Manifest
     variant: Variant
     version: Version
 
 
 def parse_manifest(raw: bytes) -> Manifest:
+    """Parse manifest JSON, refusing invalid or unsupported documents."""
     try:
         return Manifest.model_validate_json(raw)
     except ValidationError:
@@ -90,6 +107,7 @@ def parse_manifest(raw: bytes) -> Manifest:
 
 
 def select_manifest(manifest: Manifest, key: MatchKey, rel: str) -> Selected:
+    """Choose the unique variant and version matching a key and release."""
     variants = [entry for entry in manifest.embeddings if entry.key() == key]
     if len(variants) != 1:
         logger.warning(
@@ -105,6 +123,7 @@ def select_manifest(manifest: Manifest, key: MatchKey, rel: str) -> Selected:
 
 
 def configured_key(config: Config) -> MatchKey:
+    """Build the match key from local configuration without touching local files."""
     if config.embeddings_disabled or config.embedding is None:
         raise HubUnavailable("Hub pull requires embedding configuration")
     try:

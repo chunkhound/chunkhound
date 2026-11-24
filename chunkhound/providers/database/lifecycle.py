@@ -23,6 +23,7 @@ from chunkhound.utils.text_sanitization import sanitize_error_text
 
 @dataclass(frozen=True)
 class Failure:
+    """Detached exception-chain record that keeps no exceptions or frames."""
     kind: type[BaseException]
     message: str
     cause: tuple["Failure", ...] = ()
@@ -31,6 +32,7 @@ class Failure:
     def capture(
         cls, error: BaseException, seen: frozenset[int] = frozenset()
     ) -> "Failure":
+        """Snapshot an exception chain with URLs redacted and cycles cut."""
         if id(error) in seen:
             return cls(type(error), "exception cause cycle")
         seen = seen | {id(error)}
@@ -55,6 +57,7 @@ class Failure:
     def exception(self) -> BaseException:
         # Common Python/native exceptions accept a message. Structured provider
         # exceptions need their specific constructor; do not preserve raw args.
+        """Rebuild an exception from the recorded failure."""
         from chunkhound.core.exceptions import DatabaseError
 
         result: BaseException
@@ -94,16 +97,19 @@ class Failure:
 
 @dataclass(frozen=True)
 class LifecycleFailure:
+    """A failed lifecycle stage with its original and cleanup failures."""
     stage: str
     original: Failure | None
     cleanup: Failure
     restart_required: bool = False
 
     def exception(self) -> "DatabaseRecoveryRequiredError":
+        """Rebuild an exception from the recorded failure."""
         return DatabaseRecoveryRequiredError(self)
 
 
 class DatabaseRecoveryRequiredError(DatabaseTemporarilyUnavailableError):
+    """Database cleanup did not complete; the next database action retries it."""
     def __init__(self, failure: LifecycleFailure) -> None:
         self.failure = failure
         advice = (
@@ -134,6 +140,7 @@ _owner: contextvars.ContextVar[object | None] = contextvars.ContextVar(
 
 @contextmanager
 def readiness_owner(provider: object) -> Iterator[None]:
+    """Mark the provider whose readiness transition is running in this context."""
     token = _owner.set(provider)
     try:
         yield
@@ -142,6 +149,7 @@ def readiness_owner(provider: object) -> Iterator[None]:
 
 
 def owns_readiness(provider: object) -> bool:
+    """Return whether the provider owns the readiness transition in this context."""
     return _owner.get() is provider
 
 
@@ -153,6 +161,7 @@ class ReaderRecovery:
     release_ownership: bool
 
     def exception(self, failure: Failure) -> DatabaseReaderCloseError:
+        """Rebuild an exception from the recorded failure."""
         error = DatabaseReaderCloseError(self.ownership)
         error._release_ownership = self.release_ownership
         if failure.cause:
@@ -162,6 +171,7 @@ class ReaderRecovery:
 
 @dataclass
 class ReadinessAttempt:
+    """One in-flight readiness attempt shared by its callers."""
     completion: Future[Outcome]
     # Retained by this attempt's callers, not looked up on the mutable provider.
     # No caught exception/frame is cached, and Readiness.failure stays detached.
@@ -178,6 +188,7 @@ class Readiness:
         self.failure: Outcome = None
 
     def claim(self, force: bool) -> tuple[ReadinessAttempt, bool] | None:
+        """Join the in-flight attempt, start one, or return None if ready."""
         with self.lock:
             if self.inflight is not None:
                 return self.inflight, False
@@ -187,6 +198,7 @@ class Readiness:
             return self.inflight, True
 
     def run(self, attempt: ReadinessAttempt, transition: Callable[[], None]) -> None:
+        """Run a readiness transition and publish its outcome to waiting callers."""
         outcome: Outcome = None
         try:
             transition()
@@ -209,6 +221,7 @@ class Readiness:
 
     @staticmethod
     def deliver(attempt: ReadinessAttempt, outcome: Outcome) -> None:
+        """Raise the recorded failure, if any, to a caller."""
         if outcome is not None:
             error = (
                 attempt.reader_recovery.exception(outcome)
@@ -224,6 +237,7 @@ class Readiness:
         *,
         timeout: float,
     ) -> None:
+        """Block until the attempt finishes; the owning caller runs the transition."""
         attempt, owner = claim
         if owner:
             context = contextvars.copy_context()
@@ -242,6 +256,7 @@ class Readiness:
     async def wait_async(
         self, claim: tuple[ReadinessAttempt, bool], transition: Callable[[], None]
     ) -> None:
+        """Await the attempt without blocking the event loop."""
         attempt, owner = claim
         if owner:
             context = contextvars.copy_context()

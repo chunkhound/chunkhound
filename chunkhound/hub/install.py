@@ -17,6 +17,7 @@ from chunkhound.providers.database.ownership import DatabaseOwnership
 
 
 def installation_target(config: Config) -> Path:
+    """Return the writable database path a hub base would be installed to."""
     database = config.database
     configured = database.path
     if configured is None or str(configured) == ":memory:" or database.read_only:
@@ -40,6 +41,7 @@ def installation_target(config: Config) -> Path:
 def installation_failure(
     exc: Exception,
 ) -> HubLocalStateError | HubInstallationInterrupted:
+    """Map a native installation error to the matching hub error."""
     if isinstance(exc, native.DatabaseInterruptedError):
         return HubInstallationInterrupted(
             "Hub installation was interrupted; run explicit chunkhound pull again. "
@@ -62,6 +64,7 @@ def install_candidate(
     *,
     should_install: Callable[[DatabaseOwnership], bool] | None = None,
 ) -> bool:
+    """Install a verified candidate at the target; return whether it was published."""
     try:
         lease = native.acquire_install_lease(str(target), backend)
         with DatabaseOwnership(lease) as ownership:

@@ -26,6 +26,7 @@ class DatabaseOwnership:
         self._close_lock = RLock()
 
     def assert_covers(self, path: Path | str) -> None:
+        """Raise unless this ownership covers the given database path."""
         self._handle.assert_covers(str(path))
 
     def retain_failed_reader(self, reader: Any) -> None:
@@ -127,6 +128,7 @@ def inspection_parent_missing(
 def ownership_scope(
     path: Path | str, ownership: DatabaseOwnership | None = None
 ) -> Iterator[DatabaseOwnership | None]:
+    """Yield the supplied ownership, or None for an in-memory database."""
     if ownership is not None:
         ownership.assert_covers(path)
         yield ownership

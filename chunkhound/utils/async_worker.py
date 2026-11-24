@@ -8,11 +8,13 @@ from loguru import logger
 T = TypeVar("T")
 
 class WorkerDrain:
+    """Wait for a worker future to finish even if the caller is cancelled."""
     def __init__(self, on_cancel: Callable[[], None] | None = None) -> None:
         self.cancellation: asyncio.CancelledError | None = None
         self.on_cancel = on_cancel
 
     async def wait(self, future: asyncio.Future[T]) -> T:
+        """Wait for the future, deferring cancellation until it is done."""
         while not future.done():
             try:
                 await asyncio.shield(future)
@@ -35,6 +37,7 @@ class WorkerDrain:
         return future.result()
 
     def finish(self, error: BaseException | None = None) -> None:
+        """Re-raise the deferred cancellation, or the worker error if none."""
         if self.cancellation is not None:
             if error is not None and not isinstance(error, asyncio.CancelledError):
                 logger.error(
@@ -45,6 +48,7 @@ class WorkerDrain:
             raise error
 
 async def await_worker_completion(future: asyncio.Future[T]) -> T:
+    """Await a worker future, re-raising any cancellation only after it finishes."""
     drain = WorkerDrain()
     try:
         result = await drain.wait(future)

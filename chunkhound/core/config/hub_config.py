@@ -21,6 +21,8 @@ class ArchiveLimits(BaseModel):
 
 
 class HubConfig(BaseModel):
+    """Hub settings: manifest URL, download deadline, archive limits."""
+
     model_config = ConfigDict(extra="forbid")
     url: str | None = Field(default=None, repr=False)
     download_timeout_seconds: float = Field(
@@ -31,10 +33,12 @@ class HubConfig(BaseModel):
     @field_validator("url", mode="before")
     @classmethod
     def empty_is_missing(cls, value: object) -> object:
+        """Treat a blank string as an unset value."""
         return None if isinstance(value, str) and not value.strip() else value
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
+        """Read hub settings from ``CHUNKHOUND_HUB__*`` environment variables."""
         result: dict[str, Any] = {}
         if "CHUNKHOUND_HUB__URL" in os.environ:
             result["url"] = os.environ["CHUNKHOUND_HUB__URL"] or None

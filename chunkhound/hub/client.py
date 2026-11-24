@@ -55,6 +55,7 @@ from chunkhound.utils.async_worker import await_worker_completion
 
 @dataclass(frozen=True)
 class ValidatedHubSource:
+    """A fetched manifest bound to the checkout and URL digests it was validated for."""
     manifest: Manifest
     checkout_digest: str
     url_digest: str
@@ -71,6 +72,7 @@ async def _fetch_bound_manifest(
 
 
 async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
+    """Fetch and validate the manifest, bound to this checkout and URL."""
     url = config.hub.url
     if not url:
         raise HubUnavailable("No hub manifest URL configured")
@@ -113,6 +115,7 @@ _INSTALL_SUFFIXES: dict[str, tuple[str, ...]] = {
 
 
 def automatic_inventory_paths(target: Path, backend: str) -> tuple[Path, ...]:
+    """Return the install-state paths that must be absent to be cold."""
     try:
         suffixes = _INSTALL_SUFFIXES[backend]
     except KeyError:
@@ -142,6 +145,7 @@ def local_needs_pull(
     ownership: DatabaseOwnership | None = None,
 ) -> bool:
     # Acquire before existence test: an absent target plus a marker is NOT cold.
+    """Return whether local state is absent or incompatible and so needs a hub base."""
     with ownership_scope(target, ownership) as held:
         if not target.exists():
             return True
@@ -395,6 +399,7 @@ async def pull(
     no_embeddings: bool = False,
     source: ValidatedHubSource | None = None,
 ) -> bool:
+    """Install a matching published base index; return whether a base was installed."""
     try:
         try:
             return await _pull(

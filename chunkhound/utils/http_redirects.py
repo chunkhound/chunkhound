@@ -28,6 +28,7 @@ def http_destination_ok(url: str) -> bool:
 
 
 def url_origin(url: str) -> tuple[str, str | None, int | None]:
+    """Return (scheme, host, port) with the default port filled in."""
     parts = urlsplit(url)
     port = parts.port if parts.port is not None else _DEFAULT_PORTS.get(parts.scheme)
     return parts.scheme, parts.hostname, port

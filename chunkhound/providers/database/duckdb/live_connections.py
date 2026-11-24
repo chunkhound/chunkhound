@@ -43,6 +43,7 @@ def _admission(path: Path | str) -> _Admission:
 
 
 def register_duckdb_connection(path: Path | str, read_only: bool, conn: Any) -> None:
+    """Record a live connection for its file; in-memory databases are skipped."""
     if str(path) == ":memory:":
         return
     entry = _admission(path)
@@ -53,6 +54,7 @@ def register_duckdb_connection(path: Path | str, read_only: bool, conn: Any) -> 
 
 
 def close_duckdb_connection(conn: Any) -> None:
+    """Close a connection; a failed close keeps it registered so it can be retried."""
     with _lock:
         entry = _connection_admissions.get(conn)
     if entry is None:
@@ -86,6 +88,7 @@ def close_retained_duckdb_connections(connections: list[Any]) -> None:
 def compatible_duckdb_cursor(
     path: Path | str, *, read_only: bool, retained_connections: list[Any]
 ) -> Iterator[Any | None]:
+    """Yield a cursor from a compatible live connection, or None if there is none."""
     if str(path) == ":memory:":
         yield None
         return

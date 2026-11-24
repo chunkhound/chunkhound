@@ -82,8 +82,11 @@ def extract(
     extracted_bytes = 0
 
     class BoundedTarInfo(tarfile.TarInfo):
+        """Tar member header that refuses malformed or truncated headers."""
+
         @classmethod
         def fromtarfile(cls, tar: tarfile.TarFile) -> "BoundedTarInfo":
+            """Read a member header, converting header errors into a hub refusal."""
             try:
                 return super().fromtarfile(tar)
             # Typeshed omits these concrete stdlib HeaderError subclasses.

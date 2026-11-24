@@ -28,6 +28,7 @@ from chunkhound.hub.trust import (
 
 
 def forget_trust_command(args: argparse.Namespace) -> None:
+    """Remove the stored hub trust grant for a checkout, without contacting the hub."""
     if args.version != "latest":
         raise SystemExit("--version cannot be used with --forget-trust")
     try:
@@ -50,6 +51,7 @@ def hub_origin(manifest_url: str) -> str:
 
 
 async def pull_command(args: argparse.Namespace, config: Config) -> None:
+    """Run an explicit hub pull; any failure once it begins stops nonzero."""
     pre_client_fatal = True
     pull_attempted = False
     try:
