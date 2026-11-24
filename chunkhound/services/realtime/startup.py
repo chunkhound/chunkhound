@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import sys
 import threading
 import time
@@ -9,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from loguru import logger
 
@@ -29,6 +30,7 @@ from .events import (
     forward_to_loop,
     ignore_windows_last_access,
     watchdog_event_filter,
+    windows_notify_filter,
 )
 from .inotify_overflow import InotifyOverflowDetection
 
@@ -40,6 +42,7 @@ class RealtimeObserver(Protocol):
         self,
         event_handler: SimpleEventHandler,
         path: str,
+        *,
         recursive: bool = ...,
         event_filter: list[type] | None = ...,
     ) -> Any: ...
@@ -77,13 +80,40 @@ def _create_watchdog_observer(
     if observer is not None:
         return observer, "active"
 
-    from watchdog.observers import Observer
+    if IS_WINDOWS:
+        observer = _create_windows_watchdog_observer()
+    else:
+        from watchdog.observers import Observer
 
-    ignore_windows_last_access()
+        # watchdog annotates the handler as FileSystemEventHandler. SimpleEventHandler
+        # is the duck-typed handler and must stay importable without watchdog.
+        observer = cast(RealtimeObserver, Observer())
     detection: InotifyOverflowDetection = (
         "unavailable" if sys.platform.startswith("linux") else "not_applicable"
     )
-    return Observer(), detection
+    return observer, detection
+
+
+def _create_windows_watchdog_observer() -> RealtimeObserver:
+    """Windows observer that does not subscribe to last-access updates.
+
+    watchdog 7.1.1 takes the mask as ``notify_filter``. Older releases read a
+    module global inside ``ReadDirectoryChangesW``; that path clears the bit
+    before the observer is constructed.
+    """
+    from watchdog.observers.read_directory_changes import WindowsApiObserver
+
+    notify_filter = windows_notify_filter()
+    if (
+        notify_filter is not None
+        and "notify_filter" in inspect.signature(WindowsApiObserver).parameters
+    ):
+        created = WindowsApiObserver(notify_filter=notify_filter)
+    else:
+        # watchdog < 7.1.1 reads the module global at the ReadDirectoryChangesW call.
+        ignore_windows_last_access()
+        created = WindowsApiObserver()
+    return cast(RealtimeObserver, created)
 
 
 class RealtimeStartupStatusTracker:

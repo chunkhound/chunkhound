@@ -30,8 +30,10 @@ from chunkhound.services.realtime_path_filter import RealtimePathFilter
 # `attrib` whenever the record's change time is ahead of its write time, which
 # an ordinary append usually is, so for most writes it is the only signal. On
 # Linux it is IN_ATTRIB (chmod, touch), which watchdog 6 already reported as
-# `modified`. Reads raise no `attrib` on Windows because
-# ignore_windows_last_access() unsubscribes from last-access changes.
+# `modified`. Reads raise no `attrib` on Windows because the observer's
+# notify_filter omits FILE_NOTIFY_CHANGE_LAST_ACCESS. watchdog before 7.1.1
+# has no such argument; ignore_windows_last_access() clears that bit on the
+# module global those releases read.
 WATCHDOG_TO_CONSUMER_EVENT = {
     "created": "created",
     "modified": "modified",
@@ -41,33 +43,46 @@ WATCHDOG_TO_CONSUMER_EVENT = {
 }
 
 
-def ignore_windows_last_access() -> None:
-    """Stop watchdog's Windows emitter from reporting last-access changes.
+def windows_notify_filter() -> int | None:
+    """Windows ``dwNotifyFilter`` with last-access removed, or None off Windows.
 
-    When last-access updates are on (`fsutil behavior query
-    disablelastaccess`), every read of a file not read for an hour changes its
-    access time, and watchdog subscribes to that
-    (FILE_NOTIFY_CHANGE_LAST_ACCESS): without this, each read raises an event
-    (7: `attrib`, 6: `modified`) that takes a queue slot, and the start-up scan
-    reads every file. Writes still arrive through LAST_WRITE, SIZE and
-    ATTRIBUTES.
-
-    watchdog has no per-watch flag: it reads the module global
-    WATCHDOG_FILE_NOTIFY_FLAGS on every ReadDirectoryChangesW call (6.0 and
-    7.1), so clearing the bit before an observer starts covers every watch.
-    It is process-wide; ChunkHound's watchdog observer is its only user here.
+    watchdog 7.1.1 passes this to ``ReadDirectoryChangesW`` as
+    ``WindowsApiObserver(notify_filter=...)``. One observer uses one mask for
+    every watch. Writes still arrive through LAST_WRITE, SIZE and ATTRIBUTES.
+    ``None`` means this is not Windows, or this watchdog has no notify constants.
     """
     if os.name != "nt":
-        return
+        return None
     try:
         from watchdog.observers import winapi
     except ImportError:
-        return
+        return None
     flags = getattr(winapi, "WATCHDOG_FILE_NOTIFY_FLAGS", None)
     last_access = getattr(winapi, "FILE_NOTIFY_CHANGE_LAST_ACCESS", None)
-    if flags is None or last_access is None:
+    if not isinstance(flags, int) or not isinstance(last_access, int):
+        return None
+    return flags & ~last_access
+
+
+def ignore_windows_last_access() -> None:
+    """Drop last-access from watchdog's process-wide Windows notify mask.
+
+    watchdog before 7.1.1 has no ``notify_filter`` argument. It reads
+    ``WATCHDOG_FILE_NOTIFY_FLAGS`` on every ``ReadDirectoryChangesW`` call.
+    Python 3.10 installs that line (6.x). The startup path calls this only
+    when the observer constructor has no ``notify_filter`` parameter. The
+    assignment is process-wide; ChunkHound's watchdog observer is its only
+    user here. When last-access updates are on, every read of a file not read
+    for an hour would otherwise take a queue slot.
+    """
+    if os.name != "nt":
         return
-    winapi.WATCHDOG_FILE_NOTIFY_FLAGS = flags & ~last_access
+    narrowed = windows_notify_filter()
+    if narrowed is None:
+        return
+    from watchdog.observers import winapi
+
+    winapi.WATCHDOG_FILE_NOTIFY_FLAGS = narrowed
 
 
 def watchdog_event_filter() -> list[type]:
