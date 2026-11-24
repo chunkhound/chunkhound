@@ -1,7 +1,11 @@
 import concurrent.futures
+import json
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
 import pytest
+
 import chunkhound_native as native
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
@@ -128,9 +132,6 @@ def test_cancel_after_preparation_commits_replacement_and_restores_indexes(tmp_p
         provider.close()
     native.acquire_install_lease(str(tmp_path / "chunks.db"), "duckdb").close()
 
-
-import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 @pytest.mark.parametrize("vendor,model", [("openai", "text-embedding-3-small"),
                                          ("voyageai", "voyage-code-3")])

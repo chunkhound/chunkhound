@@ -646,7 +646,9 @@ def test_unacknowledged_native_failure_requires_restart_not_retry(tmp_path):
                 skip_layers={"env", "global", "local_config", "config_file", "cli"},
             )
             services = create_services(config.database.get_db_path(), config)
-            from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+            from chunkhound.core.config.embedding_factory import (
+                EmbeddingProviderFactory,
+            )
             EmbeddingProviderFactory.create_provider = staticmethod(
                 lambda config: EmbeddingClient()
             )
@@ -689,7 +691,9 @@ def test_unacknowledged_native_failure_requires_restart_not_retry(tmp_path):
                 assert not clients[0].closed
                 assert not clients[0].loop.is_closed()
                 try:
-                    native.acquire_install_lease(str(services.provider.db_path), "duckdb")
+                    native.acquire_install_lease(
+                        str(services.provider.db_path), "duckdb"
+                    )
                 except native.DatabaseBusyError:
                     pass
                 else:

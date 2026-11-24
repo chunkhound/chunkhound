@@ -387,7 +387,8 @@ async def test_rust_completion_preserves_sanitized_control_flow_and_retries(
         assert resources.token.cleanup_complete, "use actual native acknowledgment"
         assert resources.recovery_required and provider.is_rust_pipeline_in_progress()
         assert resources.cleanup_failure.kind is failure_type
-        assert "completion interrupted [redacted URL]" in resources.cleanup_failure.message
+        message = resources.cleanup_failure.message
+        assert "completion interrupted [redacted URL]" in message
         assert resources.failure_stage == "trusted database reconnect and configuration"
         assert resources.cleanup_failure.cause[0].message == "context [redacted URL]"
         assert resources.reconnect_future is None
@@ -395,7 +396,9 @@ async def test_rust_completion_preserves_sanitized_control_flow_and_retries(
         with pytest.raises(native.DatabaseBusyError):
             native.acquire_install_lease(str(provider.db_path), "duckdb")
         mode = "success"
-        hits, _ = await services.search_service.search_regex_async("completion_marker_0")
+        hits, _ = await services.search_service.search_regex_async(
+            "completion_marker_0"
+        )
         assert hits
         assert len(decisions) == (3 if entry == "recovery" else 2)
         assert all("cancelled-action" not in query for query in searches)
@@ -423,7 +426,6 @@ def test_rust_caller_keeps_own_failure_when_public_recovery_overtakes_delivery(
     seeded_config, monkeypatch, initial_type, recovery_type
 ):
     import chunkhound_native as native
-
     from chunkhound.pipeline_bridge import RustPipelineCleanupError
     from chunkhound.services.rust_pipeline_runner import run_rust_indexing_phase
     from tests.hub.test_next_action_recovery import run_empty_phase
