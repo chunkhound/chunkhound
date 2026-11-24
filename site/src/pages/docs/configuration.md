@@ -513,6 +513,7 @@ The LLM provider is used for deep code research (`chunkhound research` and the `
 | cheapaimodel | `cheapaimodel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | cheapaimodel API. Registry providers require explicit `model`. |
 | UberLLM | `uberllm` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | UberLLM API. Registry providers require explicit `model`. |
 | AIGROW | `aigrow` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | AIGROW API. Registry providers require explicit `model`. |
+| onomeo | `onomeo` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | onomeo API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 

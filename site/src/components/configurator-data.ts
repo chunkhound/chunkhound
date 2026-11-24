@@ -348,6 +348,16 @@ export const llmProviders: ConfiguratorProviderOption[] = [
         apiKeyPlaceholder: "<YOUR_AIGROW_API_KEY>",
     },
     {
+        id: "onomeo",
+        name: "onomeo",
+        svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="7.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></svg>`,
+        config: {
+            provider: "onomeo",
+            model: "deepseek-v4.1-flash",
+        },
+        apiKeyPlaceholder: "<YOUR_ONOMEO_API_KEY>",
+    },
+    {
         id: "ollama-llm",
         name: "Ollama",
         svg: OLLAMA_SVG,
