@@ -1,0 +1,11 @@
+[
+  [
+    { "id": 101, "login": "alice", "type": "User", "contributions": 5 },
+    { "id": 102, "login": "Copilot", "type": "Bot", "contributions": 9 },
+    { "id": 103, "login": "claude", "type": "User", "contributions": 7 }
+  ],
+  [
+    { "id": 101, "login": "alice", "type": "User", "contributions": 5 },
+    { "id": 104, "login": "bob", "type": "User", "contributions": 1 }
+  ]
+]

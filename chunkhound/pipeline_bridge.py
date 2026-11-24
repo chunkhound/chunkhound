@@ -6,10 +6,11 @@ by Rust.
 """
 
 import atexit
+import contextlib
 import functools
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
@@ -118,6 +119,20 @@ def _shutdown_embed_thread_resources(cache: "_EmbedThreadCache") -> None:
 _parse_pool: ProcessPoolExecutor | None = None
 _parse_pool_lock = threading.Lock()
 
+# The parse pool is only used by bulk parsing (start-up scans, resyncs, `index`);
+# a long-lived MCP server otherwise holds max_workers idle processes for its whole
+# session. Once no parse batch has been in flight for this long, the pool is shut
+# down; the next batch creates a new one. The four variables below (not the
+# constant) are guarded by _parse_pool_lock.
+_PARSE_POOL_IDLE_SECONDS = 60.0
+_parse_pool_leases = 0
+_parse_pool_idle_timer: threading.Timer | None = None
+# Identifies the one idle timer allowed to shut the pool down. Cleared whenever a
+# lease starts, so a timer whose callback is already running when a batch arrives
+# finds a stale token and leaves the pool alone.
+_parse_pool_idle_token: object | None = None
+_parse_pool_atexit_registered = False
+
 
 def _default_parse_pool_workers() -> int:
     """Single source of truth for the parse pool's default worker count.
@@ -138,7 +153,7 @@ class _ParsePoolConfig:
     process, and a Rust #[pyclass] instance (what parse_batch_callback()
     actually receives) has no pickle support — so parse_batch_callback()
     copies the fields it needs out of whatever parse_config it's given
-    (real or absent) into one of these before it ever reaches _get_parse_pool()
+    (real or absent) into one of these before it ever reaches _leased_parse_pool()
     or _parse_one_file(). Also doubles as the default used when
     parse_batch_callback()/_parse_one_file() are called directly (tests, or
     any caller that bypasses the Rust pipeline) without a parse_config.
@@ -179,33 +194,101 @@ class _ParsePoolConfig:
 _DEFAULT_PARSE_CONFIG = _ParsePoolConfig()
 
 
-def _get_parse_pool(max_workers: int) -> ProcessPoolExecutor:
-    """Lazily create the module-level parse worker pool, once per process.
+def _new_parse_pool_locked(max_workers: int) -> ProcessPoolExecutor:
+    """Create the parse pool. Caller holds _parse_pool_lock."""
+    global _parse_pool_atexit_registered
+    if not _parse_pool_atexit_registered:
+        atexit.register(_shut_down_parse_pool_at_exit)
+        _parse_pool_atexit_registered = True
+    return ProcessPoolExecutor(
+        max_workers=max(1, max_workers),
+        initializer=exit_when_parent_dies,
+    )
 
-    Reused across every parse_batch_callback() call — i.e. across every
-    parse batch within one IndexingPipeline.run(), and across every run in
-    this process — instead of being spawned and torn down per batch. Sizing
-    is fixed at first use, from whichever call happens to win the creation
-    race below — later calls' max_workers values are ignored once the pool
-    already exists, same as before this took an explicit parameter.
 
-    A lock guards creation because multiple concurrent IndexingPipeline.run()
-    calls (e.g. two simultaneous indexing operations in one long-lived MCP
-    process) each spawn their own dedicated parse thread, so a first-use race
-    across threads is a real scenario here, not a hypothetical one. The pool
-    is also read under that lock: _discard_broken_parse_pool() clears it under
-    the same lock, so a read outside it could return None.
+@contextlib.contextmanager
+def _leased_parse_pool(max_workers: int) -> Iterator[ProcessPoolExecutor]:
+    """Use the shared parse pool for one batch, keeping it alive meanwhile.
+
+    The only way to reach the pool. It is created lazily and reused across
+    every parse_batch_callback() call — every batch within one
+    IndexingPipeline.run(), and runs that start before it has sat idle for
+    _PARSE_POOL_IDLE_SECONDS — instead of being spawned and torn down per
+    batch. Sizing is fixed when the pool is created, by whichever lease
+    creates it; later max_workers values are ignored while it exists. The
+    lock matters for creation too: concurrent IndexingPipeline.run() calls
+    (e.g. two indexing operations in one long-lived MCP process) each run
+    their own parse thread, so a first-use race across threads is real.
+
+    There is deliberately no unleased accessor: a caller that submits work
+    without a lease could have the pool shut down under it by the idle timer.
+
+    While any lease is held the pool cannot be shut down: the lease count and
+    the idle timer change only under _parse_pool_lock, and the timer callback
+    re-checks both under that lock. Overlapping callers (a start-up scan and a
+    resync in one process) each hold their own lease, so the pool outlives the
+    last of them. When the last lease ends, an idle timer starts; a lease that
+    begins before it fires cancels it and clears its token.
     """
-    global _parse_pool
+    global _parse_pool, _parse_pool_leases, _parse_pool_idle_timer
+    global _parse_pool_idle_token
     with _parse_pool_lock:
+        if _parse_pool_idle_timer is not None:
+            _parse_pool_idle_timer.cancel()
+            _parse_pool_idle_timer = None
+        _parse_pool_idle_token = None
         if _parse_pool is None:
-            pool = ProcessPoolExecutor(
-                max_workers=max(1, max_workers),
-                initializer=exit_when_parent_dies,
-            )
-            atexit.register(pool.shutdown, cancel_futures=True)
-            _parse_pool = pool
-        return _parse_pool
+            _parse_pool = _new_parse_pool_locked(max_workers)
+        pool = _parse_pool
+        _parse_pool_leases += 1
+    try:
+        yield pool
+    finally:
+        with _parse_pool_lock:
+            _parse_pool_leases -= 1
+            if _parse_pool_leases == 0 and _parse_pool is pool:
+                token = object()
+                timer = threading.Timer(
+                    _PARSE_POOL_IDLE_SECONDS, _shut_down_idle_parse_pool, args=(token,)
+                )
+                timer.daemon = True
+                _parse_pool_idle_token = token
+                _parse_pool_idle_timer = timer
+                timer.start()
+
+
+def _shut_down_idle_parse_pool(token: object) -> None:
+    """Idle-timer callback: shut the pool down if nothing has used it since."""
+    global _parse_pool, _parse_pool_idle_timer, _parse_pool_idle_token
+    with _parse_pool_lock:
+        if token is not _parse_pool_idle_token or _parse_pool_leases:
+            return
+        pool = _parse_pool
+        _parse_pool = None
+        _parse_pool_idle_timer = None
+        _parse_pool_idle_token = None
+    if pool is not None:
+        # No lease is held, so no batch is using this pool; wait=True still
+        # waits for any task a failed batch left running.
+        pool.shutdown(wait=True)
+
+
+def _shut_down_parse_pool_at_exit() -> None:
+    """Shut the parse pool down at interpreter exit, cancelling queued tasks.
+
+    Waits for running tasks. Also cancels any pending idle timer and clears its
+    token, leaving no pool and no timer; tests call it to reset that state.
+    """
+    global _parse_pool, _parse_pool_idle_timer, _parse_pool_idle_token
+    with _parse_pool_lock:
+        if _parse_pool_idle_timer is not None:
+            _parse_pool_idle_timer.cancel()
+        pool = _parse_pool
+        _parse_pool = None
+        _parse_pool_idle_timer = None
+        _parse_pool_idle_token = None
+    if pool is not None:
+        pool.shutdown(cancel_futures=True)
 
 
 def _discard_broken_parse_pool(
@@ -214,7 +297,9 @@ def _discard_broken_parse_pool(
     """Stop sharing a pool whose worker died, so the next batch gets new workers.
 
     A broken executor fails every later submit, so keeping it as the shared
-    pool would fail every later parse in this process. Logs each worker's pid
+    pool would fail every later parse in this process. Called inside the
+    batch's lease; because _parse_pool no longer names this pool, that lease
+    starts no idle timer for it when it ends. Logs each worker's pid
     and exit code and the batch that was in flight; the worker list is read
     before shutdown(), which drops it. Exit codes are read once the executor
     has reaped the workers, or logged as unknown if it has not within
@@ -619,9 +704,10 @@ def parse_batch_callback(
     hands over one whole batch per call (one call per parse_batch_size chunk
     of files) and this function fans it out across subprocesses for true CPU
     parallelism (tree-sitter holds the GIL, so Python threads wouldn't help).
-    The worker pool (see _get_parse_pool()) is a process-wide singleton —
-    created once and reused for every call, both within one
-    IndexingPipeline.run() and across multiple runs in this process.
+    The worker pool (see _leased_parse_pool()) is a process-wide singleton,
+    reused for every call within one IndexingPipeline.run() and across runs,
+    until it has had no batch in flight for _PARSE_POOL_IDLE_SECONDS; the
+    next call then creates a new one (see _leased_parse_pool()).
 
     Args:
         parse_config: The chunkhound_native.ParseCallConfig Rust constructs
@@ -651,14 +737,14 @@ def parse_batch_callback(
         parse_config, index_unknown_files=index_unknown_files
     )
     args_list = [(p, cfg) for p in file_paths]
-    pool = _get_parse_pool(cfg.parse_thread_pool_size)
-    try:
-        return list(pool.map(_parse_one_file, args_list))
-    except BrokenProcessPool as error:
-        if on_pool_broken is not None:
-            on_pool_broken(error)
-        _discard_broken_parse_pool(pool, file_paths)
-        raise
+    with _leased_parse_pool(cfg.parse_thread_pool_size) as pool:
+        try:
+            return list(pool.map(_parse_one_file, args_list))
+        except BrokenProcessPool as error:
+            if on_pool_broken is not None:
+                on_pool_broken(error)
+            _discard_broken_parse_pool(pool, file_paths)
+            raise
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:
@@ -722,18 +808,12 @@ def _embedding_native_capabilities(
     return 8191, False, True
 
 
-def _resolved_embedding_model(embedding_cfg: Any, provider: str) -> str:
-    """Use the provider's canonical default instead of crossing ``None``."""
+def _resolved_embedding_model(embedding_cfg: Any) -> str:
+    """Return the configured model, else the provider's canonical default."""
     get_default_model = getattr(embedding_cfg, "get_default_model", None)
     if callable(get_default_model):
         return str(get_default_model())
-    model = _cfg_or(embedding_cfg, "model", "", str)
-    if model:
-        return model
-    return {
-        "openai": "text-embedding-3-small",
-        "voyageai": "voyage-3.5",
-    }.get(provider, "")
+    return _cfg_or(embedding_cfg, "model", "", str)
 
 
 
@@ -847,7 +927,7 @@ async def run_rust_pipeline(
     )
 
     embedding_provider = _cfg_or(embedding_cfg, "provider", "", str)
-    embedding_model = _resolved_embedding_model(embedding_cfg, embedding_provider)
+    embedding_model = _resolved_embedding_model(embedding_cfg)
     (
         embed_max_tokens_per_batch,
         embedding_matryoshka,

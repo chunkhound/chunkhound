@@ -3,7 +3,7 @@
 
 import asyncio
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
@@ -26,8 +26,11 @@ class MockRerankScenario:
     """Deterministic rerank scenario matched by exact query + document list."""
 
     query: str
-    documents: list[str]
+    # None means "match any document list"; scores are then derived from
+    # document_scores so chunk boundaries and candidate order can vary.
+    documents: list[str] | None
     results: list[MockRerankResult]
+    document_scores: dict[str, float] | None = None
     response_format: str = "cohere"
     name: str = "scenario"
     status_code: int = 200
@@ -80,7 +83,9 @@ class MockRerankServer:
                 )
 
             request_format = "tei" if has_texts else "cohere"
-            documents = body.get("texts" if request_format == "tei" else "documents", [])
+            documents = body.get(
+                "texts" if request_format == "tei" else "documents", []
+            )
             query = body.get("query", "")
             top_n = body.get("top_n")
 
@@ -106,7 +111,11 @@ class MockRerankServer:
                     status=scenario.status_code,
                 )
 
-            results = list(scenario.results)
+            results = self._scenario_results(scenario, documents)
+            if scenario.document_scores is not None:
+                # Marker scores are computed per document, so rank them before
+                # truncating; otherwise candidate order would decide top_n.
+                results.sort(key=lambda result: result.score, reverse=True)
             if top_n is not None and top_n > 0:
                 results = results[:top_n]
 
@@ -121,7 +130,10 @@ class MockRerankServer:
         self, *, query: str, documents: list[str], request_format: str
     ) -> MockRerankScenario | None:
         for scenario in self.scenarios:
-            if scenario.query == query and scenario.documents == documents:
+            documents_match = (
+                scenario.documents is None or scenario.documents == documents
+            )
+            if scenario.query == query and documents_match:
                 # Strip -bare suffix for format matching (tei-bare → tei).
                 # Use removesuffix (not rstrip) — rstrip treats its argument as
                 # a character set and would strip 'e', 'r', 'e' from 'cohere'.
@@ -131,6 +143,33 @@ class MockRerankServer:
                 if scenario_format == request_format:
                     return scenario
         return None
+
+    @staticmethod
+    def _scenario_results(
+        scenario: MockRerankScenario, documents: list[str]
+    ) -> list[MockRerankResult]:
+        """Score documents by marker when a scenario is document-agnostic.
+
+        Content-based scoring keeps semantic assertions stable when chunk
+        boundaries or candidate order change across refactors.
+        """
+        if scenario.document_scores is None:
+            return list(scenario.results)
+
+        return [
+            MockRerankResult(
+                index=index,
+                score=max(
+                    (
+                        score
+                        for marker, score in scenario.document_scores.items()
+                        if marker in document
+                    ),
+                    default=0.0,
+                ),
+            )
+            for index, document in enumerate(documents)
+        ]
 
     def _build_response_payload(
         self, scenario: MockRerankScenario, results: list[MockRerankResult]
@@ -143,8 +182,7 @@ class MockRerankServer:
         if scenario.response_format == "tei":
             return {
                 "results": [
-                    {"index": result.index, "score": result.score}
-                    for result in results
+                    {"index": result.index, "score": result.score} for result in results
                 ]
             }
 
@@ -156,7 +194,9 @@ class MockRerankServer:
                 ]
             }
 
-        raise ValueError(f"Unsupported mock response format: {scenario.response_format}")
+        raise ValueError(
+            f"Unsupported mock response format: {scenario.response_format}"
+        )
 
     async def start(self) -> None:
         """Start the aiohttp server."""
