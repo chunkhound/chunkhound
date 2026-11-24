@@ -122,6 +122,8 @@ class EmbeddingManager:
 
         Uses the provider's ``embed_query``.
         """
+        if any(not text.strip() for text in texts):
+            raise ValueError("Search query must not be blank")
         provider = self.get_provider(provider_name)
         return await _embed_checked(provider, texts, provider.embed_query)
 
@@ -158,9 +160,11 @@ async def _embed_checked(
         )
     name, model, identity = metadata_before
     if len(embeddings) != len(texts):
+        blanks = [i for i, t in enumerate(texts) if not t.strip()]
+        blank_note = f"; blank text indexes: {blanks[:20]}" if blanks else ""
         raise RuntimeError(
-            f"Embedding provider {name!r} returned {len(embeddings)} vectors "
-            f"for {len(texts)} texts"
+            f"Embedding provider {name!r} (model {model!r}) returned "
+            f"{len(embeddings)} vectors for {len(texts)} texts{blank_note}"
         )
     dims = len(embeddings[0]) if embeddings else provider.dims
     if any(len(vector) != dims for vector in embeddings):

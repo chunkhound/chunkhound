@@ -2417,6 +2417,45 @@ class TestRealtimeFunctional:
         assert service._watchdog_bootstrap_future is None
 
     @pytest.mark.asyncio
+    async def test_stop_during_indexed_root_identity_check_cancels_start(
+        self, realtime_setup, monkeypatch
+    ):
+        """stop() must cancel a start that is still checking the indexed root."""
+        import threading
+
+        service, watch_dir, _, services = realtime_setup
+        provider = services.provider
+        original_ensure = provider.ensure_indexed_root_identity
+        check_entered = threading.Event()
+        release_check = threading.Event()
+
+        def slow_ensure(*args, **kwargs):
+            check_entered.set()
+            release_check.wait(timeout=10.0)
+            return original_ensure(*args, **kwargs)
+
+        monkeypatch.setattr(provider, "ensure_indexed_root_identity", slow_ensure)
+
+        start_task = asyncio.create_task(service.start(watch_dir))
+        try:
+            entered = await asyncio.get_running_loop().run_in_executor(
+                None, check_entered.wait, 5.0
+            )
+            assert entered
+
+            await service.stop()
+        finally:
+            release_check.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(start_task, timeout=5.0)
+
+        stats = await service.get_health()
+        assert stats["service_state"] == "stopped"
+        assert service.event_consumer_task is None
+        assert service.process_task is None
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_native_watchman
     async def test_stop_cancels_inflight_watchman_start_and_cleans_sidecar(
         self, tmp_path, monkeypatch

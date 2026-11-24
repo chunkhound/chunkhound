@@ -135,6 +135,47 @@ def test_path_filter_and_threshold_still_apply(indexed) -> None:
     _assert_same(above, [e for e in _expected(vectors, query) if e[1] >= floor - 1e-6])
 
 
+def test_malformed_vector_is_skipped_by_every_similarity_lookup(indexed) -> None:
+    """A live chunk whose vector has NULL elements (what a NaN vector is stored
+    as) cannot be scored; every similarity lookup skips it and still returns
+    the other chunks instead of failing."""
+    provider, paths, vectors, query, _ = indexed
+    alpha = sorted(cid for cid, sub in paths.items() if sub == "alpha")
+    bad = alpha[len(alpha) // 2]
+    provider.delete_embeddings_by_chunk_id(bad)
+    provider.insert_embeddings_batch(
+        [
+            {
+                "chunk_id": bad,
+                "provider": "test",
+                "model": "mini",
+                "embedding": [float("nan")] * _DIMS,
+                "dims": _DIMS,
+            }
+        ]
+    )
+    del vectors[bad]
+
+    scores = asyncio.run(
+        provider.get_chunk_similarities_async(list(paths), query, "test", "mini")
+    )
+    expected = dict(_expected(vectors, query))
+    assert set(scores) == set(expected)
+    assert scores == pytest.approx(expected, abs=1e-5)
+
+    hits = provider.search_by_embedding(query, "test", "mini", limit=50)
+    _assert_same(
+        [(int(h["chunk_id"]), h["score"]) for h in hits], _expected(vectors, query)
+    )
+
+    anchor = max(cid for cid, sub in paths.items() if sub == "beta")
+    neighbours = provider.find_similar_chunks(anchor, "test", "mini", limit=50)
+    _assert_same(
+        [(int(n["chunk_id"]), n["score"]) for n in neighbours],
+        _expected(vectors, vectors[anchor], lambda c: c != anchor),
+    )
+
+
 def test_malformed_vector_outside_the_scope_does_not_empty_the_search(indexed) -> None:
     """A NaN vector is stored with NULL elements, on which cosine raises. One left
     behind by a deleted chunk, mid-way through the id range, must not fail an

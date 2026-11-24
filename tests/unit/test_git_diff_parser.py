@@ -652,3 +652,16 @@ def test_split_fragments_cover_full_hunk_range_contiguously() -> None:
             f"gap/overlap between part {i + 1} (end={chunks[i].end_line}) "
             f"and part {i + 2} (start={chunks[i + 1].start_line})"
         )
+
+
+def test_whitespace_only_hunk_content_yields_no_blank_chunks() -> None:
+    diff = (
+        "diff --git a/a.txt b/a.txt\n"
+        "--- a/a.txt\n"
+        "+++ b/a.txt\n"
+        "@@ -1,0 +1,2 @@\n"
+        "+   \n"
+        "+\t\n"
+    )
+    chunks = parse_diff_to_chunks(diff)
+    assert all(chunk.code.strip() for chunk in chunks)

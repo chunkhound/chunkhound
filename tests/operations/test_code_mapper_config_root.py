@@ -37,9 +37,7 @@ async def test_code_mapper_overview_only_uses_config_dir_as_root_and_sets_defaul
         return "1. Example\n", ["Example"]
 
     def explode_verify_database_exists(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError(
-            "verify_database_exists should not run in overview-only"
-        )
+        raise AssertionError("verify_database_exists should not run in overview-only")
 
     monkeypatch.setattr(
         code_mapper_pipeline,
@@ -76,7 +74,9 @@ async def test_code_mapper_does_not_override_explicit_db_path_from_config_file(
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir(parents=True, exist_ok=True)
     cfg_path = workspace_root / ".chunkhound.json"
-    cfg_path.write_text('{"database": {"path": "/explicit/db"}}', encoding="utf-8")
+    # Windows-authored configs may carry a BOM; preserving this path proves the
+    # Code Mapper workspace reader recognized the explicit database setting.
+    cfg_path.write_text('{"database": {"path": "/explicit/db"}}', encoding="utf-8-sig")
 
     config = Config(
         target_dir=tmp_path / "other",
@@ -94,9 +94,7 @@ async def test_code_mapper_does_not_override_explicit_db_path_from_config_file(
         return "1. Example\n", ["Example"]
 
     def explode_verify_database_exists(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError(
-            "verify_database_exists should not run in overview-only"
-        )
+        raise AssertionError("verify_database_exists should not run in overview-only")
 
     monkeypatch.setattr(
         code_mapper_pipeline,
