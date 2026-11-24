@@ -232,8 +232,8 @@ def test_watches_are_scheduled_without_read_only_events(
 
         def join(self, timeout: float | None = None) -> None: ...
 
-    def fake_create() -> tuple[FakeObserver, str]:
-        return FakeObserver(), "not_applicable"
+    def fake_create() -> FakeObserver:
+        return FakeObserver()
 
     monkeypatch.setattr(startup_module, "_create_watchdog_observer", fake_create)
     config = Config(target_dir=tmp_path, indexing={"realtime_backend": "watchdog"})

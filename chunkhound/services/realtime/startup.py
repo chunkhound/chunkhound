@@ -31,7 +31,6 @@ from .events import (
     watchdog_event_filter,
     windows_notify_filter,
 )
-from .inotify_overflow import InotifyOverflowDetection
 
 
 class RealtimeObserver(Protocol):
@@ -61,27 +60,17 @@ class WatchdogBootstrap:
 
     observer: RealtimeObserver
     event_handler: SimpleEventHandler
-    inotify_overflow_detection: InotifyOverflowDetection
 
 
-def _create_watchdog_observer() -> tuple[RealtimeObserver, InotifyOverflowDetection]:
-    """Import watchdog only inside the watchdog startup path.
-
-    Detection is "active" when Linux watchdog emits ``EventsLostEvent``,
-    "unavailable" on Linux when it does not, and "not_applicable" elsewhere.
-    The handler, not this observer, receives that event.
-    """
-    from .inotify_overflow import inotify_overflow_detection
-
+def _create_watchdog_observer() -> RealtimeObserver:
+    """Import watchdog only inside the watchdog startup path."""
     if IS_WINDOWS:
-        observer = _create_windows_watchdog_observer()
-    else:
-        from watchdog.observers import Observer
+        return _create_windows_watchdog_observer()
+    from watchdog.observers import Observer
 
-        # watchdog annotates the handler as FileSystemEventHandler. SimpleEventHandler
-        # is the duck-typed handler and must stay importable without watchdog.
-        observer = cast(RealtimeObserver, Observer())
-    return observer, inotify_overflow_detection()
+    # watchdog annotates the handler as FileSystemEventHandler. SimpleEventHandler
+    # is the duck-typed handler and must stay importable without watchdog.
+    return cast(RealtimeObserver, Observer())
 
 
 def _create_windows_watchdog_observer() -> RealtimeObserver:
@@ -709,7 +698,6 @@ class RealtimeStartupMixin:
 
         self._service_state = "stopped"
         self._monitor_adapter = None
-        self._inotify_overflow_detection = None
         self._emit_status_update()
 
     async def _setup_watchdog_with_timeout(
@@ -739,7 +727,6 @@ class RealtimeStartupMixin:
                 bootstrap_result.observer,
                 bootstrap_result.event_handler,
                 watch_path,
-                bootstrap_result.inotify_overflow_detection,
             )
         except asyncio.TimeoutError:
             self._watchdog_bootstrap_abort.set()
@@ -809,7 +796,6 @@ class RealtimeStartupMixin:
     ) -> None:
         """Start polling mode and optionally record it as a fallback warning."""
         self._start_startup_phase("polling_setup")
-        self._inotify_overflow_detection = None
         if not self._using_polling or not self._polling_task:
             self._using_polling = True
             self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
@@ -829,7 +815,6 @@ class RealtimeStartupMixin:
         observer: RealtimeObserver,
         event_handler: SimpleEventHandler,
         watch_path: Path,
-        inotify_overflow_detection: InotifyOverflowDetection,
     ) -> None:
         """Adopt a successfully bootstrapped watchdog observer into service state."""
         if (
@@ -842,7 +827,6 @@ class RealtimeStartupMixin:
 
         self.event_handler = event_handler
         self.observer = observer
-        self._inotify_overflow_detection = inotify_overflow_detection
         self._using_polling = False
         self.watched_directories.add(str(watch_path))
         logger.debug("Watchdog setup completed successfully (recursive mode)")
@@ -889,7 +873,7 @@ class RealtimeStartupMixin:
             events_lost_callback=on_overflow,
         )
 
-        observer, detection = _create_watchdog_observer()
+        observer = _create_watchdog_observer()
 
         # Use recursive=True to ensure all directory events are captured
         # This is necessary for proper real-time monitoring of new directories
@@ -918,7 +902,7 @@ class RealtimeStartupMixin:
 
         if observer.is_alive():
             logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
-            return WatchdogBootstrap(observer, event_handler, detection)
+            return WatchdogBootstrap(observer, event_handler)
 
         self._stop_bootstrap_observer(observer)
         raise RuntimeError("Observer failed to start within timeout")

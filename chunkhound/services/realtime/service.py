@@ -39,7 +39,6 @@ from .events import (
     SimpleEventHandler,
     normalize_file_path,
 )
-from .inotify_overflow import InotifyOverflowDetection
 from .pipeline import RealtimePipelineMixin
 from .startup import (
     RealtimeObserver,
@@ -185,7 +184,6 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         self._event_queue_overflow_last_cleared_at: str | None = None
         self._event_queue_overflow_sample_event_type: str | None = None
         self._event_queue_overflow_sample_file_path: str | None = None
-        self._inotify_overflow_detection: InotifyOverflowDetection | None = None
         self._inotify_overflow_count = 0
         self._inotify_overflow_last_at: str | None = None
         self._last_source_event_at: str | None = None
@@ -440,14 +438,10 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                     "sample_file_path": None,
                 },
             },
-            # Kernel inotify queue overflows. detection: "active",
-            # "unavailable" (Linux, but no hook: not detected),
-            # "not_applicable", or None before a watchdog observer is adopted.
+            # Kernel inotify overflows that EventsLostEvent reported.
             "inotify_overflow": {
-                "detection": None,
                 "count": 0,
                 "last_at": None,
-                "hint": None,
             },
             "resync": {
                 "needs_resync": False,
@@ -593,17 +587,8 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
         )
         status["inotify_overflow"].update(
             {
-                "detection": self._inotify_overflow_detection,
                 "count": self._inotify_overflow_count,
                 "last_at": self._inotify_overflow_last_at,
-                "hint": (
-                    "Kernel inotify queue overflows are not detected here "
-                    "(this needs watchdog 7.1.1's EventsLostEvent; older "
-                    "watchdog drops the overflow record), so events an "
-                    "overflow drops are not resynced."
-                    if self._inotify_overflow_detection == "unavailable"
-                    else None
-                ),
             }
         )
         status["resync"].update(

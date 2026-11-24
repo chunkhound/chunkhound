@@ -21,10 +21,6 @@ from chunkhound.services.realtime.events import (
     SimpleEventHandler,
     watchdog_event_filter,
 )
-from chunkhound.services.realtime.inotify_overflow import (
-    InotifyOverflowDetection,
-    inotify_overflow_detection,
-)
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
 
@@ -38,10 +34,8 @@ def test_events_lost_is_in_the_linux_filter_only() -> None:
     classes = watchdog_event_filter()
     if sys.platform.startswith("linux"):
         assert events_lost in classes
-        assert inotify_overflow_detection() == "active"
     else:
         assert events_lost not in classes
-        assert inotify_overflow_detection() == "not_applicable"
 
 
 def test_events_lost_requests_a_resync_and_a_write_stays_a_change(
@@ -86,7 +80,7 @@ def test_linux_observer_watches_and_reports_events_lost(tmp_path: Path) -> None:
     import chunkhound.services.realtime.startup as startup_module
 
     calls: list[None] = []
-    observer, detection = startup_module._create_watchdog_observer()
+    observer = startup_module._create_watchdog_observer()
     handler = SimpleEventHandler(
         None,
         Config(target_dir=tmp_path),
@@ -102,7 +96,6 @@ def test_linux_observer_watches_and_reports_events_lost(tmp_path: Path) -> None:
     )
     observer.start()
     try:
-        assert detection == "active"
         assert observer.is_alive()
         handler.dispatch(events_lost_cls(str(tmp_path), is_directory=True))
         assert calls == [None]
@@ -129,8 +122,8 @@ async def test_overflow_requests_a_loss_of_sync_resync(
 
         def join(self, timeout: float | None = None) -> None: ...
 
-    def fake_create() -> tuple[FakeObserver, InotifyOverflowDetection]:
-        return FakeObserver(), "active"
+    def fake_create() -> FakeObserver:
+        return FakeObserver()
 
     monkeypatch.setattr(startup_module, "_create_watchdog_observer", fake_create)
     config = Config(target_dir=tmp_path, indexing={"realtime_backend": "watchdog"})
@@ -159,7 +152,6 @@ async def test_overflow_requests_a_loss_of_sync_resync(
             bootstrap.observer,
             bootstrap.event_handler,
             tmp_path,
-            bootstrap.inotify_overflow_detection,
         )
 
         watchdog_events = pytest.importorskip("watchdog.events")
@@ -177,7 +169,6 @@ async def test_overflow_requests_a_loss_of_sync_resync(
         details = health["resync"]["last_details"]
         assert details["loss_of_sync_reason"] == "inotify_queue_overflow"
         overflow = health["inotify_overflow"]
-        assert overflow["detection"] == "active"
         assert overflow["count"] == 1
         assert overflow["last_at"] is not None
     finally:
