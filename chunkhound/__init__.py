@@ -1,5 +1,4 @@
-"""ChunkHound - Local-first semantic code search with vector and regex capabilities."""
-# ci: merge queue test
+"""Free, open-source engineering research for code, git history, rendered web pages, and technical documents—local-first, enterprise-scale, and cited."""
 
 from .platform_guard import disable_platform_wmi_queries
 from .version import __version__
@@ -8,7 +7,6 @@ from .version import __version__
 disable_platform_wmi_queries()
 
 __author__ = "Ofri Wolfus"
-__description__ = "Local-first semantic code search with vector and regex capabilities"
 
 # Import modules only when needed to avoid dependency issues during setup
 __all__ = [

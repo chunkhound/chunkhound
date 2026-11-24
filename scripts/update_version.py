@@ -28,14 +28,18 @@ def validate_version(version: str) -> None:
 
     Supports:
     - Standard releases: 4.1.0
-    - Pre-releases: 4.1.0a1, 4.1.0b2, 4.1.0rc3
-    - Alternative spellings: 4.1.0alpha1, 4.1.0beta2
+    - Tagged pre-releases: 4.1.0b2, 4.1.0rc3
+    - Alternative spellings: 4.1.0beta2
+
+    Alpha versions are CI-owned and must never be created as Git tags.
     """
-    pattern = r"^\d+\.\d+\.\d+(?:(?:a|alpha|b|beta|rc|c|preview|pre)\d+)?$"
+    if re.match(r"^\d+\.\d+\.\d+(?:a|alpha)\d+$", version):
+        raise ValueError("Alpha versions are automatic and must not use Git tags")
+    pattern = r"^\d+\.\d+\.\d+(?:(?:b|beta|rc|c|preview|pre)\d+)?$"
     if not re.match(pattern, version):
         raise ValueError(
             f"Invalid version format: {version}. "
-            f"Expected: X.Y.Z or X.Y.Z{{a|b|rc}}N (e.g., 4.1.0, 4.1.0b1, 4.1.0rc3)"
+            f"Expected: X.Y.Z or X.Y.Z{{b|rc}}N (e.g., 4.1.0, 4.1.0b1, 4.1.0rc3)"
         )
 
 
@@ -79,6 +83,8 @@ def bump_version(current: str, bump_type: str, prerelease: str | None = None) ->
         raise ValueError(f"Invalid bump type: {bump_type}")
 
     if prerelease:
+        if re.fullmatch(r"(?:a|alpha)\d+", prerelease):
+            raise ValueError("Alpha versions are automatic and must not use Git tags")
         new_version += prerelease
 
     return new_version

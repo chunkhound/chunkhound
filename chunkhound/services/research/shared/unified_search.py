@@ -124,6 +124,8 @@ class UnifiedSearch:
 
         # Step 2: Multi-hop semantic search with reranking (optionally with query
         # expansion)
+        # A blank sub-query has no embedding; drop it rather than failing the run.
+        expanded_queries = [q for q in (expanded_queries or []) if q and q.strip()]
         if QUERY_EXPANSION_ENABLED and expanded_queries:
             # Use provided expanded queries (expansion events emitted by caller)
             logger.debug("Step 2a: Using expanded queries for diverse semantic search")

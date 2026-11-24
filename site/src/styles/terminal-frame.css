@@ -1,0 +1,228 @@
+/* Shared terminal frame, scrollback and controls. */
+@keyframes hero-row-in {
+    from { opacity: 0; }
+}
+
+.terminal-lines [data-enter] {
+    animation: hero-row-in var(--hero-enter) ease-out var(--hero-push) both;
+}
+
+.terminal-lines [data-enter="solo"] { animation-delay: 0s; }
+
+@media (prefers-reduced-motion: reduce) {
+    .workflow-demo-step[data-enter] { animation: none; }
+}
+
+/* Both surfaces stay legible against the dark terminal in every theme. */
+.hero, .terminal-card {
+    --text-primary: #f4f4f4;
+    --link-focus: var(--code-accent);
+}
+
+/* The card is the query container; its own tokens cannot resolve its cqi. */
+.terminal-card {
+    display: flex;
+    flex-direction: column;
+    --hero-col: min(100%, 595px);
+    max-inline-size: var(--hero-col);
+    margin-block-start: var(--space-3);
+    container: hero-terminal / inline-size;
+    --composer-min-h: 40px;
+    --hero-measure: 100%;
+    --hero-push: 0ms;
+    --hero-enter: 260ms;
+    --hero-composer-border: color-mix(in srgb, var(--code-muted) 65%, transparent);
+    --hero-composer-border-idle: color-mix(in srgb, var(--code-muted) 22%, transparent);
+}
+
+/* Theme-stable surface: the frame is a code token, not --border-color. */
+.terminal-window {
+    --terminal-font-size: clamp(12px, 0.5cqi + 11px, 14px);
+    background: var(--code-bg);
+    border: var(--border-w-default) solid var(--code-muted);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    font-family: "JetBrains Mono", monospace;
+    font-size: var(--terminal-font-size);
+    gap: var(--space-2);
+    overflow: hidden;
+    padding-block: var(--space-2);
+}
+
+.terminal-seam,
+.terminal-viewport,
+.terminal-composer {
+    padding-inline: var(--space-3);
+}
+
+.terminal-control,
+.terminal-jump {
+    align-items: center;
+    border: var(--border-w-default) solid
+        color-mix(in srgb, var(--code-muted) 45%, transparent);
+    cursor: pointer;
+    font-family: "JetBrains Mono", monospace;
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+}
+
+.terminal-control {
+    background: none;
+    margin-inline-start: auto;
+    border-radius: var(--radius-sm);
+    color: var(--code-muted);
+    display: inline-flex;
+    flex-shrink: 0;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+}
+
+.terminal-control-icon {
+    display: inline-flex;
+}
+
+.terminal-control-icon-pause {
+    display: none;
+}
+
+.terminal-control[data-state="stop"] .terminal-control-icon-play {
+    display: none;
+}
+
+.terminal-control[data-state="stop"] .terminal-control-icon-pause {
+    display: inline-flex;
+}
+
+.terminal-control:hover {
+    border-color: var(--code-muted);
+    color: var(--code-text);
+}
+
+.terminal-control:focus-visible,
+.terminal-jump:focus-visible {
+    outline: var(--border-w-emphasis) solid var(--link-focus);
+    outline-offset: 2px;
+}
+
+.terminal-dots {
+    display: flex;
+    gap: var(--space-2);
+    opacity: 0.6;
+}
+
+.terminal-seam {
+    align-items: center;
+    display: flex;
+    gap: var(--space-5);
+}
+
+.terminal-dots .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+.terminal-dots .dot.red {
+    background: #ff5f56;
+}
+.terminal-dots .dot.yellow {
+    background: #ffbd2e;
+}
+.terminal-dots .dot.green {
+    background: #27c93f;
+}
+
+/* Full card width for margin notes; JS locks the settled height. */
+.terminal-viewport {
+    flex: 1 1 auto;
+    overflow: hidden;
+    min-height: 120px;
+}
+
+.terminal-card[data-scrollable="true"] .terminal-viewport {
+    mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+}
+
+.terminal-lines {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    transition: transform var(--hero-push) ease-out;
+    max-inline-size: var(--hero-measure);
+    min-height: 100%;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.terminal-composer {
+    position: relative;
+}
+
+/* Minmax(0, …) scrolls a long prompt instead of stretching the row. */
+.terminal-input {
+    display: grid;
+    grid-template-columns: 10ch auto minmax(0, 1fr);
+    column-gap: var(--space-3);
+    align-items: center;
+    border: var(--border-w-default) solid var(--hero-composer-border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    line-height: 1.4;
+    max-inline-size: var(--hero-measure);
+    min-height: var(--composer-min-h);
+    transition: border-color 400ms ease-out;
+}
+
+.terminal-card[data-composer="sent"] .terminal-input {
+    border-color: var(--hero-composer-border-idle);
+}
+
+.terminal-jump {
+    background: var(--code-bg);
+    border-radius: var(--radius-full);
+    bottom: calc(var(--composer-min-h) + var(--space-2));
+    color: var(--code-text);
+    display: none;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-3);
+    position: absolute;
+    right: var(--space-3);
+    z-index: 5;
+}
+
+.terminal-card[data-following="false"] .terminal-jump {
+    display: inline-flex;
+}
+
+.terminal-jump:hover {
+    border-color: var(--code-muted);
+}
+
+.input-line {
+    align-items: center;
+    display: flex;
+    gap: var(--space-1);
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    white-space: nowrap;
+}
+
+.input-line::-webkit-scrollbar {
+    display: none;
+}
+
+.input-glyph {
+    color: var(--text-primary);
+    transition: color 400ms ease-out;
+}
+
+.terminal-card[data-composer="sent"] .input-glyph {
+    color: var(--code-muted);
+}
+
+.input-text {
+    color: var(--text-primary);
+    white-space: nowrap;
+}
