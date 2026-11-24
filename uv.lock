@@ -596,7 +596,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.0.0" },
     { name = "packaging", specifier = ">=21.0" },
     { name = "pandas", specifier = ">=2.3.0" },
-    { name = "pathspec", specifier = ">=0.12.1" },
+    { name = "pathspec", specifier = ">=0.12.1,<2" },
     { name = "psutil", specifier = ">=5.8.0" },
     { name = "pyarrow", specifier = ">=23.0.0,<24.0.0" },
     { name = "pydantic", specifier = ">=2.12.0" },

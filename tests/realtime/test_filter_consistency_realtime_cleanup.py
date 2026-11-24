@@ -826,7 +826,7 @@ def test_polling_walk_does_not_enter_excluded_node_modules(tmp_path: Path) -> No
         database={"path": str(tmp_path / "nm.duckdb"), "provider": "duckdb"},
         indexing={"include": ["**/*.py"], "realtime_backend": "watchdog"},
     )
-    handler = SimpleEventHandler(None, config, None, root_path=root)
+    path_filter = RealtimePathFilter(config=config, root_path=root.resolve())
     visited: list[Path] = []
     real_scandir = os.scandir
 
@@ -836,7 +836,7 @@ def test_polling_walk_does_not_enter_excluded_node_modules(tmp_path: Path) -> No
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(os, "scandir", recording_scandir)
-        walked = list(_walk_files(root, handler))
+        walked = list(_walk_files(root, path_filter))
 
     assert root / "src" / "app.py" in walked
     assert root in visited

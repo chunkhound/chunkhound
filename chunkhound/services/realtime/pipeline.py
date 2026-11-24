@@ -20,10 +20,10 @@ from chunkhound.providers.database.duckdb_provider import DuckDBTransactionConfl
 from chunkhound.providers.database.serial_executor import (
     DatabaseTemporarilyUnavailableError,
 )
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
 from .events import (
     RealtimeMutation,
-    SimpleEventHandler,
     normalize_file_path,
     watchdog_event_filter,
 )
@@ -45,7 +45,9 @@ def _is_junction(path: Path) -> bool:
     return st.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
 
 
-def _walk_files(top: Path, handler: SimpleEventHandler) -> Generator[Path, None, None]:
+def _walk_files(
+    top: Path, path_filter: RealtimePathFilter
+) -> Generator[Path, None, None]:
     """Yield the paths of entries under ``top``, pruning excluded and linked dirs.
 
     This keeps parity with the default startup scan (the Rust scanner), which
@@ -62,7 +64,7 @@ def _walk_files(top: Path, handler: SimpleEventHandler) -> Generator[Path, None,
             name
             for name in dirnames
             if not _is_junction(parent / name)
-            and not handler._path_filter.excludes_directory(parent / name)
+            and not path_filter.excludes_directory(parent / name)
         ]
         for name in filenames:
             yield parent / name
@@ -210,7 +212,7 @@ class RealtimePipelineMixin:
         burst of rejected events does not pay for path resolution; it differs
         from full normalization only for a path that passes through a link whose
         target is also in the tree, or that the filesystem spells differently
-        (8.3 short names, letter case).
+        (8.3 short names, letter case). It is for status bookkeeping only.
         """
         path_obj = Path(file_path)
         base_dir = self.watch_path or getattr(self.config, "target_dir", None)
@@ -926,11 +928,11 @@ class RealtimePipelineMixin:
         current_files: dict[Path, tuple[int, int]] = {}
         files_checked = 0
         truncated = False
-        simple_handler = SimpleEventHandler(
-            None, self.config, None, root_path=watch_path
+        path_filter = RealtimePathFilter(
+            config=self.config, root_path=watch_path.resolve()
         )
 
-        walk = _walk_files(watch_path, simple_handler)
+        walk = _walk_files(watch_path, path_filter)
         try:
             for file_path in walk:
                 try:
@@ -938,7 +940,7 @@ class RealtimePipelineMixin:
                         continue
 
                     files_checked += 1
-                    if simple_handler._should_index(file_path):
+                    if path_filter.should_index(file_path):
                         try:
                             stat_result = file_path.stat()
                         except OSError:
@@ -962,17 +964,15 @@ class RealtimePipelineMixin:
         return current_files, files_checked, truncated
     def _collect_supported_files(self, dir_path: Path) -> list[Path]:
         """Collect supported files in a directory off the event loop."""
-        simple_handler = SimpleEventHandler(
-            None,
-            self.config,
-            None,
-            root_path=self._path_filter_root(dir_path),
+        path_filter = RealtimePathFilter(
+            config=self.config,
+            root_path=self._path_filter_root(dir_path).resolve(),
         )
         supported_files: list[Path] = []
 
-        for file_path in _walk_files(dir_path, simple_handler):
+        for file_path in _walk_files(dir_path, path_filter):
             try:
-                if file_path.is_file() and simple_handler._should_index(file_path):
+                if file_path.is_file() and path_filter.should_index(file_path):
                     supported_files.append(file_path)
             except (OSError, PermissionError):
                 continue
