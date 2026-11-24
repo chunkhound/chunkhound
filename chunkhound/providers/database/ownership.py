@@ -1,7 +1,5 @@
 """Scoped ownership of the native database coordination handles."""
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
