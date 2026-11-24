@@ -183,4 +183,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://aigrow.gg/ai-api/guide",
         auth_url="https://aigrow.gg/dashboard/api",
     ),
+    "onomeo": OpenAICompatibleSpec(
+        name="onomeo",
+        default_base_url="https://onomeo.com/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=5,
+        docs_url="https://onomeo.com/integrations",
+        auth_url="https://onomeo.com/dashboard",
+    ),
 }

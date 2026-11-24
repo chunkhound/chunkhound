@@ -150,6 +150,7 @@ LLMProviderLiteral = Literal[
     "cheapaimodel",
     "uberllm",
     "aigrow",
+    "onomeo",
     "opencode-cli",
 ]
 
@@ -198,6 +199,7 @@ CLI_PROVIDER_CHOICES = (
     "cheapaimodel",
     "uberllm",
     "aigrow",
+    "onomeo",
     "opencode-cli",
 )
 
