@@ -1,0 +1,105 @@
+---
+/**
+ * The page's core map: the seven parts pi-schematic adds to a Pi session,
+ * grouped by what each one controls (automation, configuration, delegation,
+ * memory, posture). Groups answer the reader's questions from a single step up
+ * to the whole run: what may a step change, what survives a context, who does
+ * the work, how a task declares its setup, and what runs the whole thing. So
+ * the map closes on the widest lever. The optional grounding layer opens the
+ * figure, above the parts it supplies evidence to.
+ */
+import DiagramFigure from "./DiagramFigure.astro";
+import DiagramRow from "./DiagramRow.astro";
+
+// One icon per group, top to bottom: single step first, whole run last.
+const rows = [
+    {
+        label: "Posture",
+        caption: "what a step may change",
+        icon: "ph-lock-simple",
+        nodes: [{ title: "Readonly Mode", detail: "no writes to the tree" }],
+    },
+    {
+        label: "Memory",
+        caption: "what survives a context",
+        icon: "ph-notebook",
+        nodes: [
+            { title: "Notebook", detail: "short-lived; /new clears it" },
+            { title: "Handoff", detail: "clears the context, keeps the notebook" },
+        ],
+    },
+    {
+        label: "Delegation",
+        caption: "who does the work",
+        icon: "ph-users-three",
+        nodes: [
+            { title: "Sub Agents", detail: "each works in its own context" },
+            { title: "Model Groups", detail: "client-side routing, named at spawn" },
+        ],
+    },
+    {
+        label: "Configuration",
+        caption: "how a task declares its setup",
+        icon: "ph-sliders-horizontal",
+        nodes: [{ title: "Skills", detail: "frontmatter sets model, group, readonly" }],
+    },
+    {
+        label: "Automation",
+        caption: "what runs the whole thing",
+        icon: "ph-code",
+        nodes: [
+            {
+                title: "Workflows",
+                detail: "the harness in JS, with cost and time guardrails",
+            },
+        ],
+    },
+];
+
+// The optional layer above the parts: the grounding the session can query.
+const grounding = {
+    label: "ChunkHound",
+    caption: "what the session can query",
+    icon: "ph-magnifying-glass",
+    tag: "optional",
+    nodes: [
+        { title: "Code Search", detail: "semantic + regex, over local code" },
+        { title: "Deep Research", detail: "code, web, and git history" },
+        { title: "URL Fetch", detail: "one page, efficient and accurate" },
+    ],
+};
+---
+
+<script>
+    import "@phosphor-icons/webcomponents/PhLockSimple";
+    import "@phosphor-icons/webcomponents/PhNotebook";
+    import "@phosphor-icons/webcomponents/PhUsersThree";
+    import "@phosphor-icons/webcomponents/PhSlidersHorizontal";
+    import "@phosphor-icons/webcomponents/PhCode";
+    import "@phosphor-icons/webcomponents/PhMagnifyingGlass";
+</script>
+
+<DiagramFigure
+    caption="The factory’s building blocks"
+    label="Optional ChunkHound grounding, above the seven pi-schematic parts"
+    description="At the top sits a separate, optional layer: ChunkHound, the grounding the session can query. It gives the session semantic and regex search over local code, a deep research agent over local code, the web, and git history, and a URL fetch tool that reads one page efficiently and accurately. Below it, pi-schematic adds seven parts to a Pi session, grouped by what they control, from a single step up to the whole run. Posture: Readonly Mode blocks the agent from writing to the tree, and write access is opened on purpose in a later phase. Memory: the Notebook is short-lived and /new clears it, while Handoff clears the context and carries the notebook into the next one. Delegation: Sub Agents work in their own context, and a Model Group is a client-side route that the parent names when spawning, which selects the model that answers. Configuration: Skills declare a model, a model group, and readonly control in their frontmatter, so loading the skill sets up the harness for that task. Automation: Workflows drive the whole harness from JavaScript, with built-in cost and time guardrails."
+>
+    <DiagramRow {...grounding} />
+
+    <div class="rows">
+        {rows.map((row) => <DiagramRow {...row} />)}
+    </div>
+</DiagramFigure>
+
+<style>
+    /* The rule alone marks the boundary between the optional grounding layer and
+       the parts, so it cannot be read as a caption for the next group. Tokens
+       match `.d-connector`'s hairline. */
+    .rows {
+        display: grid;
+        gap: var(--space-2);
+        margin-top: var(--space-5);
+        padding-top: var(--space-5);
+        border-top: var(--border-w-default) solid var(--border-color);
+    }
+</style>

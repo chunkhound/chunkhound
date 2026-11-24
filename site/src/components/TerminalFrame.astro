@@ -1,0 +1,31 @@
+---
+import "../styles/terminal-frame.css";
+import PhosphorIcon from "./PhosphorIcon.astro";
+interface Props { label: string; viewportId?: string }
+const { label, viewportId } = Astro.props;
+---
+<div class="terminal-card">
+    <div class="terminal-window">
+        <div class="terminal-seam">
+            <div class="terminal-dots" aria-hidden="true"><span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span></div>
+            <slot name="key" />
+            <button type="button" class="terminal-control" data-state="replay" aria-label="Replay demo">
+                <span class="terminal-control-icon terminal-control-icon-play" aria-hidden="true"><PhosphorIcon name="ph-play" size="14" weight="fill" /></span>
+                <span class="terminal-control-icon terminal-control-icon-pause" aria-hidden="true"><PhosphorIcon name="ph-pause" size="14" weight="fill" /></span>
+                <span class="terminal-control-label">Replay</span>
+            </button>
+        </div>
+        <div class="terminal-viewport" id={viewportId} role="region" aria-label={label} tabindex="0">
+            <slot />
+        </div>
+        <div class="terminal-composer">
+            <button type="button" class="terminal-jump" aria-label="Jump to latest output"><PhosphorIcon name="ph-arrow-down" size="12" weight="bold" /><span>Latest</span></button>
+            <slot name="input" />
+        </div>
+    </div>
+</div>
+<script>
+    import "@phosphor-icons/webcomponents/PhArrowDown";
+    import "@phosphor-icons/webcomponents/PhPause";
+    import "@phosphor-icons/webcomponents/PhPlay";
+</script>
