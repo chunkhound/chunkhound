@@ -1023,7 +1023,8 @@ def test_parser_worker_does_not_inherit_owner_lease(tmp_path):
             lease = native.acquire_database_lease(sys.argv[1])
             Path(sys.argv[4]).write_text(str(os.getpid()))
             bridge.exit_when_parent_dies = keep_alive_after_parent_death
-            bridge._get_parse_pool(1).submit(child, sys.argv[2], sys.argv[3]).result()
+            with bridge._leased_parse_pool(1) as pool:
+                pool.submit(child, sys.argv[2], sys.argv[3]).result()
     """)
     )
     target = tmp_path / "chunks.db"

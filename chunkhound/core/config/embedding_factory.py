@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from chunkhound.core.utils.url_redaction import url_for_log
+
 from .embedding_config import EmbeddingConfig
 
 if TYPE_CHECKING:
@@ -98,9 +100,31 @@ class EmbeddingProviderFactory:
 
         # Configuration strings, including model names, can contain credentials.
         if azure_endpoint:
-            logger.debug("Creating Azure OpenAI provider")
+            logger.debug(
+                f"Creating Azure OpenAI provider: model={model}, "
+                f"azure_endpoint={url_for_log(azure_endpoint)}, "
+                f"api_version={api_version}, "
+                f"azure_deployment={azure_deployment}, "
+                f"api_key={'***' if api_key else None}, "
+                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
+                f"rerank_batch_size={rerank_batch_size}, "
+                f"timeout={config.get('timeout', 30)}, "
+                f"batch_size={config.get('batch_size', 100)}, "
+                f"max_retries={config.get('max_retries', 3)}"
+            )
         else:
-            logger.debug("Creating OpenAI provider")
+            logger.debug(
+                f"Creating OpenAI provider: model={model}, "
+                f"base_url={url_for_log(base_url) if base_url else None}, "
+                f"api_key={'***' if api_key else None}, "
+                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
+                f"rerank_batch_size={rerank_batch_size}, "
+                f"output_dims={output_dims}, "
+                f"client_side_truncation={client_side_truncation}, "
+                f"timeout={config.get('timeout', 30)}, "
+                f"batch_size={config.get('batch_size', 100)}, "
+                f"max_retries={config.get('max_retries', 3)}"
+            )
 
         try:
             return create_openai_provider(
@@ -157,8 +181,16 @@ class EmbeddingProviderFactory:
         if not model:
             raise ValueError("Model not specified in provider configuration")
 
-        # Configuration strings, including model names, can contain credentials.
-        logger.debug("Creating VoyageAI provider")
+        # Secrets in rerank_url userinfo must not reach logs; use the shared
+        # redactor rather than the raw value.
+        logger.debug(
+            f"Creating VoyageAI provider: model={model}, "
+            f"base_url={url_for_log(base_url) if base_url else None}, "
+            f"api_key={'***' if api_key else None}, "
+            f"rerank_model={rerank_model}, "
+            f"rerank_url={url_for_log(rerank_url) if rerank_url else None}, "
+            f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
+        )
 
         try:
             # Build kwargs, only including rerank params if explicitly set
@@ -181,16 +213,11 @@ class EmbeddingProviderFactory:
                 kwargs["output_dims"] = output_dims
             if client_side_truncation:
                 kwargs["client_side_truncation"] = True
-            # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
-            if (
-                rerank_url
-                and base_url
-                and not rerank_url.startswith(("http://", "https://"))
-            ):
-                from urllib.parse import urljoin
-
-                rerank_url = urljoin(base_url.rstrip("/") + "/", rerank_url.lstrip("/"))
-            if rerank_url and rerank_url.startswith(("http://", "https://")):
+            # Forward the endpoint unchanged; the provider owns normalization,
+            # resolution, and warnings so the contract has one owner. A falsy
+            # endpoint is unset, so omit it and its dependent options instead of
+            # forwarding an empty string as a distinct unset shape.
+            if rerank_url:
                 kwargs["rerank_url"] = rerank_url
                 kwargs["rerank_format"] = rerank_format
                 if rerank_ssl_verify is not None:

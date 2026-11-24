@@ -15,6 +15,7 @@ from loguru import logger
 
 import chunkhound_native as native
 from chunkhound.core import analytics as ch_analytics
+from chunkhound.core.config._utils import read_json_file
 from chunkhound.core.config.config import Config
 from chunkhound.core.constants import EMBEDDING_MODEL_UPGRADES
 from chunkhound.core.embedding_model_drift import ModelDrift, format_drift_warning
@@ -374,7 +375,8 @@ def _suggest_model_upgrade(formatter: RichOutputFormatter) -> None:
         return
 
     formatter.info(
-        f"{successor} supersedes {model}. Switching re-embeds every chunk and "
+        f"{successor} is the newer model ChunkHound maps from {model}. "
+        "Switching re-embeds every chunk and "
         f"leaves the {model} vectors in place until removed, so it is not "
         f"automatic: set embedding.model to {successor} when you want it. "
         "Silence this with CHUNKHOUND_NO_MODEL_SUGGESTIONS=1."
@@ -757,10 +759,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                     # Load or initialize config data
                     data = {}
                     if local_config_path.exists():
-                        import json
-
                         try:
-                            data = json.loads(local_config_path.read_text())
+                            data = read_json_file(local_config_path)
                         except Exception:
                             data = {}
 
@@ -780,8 +780,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                     if added > 0:
                         indexing["exclude"] = exclude_list
                         data["indexing"] = indexing
-                        import json
-
+                        # BOM accepted on read (utf-8-sig); rewriting as plain
+                        # UTF-8 is intentional — keeps config files canonical.
                         local_config_path.write_text(
                             json.dumps(data, indent=2, sort_keys=False) + "\n",
                             encoding="utf-8",

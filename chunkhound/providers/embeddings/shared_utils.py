@@ -95,8 +95,7 @@ def ensure_vector_count(vectors: Sequence[Any], texts: Sequence[Any]) -> None:
     """Raise a clear provider error if a provider returned the wrong count."""
     if len(vectors) != len(texts):
         raise EmbeddingProviderError(
-            f"Embedding provider returned {len(vectors)} vectors for "
-            f"{len(texts)} texts"
+            f"Embedding provider returned {len(vectors)} vectors for {len(texts)} texts"
         )
 
 
@@ -225,7 +224,11 @@ def validate_positive_output_dims(
     if output_dims is None:
         return None
     # bool is a subclass of int in Python — reject explicitly
-    if isinstance(output_dims, bool) or not isinstance(output_dims, int) or output_dims <= 0:
+    if (
+        isinstance(output_dims, bool)
+        or not isinstance(output_dims, int)
+        or output_dims <= 0
+    ):
         prefix = f"Model '{model}' uses " if model else ""
         raise EmbeddingConfigurationError(
             f"{prefix}output_dims={output_dims!r}, but "

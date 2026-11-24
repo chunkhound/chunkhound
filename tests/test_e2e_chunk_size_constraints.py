@@ -13,28 +13,27 @@ Validates:
 3. min_chunk_size: 25 non-whitespace chars - Log warning only (soft threshold)
 """
 
-import logging
+from logging import getLogger
+from pathlib import Path
 
 import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
+from chunkhound.core.utils import format_chunk_for_embedding
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.parsers.chunk_splitter import CASTConfig
 from tests.fixtures.fake_providers import ValidatingEmbeddingProvider
 
-logger = logging.getLogger(__name__)
+logger = getLogger(__name__)
 
 # Derive constraints from CASTConfig to avoid drift
 _config = CASTConfig()
-# Content limit is max_chunk_size non-ws chars, but embedded text includes
-# header overhead. Header format: "# {file_path} ({language})\n"
-# Components: "# " (2) + tmp_path (varies by OS, up to ~100) + "/" (1)
-# + filename (~20) + " (" (2) + language (~10) + ")\n" (2) ≈ 137 max.
-# Rounded to 150 for safety margin.
-HEADER_OVERHEAD = 150
-MAX_CHUNK_SIZE = _config.max_chunk_size + HEADER_OVERHEAD  # non-ws chars
+# Content limit is max_chunk_size non-ws chars, but the embedded text also
+# carries the embedding header. Its size is path-dependent (macOS temp roots
+# alone exceed ~130 chars), so it is derived per-run from the real tmp_path —
+# see _max_header_overhead.
 # Intentionally lower than CASTConfig.min_chunk_size (50) — this is a soft
 # warning threshold for the test harness, not an enforcement limit. Using a
 # lower value avoids false-positive warnings from legitimate small chunks
@@ -61,6 +60,33 @@ def _make_large_statements(statement: str, count: int = 500) -> str:
     With count=500 and 5 chars/statement, we get ~2500 non-ws chars.
     """
     return "\n".join([statement] * count)
+
+
+def _max_header_overhead(tmp_path: Path) -> int:
+    """Non-ws-char budget for the embedding header prepended to every chunk.
+
+    Measured from the real formatter (format_chunk_for_embedding) so the header
+    format cannot drift between this test and production. Derived from the real
+    tmp_path because macOS temp roots alone exceed ~130 chars, which a
+    hardcoded guess must underestimate. `"all:"` is the longest rule_target the
+    samples generate (the Makefile sample's `all:` rule) — the same raw
+    target-line string the makefile parser stores as metadata["rule_target"].
+    The current samples produce no constants annotations; if one is added,
+    extend this — the failure output shows the offending header verbatim.
+    """
+    header_lengths = (
+        len(
+            format_chunk_for_embedding(
+                "",
+                str(tmp_path / f"large_{language.value}{ext}"),
+                language.value,
+                rule_target="all:",
+            )
+        )
+        for language, (ext, _, _) in LARGE_LANGUAGE_SAMPLES.items()
+        if language not in BINARY_CONTENT_LANGUAGES
+    )
+    return max(header_lengths)
 
 
 # Language samples: (extension, large_sample, normal_sample)
@@ -489,7 +515,7 @@ async def validating_db(tmp_path):
     embedding_manager = EmbeddingManager()
     validating_provider = ValidatingEmbeddingProvider(
         dims=1536,
-        max_chunk_size=MAX_CHUNK_SIZE,
+        max_chunk_size=_config.max_chunk_size + _max_header_overhead(tmp_path),
         min_chunk_size=MIN_CHUNK_SIZE,
         safe_token_limit=SAFE_TOKEN_LIMIT,
     )
@@ -584,7 +610,7 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
     # Fail on violations from cAST-enforced languages
     assert not enforced_char_violations, (
         f"Found {len(enforced_char_violations)} chunks from cAST parsers exceeding "
-        f"max_chunk_size ({MAX_CHUNK_SIZE} non-ws chars):\n"
+        f"max_chunk_size ({provider.max_chunk_size} non-ws chars):\n"
         + "\n".join(
             f"  - {v['non_ws_chars']} chars [{v.get('language', 'unknown')}]: "
             f"{v['text_preview'][:50]}..."

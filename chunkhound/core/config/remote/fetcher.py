@@ -50,10 +50,11 @@ import ipaddress
 import os
 import re
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 
+from chunkhound.core.utils.url_redaction import url_for_log
 from chunkhound.utils.http_redirects import RedirectChain, RedirectError
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
@@ -67,16 +68,6 @@ class _FetchAbortedError(Exception):
 
     WARNING already logged at the point of raise.
     """
-
-
-def _url_for_log(raw: str) -> str:
-    """Scheme/authority/path only; malformed input never escapes or leaks."""
-    try:
-        parts = urlsplit(raw)
-        _, _, netloc = parts.netloc.rpartition("@")
-        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
-    except ValueError:
-        return "[invalid URL]"
 
 
 def _is_loopback_host(hostname: str | None) -> bool:
@@ -165,7 +156,7 @@ async def _fetch_with_redirects(
     except RedirectError as exc:
         log_if_not_mcp(
             "WARNING", "Remote-config redirect refused: {} (via {})",
-            str(exc), _url_for_log(url),
+            str(exc), url_for_log(url),
         )
         raise _FetchAbortedError from None
 
@@ -178,7 +169,7 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
         recoverable failure (timeout, transport error, non-2xx, JSON parse
         failure of the response body, disallowed scheme, redirect loop).
     """
-    origin_url = _url_for_log(url)
+    origin_url = url_for_log(url)
 
     if not url_scheme_ok(url):
         log_if_not_mcp(
@@ -232,7 +223,7 @@ async def fetch(url: str, auth_header: str | None) -> Any | None:
         )
         return None
 
-    final_url_for_log = _url_for_log(final_url)
+    final_url_for_log = url_for_log(final_url)
     logged_url = (
         f"{final_url_for_log} (via {origin_url})"
         if final_url_for_log != origin_url
