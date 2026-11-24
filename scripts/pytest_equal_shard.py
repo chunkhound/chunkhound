@@ -32,13 +32,12 @@ def pytest_collection_modifyitems(
     shard = config.getoption("ci_group")
     if splits is None or shard is None:
         return
-    count = len(items)
-    quotient, remainder = divmod(count, splits)
+    # Deal tests out round-robin so each shard gets every Nth collected test.
+    # Counts differ by at most one, membership depends only on collection order,
+    # and no directory's tests (e.g. the hub suite) concentrate in one shard.
     group = shard - 1
-    start = group * quotient + min(group, remainder)
-    stop = (group + 1) * quotient + min(group + 1, remainder)
-    selected = items[start:stop]
-    deselected = items[:start] + items[stop:]
+    selected = items[group::splits]
+    deselected = [item for index, item in enumerate(items) if index % splits != group]
     if deselected:
         config.hook.pytest_deselected(items=deselected)
     items[:] = selected

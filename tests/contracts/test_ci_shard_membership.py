@@ -12,9 +12,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "check_ci_shards.py"
 EXPECTED_SHARDS = [
-    [f"test_sample.py::test_sample[{value}]" for value in range(0, 4)],
-    [f"test_sample.py::test_sample[{value}]" for value in range(4, 8)],
-    [f"test_sample.py::test_sample[{value}]" for value in range(8, 11)],
+    [f"test_sample.py::test_sample[{value}]" for value in (0, 3, 6, 9)],
+    [f"test_sample.py::test_sample[{value}]" for value in (1, 4, 7, 10)],
+    [f"test_sample.py::test_sample[{value}]" for value in (2, 5, 8)],
 ]
 
 
@@ -49,7 +49,7 @@ def _load_shards(evidence: Path) -> tuple[list[str], list[list[str]]]:
     return unsplit, shards
 
 
-def test_ci_shards_are_deterministic_equal_contiguous_slices(tmp_path: Path) -> None:
+def test_ci_shards_are_deterministic_equal_round_robin_slices(tmp_path: Path) -> None:
     _write_sample(
         tmp_path,
         "import pytest\n"
@@ -70,7 +70,7 @@ def test_ci_shards_are_deterministic_equal_contiguous_slices(tmp_path: Path) -> 
     assert [len(shard) for shard in shards] == [4, 4, 3]
     assert shards == EXPECTED_SHARDS
     assert shards == repeated_shards
-    assert shards[0] + shards[1] + shards[2] == unsplit
+    assert sorted(shards[0] + shards[1] + shards[2], key=unsplit.index) == unsplit
     assert Counter(node for shard in shards for node in shard) == Counter(unsplit)
 
 

@@ -114,7 +114,7 @@ def main() -> int:
         or combined != Counter(unsplit)
         or any(count != 1 for count in combined.values())
         or sizes != expected_sizes
-        or [node for shard in shards for node in shard] != unsplit
+        or any(shard != unsplit[group::3] for group, shard in enumerate(shards))
     ):
         sys.stderr.write(f"Shards are not a complete, disjoint partition: {output}\n")
         return 1
