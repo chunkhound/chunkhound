@@ -506,8 +506,9 @@ async def test_oversized_input_produces_valid_embedding_requests(validating_db):
     directory = tmp_path / ("long_source_path_" + "x" * 120)
     directory.mkdir()
     source = directory / "oversized.py"
-    # The source exceeds the provider budget even without metadata.
-    payload = "oversized_content " * (provider.max_tokens + 1)
+    # Exceed the provider budget but stay far under the 128KB parse-timeout
+    # domain: ~34KB payload -> est. ~8200 tokens > max_tokens (8192).
+    payload = "oversized_content " * ((provider.max_tokens * 4) // 17 + 10)
     assert provider.estimate_tokens(payload) > provider.max_tokens
     source.write_text(f'def oversized():\n    return "{payload}"\n', encoding="utf-8")
     await assert_embedding_requests(services, provider, source)
