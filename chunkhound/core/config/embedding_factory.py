@@ -101,12 +101,12 @@ class EmbeddingProviderFactory:
         # Configuration strings, including model names, can contain credentials.
         if azure_endpoint:
             logger.debug(
-                f"Creating Azure OpenAI provider: model={model}, "
+                "Creating Azure OpenAI provider: "
                 f"azure_endpoint={url_for_log(azure_endpoint)}, "
-                f"api_version={api_version}, "
-                f"azure_deployment={azure_deployment}, "
+                f"api_version_set={bool(api_version)}, "
+                f"azure_deployment_set={bool(azure_deployment)}, "
                 f"api_key={'***' if api_key else None}, "
-                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
+                f"rerank_format={rerank_format}, "
                 f"rerank_batch_size={rerank_batch_size}, "
                 f"timeout={config.get('timeout', 30)}, "
                 f"batch_size={config.get('batch_size', 100)}, "
@@ -114,10 +114,10 @@ class EmbeddingProviderFactory:
             )
         else:
             logger.debug(
-                f"Creating OpenAI provider: model={model}, "
+                "Creating OpenAI provider: "
                 f"base_url={url_for_log(base_url) if base_url else None}, "
                 f"api_key={'***' if api_key else None}, "
-                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
+                f"rerank_format={rerank_format}, "
                 f"rerank_batch_size={rerank_batch_size}, "
                 f"output_dims={output_dims}, "
                 f"client_side_truncation={client_side_truncation}, "
@@ -184,10 +184,10 @@ class EmbeddingProviderFactory:
         # Secrets in rerank_url userinfo must not reach logs; use the shared
         # redactor rather than the raw value.
         logger.debug(
-            f"Creating VoyageAI provider: model={model}, "
+            "Creating VoyageAI provider: "
             f"base_url={url_for_log(base_url) if base_url else None}, "
             f"api_key={'***' if api_key else None}, "
-            f"rerank_model={rerank_model}, "
+            f"rerank_model_set={bool(rerank_model)}, "
             f"rerank_url={url_for_log(rerank_url) if rerank_url else None}, "
             f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
         )
