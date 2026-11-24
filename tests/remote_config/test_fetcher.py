@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 import pytest
+from loguru import logger
 
 from chunkhound.core.config.remote.fetcher import _interpolate_env, fetch
 
@@ -319,3 +320,39 @@ async def test_fetch_aborts_on_redirect_loop(
     # 7th hop would be the one that trips the abort. The loop dispatches
     # _MAX_REDIRECTS + 1 = 6 requests in total before raising.
     assert len(seen) == 6
+
+
+async def test_fetch_malformed_authority_is_refused_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # urlsplit raises on a malformed IPv6 authority. The fetcher must refuse
+    # the URL and return None, never propagate the parser error.
+    seen = _install_mock_transport(
+        monkeypatch, lambda r: httpx.Response(200, json={})
+    )
+    result = await fetch("http://[::1", auth_header=None)
+    assert result is None
+    assert seen == []
+
+
+async def test_fetch_refusal_log_does_not_leak_userinfo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A delimiter inside userinfo makes the URL unparseable. The warning must
+    # not echo the truncated credential prefix produced by urlsplit.
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
+    records: list[str] = []
+
+    def capture(message: Any) -> None:
+        records.append(message.record["message"])
+
+    sink_id = logger.add(capture, level="WARNING")
+    try:
+        result = await fetch("http://user:pa?ss@host/config", auth_header=None)
+    finally:
+        logger.remove(sink_id)
+
+    assert result is None
+    assert records
+    assert all("user:pa" not in text for text in records)
+    assert all("pa?ss" not in text for text in records)

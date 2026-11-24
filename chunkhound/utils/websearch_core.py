@@ -16,6 +16,7 @@ import itertools
 import math
 import os
 import re
+import shutil
 import subprocess
 import threading
 import urllib.error
@@ -25,6 +26,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import IO, TYPE_CHECKING, Any, TypeVar
 
+import psutil
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -220,6 +222,209 @@ def _resolve_chrome_path(
     return None
 
 
+# Cap the time we wait for Chrome to expose its DevTools endpoint.
+# zendriver's default (0.25 s × 10 tries ≈ 2.5 s) is too tight for a cold
+# first launch on CI runners; 0.5 s × 30 tries gives ~15 s.
+_BROWSER_CONNECT_TIMEOUT_S = 0.5
+_BROWSER_CONNECT_MAX_TRIES = 30
+# start() and the failed-start CDP close are bounded separately so a broken
+# launch cannot block the urllib fallback indefinitely.
+_BROWSER_START_TIMEOUT_S = 20.0
+_BROWSER_CLEANUP_CLOSE_TIMEOUT_S = 2.0
+_BROWSER_STOP_TIMEOUT_S = 10.0
+
+
+def _launch_timeout() -> TimeoutError:
+    return TimeoutError(f"Chrome start exceeded {_BROWSER_START_TIMEOUT_S:g}s")
+
+
+def _new_chrome(chrome_path: str) -> zd.Browser:
+    """Own the browser before startup can spawn a process or be cancelled."""
+    import zendriver as zd
+
+    # Must run before any tab.send() creates a Transaction.
+    _install_late_completion_guard()
+    return zd.Browser(
+        zd.Config(
+            headless=True,
+            browser_args=[
+                # --headless=new is required for the PDF path: legacy --headless
+                # hands PDFs to Chrome's internal viewer and never exposes the
+                # response to _fetch_page. Pass both headless=True and the
+                # explicit flag; zendriver's Config relationship is undocumented.
+                "--headless=new",
+                # Containers default /dev/shm to 64MB; 5-way navigation of
+                # JS-heavy SPAs exhausts it and kills every in-flight CDP tab.
+                "--disable-dev-shm-usage",
+                # Drops the unused GPU process to free RAM.
+                "--disable-gpu",
+            ],
+            browser_executable_path=chrome_path,
+            browser_connection_timeout=_BROWSER_CONNECT_TIMEOUT_S,
+            browser_connection_max_tries=_BROWSER_CONNECT_MAX_TRIES,
+        )
+    )
+
+
+def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
+    """Close pipe fds without taking the buffered reader's lock.
+
+    A reader thread blocked on the pipe holds the BufferedReader lock, so a
+    buffered close() waits for that lock. Chrome stdin is never written, so
+    skipping the buffered flush is safe.
+    """
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is None:
+            continue
+        raw = getattr(pipe, "raw", None)
+        if raw is None:
+            logger.debug("Chrome pipe has no raw stream; leaving it open")
+            continue
+        try:
+            raw.close()
+        except (OSError, ValueError) as exc:
+            logger.debug("Chrome pipe close failed: {!r}", exc)
+
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kill Chrome and every descendant so no child keeps a pipe open.
+
+    Chrome's descendants inherit the stderr pipe. Killing the tree lets the
+    abandoned stderr reader reach EOF instead of blocking teardown forever.
+    """
+    try:
+        children = psutil.Process(process.pid).children(recursive=True)
+    except psutil.Error:
+        children = []
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    for child in children:
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(children, timeout=1.0)
+    if alive:
+        logger.warning(
+            "Chrome descendants survived cleanup: {}",
+            ", ".join(str(child.pid) for child in alive),
+        )
+
+
+def _reap_chrome_process(browser: zd.Browser) -> None:
+    """Kill and reap only the owned process; leave unrelated instances alone."""
+    process = browser._process
+    if process is None:
+        return
+    if process.poll() is None:
+        _kill_process_tree(process)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("Owned Chrome child did not exit within 5 s")
+    # Close pipes even when the child exited on its own; otherwise the fds stay
+    # open for the browser's lifetime.
+    _close_process_pipes(process)
+    browser._process = None
+    browser._process_pid = None
+
+
+def _remove_chrome_profile(browser: zd.Browser) -> None:
+    """Remove zendriver's temporary profile; preserve a user-supplied one."""
+    if browser.config.uses_custom_data_dir:
+        return
+    try:
+        shutil.rmtree(browser.config.user_data_dir)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        # Windows can keep the profile locked briefly after process exit.
+        # A stale temp profile on failure is acceptable; do not retry.
+        logger.debug("Chrome profile removal failed: {!r}", exc)
+
+
+def _unregister_chrome(browser: zd.Browser) -> None:
+    from zendriver.core.util import get_registered_instances
+
+    get_registered_instances().discard(browser)
+
+
+def _cleanup_browser_sync(browser: zd.Browser) -> None:
+    """Synchronous cleanup of the owned process, profile, and registration."""
+    _reap_chrome_process(browser)
+    _remove_chrome_profile(browser)
+    _unregister_chrome(browser)
+
+
+async def _cleanup_browser_async(browser: zd.Browser) -> None:
+    await asyncio.to_thread(_cleanup_browser_sync, browser)
+    if browser.connection is not None:
+        try:
+            await asyncio.wait_for(
+                browser.connection.aclose(),
+                timeout=_BROWSER_CLEANUP_CLOSE_TIMEOUT_S,
+            )
+        except Exception as exc:
+            logger.warning("Chrome CDP close failed during cleanup: {!r}", exc)
+
+
+async def _cleanup_browser(browser: zd.Browser) -> None:
+    """Finish cleanup even if the caller cancels again during teardown."""
+    task = asyncio.create_task(_cleanup_browser_async(browser))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception as exc:
+            logger.warning("Chrome cleanup failed: {!r}", exc)
+            break
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _start_chrome(browser: zd.Browser) -> zd.Browser:
+    """Start the owned browser under a hard wall-clock timeout."""
+    try:
+        await asyncio.wait_for(browser.start(), timeout=_BROWSER_START_TIMEOUT_S)
+        return browser
+    except asyncio.TimeoutError as exc:
+        await _cleanup_browser(browser)
+        raise _launch_timeout() from exc
+    except BaseException:
+        await _cleanup_browser(browser)
+        raise
+
+
+async def _shutdown_browser(browser: zd.Browser) -> None:
+    """Best-effort stop, then guaranteed cleanup of the owned browser."""
+    cancelled = False
+    try:
+        await asyncio.wait_for(browser.stop(), timeout=_BROWSER_STOP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Chrome stop exceeded {:g}s", _BROWSER_STOP_TIMEOUT_S)
+    except asyncio.CancelledError:
+        cancelled = True
+    except Exception as exc:
+        logger.warning("Chrome stop failed: {!r}", exc)
+    else:
+        _unregister_chrome(browser)
+        return
+    # stop() can abort before killing the child (CDP close runs first) or be
+    # interrupted by a timeout/cancel; finish ownership cleanup here.
+    try:
+        await _cleanup_browser(browser)
+    except asyncio.CancelledError:
+        cancelled = True
+    except Exception as exc:
+        logger.warning("Chrome cleanup after failed stop failed: {!r}", exc)
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 @asynccontextmanager
 async def _managed_browser(
     warning_callback: Callable[[str], None] | None = None,
@@ -231,13 +436,6 @@ async def _managed_browser(
     tolerate ``None`` — ``fetch_url_to_content`` and ``_fetch_page`` already
     dispatch to the urllib fallback when ``browser is None``.
     """
-    # Lazy import: pulls in websockets + CDP binding modules. Wasted cost
-    # for CLI commands that never touch websearch (e.g. `chunkhound index`).
-    import zendriver as zd
-
-    # Must run before any tab.send() creates a Transaction.
-    _install_late_completion_guard()
-
     # _resolve_chrome_path returns None for every "no usable Chrome >=124"
     # case (not installed, too old, --version probe failed) and emits its
     # own warning describing the cause. urllib is the unified fallback —
@@ -246,31 +444,14 @@ async def _managed_browser(
     chrome_path = _resolve_chrome_path(warning_callback)
     browser: zd.Browser | None = None
     if chrome_path is not None:
-        # --headless=new is required for the PDF path: legacy --headless hands
-        # PDFs to Chrome's internal viewer and never exposes the response to
-        # _fetch_page. Pass both headless=True and the explicit flag — the
-        # relationship between zendriver's Config flag and the explicit arg is
-        # undocumented; belt-and-braces.
-        # --disable-dev-shm-usage: containers default /dev/shm to 64MB, which
-        # 5-way concurrent navigation of JS-heavy SPAs exhausts — Chrome dies
-        # and every in-flight tab raises ConnectionClosedError on its CDP
-        # WebSocket. --disable-gpu drops the unused GPU process to free RAM.
+        # Launch flags, connect budget, and ownership live in _new_chrome.
         try:
-            browser = await zd.start(
-                headless=True,
-                browser_args=[
-                    "--headless=new",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-                browser_executable_path=chrome_path,
-            )
+            browser = await _start_chrome(_new_chrome(chrome_path))
         except Exception as e:
             if warning_callback:
                 warning_callback(
-                    f"Browser launch failed: {e}. Falling back to urllib."
-                    " (If Google Chrome is not installed, install it to"
-                    " enable rich page fetches.)"
+                    f"Browser launch failed: {e}. Falling back to urllib. "
+                    "(Verify Google Chrome >=124 is installed and working.)"
                 )
             browser = None
 
@@ -278,12 +459,7 @@ async def _managed_browser(
         yield browser
     finally:
         if browser is not None:
-            # Bounded best-effort stop. browser.stop() can wedge on a stuck
-            # websocket close or a Chrome process ignoring SIGTERM.
-            try:
-                await asyncio.wait_for(browser.stop(), timeout=10)
-            except asyncio.TimeoutError:
-                pass
+            await _shutdown_browser(browser)
 
 
 def clamp_limit(limit: int) -> int:
