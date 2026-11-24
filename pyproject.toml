@@ -76,8 +76,9 @@ dependencies = [
     "tree-sitter-elixir>=0.3.4",
     "tree-sitter-lua>=0.4.0",
     "tree-sitter-make>=0.1.0",
-    # 7.1.1 adds WindowsApiObserver(notify_filter=...). 7.x requires Python 3.11,
-    # so 3.10 keeps the 6.x line and the startup fallback that edits the global.
+    # 7.1.1 adds WindowsApiObserver(notify_filter=...) and EventsLostEvent.
+    # 7.x requires Python 3.11, so 3.10 keeps the 6.x line and the startup
+    # fallback that edits the global.
     "watchdog>=7.1.1; python_version >= '3.11'",
     "watchdog>=4.0.0; python_version < '3.11'",
     "xxhash>=3.0.0",

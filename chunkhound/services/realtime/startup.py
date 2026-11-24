@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -65,20 +64,14 @@ class WatchdogBootstrap:
     inotify_overflow_detection: InotifyOverflowDetection
 
 
-def _create_watchdog_observer(
-    on_overflow: Callable[[], None],
-) -> tuple[RealtimeObserver, InotifyOverflowDetection]:
+def _create_watchdog_observer() -> tuple[RealtimeObserver, InotifyOverflowDetection]:
     """Import watchdog only inside the watchdog startup path.
 
-    Returns the observer and whether a kernel inotify overflow reaches
-    ``on_overflow``: "active", "unavailable" (Linux, but no hook
-    could be installed) or "not_applicable" (not Linux).
+    Detection is "active" when Linux watchdog emits ``EventsLostEvent``,
+    "unavailable" on Linux when it does not, and "not_applicable" elsewhere.
+    The handler, not this observer, receives that event.
     """
-    from .inotify_overflow import create_inotify_observer
-
-    observer = create_inotify_observer(on_overflow)
-    if observer is not None:
-        return observer, "active"
+    from .inotify_overflow import inotify_overflow_detection
 
     if IS_WINDOWS:
         observer = _create_windows_watchdog_observer()
@@ -88,10 +81,7 @@ def _create_watchdog_observer(
         # watchdog annotates the handler as FileSystemEventHandler. SimpleEventHandler
         # is the duck-typed handler and must stay importable without watchdog.
         observer = cast(RealtimeObserver, Observer())
-    detection: InotifyOverflowDetection = (
-        "unavailable" if sys.platform.startswith("linux") else "not_applicable"
-    )
-    return observer, detection
+    return observer, inotify_overflow_detection()
 
 
 def _create_windows_watchdog_observer() -> RealtimeObserver:
@@ -882,6 +872,11 @@ class RealtimeStartupMixin:
         abort_event: threading.Event,
     ) -> WatchdogBootstrap | None:
         """Create and start a watchdog observer without mutating shared state."""
+
+        def on_overflow() -> None:
+            # Called on the watchdog thread; the service state lives on the loop.
+            loop.call_soon_threadsafe(self._record_inotify_overflow)
+
         event_handler = SimpleEventHandler(
             self.event_queue,
             self.config,
@@ -891,13 +886,10 @@ class RealtimeStartupMixin:
             source_event_callback=forward_to_loop(loop, self._record_source_event),
             filtered_event_callback=forward_to_loop(loop, self._record_filtered_event),
             admission_callback=self._should_admit_realtime_event,
+            events_lost_callback=on_overflow,
         )
 
-        def on_overflow() -> None:
-            # Called on the inotify thread; the service state lives on the loop.
-            loop.call_soon_threadsafe(self._record_inotify_overflow)
-
-        observer, detection = _create_watchdog_observer(on_overflow)
+        observer, detection = _create_watchdog_observer()
 
         # Use recursive=True to ensure all directory events are captured
         # This is necessary for proper real-time monitoring of new directories

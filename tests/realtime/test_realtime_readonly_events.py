@@ -232,7 +232,7 @@ def test_watches_are_scheduled_without_read_only_events(
 
         def join(self, timeout: float | None = None) -> None: ...
 
-    def fake_create(on_overflow: Callable[[], None]) -> tuple[FakeObserver, str]:
+    def fake_create() -> tuple[FakeObserver, str]:
         return FakeObserver(), "not_applicable"
 
     monkeypatch.setattr(startup_module, "_create_watchdog_observer", fake_create)

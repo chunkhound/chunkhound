@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -93,6 +94,11 @@ def watchdog_event_filter() -> list[type]:
     watchdog 7 shares one inotify descriptor per observer and each
     `inotify_add_watch` replaces the inode's mask, so a narrower filter on one
     watch would silently narrow an overlapping one.
+
+    On Linux, watchdog 7.1.1's ``EventsLostEvent`` is included. The mask
+    builder ignores that class, so the kernel watch is unchanged. watchdog
+    drops the event unless the filter lists it. Windows buffer-overflow
+    events of the same class stay out of the filter.
     """
     # Imported here so this module stays importable without watchdog.
     import watchdog.events as watchdog_events
@@ -105,12 +111,16 @@ def watchdog_event_filter() -> list[type]:
         # Only watchdog 7 has the attrib classes; 6 reports attrib as modified.
         "attrib": ("FileAttribEvent",),
     }
-    return [
+    classes = [
         getattr(watchdog_events, name)
         for event_type in sorted(names)
         for name in names[event_type]
         if hasattr(watchdog_events, name)
     ]
+    events_lost = getattr(watchdog_events, "EventsLostEvent", None)
+    if events_lost is not None and sys.platform.startswith("linux"):
+        classes.append(events_lost)
+    return classes
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -247,6 +257,7 @@ class SimpleEventHandler:
         source_event_callback: Callable[[str, Path], None] | None = None,
         filtered_event_callback: Callable[[str, Path], None] | None = None,
         admission_callback: AdmissionCallback | None = None,
+        events_lost_callback: Callable[[], None] | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
@@ -255,6 +266,7 @@ class SimpleEventHandler:
         self._source_event_callback = source_event_callback
         self._filtered_event_callback = filtered_event_callback
         self._admission_callback = admission_callback
+        self._events_lost_callback = events_lost_callback
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -268,6 +280,12 @@ class SimpleEventHandler:
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
+        # watchdog 7.1.1 emits this after repairing watches. The path is the
+        # watch, not a changed file, so it must not take a queue slot.
+        if getattr(event, "event_type", None) == "events_lost":
+            self._report_events_lost()
+            return
+
         # No callbacks for a dropped read: each would cost a cross-thread call.
         event_type = WATCHDOG_TO_CONSUMER_EVENT.get(event.event_type)
         if event_type is None:
@@ -351,6 +369,14 @@ class SimpleEventHandler:
             logger.debug(f"File moved to temp/unsupported: {src_path}")
             self._record_source_event("deleted", src_file)
             self._queue_event("deleted", src_file)
+
+    def _report_events_lost(self) -> None:
+        if self._events_lost_callback is None:
+            return
+        try:
+            self._events_lost_callback()
+        except Exception as error:
+            logger.warning(f"lost filesystem events could not be reported: {error}")
 
     def _should_admit_event(
         self,

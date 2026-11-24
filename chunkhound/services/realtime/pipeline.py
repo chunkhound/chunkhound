@@ -672,9 +672,9 @@ class RealtimePipelineMixin:
     def _record_inotify_overflow(self) -> None:
         """Resync after the kernel dropped inotify events.
 
-        Runs on the loop. watchdog has already rebuilt its watches, so changes
-        lost before the rebuild are found by the scan and later ones arrive as
-        events.
+        Runs on the loop. watchdog 7.1.1 emits EventsLostEvent only after it
+        has rebuilt its watches, so changes lost before the rebuild are found
+        by the scan and later ones arrive as events.
         """
         # An inotify thread can outlive the observer join in _stop_observer.
         if self._stopping or self._service_state in {"stopping", "stopped"}:

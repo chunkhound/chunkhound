@@ -164,7 +164,7 @@ async def test_access_is_not_a_content_change_and_a_write_is(
         maxsize=RealtimeIndexingService._EVENT_QUEUE_MAXSIZE
     )
     handler = _handler(tmp_path, queue, asyncio.get_running_loop())
-    observer, _detection = startup_module._create_watchdog_observer(lambda: None)
+    observer, _detection = startup_module._create_watchdog_observer()
     observer.schedule(
         handler, str(tmp_path), recursive=True, event_filter=watchdog_event_filter()
     )

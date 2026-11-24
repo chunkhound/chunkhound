@@ -598,10 +598,9 @@ class RealtimeIndexingService(RealtimeStartupMixin, RealtimePipelineMixin):
                 "last_at": self._inotify_overflow_last_at,
                 "hint": (
                     "Kernel inotify queue overflows are not detected here "
-                    "(this needs watchdog 7.1's inotify observer; older "
-                    "versions, untested newer internals, or an unusable "
-                    "inotify all report unavailable), so events an overflow "
-                    "drops are not resynced."
+                    "(this needs watchdog 7.1.1's EventsLostEvent; older "
+                    "watchdog drops the overflow record), so events an "
+                    "overflow drops are not resynced."
                     if self._inotify_overflow_detection == "unavailable"
                     else None
                 ),
