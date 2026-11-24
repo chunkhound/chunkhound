@@ -205,6 +205,46 @@ jobs:
           DUCKDB_DOWNLOAD_LIB: "1"
         run: cargo test
 
+  # ignore_engine reads pathspec's compiled patterns, whose regex shape is not
+  # public API. The lock pins pathspec 0.12, so the tests job covers 0.12;
+  # this job runs the ignore tests on the newest 1.x, which is what a fresh
+  # install resolves. A pathspec release that changes the shape fails here.
+  pathspec-1x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # hatch-vcs requires tags
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Build Rust extension
+        uses: ./.github/actions/build-rust-extension
+
+      - name: Install newest pathspec 1.x over the lock
+        run: |
+          uv pip install "pathspec>=1,<2"
+          uv run --no-sync python -c "import pathspec; print('pathspec', pathspec.__version__)"
+
+      - name: Run ignore tests on pathspec 1.x
+        run: >
+          uv run --no-sync pytest
+          tests/ignore
+          tests/realtime/test_filter_consistency_realtime_cleanup.py
+          -v
+
   # ubuntu-24.04-arm has no track record in this project yet (added for the
   # chunkhound-native release wheel matrix) -- build+repair+smoke-import it on
   # every PR via the same composite action release.yml/release-rc.yml use, so

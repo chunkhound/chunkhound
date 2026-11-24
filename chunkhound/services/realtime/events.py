@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.utils.path_utils import lexical_absolute_path
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
 # The watchdog event types that can mean a file's content changed, and the type
@@ -101,11 +102,6 @@ def watchdog_event_filter() -> list[type]:
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
-
-
-def _in_tree_path(path: Path | str) -> Path:
-    """Absolute path as the event spelled it, links unresolved, for admission."""
-    return Path(os.path.abspath(path))
 
 
 QueueResultCallback = Callable[[str, Path, bool, str | None], None]
@@ -269,7 +265,7 @@ class SimpleEventHandler:
             # it sits in the tree: resolving first would turn a link under
             # node_modules/ into its target outside the root, which no exclude
             # rule matches.
-            in_tree = _in_tree_path(event.src_path)
+            in_tree = lexical_absolute_path(event.src_path)
             self._record_source_event("dir_created", in_tree)
             if self._path_filter.excludes_directory(in_tree):
                 self._record_filtered_event("dir_created", in_tree)
@@ -299,7 +295,7 @@ class SimpleEventHandler:
         # resolved target of a link above it (e.g. under node_modules/), and a
         # rejected event is never resolved: a burst of excluded events must not
         # pay for path resolution.
-        in_tree = _in_tree_path(event.src_path)
+        in_tree = lexical_absolute_path(event.src_path)
         self._record_source_event(event_type, in_tree)
 
         # Simple filtering for supported file types, with a shared
@@ -322,8 +318,8 @@ class SimpleEventHandler:
 
     def _handle_move_event(self, src_path: str, dest_path: str) -> None:
         """Handle atomic file moves (temp -> final file)."""
-        src_file = _in_tree_path(src_path)
-        dest_file = _in_tree_path(dest_path)
+        src_file = lexical_absolute_path(src_path)
+        dest_file = lexical_absolute_path(dest_path)
         src_should_index = self._should_index(src_file)
         dest_should_index = self._should_index(dest_file)
         src_should_admit_delete = self._should_admit_event(

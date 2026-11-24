@@ -1,5 +1,6 @@
 """Path utility functions for ChunkHound."""
 
+import os
 from pathlib import Path
 
 
@@ -124,3 +125,8 @@ def normalize_realtime_path(
             return logical_base / relative_path
 
     return path_obj.resolve()
+
+
+def lexical_absolute_path(path: str | Path) -> Path:
+    """Absolute path as spelled, links unresolved; ``..`` collapses lexically."""
+    return Path(os.path.abspath(path))
