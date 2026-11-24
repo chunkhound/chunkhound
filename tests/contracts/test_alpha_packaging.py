@@ -51,10 +51,10 @@ def _native_requirement(metadata_text: str) -> Requirement:
 @pytest.mark.parametrize(
     ("version", "release_artifact", "expected_specifier"),
     [
-        ("6.2.0", False, ">=6.1.0"),
-        ("6.2.0a10", False, ">=6.1.0"),
-        ("6.2.0b1", False, ">=6.1.0"),
-        ("6.2.0rc1", False, ">=6.1.0"),
+        ("6.2.0", False, ">=6.2.0"),
+        ("6.2.0a10", False, ">=6.2.0"),
+        ("6.2.0b1", False, ">=6.2.0"),
+        ("6.2.0rc1", False, ">=6.2.0"),
         ("6.2.0", True, "==6.2.0"),
         ("6.2.0a10", True, "==6.2.0a10"),
         ("6.2.0b1", True, "==6.2.0b1"),

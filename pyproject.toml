@@ -133,7 +133,10 @@ dependencies = [
     # 6.1.0 is the first release with AnalyticsRecorder, which
     # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
     # command; an older native satisfies a lower bound and then fails there.
-    "chunkhound-native>=6.1.0",
+    # Known gap: no published native yet has the database lease API this
+    # package imports, so source/editable installs need `make dev`. Official
+    # release artifacts pin the exact matching native instead.
+    "chunkhound-native>=6.2.0",
 ]
 
 [project.optional-dependencies]

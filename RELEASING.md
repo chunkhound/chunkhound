@@ -143,7 +143,7 @@ explicit tag. Multiple tags on a source commit cannot select a different version
 Every official alpha, beta, RC, and stable `chunkhound` artifact requires the
 matching `chunkhound-native` version exactly, including when a wheel is rebuilt
 from the published sdist. This release-artifact rule does not change the
-`chunkhound-native>=6.1.0` dependency range used by ordinary local, editable, and
+`chunkhound-native>=6.2.0` dependency range used by ordinary local, editable, and
 non-release builds. Alpha-specific allocation and approval routing remain
 separate from artifact dependency pairing.
 

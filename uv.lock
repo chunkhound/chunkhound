@@ -580,7 +580,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.96.0,<1.0.0" },
     { name = "anyio", specifier = ">=4.5.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "chunkhound-native", specifier = ">=6.1.0" },
+    { name = "chunkhound-native", specifier = ">=6.2.0" },
     { name = "duckdb", specifier = "==1.5.4" },
     { name = "google-genai", specifier = ">=1.51.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -680,13 +680,13 @@ dev = [
 
 [[package]]
 name = "chunkhound-native"
-version = "6.1.0"
+version = "6.2.0"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/fc/4c1b3d7f20151c705ac2fa89978a67fcd371c5b02c5e40c2b29f089ab76c/chunkhound_native-6.1.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:f760d5021982727f992af376766b5e2d566414bb70c627b3fb0aa5ef712c51ff", size = 38712395, upload-time = "2026-10-20T11:02:24.979Z" },
-    { url = "https://files.pythonhosted.org/packages/97/01/b016b00a4d8579ab07382fe77ffa2253d1032c548920ffa887f4685c85f8/chunkhound_native-6.1.0-cp310-abi3-manylinux_2_31_aarch64.whl", hash = "sha256:c74c84b6b65d8e25cd27970004a3e74dca7de42270e11f2d37ddeddc3261f7b5", size = 24661579, upload-time = "2026-10-20T11:02:28.518Z" },
-    { url = "https://files.pythonhosted.org/packages/00/e0/9bb6ec73eb0a7dd6bd8acd6d942baa82cb14c7cd86a9de960c45299b1dd9/chunkhound_native-6.1.0-cp310-abi3-manylinux_2_31_x86_64.whl", hash = "sha256:1c404cd3bcbb12eb9e79c90913f71f7f981a2c6a10dce382f1a316158673e17c", size = 26919403, upload-time = "2026-10-20T11:02:30.91Z" },
-    { url = "https://files.pythonhosted.org/packages/8d/87/c86cde59c3f5c8abb1f4c53762ad2d09b918b685be7b0acc43a73c61293c/chunkhound_native-6.1.0-cp310-abi3-win_amd64.whl", hash = "sha256:4974f1982a8382ffbe9d1afc52bad7c679af04afb4f8b2ee61723a0fe2e87e03", size = 16539327, upload-time = "2026-10-20T11:02:33.908Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/1d/3e0115c81bf3564546744bb9974a1255c416517a150d4cb2bcbf663f2f1f/chunkhound_native-6.2.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:88d86be8b9be09aba237c75a7d5ecd84c2e3d160766b8bb80479cf9f4b1293da", size = 37579457, upload-time = "2026-11-23T12:15:58.571Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/aa/807153bb141c3bef64382ee2d7077a906401689e2fb648cd2213808fbd9f/chunkhound_native-6.2.0-cp310-abi3-manylinux_2_31_aarch64.whl", hash = "sha256:8149666bdcf7de5cc31f47946cffbba2182925e837ea40b72bde7f4c2fe95576", size = 24662390, upload-time = "2026-11-23T12:16:01.452Z" },
+    { url = "https://files.pythonhosted.org/packages/be/a6/0bf18d1c456bb83f39b09e64910c3544444b065107979a7ccc6524f645d8/chunkhound_native-6.2.0-cp310-abi3-manylinux_2_31_x86_64.whl", hash = "sha256:f1569a1dca6faadf47de00ac6905484cdb614f89524126965e0a71b59fa886d2", size = 26919923, upload-time = "2026-11-23T12:16:03.847Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/56/8aeb93c18e3a84af1d5333f9922fe5feb90113dc58a022c6f1780bbf4444/chunkhound_native-6.2.0-cp310-abi3-win_amd64.whl", hash = "sha256:f792ceed3cc4b264695d3524ee94aac60ef343662321b838d8fc9e1617d4c200", size = 15926996, upload-time = "2026-11-23T12:16:06.196Z" },
 ]
 
 [[package]]
