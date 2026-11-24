@@ -327,6 +327,9 @@ class StreamingDiffParser:
             self._pending = None
             return
         text, line_offset = self._pending
+        if not text.strip():
+            self._pending = None
+            return
         self._part_number += 1
         # Deleted lines have no new-file position. When a deletion-only
         # fragment follows the hunk's final new-side line, anchor it to that

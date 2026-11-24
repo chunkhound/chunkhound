@@ -1,9 +1,9 @@
 # ChunkHound LLM Context
 
 ## PROJECT_IDENTITY
-ChunkHound: Semantic and regex search tool for codebases with MCP integration
+ChunkHound: Free, open-source engineering research for code, git history, rendered web pages, and technical documents—local-first, enterprise-scale, and cited.
 Built: 100% by AI agents - NO human-written code
-Purpose: Transform codebases into searchable knowledge bases for AI assistants
+Purpose: Transform codebases into searchable knowledge bases for AI agents
 
 ## MODIFICATION_RULES
 **NEVER:**
@@ -22,7 +22,7 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 ## KEY_COMMANDS
 ```bash
 # Development
-lint:      uv run ruff check chunkhound
+lint:      make lint
 typecheck: uv run mypy chunkhound
 test:      uv run pytest
 smoke:     uv run pytest tests/test_smoke.py -v -n auto  # MANDATORY before commits
@@ -41,22 +41,28 @@ git_hash:   uv run chunkhound search "<query>" --commit-hash <hash>
 ```
 
 ## VERSION_MANAGEMENT
-Dynamic versioning via hatch-vcs - version derived from git tags.
+Stable, beta, and RC versions use hatch-vcs and are derived from Git tags.
+Automatic alpha versions are tagless and CI-owned. From the latest published
+`chunkhound` stable `X.Y.Z`, CI starts the `X.(Y+1).0` alpha line; from the
+latest published alpha, CI keeps that exact core. CI increments only `aN`
+across both published packages. NEVER create alpha tags or use `scripts/update_version.py`
+for alpha releases.
 
 ```bash
-# Create release
+# Create stable release tag
 uv run scripts/update_version.py 4.1.0
 
-# Create pre-release
+# Create beta or RC tag
 uv run scripts/update_version.py 4.1.0b1
 uv run scripts/update_version.py 4.1.0rc1
 
-# Bump version
+# Bump tagged versions
 uv run scripts/update_version.py --bump minor      # v4.0.1 → v4.1.0
 uv run scripts/update_version.py --bump minor b1   # v4.0.1 → v4.1.0b1
 ```
 
-NEVER manually edit version strings - ALWAYS create git tags instead.
+NEVER manually edit version strings. Use Git tags for stable/beta/RC releases;
+let CI allocate automatic alpha versions without tags.
 
 ## RUST_RULES
 **NEVER:**

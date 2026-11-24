@@ -1,0 +1,128 @@
+---
+import DocsLayout from "../../../layouts/DocsLayout.astro";
+import DocCode from "../../../components/DocCode.astro";
+import SoftwareFactoryDiagram from "../../../components/diagrams/SoftwareFactoryDiagram.astro";
+
+// Explain how the parts compose through one illustrative task. Keep workflow
+// syntax on the workflows page.
+const toc = [
+    { depth: 2 as const, slug: "start", text: "Installation" },
+    { depth: 2 as const, slug: "schematic", text: "The building blocks" },
+];
+---
+
+<DocsLayout title="Software Factory" toc={toc}>
+    <h1 id="why">Design the part and the bot that builds it<span class="title-dot" aria-hidden="true"></span></h1>
+    <p>
+        A mechanical engineer specifies a part&rsquo;s shape, fit, and
+        tolerances. A machine manufactures it without the engineer guiding
+        every movement. ChunkHound and pi-schematic give you the tools to
+        apply that model to software: design the <strong>digital part</strong>
+        and the <strong>automation bot that builds it</strong>.
+    </p>
+    <p>
+        The part has behavior, interfaces, and acceptance tests. The bot has
+        a procedure: investigate, build, test, review, and stop for human
+        judgment when needed. Models can misunderstand instructions, so
+        checks matter. Engineers retain ownership of the design and what ships.
+    </p>
+    <p>
+        Designing the bot means encoding engineering expertise as code in a
+        tailored, deterministic control plane. It places active guardrails
+        where they matter: before edits, after checks, and when a run must
+        stop. Models supply judgment; your code governs what happens next,
+        including model, cost, and context policies.
+    </p>
+
+    <p>
+        ChunkHound supplies the evidence; pi-schematic controls the procedure.
+        Instead of constantly pressing the agent&rsquo;s buttons, you define
+        when the bot must turn to you. It runs the process between those
+        points, freeing your attention for decisions that need your judgment
+        and for improving the process itself.
+    </p>
+
+    <h2 id="start">Installation</h2>
+    <p>
+        Install pi-schematic in Pi from its repository. The package is not on
+        npm yet.
+    </p>
+    <DocCode lang="bash" code={`pi install git:github.com/chunkhound/pi-schematic`} />
+    <p>
+        To run from a checkout instead, run
+        <code>pi install ./pi-schematic</code>.
+    </p>
+    <p>
+        To add ChunkHound, follow <a href="/docs/getting-started/">Getting Started</a>
+        to index a repository and configure your MCP client.
+    </p>
+
+    <h2 id="schematic">The building blocks</h2>
+
+    <SoftwareFactoryDiagram />
+
+    <p>
+        These controls work together, from preventing accidental edits to
+        running a complete automation bot.
+    </p>
+    <ul class="feature-list">
+        <li>
+            <strong>Posture</strong> &mdash; prevent accidental changes.
+            Grounding, planning, and review need access to the repository
+            without changing it. Readonly mode guards against accidental
+            writes. It is not a security boundary; see the
+            <a href="https://github.com/chunkhound/pi-schematic/blob/main/docs/architecture.md#behavioral-notes">design and limits</a>.
+        </li>
+        <li>
+            <strong>Memory</strong> &mdash; keep what matters, not the whole
+            conversation. Long conversations bury important details; lasting
+            memories can become outdated. The agent keeps a short-lived
+            notebook of findings and decisions as it works, rather than relying
+            on a summary made when the context fills. A
+            <code>/handoff &lt;prompt&gt;</code> starts a fresh context with the
+            notebook and the next instruction. The agent can also hand off
+            when the topic changes. <code>/new</code> clears the notebook for
+            a new task.
+        </li>
+        <li>
+            <strong>Delegation</strong> &mdash; divide the work and choose the model.
+            An orchestrator needs to break a job into focused tasks without
+            doing every investigation itself. The <code>spawn</code> tool
+            sends those tasks to sub-agents, each with its own context. Model
+            Groups handle a separate decision: which model should do each
+            task. Stable group names let you change the models behind them
+            without rewriting the instructions that delegate the work.
+        </li>
+        <li>
+            <strong>Configuration</strong> &mdash; activate the right harness settings
+            with the task. Let the harness handle the setup so you can focus
+            on the work, not the settings. Frontmatter declares readonly mode,
+            a Model Group or specific model, and thinking level. The harness
+            applies them automatically each time you invoke the skill or
+            command, so the task starts with the intended setup.
+        </li>
+        <li>
+            <strong>Automation</strong> &mdash; turn the process into a bot.
+            Workflows are where these controls become a tailored automation
+            bot. You write a deterministic control plane for the process:
+            what runs, which results permit the next step, and where human
+            judgment is required. Workflows can control the whole harness,
+            not just send prompts. You improve that process over time,
+            freeing people to concentrate where their judgment matters
+            instead of continually directing the agent.
+        </li>
+    </ul>
+
+    <p>
+        Ready to build your first software factory?
+        Start with <a href="/docs/workflows/">workflows &rarr;</a>.
+    </p>
+</DocsLayout>
+
+<style>
+    /* The accent marks the five control names only, matching the rail icons in
+       the figure. Prose and code stay in their own tones. */
+    .feature-list > li > strong {
+        color: var(--primary);
+    }
+</style>

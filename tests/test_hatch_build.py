@@ -277,3 +277,102 @@ def test_manifest_force_include_entries_cover_supported_platforms() -> None:
     assert entries[str(windows_manifest)] == (
         "chunkhound/watchman_runtime/platforms/windows-x86_64/manifest.json"
     )
+
+
+def test_metadata_hook_links_package_to_built_commit() -> None:
+    metadata: dict = {"urls": {"Homepage": "https://example.test"}}
+
+    hatch_build._add_source_commit_url(metadata, hatch_build._REPO_ROOT)
+
+    sha = hatch_build._source_commit(hatch_build._REPO_ROOT)
+    assert sha is not None
+    assert metadata["urls"]["Source commit"] == (
+        f"https://github.com/chunkhound/chunkhound/commit/{sha}"
+    )
+    assert metadata["urls"]["Homepage"] == "https://example.test"
+
+
+def test_metadata_hook_adds_no_link_outside_git(tmp_path) -> None:
+    metadata: dict = {}
+
+    hatch_build._add_source_commit_url(metadata, tmp_path)
+
+    assert "urls" not in metadata or "Source commit" not in metadata["urls"]
+
+
+def test_native_wheel_gets_source_commit_link(tmp_path) -> None:
+    import base64
+    import hashlib
+    import zipfile
+
+    from scripts import add_source_commit_link
+
+    wheel = tmp_path / "chunkhound_native-0.0.0-py3-none-any.whl"
+    dist = "chunkhound_native-0.0.0.dist-info"
+    metadata_text = "Metadata-Version: 2.4\nName: chunkhound-native\n\nbody\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("chunkhound_native/__init__.py", "")
+        archive.writestr(f"{dist}/METADATA", metadata_text)
+        archive.writestr(f"{dist}/RECORD", "")
+
+    add_source_commit_link.add_source_commit_link(wheel, hatch_build._REPO_ROOT)
+
+    with zipfile.ZipFile(wheel) as archive:
+        metadata = archive.read(f"{dist}/METADATA").decode()
+        record = archive.read(f"{dist}/RECORD").decode()
+        for name in archive.namelist():
+            if name == f"{dist}/RECORD":
+                continue
+            digest = base64.urlsafe_b64encode(
+                hashlib.sha256(archive.read(name)).digest()
+            ).rstrip(b"=")
+            assert f"{name},sha256={digest.decode()}," in record
+
+    sha = hatch_build._source_commit(hatch_build._REPO_ROOT)
+    assert metadata.count("Project-URL: Source commit, ") == 1
+    assert f"/commit/{sha}" in metadata
+
+
+def test_native_wheel_record_matches_zip_contents_after_repair(tmp_path) -> None:
+    """RECORD must describe the archive's file members exactly.
+
+    auditwheel's Linux repair (``dir2zip``) writes explicit directory entries
+    that maturin's own macOS/Windows repair never emits, and PyPI rejects any
+    wheel whose RECORD and ZIP contents disagree (enforced since 2026-02-01).
+    Rebuilding the archive here must not leak those directory entries into
+    RECORD, or the whole platform's wheels fail to upload.
+    """
+    import csv
+    import zipfile
+
+    from scripts import add_source_commit_link
+
+    wheel = tmp_path / "chunkhound_native-0.0.0-cp310-abi3-manylinux_2_31_x86_64.whl"
+    dist = "chunkhound_native-0.0.0.dist-info"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        # Mirror an auditwheel-repaired wheel: directory members included.
+        archive.writestr(zipfile.ZipInfo("chunkhound_native/"), b"")
+        archive.writestr("chunkhound_native/__init__.py", "")
+        archive.writestr(zipfile.ZipInfo("chunkhound_native.libs/"), b"")
+        archive.writestr("chunkhound_native.libs/libduckdb-deadbeef.so", "so")
+        archive.writestr(zipfile.ZipInfo(f"{dist}/"), b"")
+        archive.writestr(
+            f"{dist}/METADATA",
+            "Metadata-Version: 2.4\nName: chunkhound-native\n\nbody\n",
+        )
+        archive.writestr(f"{dist}/RECORD", "")
+
+    add_source_commit_link.add_source_commit_link(wheel, hatch_build._REPO_ROOT)
+
+    with zipfile.ZipFile(wheel) as archive:
+        record = archive.read(f"{dist}/RECORD").decode()
+        record_entries = {
+            row.replace("\\", "/") for row, *_ in csv.reader(record.splitlines())
+        }
+        zip_entries = {
+            info.filename for info in archive.infolist() if not info.is_dir()
+        }
+        assert not [info.filename for info in archive.infolist() if info.is_dir()]
+
+    # This is exactly the check PyPI runs on upload.
+    assert record_entries == zip_entries
