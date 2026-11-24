@@ -27,6 +27,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.utils.atomic_write import write_json_atomically
+from chunkhound.utils.python_command import python_module_command
 
 from .process import pid_alive
 
@@ -1067,9 +1068,7 @@ class DaemonDiscovery:
         startup_socket_path = socket_path or self._select_startup_ipc_address()
 
         cmd = [
-            sys.executable,
-            "-m",
-            "chunkhound.api.cli.main",
+            *python_module_command("chunkhound.api.cli.main"),
             "_daemon",
             "--project-dir",
             str(self._project_dir),

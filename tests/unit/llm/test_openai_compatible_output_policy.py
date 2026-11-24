@@ -44,6 +44,7 @@ def _manager_provider(
         ("grok", "max_completion_tokens", OutputLimitCapability.SUPPORTED),
         ("openrouter", "max_tokens", OutputLimitCapability.SUPPORTED),
         ("orcarouter", "max_tokens", OutputLimitCapability.SUPPORTED),
+        ("vercel", "max_tokens", OutputLimitCapability.SUPPORTED),
         ("requesty", "max_tokens", OutputLimitCapability.SUPPORTED),
         ("api-route", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("obscurify-ai", "max_tokens", OutputLimitCapability.UNKNOWN),
@@ -51,6 +52,7 @@ def _manager_provider(
         ("runcrate", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("cheapaimodel", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("uberllm", "max_tokens", OutputLimitCapability.UNKNOWN),
+        ("aigrow", "max_tokens", OutputLimitCapability.UNKNOWN),
     ],
 )
 async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
@@ -99,6 +101,7 @@ async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
         ("openrouter", "max_tokens"),
         ("orcarouter", "max_tokens"),
         ("requesty", "max_tokens"),
+        ("vercel", "max_tokens"),
         ("api-route", "max_tokens"),
         ("opper", "max_tokens"),
         ("obscurify-ai", "max_tokens"),
@@ -106,6 +109,7 @@ async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
         ("runcrate", "max_tokens"),
         ("cheapaimodel", "max_tokens"),
         ("uberllm", "max_tokens"),
+        ("aigrow", "max_tokens"),
     ],
 )
 async def test_custom_builtin_endpoint_uses_fallback_cap(

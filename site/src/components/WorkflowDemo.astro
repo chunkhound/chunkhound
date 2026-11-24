@@ -1,0 +1,83 @@
+---
+import TerminalFrame from "./TerminalFrame.astro";
+---
+<TerminalFrame label="Illustrative workflow run">
+    <div class="terminal-lines workflow-demo-lines">
+        <div class="workflow-demo-step" data-checkpoints="0" data-elapsed="0:40" data-cost="$0.08" data-effect="/detect-tests"><span class="workflow-accent">/detect-tests</span><br /><span class="workflow-dim">Detected test command: npm test</span></div>
+        <div class="workflow-demo-step" data-checkpoints="0" data-elapsed="2:00" data-cost="$0.08" data-effect="npm test"><span class="workflow-accent">$</span> npm test<br /><span class="workflow-dim">Baseline tests passed.</span></div>
+        <div class="workflow-demo-step" data-checkpoints="1" data-elapsed="2:01" data-cost="$0.08"><span class="workflow-dim">Checkpoint 1: baseline passed</span></div>
+        <div class="workflow-demo-step" data-checkpoints="1" data-elapsed="5:00" data-cost="$0.34" data-effect="/skill:analyze-spec"><span class="workflow-accent">/skill:analyze-spec</span><br /><span class="workflow-dim">Review the spec and implementation.</span></div>
+        <div class="workflow-demo-step" data-checkpoints="2" data-elapsed="5:01" data-cost="$0.34"><span class="workflow-dim">Checkpoint 2: inspected, round 1</span></div>
+        <div class="workflow-demo-step" data-checkpoints="2" data-elapsed="7:00" data-cost="$0.55" data-effect="/plan-spec-fixes"><span class="workflow-accent">/plan-spec-fixes</span><br /><span class="workflow-dim">Plan the changes.</span></div>
+        <div class="workflow-demo-step" data-checkpoints="2" data-elapsed="11:58" data-cost="$1.04" data-effect="/apply-spec-fixes"><span class="workflow-accent">/apply-spec-fixes</span><br /><span class="workflow-dim">Apply the changes.</span></div>
+        <div class="workflow-demo-step" data-checkpoints="2" data-elapsed="11:59" data-cost="$1.04" data-effect="npm test" data-warning><span class="workflow-accent">$</span> npm test<br /><span class="workflow-dim">Tests passed.</span></div>
+        <div class="workflow-demo-step" data-checkpoints="3" data-elapsed="12:00" data-cost="$1.04" data-warning><span class="workflow-dim">Checkpoint 3: tested, round 1</span></div>
+        <div class="workflow-demo-step workflow-dialog workflow-summary" data-summary>
+            <strong class="workflow-accent">🛠️ workflow implement-spec</strong>
+            <div class="workflow-summary-rows">
+                <div><span class="workflow-dim">exit</span> <span>cost target reached</span></div>
+                <div><span class="workflow-dim">time</span> <span>12:00</span></div>
+                <div><span class="workflow-dim">counts</span> <span>checkpoints 3 · steps 4 · turns 4 · classify 0</span></div>
+                <div><span class="workflow-dim">spend</span> <span class="workflow-accent">$1.04</span></div>
+                <div><span class="workflow-dim">target</span> <span>$1.00 → $1.04 <span class="workflow-dim">(+$0.04, +4%)</span></span></div>
+                <div class="workflow-stop"><span class="workflow-dim">stopped</span> <span>at checkpoint <span class="workflow-payload">{'{"phase":"tested","round":1,"command":"npm test"}'}</span></span></div>
+            </div>
+            <div class="workflow-models"><span class="workflow-dim">by model</span>
+                <div><span>anthropic/claude-sonnet-4-5</span> <span class="workflow-accent">$0.69</span> <span class="workflow-dim">150k in · 16k out</span></div>
+                <div><span>anthropic/claude-opus-4-5</span> <span class="workflow-accent">$0.35</span> <span class="workflow-dim">45k in · 5k out</span></div>
+            </div>
+        </div>
+    </div>
+    <div slot="input">
+        <div class="terminal-input" data-command="/workflow implement-spec specs/checkout.md"><span class="input-glyph" aria-hidden="true">❯</span><span class="input-line"><span class="input-text">/workflow implement-spec specs/checkout.md</span><span class="workflow-caret" aria-hidden="true">&nbsp;</span></span></div>
+        <div class="workflow-picker" hidden><strong>Cost target (USD) — soft: stops at next checkpoint</strong><div data-option>❯ $1</div><div data-option>　 $5</div><div data-option>　 $10</div><div data-option>　 No target</div><div data-option>　 Custom…</div><div class="workflow-picker-hint">↑↓ navigate · enter select · esc cancel</div><div class="workflow-key" hidden>Enter ↵</div></div>
+        <div class="workflow-picker" hidden><strong>Time target — soft: stops at next checkpoint</strong><div data-option>❯ 1 hour</div><div data-option>　 4 hours</div><div data-option>　 8 hours</div><div data-option>　 No target</div><div data-option>　 Custom…</div><div class="workflow-picker-hint">↑↓ navigate · enter select · esc cancel</div><div class="workflow-key" hidden>Enter ↵</div></div>
+        <div class="workflow-live-status" hidden>
+            <div class="workflow-status-bar">
+                <span class="workflow-warning" hidden>⏸ cost target reached — stopping at next checkpoint</span>
+                <span class="workflow-name">🛠️ implement-spec</span>
+                <span class="workflow-checkpoints"></span>
+                <span class="workflow-elapsed"></span>
+                <span class="workflow-cost"></span>
+                <span class="workflow-effect"></span>
+            </div>
+            <div class="workflow-ambient">~/checkout · main &nbsp; | &nbsp; claude-sonnet-4-5</div>
+        </div>
+    </div>
+</TerminalFrame>
+<noscript><style>.terminal-card:has(.workflow-demo-lines) .terminal-control { display: none; }</style></noscript>
+<style is:global>
+.workflow-demo-lines { color: var(--code-text); gap: var(--space-3); }
+.workflow-demo-lines .workflow-dialog { border: 1px solid var(--code-muted); padding: var(--space-2); }
+.workflow-demo-lines .workflow-accent { color: var(--code-accent); }
+.workflow-picker { color: var(--code-text); border-block: 1px solid var(--code-accent); padding: var(--space-2) 0; line-height: 1.4; }
+.workflow-picker [data-option] { white-space: pre; }
+.workflow-picker-hint { color: var(--code-muted); margin-top: var(--space-2); }
+.terminal-card[data-selecting] .terminal-input { display: none; }
+.workflow-key { color: var(--code-accent); margin-top: var(--space-2); }
+.workflow-key[hidden] { display: block; visibility: hidden; }
+.workflow-summary { line-height: 1.55; overflow-wrap: anywhere; }
+.workflow-summary-rows, .workflow-models { margin-top: var(--space-2); }
+.workflow-summary-rows > div { display: grid; grid-template-columns: 7ch minmax(0, 1fr); column-gap: 1ch; }
+.workflow-summary-rows > .workflow-stop { display: block; }
+.workflow-models > div { display: flex; flex-wrap: wrap; gap: 0 2ch; padding-left: 2ch; }
+.workflow-payload { color: var(--code-muted); }
+.workflow-demo-lines .workflow-dim, .workflow-live-status { color: var(--code-muted); }
+.workflow-live-status { padding-top: var(--space-2); line-height: 1.4; }
+.workflow-status-bar { display: flex; flex-wrap: wrap; gap: 0 1ch; }
+.workflow-status-bar > span { flex: none; }
+.workflow-elapsed, .workflow-cost { color: var(--code-text); }
+.workflow-status-bar .workflow-warning { color: var(--code-accent); flex: 1 0 100%; overflow-wrap: anywhere; }
+.workflow-ambient { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.7; }
+.workflow-status-bar .workflow-effect { flex: 0 0 100%; min-width: 0; min-height: 1.4em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* No context-usage cell: the docs column caps near 600px, so a 700px hero-terminal tier never matches. */
+.terminal-card:has(.workflow-demo-lines) { margin-inline: auto; }
+.terminal-card:has(.workflow-demo-lines) .terminal-window { height: 420px; }
+.terminal-card:has(.workflow-demo-lines) .terminal-viewport { height: 320px; max-height: 320px; overflow-y: auto; }
+.terminal-card:has(.workflow-demo-lines) .terminal-input { grid-template-columns: auto minmax(0, 1fr); }
+.terminal-card:has(.workflow-demo-lines) .input-line { display: block; overflow: visible; white-space: normal; }
+.terminal-card:has(.workflow-demo-lines) .input-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-caret { background: var(--code-text); }
+.terminal-card[data-composer="sent"] .workflow-caret { visibility: hidden; }
+</style>
+<script>import "../scripts/workflow-demo";</script>

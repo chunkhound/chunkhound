@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200" role="img" aria-label="Certified Code Hound stickers board">
+  <rect width="1200" height="1200" fill="#f4f6f1"/>
+  <text x="600" y="132" fill="#21221e" font-family="Inter, system-ui, sans-serif" font-size="54" font-weight="700" letter-spacing="2" text-anchor="middle">CERTIFIED CODE HOUND</text>
+  <text x="600" y="186" fill="#21221e" font-family="Inter, system-ui, sans-serif" font-size="27" font-weight="700" letter-spacing="5" text-anchor="middle">STICKERS</text>
+  <image href="sticker-light.svg" x="210" y="318" width="300" height="300"/>
+  <image href="sticker-holo.svg" x="690" y="318" width="300" height="300"/>
+  <g fill="#21221e" font-family="Inter, system-ui, sans-serif" font-size="27" font-weight="700" text-anchor="middle">
+    <text x="360" y="687">LIGHT</text><text x="840" y="687">HOLOGRAM</text>
+  </g>
+  <line x1="96" y1="778" x2="1104" y2="778" stroke="#21221e" stroke-opacity=".15"/>
+  <image href="../logo.svg" x="430" y="846" width="340" height="264"/>
+</svg>

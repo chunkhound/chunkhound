@@ -133,9 +133,12 @@ def _derive_page_title(
 # The shared ``chunkhound.utils.ssrf`` validator is called directly in
 # ``_fetch_with_retry`` below; its ``SsrfBlockedError`` propagates
 # unchanged and is caught alongside ``FetchUrlError`` at the CLI/MCP
-# boundaries. Out of scope, as before: full DNS-rebind defence (urllib
-# and Chrome re-resolve independently), and validated redirects —
-# fetchurl validates only the initial URL (see chunkhound issue #478).
+# boundaries. Redirects get the same checks as in websearch, because the
+# fetch itself runs with ``fetch_url_to_content``'s default
+# ``validate_ssrf=True``: urllib validates every hop before requesting it,
+# and the Chrome branch validates the final URL before its content is
+# returned. Out of scope, as before: full DNS-rebind defence (urllib and
+# Chrome re-resolve independently).
 
 def _classify_and_raise_if_terminal(e: BaseException) -> None:
     """Re-raise ``e`` if non-retryable; return silently if retryable.
@@ -240,16 +243,13 @@ async def _fetch_with_retry(
                 delay = random.uniform(0, min(8.0, 0.5 * (2**attempt)))
                 await asyncio.sleep(delay)
             try:
-                # Explicit opt-out: fetchurl already pre-validated the
-                # URL above. Letting fetch_url_to_content's secure
-                # default run as well would re-validate on every retry.
-                # Consequence, tracked in chunkhound issue #478:
-                # fetchurl therefore still validates only the initial
-                # URL — its redirects are unchecked, unlike websearch's
-                # hop-by-hop validation.
-                return await fetch_url_to_content(
-                    url, browser, validate_ssrf=False
-                )
+                # Keep fetch_url_to_content's secure default: it is what
+                # validates redirect destinations (#478). The initial URL
+                # is checked again on each attempt; that costs one DNS
+                # lookup per attempt. An SsrfBlockedError raised here is a
+                # ValueError of no known retryable shape, so
+                # _classify_and_raise_if_terminal re-raises it unretried.
+                return await fetch_url_to_content(url, browser)
             except Exception as e:
                 if browser is not None and _is_browser_fatal(e):
                     if warning_callback:

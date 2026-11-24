@@ -1,6 +1,8 @@
 """Gate publication on explicit-tag metadata and a clean sdist rebuild.
 
-Run with RELEASE_TAG=vX.Y.Z[preN] and ALPHA_RELEASE=true for alpha pairing.
+Run with exactly one of RELEASE_TAG=vX.Y.Z[preN] (tagged release) or
+RELEASE_VERSION=X.Y.ZaN (explicit canonical alpha, no tag). ALPHA_RELEASE=true
+requires an alpha version in either form.
 The sdist rebuild deliberately receives neither a VCS version override nor the
 alpha build flag: the published source must retain both contracts on its own.
 """
@@ -25,7 +27,8 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.release_tag import parse_release_tag
+from scripts.release_tag import resolve_release
+from scripts.validate_wheel_record import check_wheel as check_wheel_record
 
 
 def check_metadata(text: str, name: str, version: str, alpha: bool) -> None:
@@ -91,6 +94,12 @@ def check_wheel(path: Path, version: str, alpha: bool) -> str:
             check_embedded_version(
                 archive.read("chunkhound/_version.py").decode(), version
             )
+    # PyPI rejects uploads whose ZIP contents disagree with RECORD; the Linux
+    # native wheels are the ones at risk (auditwheel's repack emits directory
+    # members maturin never writes). Fail before publishing, not during upload.
+    record_problems = check_wheel_record(path)
+    if record_problems:
+        raise SystemExit("\n".join(record_problems))
     return name
 
 
@@ -151,13 +160,16 @@ def main() -> None:
     parser.add_argument("--rebuild-sdist", action="store_true")
     args = parser.parse_args()
     try:
-        release = parse_release_tag(os.environ["RELEASE_TAG"])
+        release = resolve_release(
+            os.environ.get("RELEASE_TAG") or None,
+            os.environ.get("RELEASE_VERSION") or None,
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     version = release.version
     alpha = os.environ.get("ALPHA_RELEASE", "false") == "true"
     if alpha and not release.alpha:
-        raise SystemExit("Alpha publication requires an alpha tag")
+        raise SystemExit("Alpha publication requires an alpha tag or version")
     wheels = sorted(args.dist.glob("*.whl"))
     names = {check_wheel(wheel, version, alpha) for wheel in wheels}
     if names != {"chunkhound", "chunkhound-native"}:

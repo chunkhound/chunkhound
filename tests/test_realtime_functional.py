@@ -23,6 +23,7 @@ from chunkhound.providers.database.duckdb_provider import (
 )
 from chunkhound.services.realtime.service import RealtimeIndexingService
 from chunkhound.services.realtime.events import SimpleEventHandler
+from chunkhound.services.realtime.startup import WatchdogBootstrap
 from chunkhound.watchman import discover_nested_linux_mount_roots
 from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
@@ -2469,10 +2470,10 @@ class TestRealtimeFunctional:
             _watch_path: Path,
             loop: asyncio.AbstractEventLoop,
             _abort_event,
-        ) -> tuple[MagicMock, MagicMock]:
+        ) -> WatchdogBootstrap:
             time.sleep(0.05)
             loop.call_soon_threadsafe(late_watchdog_returned.set)
-            return late_observer, MagicMock()
+            return WatchdogBootstrap(late_observer, MagicMock(), "not_applicable")
 
         monkeypatch.setattr(
             service, "_WATCHDOG_SETUP_TIMEOUT_SECONDS", 0.01, raising=False
@@ -2507,7 +2508,7 @@ class TestRealtimeFunctional:
         service.config.indexing.realtime_backend = "watchdog"
         service._monitor_adapter = service._build_monitor_adapter()
         service._watchdog_setup_task = asyncio.create_task(asyncio.sleep(3600))
-        bootstrap_future: asyncio.Future[tuple[MagicMock, MagicMock] | None] = (
+        bootstrap_future: asyncio.Future[WatchdogBootstrap | None] = (
             asyncio.get_running_loop().create_future()
         )
         bootstrap_future.set_exception(RuntimeError("bootstrap exploded during stop"))
@@ -2517,6 +2518,45 @@ class TestRealtimeFunctional:
 
         assert service._service_state == "stopped"
         assert service._watchdog_bootstrap_future is None
+
+    @pytest.mark.asyncio
+    async def test_stop_during_indexed_root_identity_check_cancels_start(
+        self, realtime_setup, monkeypatch
+    ):
+        """stop() must cancel a start that is still checking the indexed root."""
+        import threading
+
+        service, watch_dir, _, services = realtime_setup
+        provider = services.provider
+        original_ensure = provider.ensure_indexed_root_identity
+        check_entered = threading.Event()
+        release_check = threading.Event()
+
+        def slow_ensure(*args, **kwargs):
+            check_entered.set()
+            release_check.wait(timeout=10.0)
+            return original_ensure(*args, **kwargs)
+
+        monkeypatch.setattr(provider, "ensure_indexed_root_identity", slow_ensure)
+
+        start_task = asyncio.create_task(service.start(watch_dir))
+        try:
+            entered = await asyncio.get_running_loop().run_in_executor(
+                None, check_entered.wait, 5.0
+            )
+            assert entered
+
+            await service.stop()
+        finally:
+            release_check.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(start_task, timeout=5.0)
+
+        stats = await service.get_health()
+        assert stats["service_state"] == "stopped"
+        assert service.event_consumer_task is None
+        assert service.process_task is None
 
     @pytest.mark.asyncio
     @pytest.mark.requires_native_watchman

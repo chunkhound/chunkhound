@@ -39,8 +39,8 @@ class ChatCompletionScript:
     def matches(self, body: Mapping[str, Any], flattened_messages: str) -> bool:
         """Match by a unique marker and/or a caller-supplied stable predicate."""
         marker_matches = self.marker is None or self.marker in flattened_messages
-        predicate_matches = (
-            self.predicate is None or self.predicate(body, flattened_messages)
+        predicate_matches = self.predicate is None or self.predicate(
+            body, flattened_messages
         )
         return marker_matches and predicate_matches
 
@@ -127,18 +127,32 @@ class OpenAICompatibleTestServer:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
+    def _unmatched_requests(self) -> list[dict[str, Any]]:
+        """Requests that matched no script — the server answered them with 400."""
+        with self._lock:
+            return [
+                request
+                for request in self.requests
+                if request["matched_script"] is None
+            ]
+
     def assert_all_scripts_consumed(self) -> None:
         """Assert expected calls were consumed and no request was unmatched."""
         with self._lock:
             remaining = {
                 name: count for name, count in self._remaining.items() if count
             }
-            unmatched = [
-                request
-                for request in self.requests
-                if request["matched_script"] is None
-            ]
         assert not remaining, f"Unconsumed OpenAI response scripts: {remaining}"
+        unmatched = self._unmatched_requests()
+        assert not unmatched, f"Unexpected OpenAI requests: {unmatched}"
+
+    def assert_no_unmatched_requests(self) -> None:
+        """Assert every recorded request matched a scripted response.
+
+        A call beyond the scripted budget gets a 400 and is recorded as
+        unmatched, so callers turn an over-budget flake into a hard failure.
+        """
+        unmatched = self._unmatched_requests()
         assert not unmatched, f"Unexpected OpenAI requests: {unmatched}"
 
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
@@ -170,15 +184,7 @@ class OpenAICompatibleTestServer:
             )
             if script is not None:
                 self._remaining[script.name] -= 1
-            usage = (
-                {
-                    "prompt_tokens": script.prompt_tokens,
-                    "completion_tokens": script.completion_tokens,
-                    "total_tokens": script.prompt_tokens + script.completion_tokens,
-                }
-                if script is not None and script.status_code == 200
-                else None
-            )
+            usage = _usage(script)
             self.requests.append(
                 {
                     "sequence": sequence,
@@ -216,6 +222,10 @@ class OpenAICompatibleTestServer:
             )
             return
 
+        if body.get("stream"):
+            self._send_sse(handler, body, script, sequence)
+            return
+
         response = {
             "id": f"chatcmpl-loopback-{sequence}",
             "object": "chat.completion",
@@ -232,6 +242,30 @@ class OpenAICompatibleTestServer:
         }
         self._send_json(handler, 200, response, script.headers)
 
+    def _send_sse(
+        self,
+        handler: BaseHTTPRequestHandler,
+        body: Mapping[str, Any],
+        script: ChatCompletionScript,
+        sequence: int,
+    ) -> None:
+        """Answer a streaming request as OpenAI `chat.completion.chunk` SSE.
+
+        CLI subprocess providers (opencode) request `stream=true`; a buffered
+        JSON body is not a valid stream, so it must be chunked. The whole
+        payload is available at once, so it is sent with Content-Length while
+        still carrying `text/event-stream` framing the client parses line-wise.
+        """
+        encoded = _sse_payload(body, script, sequence)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Content-Length", str(len(encoded)))
+        for name, value in script.headers.items():
+            handler.send_header(name, value)
+        handler.end_headers()
+        handler.wfile.write(encoded)
+
     @staticmethod
     def _send_json(
         handler: BaseHTTPRequestHandler,
@@ -247,6 +281,46 @@ class OpenAICompatibleTestServer:
             handler.send_header(name, value)
         handler.end_headers()
         handler.wfile.write(encoded)
+
+
+def _sse_payload(
+    body: Mapping[str, Any],
+    script: ChatCompletionScript,
+    sequence: int,
+) -> bytes:
+    """Encode a scripted completion as OpenAI `chat.completion.chunk` SSE."""
+    base = {
+        "id": f"chatcmpl-loopback-{sequence}",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": body.get("model", "loopback-model"),
+    }
+
+    def chunk(delta: dict[str, Any], finish: str | None) -> dict[str, Any]:
+        choice = {"index": 0, "delta": delta, "finish_reason": finish}
+        event = {**base, "choices": [choice]}
+        if finish is not None:
+            event["usage"] = _usage(script)
+        return event
+
+    chunks = [
+        chunk({"role": "assistant"}, None),
+        chunk({"content": script.content or ""}, None),
+        chunk({}, script.finish_reason),
+    ]
+    events = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks)
+    return (events + "data: [DONE]\n\n").encode()
+
+
+def _usage(script: ChatCompletionScript | None) -> dict[str, int] | None:
+    """Token usage for a matched 200 script, else None."""
+    if script is None or script.status_code != 200:
+        return None
+    return {
+        "prompt_tokens": script.prompt_tokens,
+        "completion_tokens": script.completion_tokens,
+        "total_tokens": script.prompt_tokens + script.completion_tokens,
+    }
 
 
 def _flatten_messages(messages: object) -> str:
