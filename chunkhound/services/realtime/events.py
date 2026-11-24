@@ -355,8 +355,14 @@ class SimpleEventHandler:
         *,
         should_index: bool | None = None,
     ) -> bool:
+        # A delete is judged where the path sits: it reads no content, so the
+        # target of a link on its way does not decide it.
         path_allowed = (
-            should_index if should_index is not None else self._should_index(file_path)
+            should_index
+            if should_index is not None
+            else self._path_filter.should_index(
+                file_path, check_target=event_type != "deleted"
+            )
         )
         if self._admission_callback is None:
             return path_allowed
