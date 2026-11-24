@@ -1210,6 +1210,56 @@ async def test_hybrid_both_includes_diff_db_and_regex_results() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("vector_source", ["db", "diff", "both"])
+async def test_hybrid_blank_query_with_regex_returns_regex_results(
+    vector_source: str,
+) -> None:
+    original = make_original(
+        [],
+        [
+            {
+                "chunk_id": "db-regex",
+                "file_path": "regex.py",
+                "start_line": 1,
+                "content": "regex match",
+            }
+        ],
+    )
+    manager = embedding_manager()
+    service = TransientSearchService(
+        original,
+        stream_chunks([]),
+        vector_source,
+        manager,
+        VectorCache(max_entries=0),
+    )
+
+    results, _ = await service.search_hybrid("", regex_pattern="match")
+
+    assert [r["file_path"] for r in results] == (
+        [] if vector_source == "diff" else ["regex.py"]
+    )
+    manager.get_provider.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vector_source", ["db", "diff", "both"])
+async def test_hybrid_blank_query_without_regex_is_rejected(
+    vector_source: str,
+) -> None:
+    service = TransientSearchService(
+        make_original([], []),
+        stream_chunks([]),
+        vector_source,
+        embedding_manager(),
+        VectorCache(max_entries=0),
+    )
+
+    with pytest.raises(ValueError, match="must not be blank"):
+        await service.search_hybrid("  ")
+
+
+@pytest.mark.asyncio
 async def test_hybrid_both_diff_wins_duplicate_db_location() -> None:
     chunks = [
         make_chunk("diff", file_path="shared.py", start_line=7, code="historical diff")

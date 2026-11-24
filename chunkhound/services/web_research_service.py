@@ -223,7 +223,10 @@ def _text_chunks(source_url: str, content: str) -> list[Chunk]:
 
     def flush() -> None:
         nonlocal current, current_chars, start_line
-        if not current:
+        if not current or not "".join(current).strip():
+            current = []
+            current_chars = 0
+            start_line = line_number
             return
         chunks.append(
             Chunk(
@@ -278,6 +281,9 @@ def _bounded_pdf_chunks(parsed: Sequence[Chunk]) -> tuple[list[Chunk], bool]:
             code = source.code[start : start + min(_PAGE_CHUNK_CHARS, remaining)]
             if not code:
                 return chunks, True
+            if not code.strip():
+                extracted_chars += len(code)
+                continue
             symbol = (
                 source.symbol
                 if len(source.code) <= _PAGE_CHUNK_CHARS

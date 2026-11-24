@@ -186,8 +186,9 @@ async def resolve_last_n_commits_range(n: int, cwd: Path | str) -> str:
     The diff is a single two-endpoint (tree) diff, so it is exactly the N
     commits whenever the window has one boundary commit. When merged branches
     leave several, the closest common ancestor of them is used, and the range
-    can then include extra commits from those branches. A request larger than
-    the reachable history is clamped to the full history, with a warning.
+    can then include extra commits, from the merged branches or the
+    mainline. A request larger than the reachable history is clamped to the
+    full history, with a warning.
     """
     rows = await _rev_list_parents(cwd, n)
     if not rows:

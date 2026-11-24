@@ -322,6 +322,13 @@ jobs:
           RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
         run: uv run --no-project python scripts/validate_native_wheel_versions.py
 
+      - name: Validate native wheels match their RECORD
+        # PyPI rejects uploads whose ZIP contents disagree with RECORD. The
+        # Linux wheels are the ones at risk (auditwheel's repack writes
+        # directory members maturin never emits), so catch it here rather
+        # than at the upload, which cannot be undone.
+        run: uv run --no-project python scripts/validate_wheel_record.py dist-native
+
       - name: Publish chunkhound-native to PyPI
         id: publish-native
         uses: pypa/gh-action-pypi-publish@release/v1
