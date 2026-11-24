@@ -36,6 +36,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.release_tag import resolve_release
+from scripts.validate_wheel_record import check_wheel as check_wheel_record
 
 # Inherited build controls that must not influence a clean sdist rebuild.
 RELEASE_BUILD_CONTROLS = {
@@ -158,6 +159,12 @@ def check_wheel(path: Path, version: str, release_artifact: bool) -> str:
             check_embedded_version(
                 archive.read("chunkhound/_version.py").decode(), str(expected)
             )
+    # PyPI rejects uploads whose ZIP contents disagree with RECORD; the Linux
+    # native wheels are the ones at risk (auditwheel's repack emits directory
+    # members maturin never writes). Fail before publishing, not during upload.
+    record_problems = check_wheel_record(path)
+    if record_problems:
+        raise SystemExit("\n".join(record_problems))
     return name
 
 

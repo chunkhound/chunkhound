@@ -33,8 +33,16 @@ def add_source_commit_link(wheel: Path, repo_root: Path) -> None:
     )
 
     with zipfile.ZipFile(wheel) as archive:
+        # RECORD must list files only: PyPI rejects wheels whose RECORD mentions
+        # any path that is not an archive file member, and auditwheel's
+        # `dir2zip` writes explicit directory entries for the repaired Linux
+        # wheels that macOS/Windows never get. Dropping the directory entries
+        # here keeps the rewritten archive's member list equal to RECORD, and
+        # matches what maturin produces on the other platforms.
         entries = {
-            info.filename: (info, archive.read(info)) for info in archive.infolist()
+            info.filename: (info, archive.read(info))
+            for info in archive.infolist()
+            if not info.is_dir()
         }
     metadata = next(name for name in entries if name.endswith(".dist-info/METADATA"))
     record = next(name for name in entries if name.endswith(".dist-info/RECORD"))

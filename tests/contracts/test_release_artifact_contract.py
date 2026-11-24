@@ -14,6 +14,24 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def write_record(archive: zipfile.ZipFile, dist_info: str) -> None:
+    """Write a RECORD listing every file member, as a real build tool would."""
+    import base64
+    import csv
+    import hashlib
+    import io
+
+    rows = []
+    for name in archive.namelist():
+        data = archive.read(name)
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+        rows.append((name, f"sha256={digest.decode()}", str(len(data))))
+    rows.append((f"{dist_info}/RECORD", "", ""))
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="\n").writerows(rows)
+    archive.writestr(f"{dist_info}/RECORD", buffer.getvalue())
+
+
 def _project_config(native_requirement: str) -> str:
     return (
         "[tool.hatch.metadata.hooks.custom]\n"
@@ -42,6 +60,7 @@ def make_artifacts(
     ) as archive:
         archive.writestr(f"chunkhound-{version}.dist-info/METADATA", metadata)
         archive.writestr("chunkhound/_version.py", embedded)
+        write_record(archive, f"chunkhound-{version}.dist-info")
     with zipfile.ZipFile(
         directory / f"chunkhound_native-{version}-cp310-abi3-manylinux_2_31_x86_64.whl",
         "w",
@@ -50,6 +69,7 @@ def make_artifacts(
             f"chunkhound_native-{version}.dist-info/METADATA",
             f"Name: chunkhound-native\nVersion: {version}\n",
         )
+        write_record(archive, f"chunkhound_native-{version}.dist-info")
     sdist_requirement = sdist_native_requirement or native_requirement
     with tarfile.open(directory / f"chunkhound-{version}.tar.gz", "w:gz") as archive:
         for filename, content in {
@@ -128,6 +148,34 @@ def test_publication_gate_accepts_equivalent_pep440_artifact_version(
     make_artifacts(tmp_path, version="6.2.0.0", native_requirement="==6.2.0.0")
     result = run_gate(tmp_path, "v6.2.0")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publication_gate_rejects_wheel_with_record_mismatch(tmp_path):
+    """PyPI rejects RECORD/contents mismatches, so the gate must too.
+
+    Mirrors the Linux native wheels: auditwheel's repack writes directory
+    members into RECORD that maturin never emits on macOS/Windows.
+    """
+    make_artifacts(tmp_path, version="6.2.0", native_requirement="==6.2.0")
+    native = tmp_path / "chunkhound_native-6.2.0-cp310-abi3-manylinux_2_31_x86_64.whl"
+    with zipfile.ZipFile(native, "a") as archive:
+        archive.writestr("chunkhound_native.libs/", "")
+        archive.writestr("chunkhound_native.libs/libduckdb-deadbeef.so", "so")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/validate_release_artifacts.py"),
+            "--dist",
+            str(tmp_path),
+        ],
+        env={**os.environ, "RELEASE_TAG": "v6.2.0", "ALPHA_RELEASE": "false"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "chunkhound_native.libs/" in result.stderr
 
 
 @pytest.mark.parametrize(
