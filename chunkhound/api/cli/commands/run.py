@@ -13,7 +13,6 @@ from typing import Any
 
 from loguru import logger
 
-import chunkhound_native as native
 from chunkhound.core import analytics as ch_analytics
 from chunkhound.core.config._utils import read_json_file
 from chunkhound.core.config.config import Config
@@ -27,6 +26,7 @@ from chunkhound.hub.client import (
     automatic_pull_eligible,
     automatic_target_absent,
     automatic_target_appears_cold,
+    binding_unchanged,
     fetch_validated_manifest,
     pull,
 )
@@ -37,7 +37,11 @@ from chunkhound.hub.errors import (
     HubLocalStateError,
     HubUnavailable,
 )
-from chunkhound.hub.install import installation_failure, installation_target
+from chunkhound.hub.install import (
+    NATIVE_ERRORS,
+    installation_failure,
+    installation_target,
+)
 from chunkhound.hub.trust import (
     HubTrustError,
     checkout_digest,
@@ -108,6 +112,15 @@ def _choose_hub_failure_action() -> str:
 
 def _hub_authorized_failure_guidance(formatter: RichOutputFormatter) -> None:
     formatter.info(HUB_PULL_FAILURE_GUIDANCE)
+
+
+def _report_local_filesystem_error(
+    formatter: RichOutputFormatter,
+) -> HubLocalStateError:
+    """Report an unavailable local filesystem once; the caller raises the result."""
+    error = HubLocalStateError("Hub local filesystem is unavailable")
+    formatter.error(str(error))
+    return error
 
 
 def _save_hub_trust(
@@ -194,19 +207,11 @@ async def _prepare_hub_index(
     if explicit_trust:
         try:
             source = await fetch_validated_manifest(config)
-            try:
-                current_checkout_digest = checkout_digest(
-                    config.target_dir or Path.cwd()
-                )
-            except OSError:
-                raise HubLocalStateError(
-                    "Hub checkout identity is unavailable"
-                ) from None
+            still_bound = binding_unchanged(config, authorized_checkout_digest, hub_url)
             if (
                 source.checkout_digest != authorized_checkout_digest
                 or source.url_digest != authorized_url_digest
-                or current_checkout_digest != authorized_checkout_digest
-                or config.hub.url != hub_url
+                or not still_bound
             ):
                 raise HubUnavailable(
                     "Validated hub source no longer matches authorized configuration"
@@ -218,11 +223,7 @@ async def _prepare_hub_index(
             formatter.error(str(exc))
             raise
         except OSError:
-            filesystem_error = HubLocalStateError(
-                "Hub local filesystem is unavailable"
-            )
-            formatter.error(str(filesystem_error))
-            raise filesystem_error from None
+            raise _report_local_filesystem_error(formatter) from None
         _save_hub_trust(authorized_checkout, hub_url, formatter)
 
     try:
@@ -238,12 +239,7 @@ async def _prepare_hub_index(
             "and rerun."
         )
         return HubIndexDecision.STOP
-    except (
-        native.DatabaseBusyError,
-        native.DatabaseInterruptedError,
-        native.DatabaseLayoutError,
-        native.DatabaseFilesystemError,
-    ) as exc:
+    except NATIVE_ERRORS as exc:
         error = installation_failure(exc)
         formatter.error(str(error))
         raise error from None
@@ -251,9 +247,7 @@ async def _prepare_hub_index(
         formatter.error(str(exc))
         raise
     except OSError:
-        filesystem_error = HubLocalStateError("Hub local filesystem is unavailable")
-        formatter.error(str(filesystem_error))
-        raise filesystem_error from None
+        raise _report_local_filesystem_error(formatter) from None
 
     try:
         if not target_absent:
@@ -280,12 +274,7 @@ async def _prepare_hub_index(
     # Another process can win the exclusive publication race successfully.
     try:
         target_absent = automatic_target_absent(target, config.database.provider)
-    except (
-        native.DatabaseBusyError,
-        native.DatabaseInterruptedError,
-        native.DatabaseLayoutError,
-        native.DatabaseFilesystemError,
-    ) as exc:
+    except NATIVE_ERRORS as exc:
         error = installation_failure(exc)
         formatter.error(str(error))
         _hub_authorized_failure_guidance(formatter)
@@ -295,8 +284,7 @@ async def _prepare_hub_index(
         _hub_authorized_failure_guidance(formatter)
         raise
     except OSError:
-        filesystem_error = HubLocalStateError("Hub local filesystem is unavailable")
-        formatter.error(str(filesystem_error))
+        filesystem_error = _report_local_filesystem_error(formatter)
         _hub_authorized_failure_guidance(formatter)
         raise filesystem_error from None
 

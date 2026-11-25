@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from loguru import logger
 
 from chunkhound.core.config.config import Config
-from chunkhound.hub.client import fetch_validated_manifest, pull
+from chunkhound.hub.client import binding_unchanged, fetch_validated_manifest, pull
 from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
     HUB_PULL_CANCELLATION_DIAGNOSTIC,
@@ -91,17 +91,13 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
                 logger.error("{}", HUB_PULL_FAILURE_GUIDANCE)
                 raise SystemExit(1) from None
             raise
-        try:
-            current_checkout_digest = checkout_digest(
-                config.target_dir or Path(args.path)
-            )
-        except OSError:
-            raise HubLocalStateError("Hub checkout identity is unavailable") from None
+        still_bound = binding_unchanged(
+            config, checkout_binding, authorized_url, Path(args.path)
+        )
         if (
             source.checkout_digest != checkout_binding
             or source.url_digest != url_binding
-            or current_checkout_digest != checkout_binding
-            or config.hub.url != authorized_url
+            or not still_bound
         ):
             raise HubUnavailable(
                 "Validated hub source no longer matches authorized configuration"

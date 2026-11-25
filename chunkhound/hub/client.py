@@ -27,6 +27,7 @@ from chunkhound.hub.errors import (
 )
 from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.install import (
+    NATIVE_ERRORS,
     install_candidate,
     installation_failure,
     installation_target,
@@ -72,6 +73,27 @@ async def _fetch_bound_manifest(
     )
 
 
+def current_checkout_digest(config: Config, fallback: Path | None = None) -> str:
+    """Digest of the checkout now configured; failure is a sanitized hub error."""
+    try:
+        return checkout_digest(config.target_dir or fallback or Path.cwd())
+    except OSError:
+        raise HubLocalStateError("Hub checkout identity is unavailable") from None
+
+
+def binding_unchanged(
+    config: Config,
+    authorized_checkout_digest: str,
+    authorized_url: str,
+    fallback: Path | None = None,
+) -> bool:
+    """Whether the checkout and hub URL still match what was authorized."""
+    return (
+        current_checkout_digest(config, fallback) == authorized_checkout_digest
+        and config.hub.url == authorized_url
+    )
+
+
 async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
     """Fetch and validate the manifest, bound to this checkout and URL."""
     url = config.hub.url
@@ -85,13 +107,6 @@ async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
         raise HubLocalStateError("Hub checkout identity is unavailable") from None
     return await _fetch_bound_manifest(url, checkout_binding, url_binding)
 
-
-_NATIVE_ERRORS = (
-    native.DatabaseBusyError,
-    native.DatabaseInterruptedError,
-    native.DatabaseLayoutError,
-    native.DatabaseFilesystemError,
-)
 
 _INSTALL_SUFFIXES: dict[str, tuple[str, ...]] = {
     "duckdb": (
@@ -157,7 +172,7 @@ def local_needs_pull(
             indexed = resolve_indexed_model(inventory.groups, active)
         except DatabaseReaderCloseError:
             raise
-        except _NATIVE_ERRORS:
+        except NATIVE_ERRORS:
             raise
         except Exception:
             # Unreadable/empty local state is not evidence of embedding drift.
@@ -289,25 +304,11 @@ async def _pull(
         if not await _await_pull_worker(worker):
             return False
     if source is not None:
-        try:
-            current_checkout_digest = checkout_digest(config.target_dir or Path.cwd())
-        except OSError:
-            raise HubLocalStateError("Hub checkout identity is unavailable") from None
-        if (
-            current_checkout_digest != authorized_checkout_digest
-            or config.hub.url != url
-        ):
+        if not binding_unchanged(config, authorized_checkout_digest, url):
             return False
         validated = source
     elif automatic:
-        try:
-            current_checkout_digest = checkout_digest(config.target_dir or Path.cwd())
-        except OSError:
-            raise HubLocalStateError("Hub checkout identity is unavailable") from None
-        if (
-            current_checkout_digest != authorized_checkout_digest
-            or config.hub.url != url
-        ):
+        if not binding_unchanged(config, authorized_checkout_digest, url):
             return False
         try:
             if not is_trusted(config.target_dir or Path.cwd(), url):
@@ -322,14 +323,7 @@ async def _pull(
             authorized_checkout_digest,
             authorized_url_digest,
         )
-        try:
-            current_checkout_digest = checkout_digest(config.target_dir or Path.cwd())
-        except OSError:
-            raise HubLocalStateError("Hub checkout identity is unavailable") from None
-        if (
-            current_checkout_digest != authorized_checkout_digest
-            or config.hub.url != url
-        ):
+        if not binding_unchanged(config, authorized_checkout_digest, url):
             return False
     else:
         validated = await fetch_validated_manifest(config)
@@ -405,7 +399,7 @@ async def pull(
             )
         except DatabaseReaderCloseError as exc:
             raise HubReaderCloseError(exc) from None
-        except _NATIVE_ERRORS as exc:
+        except NATIVE_ERRORS as exc:
             # Initial ordinary inspection can fail before install.py is entered.
             raise installation_failure(exc) from None
         except OSError:

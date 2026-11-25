@@ -15,6 +15,14 @@ from chunkhound.hub.errors import (
 )
 from chunkhound.providers.database.ownership import DatabaseOwnership
 
+# Native database-coordination failures that hub installation maps to hub errors.
+NATIVE_ERRORS = (
+    native.DatabaseBusyError,
+    native.DatabaseInterruptedError,
+    native.DatabaseLayoutError,
+    native.DatabaseFilesystemError,
+)
+
 
 def installation_target(config: Config) -> Path:
     """Return the writable database path a hub base would be installed to."""
@@ -86,10 +94,5 @@ def install_candidate(
                         "Hub base installed with a cleanup warning"
                     )
             return True
-    except (
-        native.DatabaseBusyError,
-        native.DatabaseInterruptedError,
-        native.DatabaseLayoutError,
-        native.DatabaseFilesystemError,
-    ) as exc:
+    except NATIVE_ERRORS as exc:
         raise installation_failure(exc) from None

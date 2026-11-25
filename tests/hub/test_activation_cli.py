@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from loguru import logger
 
+import chunkhound.hub.client as hub_client
 import chunkhound_native as native
 from chunkhound.core.config.hub_config import HubConfig
 from chunkhound.hub.client import ValidatedHubSource
@@ -608,19 +609,15 @@ async def test_pull_trust_post_fetch_identity_failure_is_sanitized_once(
     source = valid_source(checkout, captured_url)
     raw = "raw post-fetch checkout path?token=secret"
     pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
-    digest_calls = 0
 
-    def fail_revalidation(current_checkout):
-        nonlocal digest_calls
-        digest_calls += 1
-        if digest_calls == 2:
-            raise OSError(raw)
-        return checkout_digest(current_checkout)
+    def fail_revalidation(_current_checkout):
+        raise OSError(raw)
 
     monkeypatch.setattr(
         pull_module, "fetch_validated_manifest", AsyncMock(return_value=source)
     )
-    monkeypatch.setattr(pull_module, "checkout_digest", fail_revalidation)
+    # The re-check after the fetch is shared client code; fail it there.
+    monkeypatch.setattr(hub_client, "checkout_digest", fail_revalidation)
     monkeypatch.setattr(pull_module, "grant_trust", Mock())
     args = argparse.Namespace(trust=True, path=checkout, version="latest")
     messages = []

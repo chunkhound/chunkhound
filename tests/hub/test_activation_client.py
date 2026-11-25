@@ -332,6 +332,32 @@ async def test_automatic_pull_retains_authorized_identity_across_absence_wait(
             await task
 
 
+@pytest.mark.parametrize("change", ["url", "checkout"])
+async def test_automatic_pull_revalidates_identity_after_manifest_fetch(
+    tmp_path, hub_http, monkeypatch, change
+):
+    monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
+    config = config_for(tmp_path / "checkout", hub_http)
+    publish(hub_http, build_database(tmp_path / "published"))
+    grant_trust(config.target_dir, config.hub.url)
+    target = config.database.get_db_path()
+    manifest = hub_http.resources["/catalogue?token=secret"]
+
+    async def fetch_then_change_identity(_url):
+        if change == "url":
+            config.hub.url += "&changed=true"
+        else:
+            config.target_dir = tmp_path / "moved-checkout"
+        return manifest
+
+    monkeypatch.setattr(hub_client, "fetch_manifest", fetch_then_change_identity)
+    hub_http.requests.clear()
+
+    assert not await pull(config, automatic=True)
+    assert hub_http.requests == []
+    assert not target.exists()
+
+
 async def test_initial_trust_read_failure_is_fatal_before_hub_boundaries(
     tmp_path, hub_http, monkeypatch
 ):

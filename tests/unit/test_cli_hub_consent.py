@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+import chunkhound.hub.client as hub_client
 import chunkhound_native as native
 from chunkhound.api.cli.commands import run
 from chunkhound.api.cli.parsers.run_parser import add_run_subparser
@@ -554,14 +555,9 @@ async def test_post_fetch_checkout_failure_is_formatted_once(
     args.trust = True
     target = tmp_path / "chunks.db"
     source = _validated_source(config.target_dir, config.hub.url)
-    digest_calls = 0
 
-    def fail_revalidation(checkout):
-        nonlocal digest_calls
-        digest_calls += 1
-        if digest_calls == 2:
-            raise OSError("raw post-fetch checkout path?token=secret")
-        return checkout_digest(checkout)
+    def fail_revalidation(_checkout):
+        raise OSError("raw post-fetch checkout path?token=secret")
 
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(
@@ -572,7 +568,8 @@ async def test_post_fetch_checkout_failure_is_formatted_once(
         "fetch_validated_manifest",
         AsyncMock(return_value=source),
     )
-    monkeypatch.setattr(run, "checkout_digest", fail_revalidation)
+    # The re-check after the fetch is shared client code; fail it there.
+    monkeypatch.setattr(hub_client, "checkout_digest", fail_revalidation)
 
     with pytest.raises(HubLocalStateError):
         await run._prepare_hub_index(args, config, formatter)
