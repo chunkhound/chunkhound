@@ -24,6 +24,7 @@ from chunkhound.utils.text_sanitization import sanitize_error_text
 @dataclass(frozen=True)
 class Failure:
     """Detached exception-chain record that keeps no exceptions or frames."""
+
     kind: type[BaseException]
     message: str
     cause: tuple["Failure", ...] = ()
@@ -68,8 +69,7 @@ class Failure:
             # constructors. SystemExit.code is sanitized text, never a raw payload.
             result = self.kind(self.message)
         elif any(
-            self.kind.__init__ is plain.__init__
-            and self.kind.__new__ is plain.__new__
+            self.kind.__init__ is plain.__init__ and self.kind.__new__ is plain.__new__
             for plain in (
                 BaseException,
                 Exception,
@@ -98,6 +98,7 @@ class Failure:
 @dataclass(frozen=True)
 class LifecycleFailure:
     """A failed lifecycle stage with its original and cleanup failures."""
+
     stage: str
     original: Failure | None
     cleanup: Failure
@@ -110,6 +111,7 @@ class LifecycleFailure:
 
 class DatabaseRecoveryRequiredError(DatabaseTemporarilyUnavailableError):
     """Database cleanup did not complete; the next database action retries it."""
+
     def __init__(self, failure: LifecycleFailure) -> None:
         self.failure = failure
         advice = (
@@ -172,6 +174,7 @@ class ReaderRecovery:
 @dataclass
 class ReadinessAttempt:
     """One in-flight readiness attempt shared by its callers."""
+
     completion: Future[Outcome]
     # Retained by this attempt's callers, not looked up on the mutable provider.
     # No caught exception/frame is cached, and Readiness.failure stays detached.

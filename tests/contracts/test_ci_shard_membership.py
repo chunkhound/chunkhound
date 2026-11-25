@@ -139,3 +139,24 @@ def test_ci_shard_check_requires_a_complete_collection(
     assert Counter(node for shard in shards for node in shard) == Counter(unsplit)
     assert all(len(shard) == len(set(shard)) for shard in shards)
     assert all(shards)
+
+
+def test_workflow_shard_count_matches_the_checker() -> None:
+    """The CI matrix and --ci-splits must agree with the checker's shard count."""
+    import re
+
+    import yaml
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from scripts.check_ci_shards import SHARD_COUNT
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    jobs = yaml.safe_load(workflow)["jobs"]
+    expected = list(range(1, SHARD_COUNT + 1))
+    for name in ("tests", "site-tests"):
+        assert jobs[name]["strategy"]["matrix"]["split"] == expected, name
+    assert {int(count) for count in re.findall(r"--ci-splits (\d+)", workflow)} == {
+        SHARD_COUNT
+    }

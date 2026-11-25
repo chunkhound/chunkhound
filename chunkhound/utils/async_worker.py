@@ -1,4 +1,5 @@
 """Drain private completion futures before relinquishing worker resources."""
+
 import asyncio
 from collections.abc import Callable
 from typing import TypeVar
@@ -7,8 +8,10 @@ from loguru import logger
 
 T = TypeVar("T")
 
+
 class WorkerDrain:
     """Wait for a worker future to finish even if the caller is cancelled."""
+
     def __init__(self, on_cancel: Callable[[], None] | None = None) -> None:
         self.cancellation: asyncio.CancelledError | None = None
         self.on_cancel = on_cancel
@@ -46,6 +49,7 @@ class WorkerDrain:
             raise self.cancellation
         if error is not None:
             raise error
+
 
 async def await_worker_completion(future: asyncio.Future[T]) -> T:
     """Await a worker future, re-raising any cancellation only after it finishes."""

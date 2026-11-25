@@ -56,6 +56,7 @@ from chunkhound.utils.async_worker import await_worker_completion
 @dataclass(frozen=True)
 class ValidatedHubSource:
     """A fetched manifest bound to the checkout and URL digests it was validated for."""
+
     manifest: Manifest
     checkout_digest: str
     url_digest: str
@@ -185,9 +186,7 @@ def automatic_target_absent(
         except FileNotFoundError:
             pass
         except OSError:
-            raise HubLocalStateError(
-                "Hub local filesystem is unavailable"
-            ) from None
+            raise HubLocalStateError("Hub local filesystem is unavailable") from None
         else:
             return False
 
@@ -291,9 +290,7 @@ async def _pull(
             return False
     if source is not None:
         try:
-            current_checkout_digest = checkout_digest(
-                config.target_dir or Path.cwd()
-            )
+            current_checkout_digest = checkout_digest(config.target_dir or Path.cwd())
         except OSError:
             raise HubLocalStateError("Hub checkout identity is unavailable") from None
         if (
@@ -304,9 +301,7 @@ async def _pull(
         validated = source
     elif automatic:
         try:
-            current_checkout_digest = checkout_digest(
-                config.target_dir or Path.cwd()
-            )
+            current_checkout_digest = checkout_digest(config.target_dir or Path.cwd())
         except OSError:
             raise HubLocalStateError("Hub checkout identity is unavailable") from None
         if (
@@ -328,9 +323,7 @@ async def _pull(
             authorized_url_digest,
         )
         try:
-            current_checkout_digest = checkout_digest(
-                config.target_dir or Path.cwd()
-            )
+            current_checkout_digest = checkout_digest(config.target_dir or Path.cwd())
         except OSError:
             raise HubLocalStateError("Hub checkout identity is unavailable") from None
         if (

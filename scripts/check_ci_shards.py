@@ -12,6 +12,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHARD_PLUGIN = "scripts.pytest_equal_shard"
+# The workflow matrix and its --ci-splits must use this value; a contract test
+# (tests/contracts/test_ci_shard_membership.py) fails if they disagree.
+SHARD_COUNT = 3
 
 
 class ShardContractError(RuntimeError):
@@ -69,9 +72,11 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     memberships: dict[str, list[str]] = {}
-    for group in range(4):
+    for group in range(SHARD_COUNT + 1):
         name = "unsplit" if group == 0 else f"shard-{group}"
-        shard_arguments = [] if group == 0 else ["--ci-splits=3", f"--ci-group={group}"]
+        shard_arguments = (
+            [] if group == 0 else [f"--ci-splits={SHARD_COUNT}", f"--ci-group={group}"]
+        )
         destination = output / f"{name}.json"
         command = [
             sys.executable,
@@ -103,10 +108,13 @@ def main() -> int:
             return 1
         memberships[name] = json.loads(destination.read_text(encoding="utf-8"))
     unsplit = memberships["unsplit"]
-    shards = [memberships[f"shard-{group}"] for group in range(1, 4)]
+    shards = [memberships[f"shard-{group}"] for group in range(1, SHARD_COUNT + 1)]
     combined = Counter(node for shard in shards for node in shard)
     sizes = [len(shard) for shard in shards]
-    expected_sizes = [len(unsplit) // 3 + (i < len(unsplit) % 3) for i in range(3)]
+    expected_sizes = [
+        len(unsplit) // SHARD_COUNT + (i < len(unsplit) % SHARD_COUNT)
+        for i in range(SHARD_COUNT)
+    ]
     if (
         not unsplit
         or len(unsplit) != len(set(unsplit))
@@ -114,7 +122,9 @@ def main() -> int:
         or combined != Counter(unsplit)
         or any(count != 1 for count in combined.values())
         or sizes != expected_sizes
-        or any(shard != unsplit[group::3] for group, shard in enumerate(shards))
+        or any(
+            shard != unsplit[group::SHARD_COUNT] for group, shard in enumerate(shards)
+        )
     ):
         sys.stderr.write(f"Shards are not a complete, disjoint partition: {output}\n")
         return 1

@@ -130,9 +130,7 @@ def exclusive_duckdb_compaction(
     with entry.lock:
         with _lock:
             connections = [
-                conn
-                for group in entry.connections.values()
-                for conn in group
+                conn for group in entry.connections.values() for conn in group
             ]
         if any(
             all(conn is not owned for owned in owned_connections)
