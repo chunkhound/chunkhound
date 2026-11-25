@@ -23,6 +23,7 @@ import {
   RUNCRATE_SVG,
   UBERLLM_SVG,
   AIGROW_SVG,
+  TEAMOROUTER_SVG,
   VERCEL_SVG,
   VLLM_SVG,
   VOYAGEAI_SVG,
@@ -407,6 +408,18 @@ export const llmProviders: ConfiguratorProviderOption[] = [
     requirements: [requirements.aigrowApiKey],
     recommendation:
       "<strong>Claude Haiku 5.5</strong> — the OpenAI-compatible route through AIGROW.",
+  },
+  {
+    id: "teamorouter",
+    name: "TeamoRouter",
+    svg: TEAMOROUTER_SVG,
+    description: "Recommended model: DeepSeek V4 Flash",
+    config: { provider: "teamorouter", model: "deepseek-v4-flash" },
+    apiKeyPlaceholder: "<YOUR_TEAMOROUTER_API_KEY>",
+    group: "cloud",
+    requirements: [requirements.teamorouterApiKey],
+    recommendation:
+      "<strong>DeepSeek V4 Flash</strong> — the OpenAI-compatible route through TeamoRouter.",
   },
   {
     id: "anthropic",

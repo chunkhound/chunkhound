@@ -2,6 +2,7 @@ import type { ConfiguratorRequirement } from "./types.ts";
 import { backendAuthUrl } from "./catalog.ts";
 import {
   AIGROW_SVG,
+  TEAMOROUTER_SVG,
   ANTHROPIC_SVG,
   API_ROUTE_SVG,
   ATLASCLOUD_SVG,
@@ -267,5 +268,11 @@ export const requirements = {
     label: "AIGROW API key",
     provider: "aigrow",
     svg: AIGROW_SVG,
+  }),
+  teamorouterApiKey: apiKeyRequirement({
+    id: "teamorouter-api-key",
+    label: "TeamoRouter API key",
+    provider: "teamorouter",
+    svg: TEAMOROUTER_SVG,
   }),
 } satisfies Record<string, ConfiguratorRequirement>;

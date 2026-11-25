@@ -210,4 +210,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://aigrow.gg/ai-api/guide",
         auth_url="https://aigrow.gg/dashboard/api",
     ),
+    "teamorouter": OpenAICompatibleSpec(
+        name="teamorouter",
+        default_base_url="https://api.teamorouter.com/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=5,
+        docs_url="https://teamorouter.com/docs",
+        auth_url="https://teamorouter.com/dashboard?tab=api-keys",
+    ),
 }
