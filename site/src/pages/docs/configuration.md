@@ -263,7 +263,10 @@ not buffer hub artifacts.
 
 **HTTP provides no protection against network interception or tampering.** A
 checksum delivered through the same untrusted connection does not authenticate
-an artifact. Use HTTPS when that protection is required. Hub URLs may be
+an artifact. Use HTTPS when that protection is required. The hub is intended
+for organization-internal hosts, and [source authorization](#source-authorization)
+grants permission for an exact URL; it does not authenticate bytes fetched over
+HTTP. Hub URLs may be
 committed in project configuration, unlike the operator-owned
 [remote configuration](#remote-configuration) settings; the remote-config
 transport and scrub policies are unchanged. Do not commit secrets in URLs.
