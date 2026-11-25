@@ -20,6 +20,7 @@ import pytest
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
+from tests.ignore import _backends
 from tests.realtime.test_filter_consistency_realtime_cleanup import (
     _build_config,
     _build_gitignored_worktree_layout,
@@ -27,7 +28,9 @@ from tests.realtime.test_filter_consistency_realtime_cleanup import (
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 
-BACKENDS = ("python", "libgit2")
+# Shared ``backend`` fixture: parametrizes over IGNORE_BACKENDS and skips
+# libgit2 when pygit2 is missing (tests/ignore/_backends.py).
+backend = _backends.backend
 
 
 def _write(path: Path, text: str = "x") -> None:
@@ -106,7 +109,6 @@ LAYOUTS = [
 ]
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize(
     "name,builder,gap",
     LAYOUTS,
@@ -165,7 +167,6 @@ async def test_batch_and_realtime_agree_on_every_file(
         provider.disconnect()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.asyncio
 async def test_info_exclude_per_side_behavior(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
