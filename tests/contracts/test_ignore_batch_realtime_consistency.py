@@ -215,7 +215,9 @@ async def test_batch_and_realtime_agree_on_every_file(
     root.mkdir()
     builder(root, monkeypatch)
     if gap is not None and gap[0] == backend:
-        request.applymarker(pytest.mark.xfail(strict=True, reason=gap[1]))
+        request.applymarker(
+            pytest.mark.xfail(strict=True, raises=AssertionError, reason=gap[1])
+        )
 
     batch_rels = await _batch_rels(root, tmp_path, "python")
     rt_rels = _realtime_rels(root, tmp_path, backend)

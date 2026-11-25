@@ -27,7 +27,9 @@ from tests.ignore._git_oracle import (
 
 
 def _xfail(request: pytest.FixtureRequest, reason: str) -> None:
-    request.applymarker(pytest.mark.xfail(strict=True, reason=reason))
+    request.applymarker(
+        pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
+    )
 
 
 def _write(repo: Path, rel: str, text: str = "x") -> None:

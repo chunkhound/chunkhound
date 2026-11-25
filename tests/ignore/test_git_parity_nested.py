@@ -21,6 +21,7 @@ async def test_git_parity_nested_negation_and_anchoring(
         request.applymarker(
             pytest.mark.xfail(
                 strict=True,
+                raises=AssertionError,
                 reason=(
                     "libgit2 re-ignores sub/keep.log: root '*.log' is not "
                     "re-included by sub/.gitignore '!keep.log' (git says not ignored)"
