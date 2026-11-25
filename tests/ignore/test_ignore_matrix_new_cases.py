@@ -15,7 +15,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.ignore._git_oracle import engine_ignored, git_ignored, run_git
+from chunkhound.core.config.config import Config
+from chunkhound.services.indexing_coordinator import IndexingCoordinator
+from tests.ignore._git_oracle import (
+    assert_engine_backend,
+    build_backend_engine,
+    engine_ignored,
+    git_ignored,
+    run_git,
+)
 
 
 def _xfail(request: pytest.FixtureRequest, reason: str) -> None:
@@ -115,15 +123,7 @@ def test_chignore_file_is_not_applied(
     repo = _init_repo(tmp_path)
     _write(repo, ".chignore", "*.tmp\n")
     _write(repo, "a.tmp")
-    from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
-
-    eng = build_repo_aware_ignore_engine(
-        repo,
-        sources=["gitignore"],
-        chignore_file=".chignore",
-        config_exclude=[],
-        backend=backend,
-    )
+    eng = build_backend_engine(repo, backend)
     matched = eng.matches(repo / "a.tmp", is_dir=False) is not None
     if backend == "libgit2":
         assert matched is False, "libgit2 mode must not apply .chignore"
@@ -167,14 +167,11 @@ def test_config_excludes_apply_through_repo_aware_engine(
     _write(repo, "pkg/node_modules/dep/index.js")
     _write(repo, "src/app.min.js")
     _write(repo, "src/app.js")
-    from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
-
-    eng = build_repo_aware_ignore_engine(
+    eng = build_backend_engine(
         repo,
-        sources=["gitignore", "config"],
-        chignore_file=".chignore",
-        config_exclude=["**/node_modules/**", "*.min.js"],
-        backend=backend,
+        backend,
+        sources=("gitignore", "config"),
+        config_exclude=("**/node_modules/**", "*.min.js"),
     )
     assert eng.matches(repo / "pkg/node_modules/dep/index.js", is_dir=False)
     assert eng.matches(repo / "src/app.min.js", is_dir=False)
@@ -192,15 +189,7 @@ def test_windows_separators_match_on_backend(tmp_path: Path, backend: str) -> No
     repo = _init_repo(tmp_path)
     _write(repo, ".gitignore", "build/\n")
     _write(repo, "build/x.txt")
-    from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
-
-    eng = build_repo_aware_ignore_engine(
-        repo,
-        sources=["gitignore"],
-        chignore_file=".chignore",
-        config_exclude=[],
-        backend=backend,
-    )
+    eng = build_backend_engine(repo, backend)
     win_style = str(repo / "build" / "x.txt").replace("/", "\\")
     assert eng.matches(Path(win_style), is_dir=False) is not None
 
@@ -269,38 +258,20 @@ def test_submodule_directory_is_not_ignored_by_parent(
 # --- user exclude patterns through batch discovery ----------------------------
 
 
-@pytest.mark.parametrize("in_git_repo", [False, True], ids=["walk", "git_repo"])
-@pytest.mark.asyncio
-async def test_user_exclude_subtree_pattern_drops_files_in_batch(
-    tmp_path: Path,
-    backend: str,
-    in_git_repo: bool,
-    request: pytest.FixtureRequest,
-) -> None:
-    """`**/name/**` user excludes drop files under that subtree (batch path).
-
-    Protects the behavior the fnmatch->gitignore converter helper provides.
-    Known gap: inside a git repo the git discovery backend ignores the user
-    exclude, so pkg/vendored/v.py is kept (the non-repo walk drops it).
-    """
+async def _batch_files(
+    tmp_path: Path, repo: Path, backend: str
+) -> tuple[list[str], IndexingCoordinator]:
     from chunkhound.core.types.common import Language
     from chunkhound.parsers.parser_factory import create_parser_for_language
     from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-    from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
-    if in_git_repo:
-        _xfail(
-            request,
-            "git discovery backend drops user exclude '**/vendored/**': "
-            "pkg/vendored/v.py is kept inside a git repo; the non-repo walk "
-            "honors it",
-        )
-        repo = _init_repo(tmp_path)
-    else:
-        repo = tmp_path / "plain"
-        repo.mkdir()
     _write(repo, "pkg/vendored/v.py")
     _write(repo, "pkg/own.py")
+    config = Config(
+        target_dir=repo,
+        database={"path": str(tmp_path / "d.duckdb"), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "gitignore_backend": backend},
+    )
     db = DuckDBProvider(":memory:", base_directory=tmp_path)
     db.connect()
     try:
@@ -310,7 +281,7 @@ async def test_user_exclude_subtree_pattern_drops_files_in_batch(
             None,
             {Language.PYTHON: create_parser_for_language(Language.PYTHON)},
             None,
-            None,
+            config,
         )
         files = await coordinator._discover_files(
             repo,
@@ -320,5 +291,52 @@ async def test_user_exclude_subtree_pattern_drops_files_in_batch(
         )
     finally:
         db.disconnect()
-    rels = sorted(p.relative_to(repo).as_posix() for p in files)
+    return sorted(p.relative_to(repo).as_posix() for p in files), coordinator
+
+
+@pytest.mark.asyncio
+async def test_user_exclude_subtree_pattern_walk_uses_requested_backend(
+    tmp_path: Path, backend: str
+) -> None:
+    """Plain-directory walk applies the user exclude and builds the asked backend."""
+    repo = tmp_path / "plain"
+    repo.mkdir()
+    rels, coordinator = await _batch_files(tmp_path, repo, backend)
+    (walk_engine,) = coordinator._ignore_engine_cache.values()
+    assert_engine_backend(walk_engine, backend)
+    assert rels == ["pkg/own.py"]
+
+
+@pytest.mark.asyncio
+async def test_git_repo_batch_enumerates_with_git_ls_files(
+    tmp_path: Path, backend: str
+) -> None:
+    """Inside a git repo, batch uses `git ls-files`; no ignore engine is built.
+
+    So the gitignore backend cannot change batch output here. This is the
+    reason batch results are backend-independent in git layouts.
+    """
+    repo = _init_repo(tmp_path)
+    _rels, coordinator = await _batch_files(tmp_path, repo, backend)
+    assert coordinator._resolved_discovery_backend == "git_only"
+    assert not coordinator._ignore_engine_cache
+
+
+@pytest.mark.asyncio
+async def test_git_repo_batch_drops_user_exclude_subtree(
+    tmp_path: Path, backend: str, request: pytest.FixtureRequest
+) -> None:
+    """Known gap: git discovery ignores the user exclude '**/vendored/**'.
+
+    Inside a git repo, pkg/vendored/v.py is kept, while the non-repo walk drops
+    it. The git_only path applies config excludes only through the `git`
+    results and does not evaluate the exclude_patterns argument.
+    """
+    _xfail(
+        request,
+        "git discovery backend drops user exclude '**/vendored/**': "
+        "pkg/vendored/v.py is kept inside a git repo; the non-repo walk "
+        "honors it",
+    )
+    rels, _ = await _batch_files(tmp_path, _init_repo(tmp_path), backend)
     assert rels == ["pkg/own.py"]

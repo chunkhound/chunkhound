@@ -28,6 +28,13 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from chunkhound.utils.ignore_engine import (
+        RepoAwareIgnoreEvaluator,
+        RepoAwareLibgit2Evaluator,
+    )
 
 
 def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -56,6 +63,57 @@ def git_ignored(paths: Iterable[str], repo: Path) -> dict[str, bool]:
     return out
 
 
+def assert_engine_backend(
+    eng: RepoAwareIgnoreEvaluator | RepoAwareLibgit2Evaluator, backend: str
+) -> None:
+    """Fail loudly if the built engine is not the requested backend.
+
+    libgit2 can silently degrade: when pygit2 imports but a repo fails to
+    open, RepoAwareLibgit2Evaluator is still returned with fewer opened repos
+    (ignore_engine.py, RepoAwareLibgit2Evaluator.__init__). Nothing falls back
+    to python there, so the open-repo check is what catches it.
+    """
+    from chunkhound.utils.ignore_engine import (
+        RepoAwareIgnoreEvaluator,
+        RepoAwareLibgit2Evaluator,
+    )
+
+    expected = {
+        "python": RepoAwareIgnoreEvaluator,
+        "libgit2": RepoAwareLibgit2Evaluator,
+    }[backend]
+    assert type(eng) is expected, (
+        f"requested backend {backend!r} but engine is {type(eng).__name__}"
+    )
+    if isinstance(eng, RepoAwareLibgit2Evaluator):
+        opened = set(eng._repos)  # private: which pygit2 repos actually opened
+        assert opened == set(eng.repo_roots), (
+            f"libgit2 opened {len(opened)} of {len(eng.repo_roots)} repo(s); "
+            "the engine would silently ignore nothing for the rest"
+        )
+
+
+def build_backend_engine(
+    repo: Path,
+    backend: str = "python",
+    *,
+    sources: Iterable[str] = ("gitignore",),
+    config_exclude: Iterable[str] = (),
+) -> RepoAwareIgnoreEvaluator | RepoAwareLibgit2Evaluator:
+    """Build the repo-aware engine for ``backend`` and verify what was built."""
+    from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
+
+    eng = build_repo_aware_ignore_engine(
+        repo,
+        sources=list(sources),
+        chignore_file=".chignore",
+        config_exclude=list(config_exclude),
+        backend=backend,
+    )
+    assert_engine_backend(eng, backend)
+    return eng
+
+
 def engine_ignored(
     paths: Iterable[str],
     repo: Path,
@@ -63,13 +121,5 @@ def engine_ignored(
     config_exclude: list[str] | None = None,
 ) -> dict[str, bool]:
     """Return {path: is_ignored} from the repo-aware engine for ``backend``."""
-    from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
-
-    eng = build_repo_aware_ignore_engine(
-        repo,
-        sources=["gitignore"],
-        chignore_file=".chignore",
-        config_exclude=config_exclude or [],
-        backend=backend,
-    )
+    eng = build_backend_engine(repo, backend, config_exclude=config_exclude or [])
     return {p: eng.matches(repo / p, is_dir=False) is not None for p in paths}

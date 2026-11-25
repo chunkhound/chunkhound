@@ -1,19 +1,18 @@
-"""Ignore-engine test prerequisites and the shared ``backend`` fixture.
+"""Ignore-engine test prerequisites.
 
 This conftest is scoped to the tests/ignore/ package to enforce that
 the development environment has a working Git executable available.
 We do NOT skip these tests silently: if git is missing, fail fast.
 
-``backend`` parametrizes every parity case over the gitignore backends.
-Phase 2 adds "rust" to ``IGNORE_BACKENDS``; nothing else should change.
+The ``backend`` fixture lives in ``tests/ignore/_backends.py`` so that
+tests/contracts/ can reuse the same parametrization and libgit2 skip rule.
 """
 
 import shutil
 
 import pytest
 
-# Phase 2: append "rust" here once the Rust matcher exists.
-IGNORE_BACKENDS = ("python", "libgit2")
+from tests.ignore._backends import backend  # noqa: F401  (re-exported fixture)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -22,14 +21,3 @@ def _require_git_available() -> None:
     assert git is not None, (
         "git is required for ignore-engine tests; please install git"
     )
-
-
-@pytest.fixture(params=IGNORE_BACKENDS)
-def backend(request: pytest.FixtureRequest) -> str:
-    name: str = request.param
-    if name == "libgit2":
-        try:
-            import pygit2  # noqa: F401
-        except Exception:
-            pytest.skip("pygit2 not available (libgit2 backend)")
-    return name
