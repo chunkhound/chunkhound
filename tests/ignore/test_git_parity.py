@@ -8,34 +8,11 @@ until the engine is implemented, as part of TDD.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
-
-def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([
-        "git",
-        "-c",
-        "core.autocrlf=false",
-        "-c",
-        "core.safecrlf=false",
-        *args,
-    ], cwd=str(cwd), text=True, capture_output=True, check=False)
-
-
-def git_ignored(paths: Iterable[str], repo: Path) -> dict[str, bool]:
-    """Return a mapping {path: is_ignored} using git check-ignore -q.
-
-    We call git one path at a time to keep parsing simple and stable.
-    """
-    out: dict[str, bool] = {}
-    for p in paths:
-        proc = run_git(["check-ignore", "-q", "--no-index", p], repo)
-        out[p] = (proc.returncode == 0)
-    return out
+from tests.ignore._git_oracle import git_ignored, run_git
 
 
 @pytest.mark.asyncio
@@ -100,4 +77,3 @@ async def test_git_parity_basic(tmp_path: Path) -> None:
         engine_map[p] = engine.matches((repo / p), is_dir=False) is not None
 
     assert engine_map == git_map
-

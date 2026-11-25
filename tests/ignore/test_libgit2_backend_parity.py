@@ -6,16 +6,24 @@ from pathlib import Path
 
 import pytest
 
-
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git","-C",str(repo),*args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check)
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=check,
+    )
 
 
 def _git_ignored(repo: Path, rel_path: str) -> bool:
-    p = subprocess.run(["git","-C",str(repo),"check-ignore","-q","--no-index", rel_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p = subprocess.run(
+        ["git", "-C", str(repo), "check-ignore", "-q", "--no-index", rel_path],
+        capture_output=True,
+        text=True,
+    )
     return p.returncode == 0
 
 
@@ -27,7 +35,12 @@ def test_libgit2_backend_matches_git_when_available(tmp_path: Path):
 
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git","init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
 
     # Patterns: ignore foo/ but not bar/
     (repo / ".gitignore").write_text("foo/\n", encoding="utf-8")
