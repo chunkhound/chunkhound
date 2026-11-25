@@ -13,8 +13,12 @@ they protect is covered by these behavior-level tests:
 - ignore/test_detect_repo_roots_gitignore_prune.py
                                     -> ignore/test_git_parity*.py
 - test_rust_scanner.py (fast-path decline)
-                                    -> contracts/test_ignore_batch_realtime_
-                                       consistency.py
+                                    -> test_rust_scanner.py itself. Owner:
+                                       test_heavy_dir_anchor_conflict_declines_
+                                       rust_fast_path. NOT covered by
+                                       contracts/test_ignore_batch_realtime_
+                                       consistency.py, which uses only
+                                       include=['**/*'] and no anchored pattern.
 - realtime/test_realtime_ignore_parity.py (log-once)
                                     -> KEPT: wrapper must still log errors once
 
