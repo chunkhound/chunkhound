@@ -10,11 +10,23 @@ from pathlib import Path
 
 import pytest
 
-from tests.ignore._git_oracle import git_ignored, run_git
+from tests.ignore._git_oracle import engine_ignored, git_ignored, run_git
 
 
 @pytest.mark.asyncio
-async def test_git_parity_nested_negation_and_anchoring(tmp_path: Path) -> None:
+async def test_git_parity_nested_negation_and_anchoring(
+    tmp_path: Path, backend: str, request: pytest.FixtureRequest
+) -> None:
+    if backend == "libgit2":
+        request.applymarker(
+            pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "libgit2 re-ignores sub/keep.log: root '*.log' is not "
+                    "re-included by sub/.gitignore '!keep.log' (git says not ignored)"
+                ),
+            )
+        )
     repo = tmp_path
     assert run_git(["init"], repo).returncode == 0
 
@@ -50,14 +62,6 @@ async def test_git_parity_nested_negation_and_anchoring(tmp_path: Path) -> None:
 
     gmap = git_ignored(rels, repo)
 
-    from chunkhound.utils.ignore_engine import build_ignore_engine  # type: ignore
-
-    engine = build_ignore_engine(
-        root=repo, sources=["gitignore"], chignore_file=".chignore", config_exclude=None
-    )
-
-    emap: dict[str, bool] = {}
-    for p in rels:
-        emap[p] = engine.matches(repo / p, is_dir=False) is not None
+    emap = engine_ignored(rels, repo, backend)
 
     assert emap == gmap

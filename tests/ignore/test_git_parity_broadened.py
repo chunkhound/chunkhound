@@ -5,7 +5,7 @@ from pathlib import Path
 from tests.ignore._git_oracle import engine_ignored, git_ignored, run_git
 
 
-def test_root_dir_variants(tmp_path: Path) -> None:
+def test_root_dir_variants(tmp_path: Path, backend: str) -> None:
     repo = tmp_path
     assert run_git(["init"], repo).returncode == 0
 
@@ -36,11 +36,11 @@ def test_root_dir_variants(tmp_path: Path) -> None:
     ]
 
     gmap = git_ignored(rels, repo)
-    emap = engine_ignored(rels, repo)
+    emap = engine_ignored(rels, repo, backend)
     assert emap == gmap
 
 
-def test_subdir_gitignore_anchoring(tmp_path: Path) -> None:
+def test_subdir_gitignore_anchoring(tmp_path: Path, backend: str) -> None:
     repo = tmp_path
     assert run_git(["init"], repo).returncode == 0
 
@@ -65,11 +65,11 @@ def test_subdir_gitignore_anchoring(tmp_path: Path) -> None:
     ]
 
     gmap = git_ignored(rels, repo)
-    emap = engine_ignored(rels, repo)
+    emap = engine_ignored(rels, repo, backend)
     assert emap == gmap
 
 
-def test_docs_recursive_build(tmp_path: Path) -> None:
+def test_docs_recursive_build(tmp_path: Path, backend: str) -> None:
     repo = tmp_path
     assert run_git(["init"], repo).returncode == 0
     (repo / ".gitignore").write_text("docs/**/build/\n")
@@ -89,5 +89,5 @@ def test_docs_recursive_build(tmp_path: Path) -> None:
     ]
 
     gmap = git_ignored(rels, repo)
-    emap = engine_ignored(rels, repo)
+    emap = engine_ignored(rels, repo, backend)
     assert emap == gmap

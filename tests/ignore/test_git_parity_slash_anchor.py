@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.ignore._git_oracle import git_ignored, run_git
+from tests.ignore._git_oracle import engine_ignored, git_ignored, run_git
 
 
-def test_root_gitignore_slash_anchor(tmp_path: Path) -> None:
+def test_root_gitignore_slash_anchor(tmp_path: Path, backend: str) -> None:
     repo = tmp_path
     assert run_git(["init"], repo).returncode == 0
 
@@ -26,14 +26,6 @@ def test_root_gitignore_slash_anchor(tmp_path: Path) -> None:
     gmap = git_ignored(rels, repo)
 
     # Engine decision
-    from chunkhound.utils.ignore_engine import build_ignore_engine  # type: ignore
-
-    eng = build_ignore_engine(
-        root=repo, sources=["gitignore"], chignore_file=".chignore", config_exclude=None
-    )
-
-    emap: dict[str, bool] = {}
-    for p in rels:
-        emap[p] = eng.matches(repo / p, is_dir=False) is not None
+    emap = engine_ignored(rels, repo, backend)
 
     assert emap == gmap, (emap, gmap)

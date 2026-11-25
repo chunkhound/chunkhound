@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.ignore._git_oracle import git_ignored, run_git
+from tests.ignore._git_oracle import engine_ignored, git_ignored, run_git
 
 
 @pytest.mark.asyncio
-async def test_git_parity_basic(tmp_path: Path) -> None:
+async def test_git_parity_basic(tmp_path: Path, backend: str) -> None:
     repo = tmp_path
 
     # Initialize repo
@@ -62,18 +62,6 @@ async def test_git_parity_basic(tmp_path: Path) -> None:
 
     git_map = git_ignored(rels, repo)
 
-    # Import (non-existent) engine to enforce TDD failure until implemented
-    from chunkhound.utils.ignore_engine import build_ignore_engine  # type: ignore
-
-    engine = build_ignore_engine(
-        root=repo,
-        sources=["gitignore"],
-        chignore_file=".chignore",
-        config_exclude=None,
-    )
-
-    engine_map: dict[str, bool] = {}
-    for p in rels:
-        engine_map[p] = engine.matches((repo / p), is_dir=False) is not None
+    engine_map = engine_ignored(rels, repo, backend)
 
     assert engine_map == git_map
