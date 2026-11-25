@@ -108,19 +108,20 @@ class BaseMapping(ABC):
         """
         return content
 
-    def get_node_text(self, node: TSNode | None, source: str) -> str:
+    def get_node_text(self, node: TSNode | None, source: str | bytes) -> str:
         """Extract text content from a tree-sitter node.
 
         Args:
             node: Tree-sitter node
-            source: Source code string
+            source: Source code as UTF-8 bytes, or a string (encoded on each
+                call, which is slow for large files)
 
         Returns:
             Text content of the node
         """
         if node is None:
             return ""
-        source_bytes = source.encode("utf-8")
+        source_bytes = source if isinstance(source, bytes) else source.encode("utf-8")
         return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
 
     def find_child_by_type(self, node: TSNode | None, node_type: str) -> TSNode | None:
