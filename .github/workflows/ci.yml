@@ -296,8 +296,9 @@ jobs:
 
   # ignore_engine reads pathspec's compiled patterns, whose regex shape is not
   # public API. The lock pins pathspec 0.12, so the tests job covers 0.12;
-  # this job runs the ignore tests on the newest 1.x, which is what a fresh
-  # install resolves. A pathspec release that changes the shape fails here.
+  # this job runs the ignore tests on pathspec 1.x, pinned so that a new
+  # upstream release cannot turn an unrelated PR red. Move the pin by hand to
+  # take a newer 1.x.
   pathspec-1x:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -322,9 +323,9 @@ jobs:
       - name: Build Rust extension
         uses: ./.github/actions/build-rust-extension
 
-      - name: Install newest pathspec 1.x over the lock
+      - name: Install pathspec 1.1.1 over the lock
         run: |
-          uv pip install "pathspec>=1,<2"
+          uv pip install "pathspec==1.1.1"
           uv run --no-sync python -c "import pathspec; print('pathspec', pathspec.__version__)"
 
       - name: Run ignore tests on pathspec 1.x

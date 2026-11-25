@@ -383,6 +383,132 @@ def _link_directory(link: Path, target: Path) -> None:
         link.symlink_to(target, target_is_directory=True)
 
 
+@pytest.mark.parametrize("spelling", ["link", "case"])
+@pytest.mark.asyncio
+async def test_excluded_indexed_file_is_cleaned_when_the_root_is_spelled_differently(
+    tmp_path: Path,
+    spelling: str,
+) -> None:
+    """Watchman reports paths under the root as it was requested, not resolved.
+    When that spelling goes through a link, or differs in case on Windows, a
+    delete of an excluded file the index still holds is admitted and its row
+    removed: the lookup resolves both the path and the base before comparing."""
+    if spelling == "case" and sys.platform != "win32":
+        pytest.skip("a case-variant spelling names the same path only on Windows")
+    real_root = tmp_path / "real" / "repo"
+    stale = real_root / "vendor" / "stale.py"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("S = 1\n", encoding="utf-8")
+    if spelling == "link":
+        root = tmp_path / "repo-link"
+        _link_directory(root, real_root)
+    else:
+        root = Path(str(real_root).upper())
+    db_path = tmp_path / "spelled-delete.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={
+            "include": ["**/*.py"],
+            "exclude": ["vendor/**"],
+            "realtime_backend": "watchman",
+        },
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        _seed_indexed_file(services.provider, real_root, stale)
+        stale.unlink()
+        service = RealtimeIndexingService(services, config)
+        adapter = WatchmanRealtimeAdapter(service)
+        adapter._path_filter = RealtimePathFilter(config=config, root_path=root)
+        assert not adapter._path_filter.should_index(root / "vendor" / "stale.py")
+
+        adapter._translate_subscription_pdu(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:31",
+                "files": [
+                    {"name": "vendor/stale.py", "exists": False, "type": "f"}
+                ],
+            },
+            WatchmanSubscriptionScope(
+                requested_path=root,
+                watch_root=real_root.resolve(),
+                relative_root=None,
+                scope_kind="primary",
+            ),
+        )
+
+        event_type, queued_path = service.event_queue.get_nowait()
+        assert event_type == "deleted"
+        await service.remove_file(queued_path)
+        assert services.provider.get_file_by_path(str(stale)) is None
+    finally:
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_delete_through_a_linked_directory_is_admitted_alike_by_both_backends(
+    tmp_path: Path,
+) -> None:
+    """A delete is judged where the path sits on both backends, so a linked
+    directory whose target is excluded does not decide it. The path was never
+    indexed, so only the policy, not the index lookup, can admit it."""
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    _link_directory(root / "src" / "lib", root / "node_modules" / "pkg")
+    deleted = root / "src" / "lib" / "gone.py"
+    db_path = tmp_path / "linked-delete.duckdb"
+    config = Config(
+        target_dir=root,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["**/*.py"], "realtime_backend": "watchman"},
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        service = RealtimeIndexingService(services, config)
+        watchdog_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+        handler = SimpleEventHandler(
+            watchdog_queue,
+            config=config,
+            loop=asyncio.get_running_loop(),
+            root_path=root,
+            admission_callback=service._should_admit_realtime_event,
+        )
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="deleted", is_directory=False, src_path=str(deleted)
+            )
+        )
+        await asyncio.sleep(0)
+
+        adapter = WatchmanRealtimeAdapter(service)
+        adapter._path_filter = RealtimePathFilter(config=config, root_path=root)
+        adapter._translate_subscription_pdu(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:41",
+                "files": [{"name": "src/lib/gone.py", "exists": False, "type": "f"}],
+            },
+            WatchmanSubscriptionScope(
+                requested_path=root,
+                watch_root=root.resolve(),
+                relative_root=None,
+                scope_kind="primary",
+            ),
+        )
+
+        assert watchdog_queue.get_nowait()[0] == "deleted"
+        assert service.event_queue.get_nowait()[0] == "deleted"
+    finally:
+        services.provider.disconnect()
+
+
 @pytest.mark.asyncio
 async def test_linked_package_under_node_modules_is_never_indexed(
     tmp_path: Path,
