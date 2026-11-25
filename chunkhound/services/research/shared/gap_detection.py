@@ -168,9 +168,16 @@ class GapDetectionService(ProgressEmitterMixin):
 
         # Step 2.3: Detect gaps in parallel
         t = perf_counter()
-        raw_gaps = await self._detect_gaps_parallel(
+        detected_gaps = await self._detect_gaps_parallel(
             root_query, shards, constants_context
         )
+        # Blank queries have no meaningful embedding (zero vector breaks cosine
+        # clustering), so drop them once here; all later steps use this list.
+        raw_gaps = [gap for gap in detected_gaps if gap.query.strip()]
+        if len(raw_gaps) < len(detected_gaps):
+            logger.warning(
+                f"Dropped {len(detected_gaps) - len(raw_gaps)} blank gap queries"
+            )
         logger.info(f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates")
         await self._emit_event(
             "gap_step",
@@ -600,7 +607,7 @@ Output JSON with gaps array."""
         embedding_provider = self._embedding_manager.get_provider()
         queries = [gap.query for gap in gaps]
 
-        embeddings = await embedding_provider.embed(queries)
+        embeddings = await embedding_provider.embed_query(queries)
         return np.array(embeddings)
 
     def _cluster_gap_queries(self, embeddings: np.ndarray) -> np.ndarray:

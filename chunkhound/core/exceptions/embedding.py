@@ -9,6 +9,7 @@ covers higher-level embedding operations (generate, store, retrieve).
 """
 
 from chunkhound.core.exceptions.core import ChunkHoundError
+from chunkhound.core.utils.url_redaction import url_for_log
 
 
 class EmbeddingProviderError(ChunkHoundError):
@@ -19,6 +20,19 @@ class EmbeddingProviderError(ChunkHoundError):
     """
 
     pass
+
+
+class RerankEndpointError(EmbeddingProviderError, RuntimeError):
+    """Rerank failure; keeps the RuntimeError base and drops the URL-bearing cause."""
+
+    def __init__(self, err: Exception, endpoint: str) -> None:
+        self.status_code = getattr(getattr(err, "response", None), "status_code", None)
+        self.error_type = type(err).__name__
+        suffix = f" [{self.status_code}]" if self.status_code is not None else ""
+        super().__init__(
+            f"Rerank request to {url_for_log(endpoint)} failed: "
+            f"{self.error_type}{suffix}"
+        )
 
 
 class EmbeddingDimensionError(EmbeddingProviderError):
