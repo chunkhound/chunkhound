@@ -97,7 +97,9 @@ LAYOUTS = [
         _layout_info_exclude,
         (
             "python",
-            "python ignores .git/info/exclude; sec/a.py is admitted but git ignores it",
+            "python realtime admits sec/a.py (python engine does not read "
+            ".git/info/exclude; ignore_engine.py), but batch excludes it "
+            "(git ls-files --exclude-standard)",
         ),
     ),
     ("chignore", _layout_chignore, None),
@@ -159,5 +161,40 @@ async def test_batch_and_realtime_agree_on_every_file(
             "only_batch": sorted(batch_rels - rt_rels),
             "only_realtime": sorted(rt_rels - batch_rels),
         }
+    finally:
+        provider.disconnect()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.asyncio
+async def test_info_exclude_per_side_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """Records what each side does today for .git/info/exclude 'sec/'.
+
+    Batch in a git repo goes through git ls-files --exclude-standard (git_only),
+    so it drops sec/a.py for both backends. Realtime python admits it because
+    the python engine never reads info/exclude; libgit2 realtime drops it.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _layout_info_exclude(root, monkeypatch)
+    config = _build_config(root, tmp_path / "db.duckdb")
+    config.indexing.include = ["**/*"]
+    config.indexing.index_unknown_files = True
+    config.indexing.gitignore_backend = backend
+    provider = DuckDBProvider(tmp_path / "db.duckdb", base_directory=root)
+    provider.connect()
+    try:
+        coordinator = IndexingCoordinator(
+            database_provider=provider, base_directory=root, config=config
+        )
+        realtime = RealtimePathFilter(config=config, root_path=root)
+        batch = await coordinator._discover_files(root, ["**/*"], [])
+        batch_rels = {p.relative_to(root).as_posix() for p in batch}
+        assert batch_rels == {"pub/a.py"}
+        expect_rt_sec = backend == "python"
+        assert realtime.should_index(root / "sec" / "a.py") is expect_rt_sec
+        assert realtime.should_index(root / "pub" / "a.py") is True
     finally:
         provider.disconnect()

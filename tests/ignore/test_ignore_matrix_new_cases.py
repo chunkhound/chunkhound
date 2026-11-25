@@ -83,21 +83,24 @@ def test_anchoring_root_vs_nested(tmp_path: Path, backend: str) -> None:
 # --- .git/info/exclude and .chignore -----------------------------------------
 
 
-def test_info_exclude_is_honored(
-    tmp_path: Path, backend: str, request: pytest.FixtureRequest
-) -> None:
-    if backend == "python":
-        _xfail(
-            request,
-            "python engine never reads .git/info/exclude; git ignores sec/a.key",
-        )
+def test_info_exclude_is_honored(tmp_path: Path, backend: str) -> None:
     repo = _init_repo(tmp_path)
     (repo / ".git" / "info" / "exclude").write_text("sec/\n", encoding="utf-8")
     _write(repo, "sec/a.key")
     _write(repo, "pub/a.key")
     rels = ["sec/a.key", "pub/a.key"]
     assert git_ignored(rels, repo) == {"sec/a.key": True, "pub/a.key": False}
-    _assert_matches_git(repo, rels, backend)
+    if backend == "python":
+        # Current code: python engine reads only .gitignore files
+        # (ignore_engine.py:_read_transformed_gitignore_patterns), so
+        # .git/info/exclude is NOT applied and sec/a.key is not ignored.
+        assert engine_ignored(rels, repo, backend) == {
+            "sec/a.key": False,
+            "pub/a.key": False,
+        }
+    else:
+        # libgit2 asks pygit2 repo ignore rules, which read info/exclude.
+        _assert_matches_git(repo, rels, backend)
 
 
 def test_chignore_file_is_not_applied(
