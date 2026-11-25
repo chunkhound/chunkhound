@@ -261,3 +261,61 @@ def test_submodule_directory_is_not_ignored_by_parent(
     assert engine_ignored(["vendor/lib"], top, backend) == git_ignored(
         ["vendor/lib"], top
     )
+
+
+# --- user exclude patterns through batch discovery ----------------------------
+
+
+@pytest.mark.parametrize("in_git_repo", [False, True], ids=["walk", "git_repo"])
+@pytest.mark.asyncio
+async def test_user_exclude_subtree_pattern_drops_files_in_batch(
+    tmp_path: Path,
+    backend: str,
+    in_git_repo: bool,
+    request: pytest.FixtureRequest,
+) -> None:
+    """`**/name/**` user excludes drop files under that subtree (batch path).
+
+    Protects the behavior the fnmatch->gitignore converter helper provides.
+    Known gap: inside a git repo the git discovery backend ignores the user
+    exclude, so pkg/vendored/v.py is kept (the non-repo walk drops it).
+    """
+    from chunkhound.core.types.common import Language
+    from chunkhound.parsers.parser_factory import create_parser_for_language
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+    from chunkhound.services.indexing_coordinator import IndexingCoordinator
+
+    if in_git_repo:
+        _xfail(
+            request,
+            "git discovery backend drops user exclude '**/vendored/**': "
+            "pkg/vendored/v.py is kept inside a git repo; the non-repo walk "
+            "honors it",
+        )
+        repo = _init_repo(tmp_path)
+    else:
+        repo = tmp_path / "plain"
+        repo.mkdir()
+    _write(repo, "pkg/vendored/v.py")
+    _write(repo, "pkg/own.py")
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+    try:
+        coordinator = IndexingCoordinator(
+            db,
+            repo,
+            None,
+            {Language.PYTHON: create_parser_for_language(Language.PYTHON)},
+            None,
+            None,
+        )
+        files = await coordinator._discover_files(
+            repo,
+            patterns=["**/*.py"],
+            exclude_patterns=["**/vendored/**"],
+            parallel_discovery=False,
+        )
+    finally:
+        db.disconnect()
+    rels = sorted(p.relative_to(repo).as_posix() for p in files)
+    assert rels == ["pkg/own.py"]
