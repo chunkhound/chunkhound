@@ -233,11 +233,35 @@ def _make_submodule_repo(tmp_path: Path) -> Path:
     return top
 
 
-def test_submodule_contents_are_not_ignored_by_parent(
+def test_submodule_contents_follow_nested_repo_boundary(
     tmp_path: Path, backend: str
 ) -> None:
+    """Code today: a submodule's files are not ignored by the parent's rules.
+
+    The parent has '*.txt' and vendor/lib/s.txt matches it. Python and libgit2
+    treat vendor/lib as its own repo root (_detect_repo_roots), so the
+    parent's rule does not reach inside it and s.txt is admitted on both.
+    """
     top = _make_submodule_repo(tmp_path)
-    _assert_matches_git(top, ["vendor/lib/s.py"], backend)
+    _write(top, "vendor/lib/s.txt")
+    assert engine_ignored(["vendor/lib/s.txt"], top, backend) == {
+        "vendor/lib/s.txt": False
+    }
+
+
+def test_submodule_contents_match_git_for_parent_rule(
+    tmp_path: Path, backend: str, request: pytest.FixtureRequest
+) -> None:
+    """Git oracle: git applies the parent '*.txt' inside the submodule path."""
+    _xfail(
+        request,
+        "git ignores vendor/lib/s.txt via the parent '*.txt' rule; python and "
+        "libgit2 treat vendor/lib as a nested repo root "
+        "(ignore_engine.py, _detect_repo_roots / _nearest_repo) and admit it",
+    )
+    top = _make_submodule_repo(tmp_path)
+    _write(top, "vendor/lib/s.txt")
+    _assert_matches_git(top, ["vendor/lib/s.txt"], backend)
 
 
 def test_submodule_directory_is_not_ignored_by_parent(
