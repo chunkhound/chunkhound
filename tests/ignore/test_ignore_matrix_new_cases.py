@@ -108,29 +108,40 @@ def test_info_exclude_is_honored(tmp_path: Path, backend: str) -> None:
         _assert_matches_git(repo, rels, backend)
 
 
-def test_chignore_file_is_not_applied(
-    tmp_path: Path, backend: str, request: pytest.FixtureRequest
-) -> None:
-    """Documented split: libgit2 does NOT apply .chignore; python mode should.
+def test_chignore_file_is_not_applied(tmp_path: Path, backend: str) -> None:
+    """Code today: neither backend applies .chignore.
 
-    The wiki says python honors .chignore, but the 'chignore' source was
-    removed from build_ignore_engine. So python currently ignores nothing from
-    .chignore; that gap is an xfail naming it.
+    Follows the code. ignore_engine.py build_ignore_engine has no chignore
+    source ("chignore" source is no longer supported), so a.tmp is admitted.
     """
     repo = _init_repo(tmp_path)
     write_file(repo, ".chignore", "*.tmp\n")
     write_file(repo, "a.tmp")
     eng = build_backend_engine(repo, backend)
-    matched = eng.matches(repo / "a.tmp", is_dir=False) is not None
-    if backend == "libgit2":
-        assert matched is False, "libgit2 mode must not apply .chignore"
-    else:
-        _xfail(
-            request,
-            "wiki says python mode honors .chignore, but the 'chignore' source "
-            "was removed; a.tmp is not ignored",
-        )
-        assert matched is True
+    assert eng.matches(repo / "a.tmp", is_dir=False) is None
+
+
+def test_chignore_wiki_claim_python_honors_it(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    """Doc-vs-code gap, recorded as an xfail (not decided here).
+
+    The wiki says python mode honors .chignore. The code does not: the
+    'chignore' source was removed (ignore_engine.py build_ignore_engine, the
+    "chignore source is no longer supported" comment). The xfail asserts the
+    wiki claim so that it flips to XPASS if the code is changed to match.
+    """
+    _xfail(
+        request,
+        "doc-vs-code gap: wiki says python mode honors .chignore, but the "
+        "'chignore' source was removed (ignore_engine.py build_ignore_engine); "
+        "a.tmp is admitted",
+    )
+    repo = _init_repo(tmp_path)
+    write_file(repo, ".chignore", "*.tmp\n")
+    write_file(repo, "a.tmp")
+    eng = build_backend_engine(repo, "python")
+    assert eng.matches(repo / "a.tmp", is_dir=False) is not None
 
 
 # --- tracked-but-ignored ------------------------------------------------------
