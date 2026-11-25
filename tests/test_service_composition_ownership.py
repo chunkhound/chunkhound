@@ -736,3 +736,63 @@ def test_refused_reconnect_does_not_repeat_completed_drift_on_retained_session(
         assert provider.search_regex("completion_marker_0")[0]
     finally:
         provider.close()
+
+
+def _registry_config(root):
+    return Config(
+        target_dir=root,
+        database={"path": root / "db", "provider": "duckdb"},
+        embeddings_disabled=True,
+        skip_layers={"global", "env", "local_config", "config_file", "cli"},
+    )
+
+
+def test_reconfiguring_a_registry_closes_the_provider_it_built(tmp_path):
+    registry = ProviderRegistry()
+    config = _registry_config(tmp_path)
+    registry.configure(config)
+    first = registry.get_provider("database")
+    assert first.is_connected
+    try:
+        registry.configure(config)
+        second = registry.get_provider("database")
+        assert second is not first
+        assert not first.is_connected
+        assert second.is_connected
+    finally:
+        registry.get_provider("database").close()
+        first.close()
+
+
+def test_registry_never_closes_a_provider_its_caller_built(tmp_path):
+    registry = ProviderRegistry()
+    config = _registry_config(tmp_path)
+    caller_owned = ProviderRegistry()
+    caller_owned.configure(config)
+    provider = caller_owned.get_provider("database")
+    registry.register_provider("database", provider)
+    try:
+        registry.configure(_registry_config(tmp_path / "other"))
+        assert provider.is_connected
+    finally:
+        registry.get_provider("database").close()
+        provider.close()
+
+
+def test_failed_close_of_a_replaced_provider_does_not_block_configure(tmp_path):
+    registry = ProviderRegistry()
+    config = _registry_config(tmp_path)
+    registry.configure(config)
+    first = registry.get_provider("database")
+    real_close = first.close
+
+    def failing_close():
+        real_close()
+        raise RuntimeError("close failed")
+
+    first.close = failing_close
+    try:
+        registry.configure(config)
+        assert registry.get_provider("database") is not first
+    finally:
+        registry.get_provider("database").close()

@@ -130,6 +130,9 @@ class ProviderRegistry:
     def __init__(self):
         """Initialize the provider registry."""
         self._providers: dict[str, Any] = {}
+        # Names whose provider this registry built and must close when replacing it.
+        # Providers handed in by a caller stay the caller's to close.
+        self._owned: set[str] = set()
         self._services: RetainedServices = {}
         self._language_parsers: LazyLanguageParsers = LazyLanguageParsers()
         self._config: Config | None = None
@@ -161,7 +164,7 @@ class ProviderRegistry:
         self._pending_model_drift_decision = on_model_drift
         # One embedding owner feeds both LanceDB schema setup and all services.
         # Never construct and then discard a second provider from defaults.
-        self._providers.pop("embedding", None)
+        self._discard_provider("embedding")
         self._embedding_manager = embedding_manager
         if embedding_manager is None:
             self._setup_embedding_provider()
@@ -169,6 +172,8 @@ class ProviderRegistry:
             embedding = embedding_manager.get_default_provider()
             if embedding is not None:
                 self.register_embedding_provider(embedding)
+        # Release a provider this registry built before building its replacement.
+        self._discard_provider("database")
         self._setup_database_provider(connect_database=False)
         self._setup_language_parsers()
         self._bind_service_graph()
@@ -411,16 +416,47 @@ class ProviderRegistry:
             )
 
     def register_provider(
-        self, name: str, provider: Any, singleton: bool = True
+        self,
+        name: str,
+        provider: Any,
+        singleton: bool = True,
+        *,
+        owned: bool = False,
     ) -> None:
         """Register a provider instance directly.
 
-        Simplified: Takes actual instances instead of classes.
+        ``owned`` means this registry built the provider, so it closes it when the
+        provider is replaced. A caller-built provider stays the caller's to close.
+        Registering a different provider under a name releases an owned one first.
         """
+        if self._providers.get(name) is not provider:
+            self._discard_provider(name)
         self._providers[name] = provider
+        if owned:
+            self._owned.add(name)
+        else:
+            self._owned.discard(name)
 
         if not os.environ.get("CHUNKHOUND_MCP_MODE"):
             logger.debug(f"Registered {type(provider).__name__} as {name}")
+
+    def _discard_provider(self, name: str) -> None:
+        """Drop a provider; close it only if this registry built it."""
+        provider = self._providers.pop(name, None)
+        owned = name in self._owned
+        self._owned.discard(name)
+        close = getattr(provider, "close", None)
+        if provider is None or not owned or not callable(close):
+            return
+        try:
+            close()
+        except Exception as error:
+            # The provider is being replaced either way; do not block the new one.
+            logger.warning(
+                "Replaced {} provider did not close cleanly: {}",
+                name,
+                type(error).__name__,
+            )
 
     def register_language_parser(self, language: Language, parser_class: Any) -> None:
         """Register a language parser for a specific programming language."""
@@ -584,7 +620,7 @@ class ProviderRegistry:
             )
             if connect_database:
                 provider.connect()
-            self.register_provider("database", provider, singleton=True)
+            self.register_provider("database", provider, singleton=True, owned=True)
             return
 
         provider_type = self._config.database.provider
@@ -624,7 +660,7 @@ class ProviderRegistry:
         # Connect and register
         if connect_database:
             provider.connect()
-        self.register_provider("database", provider, singleton=True)
+        self.register_provider("database", provider, singleton=True, owned=True)
 
     def _setup_embedding_provider(self) -> None:
         """Create and register the embedding provider if configured."""
