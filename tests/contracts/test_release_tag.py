@@ -159,3 +159,67 @@ def test_prerelease_gate_checks_tag_and_checkout_before_writing_outputs(tmp_path
     assert result.returncode != 0
     assert "checkout does not match" in result.stderr
     assert not output.exists()
+
+
+def test_explicit_alpha_version_is_validated_against_checkout_without_tag(tmp_path):
+    def git(*args):
+        return subprocess.check_output(
+            ["git", *args], cwd=tmp_path, text=True, stderr=subprocess.PIPE
+        ).strip()
+
+    git("init")
+    identity = ["-c", "user.name=CI", "-c", "user.email=ci@example.invalid"]
+    git(*identity, "commit", "--allow-empty", "-m", "source")
+    source = git("rev-parse", "HEAD")
+    output = tmp_path / "outputs"
+
+    def validate(*args):
+        output.unlink(missing_ok=True)
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "validate", *args],
+            cwd=tmp_path,
+            env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            capture_output=True,
+            text=True,
+        )
+
+    result = validate("--version", "6.2.0a5", "--source-sha", source)
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert outputs["version"] == "6.2.0a5"
+    assert outputs["cargo_version"] == "6.2.0-a5"
+    assert outputs["alpha"] == "true"
+    assert outputs["source_sha"] == source
+
+    for version in ("6.2.0", "6.2.0b1", "6.2.0rc1", "v6.2.0a5", "6.2"):
+        result = validate("--version", version, "--source-sha", source)
+        assert result.returncode != 0
+        assert "Invalid explicit version" in result.stderr
+        assert not output.exists()
+
+    result = validate(
+        "--version", "6.2.0a5", "--tag", "v6.2.0a5", "--source-sha", source
+    )
+    assert result.returncode != 0
+    assert "Exactly one of --tag or --version" in result.stderr
+    result = validate("--source-sha", source)
+    assert result.returncode != 0
+    assert "Exactly one of --tag or --version" in result.stderr
+
+    result = validate("--version", "6.2.0a5", "--source-sha", "0" * 40)
+    assert result.returncode != 0
+    assert "does not match requested source" in result.stderr
+    assert not output.exists()
+
+
+def test_explicit_alpha_version_patches_cargo_without_tag(tmp_path):
+    cargo = tmp_path / "Cargo.toml"
+    cargo.write_text('[package]\nname = "chunkhound_native"\nversion = "0.1.0"\n')
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "patch-cargo", "--version", "6.2.0a5"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert tomllib.loads(cargo.read_text())["package"]["version"] == "6.2.0-a5"

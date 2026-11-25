@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 
 from loguru import logger
 
+from chunkhound.core.config._utils import read_json_file
 from chunkhound.core.config.config import Config
 
 
@@ -45,10 +45,10 @@ def apply_code_mapper_workspace_overrides(
     )
     explicit_db_in_file = False
     try:
-        raw = json.loads(cfg_override.read_text(encoding="utf-8"))
+        raw = read_json_file(cfg_override)
         db = raw.get("database") if isinstance(raw, dict) else None
         explicit_db_in_file = isinstance(db, dict) and bool(db.get("path"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         logger.debug(f"Code Mapper: failed to parse config override: {exc}")
         explicit_db_in_file = False
 

@@ -24,7 +24,12 @@ from .adapters import (
     WatchdogRealtimeAdapter,
     WatchmanRealtimeAdapter,
 )
-from .events import SimpleEventHandler, forward_to_loop, watchdog_event_filter
+from .events import (
+    SimpleEventHandler,
+    forward_to_loop,
+    ignore_windows_last_access,
+    watchdog_event_filter,
+)
 from .inotify_overflow import InotifyOverflowDetection
 
 
@@ -74,6 +79,7 @@ def _create_watchdog_observer(
 
     from watchdog.observers import Observer
 
+    ignore_windows_last_access()
     detection: InotifyOverflowDetection = (
         "unavailable" if sys.platform.startswith("linux") else "not_applicable"
     )
@@ -518,23 +524,32 @@ class RealtimeStartupMixin:
         # normalization differences (e.g. macOS /var ↔ /private/var, Windows
         # 8.3 short-name expansion) that can otherwise cause the caller-passed
         # `watch_path` to diverge from the already-validated provider base.
+        # Record this start before awaiting the guard, so a stop() issued while
+        # the guard runs can cancel it. Recording the task touches no watcher or
+        # monitor state.
+        start_task = asyncio.current_task()
+        self._active_start_task = start_task
         provider = getattr(getattr(self, "services", None), "provider", None)
         ensure_root = getattr(provider, "ensure_indexed_root_identity", None)
         if callable(ensure_root):
             get_base = getattr(provider, "get_base_directory", None)
-            requested_root = get_base() if callable(get_base) else watch_path
-            loop = asyncio.get_running_loop()
-            # run_in_executor only forwards positional args; lambda bridges kwargs
-            await loop.run_in_executor(
-                None,
-                lambda: ensure_root(
-                    requested_root=requested_root,
-                    allow_claim_if_missing=True,
-                ),
-            )
+            try:
+                requested_root = get_base() if callable(get_base) else watch_path
+                loop = asyncio.get_running_loop()
+                # run_in_executor only forwards positional args; lambda bridges
+                # kwargs
+                await loop.run_in_executor(
+                    None,
+                    lambda: ensure_root(
+                        requested_root=requested_root,
+                        allow_claim_if_missing=True,
+                    ),
+                )
+            except BaseException:
+                if self._active_start_task is start_task:
+                    self._active_start_task = None
+                raise
 
-        start_task = asyncio.current_task()
-        self._active_start_task = start_task
         self._start_generation += 1
         start_generation = self._start_generation
         self._start_startup_phase("realtime_start")

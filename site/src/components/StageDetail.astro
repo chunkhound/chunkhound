@@ -1,0 +1,224 @@
+---
+import {
+  optionSearchText,
+  renderRequirements,
+  requirementLabels,
+} from "./configurator/index.ts";
+import type { StageOption } from "./configurator/index.ts";
+
+// Editors carry no description; providers do — keep it optional on both.
+type DetailOption = StageOption & {
+  description?: string;
+  recommended?: boolean;
+  recommendation?: string;
+};
+
+interface StageGroup {
+  label?: string;
+  options: DetailOption[];
+}
+
+interface Props {
+  role: string;
+  description: string;
+  defaultOption: DetailOption;
+  groups: StageGroup[];
+  searchPlaceholder: string;
+  active: boolean;
+}
+
+const {
+  role,
+  description,
+  defaultOption,
+  groups,
+  searchPlaceholder,
+  active,
+} = Astro.props;
+---
+
+<section
+  class="stage-detail"
+  id={`panel-${role}`}
+  role="tabpanel"
+  aria-labelledby={`tab-${role}`}
+  data-stage-panel={role}
+  tabindex="0"
+  hidden={!active}
+>
+  <!-- The tab strip names this panel (aria-labelledby); the lead is the only
+       place the layer's description appears. -->
+  <p class="stage-lead">{description}</p>
+  <div class="detail-body">
+  <label class="provider-search-label">
+    <span class="sr-only">Filter {searchPlaceholder}</span>
+    <input
+      type="search"
+      class="provider-search"
+      data-provider-search={role}
+      placeholder={`Filter ${searchPlaceholder}`}
+      autocomplete="off"
+    />
+  </label>
+  <p class="provider-search-status" data-search-status={role} aria-live="polite" />
+  <div class="provider-list" data-provider-list={role}>
+    {groups.map((group) => (
+      <section class="provider-group" data-provider-group={role}>
+        {group.label && <h4>{group.label}</h4>}
+        <div class="provider-options">
+          {group.options.map((option) => (
+            /* Rows are containers, not <label> wrappers: the reveal below them
+               holds real links, and a link nested inside a label would select
+               the radio it points at. `for` keeps the whole text block clickable. */
+            <div
+              class="provider-option"
+              data-provider-option={role}
+              data-search-text={optionSearchText(option)}
+            >
+              <input
+                type="radio"
+                id={`option-${role}-${option.id}`}
+                name={`configurator-${role}`}
+                value={option.id}
+                checked={option.id === defaultOption.id}
+                {...{ [`data-${role}`]: option.id }}
+              />
+              <label class="provider-option-label" for={`option-${role}-${option.id}`}>
+                {/* Template-rendered (not set:html) so scoped input styles apply. */}
+                <span class="provider-option-icon" set:html={option.svg} />
+                <span class="provider-option-text">
+                  <span class="option-title">
+                    <strong>{option.name}</strong>
+                    {option.recommended && <span class="option-badge">Recommended</span>}
+                  </span>
+                  {option.description && <small class="option-description">{option.description}</small>}
+                  <small class="option-requirements-line">{requirementLabels(option.requirements)}</small>
+                </span>
+              </label>
+              {/* The row's own tail. Server-rendered for every option and opened
+                  by `:has(input:checked)` in CSS, so the content a row describes
+                  can never describe a different row, needs no script to appear,
+                  and stays inside the list's fixed height. */}
+              <div class="option-reveal">
+                <div class="option-reveal-clip">
+                  <div class="option-reveal-content">
+                    {option.recommendation && <p class="option-recommendation" set:html={option.recommendation} />}
+                    <ul class="option-requirements" data-option-requirements={option.id} set:html={renderRequirements(option.requirements)} />
+                    {/* Stage-level controls that only make sense for the picked
+                        option (the retrieval reranker) belong in the row they
+                        override, not below the list. Rendered for the default
+                        row only; configurator.ts relocates the single element
+                        when the pick changes. */}
+                    {option.id === defaultOption.id && <slot />}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    ))}
+  </div>
+  </div>
+</section>
+
+<style>
+  /* Asymmetric on purpose: the row opens slower than it closes (Material's
+     enter-longer/exit-shorter rule), and each state declares its own duration
+     so the asymmetry needs no second rule. */
+  .stage-detail { --reveal-enter-ms: 200ms; --reveal-exit-ms: 120ms; display: grid; gap: var(--space-3); }
+  .stage-detail[hidden] { display: none; }
+  /* No reserved height: a two-line reserve left a dead band under every
+     one-line lead. All three leads are one line at desktop widths, so the
+     panels stay level there. */
+  .stage-lead { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .provider-search-label { display: block; }
+  /* Search Input spec (DESIGN_SYSTEM.md): font text-sm, padding space-2/space-4,
+     min-height target-md. The old `font: inherit` made it 16px — larger than the
+     panel lead beside it and off the caption/input scale. */
+  .provider-search { width: 100%; min-height: var(--target-md); padding: var(--space-2) var(--space-4); border: var(--border-w-default) solid var(--border-color); border-radius: var(--radius-control); background: var(--bg-page); color: var(--text-primary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  /* The live status takes no space until a filter sets it: an empty reserved
+     line sat between the field and the list, reading as a big gap. */
+  .provider-search-status { margin: 0; color: var(--text-tertiary); font-size: var(--text-xs); }
+  .provider-search-status:empty { display: none; }
+  /* The stage body fills its grid column: on the homepage that column is half
+     the card (the terminal takes the other half), and the reading width is the
+     column's own. */
+  /* The body — not the list — is the height lock: it holds the filter and the
+     list, so a panel with a filter and one without stay the same height, and a
+     pick never resizes the card. `--stage-list-h` is the available screen height
+     at every width, so the card never runs past the viewport either. */
+  /* Same `--space-3` gap as the panel above it, so the field sits midway
+     between the lead and the list. */
+  .detail-body { display: flex; flex-direction: column; gap: var(--space-3); height: var(--stage-list-h); min-height: 0; }
+  /* The list fills the fixed-height body above (`flex: 1`, never a content
+     height), so the checked row's reveal grows the scroll content and not the
+     card. `align-content: start` keeps the rows packed at the top;
+     `scrollbar-gutter` stops the rail from appearing and shifting every row;
+     `overscroll-behavior: contain` stops the bounded pane from dragging the page
+     once it reaches its end. Selection performs no scroll: the list moves only
+     under the user's own gesture, and native scroll anchoring keeps the picked
+     row steady while the previous reveal collapses. */
+  .provider-list { display: grid; align-content: start; gap: var(--space-2); flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
+  .provider-group { display: grid; gap: var(--space-1); }
+  .provider-group[hidden] { display: none; }
+  .provider-group h4 { margin: var(--space-2) 0 0; color: var(--text-tertiary); font-size: var(--text-xs); letter-spacing: .08em; text-transform: uppercase; }
+  .provider-options { display: grid; gap: var(--space-1); }
+  .provider-option { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--space-2); padding: var(--space-3); border: var(--border-w-default) solid transparent; border-radius: var(--radius-control); transition: border-color 200ms, background-color 200ms, box-shadow 200ms; }
+  .provider-option:hover { border-color: var(--primary); background: var(--primary-bg); }
+  /* Selected must out-read hover: identical states leave users unable to tell
+     which row the reveal belongs to. Emphasis is the same side-neutral inset
+     ring as the stage tiles (StageTile.astro) — it adds the second pixel without
+     moving content, and without the one-off accent on a single border side. */
+  .provider-option:has(input:checked) { border-color: var(--primary); box-shadow: inset 0 0 0 var(--border-w-default) var(--primary); background: var(--primary-bg); }
+  .provider-option[hidden] { display: none; }
+  .provider-option input { margin-top: 2px; accent-color: var(--primary); }
+  .provider-option-label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--space-2); cursor: pointer; }
+  .provider-option strong, .provider-option small { display: block; }
+  .option-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+  /* The badge renders inside a provider row, and the checked row is filled with
+     --primary-bg, which bleeds through a transparent fill. It takes the raised
+     surface fill — the same tile as the chips and the reranker. Unconditional:
+     the row's only other ground is the card itself, already --bg-surface. */
+  .option-badge { padding: 1px var(--space-2); border: var(--border-w-default) solid var(--border-accent); border-radius: var(--radius-full); background: var(--bg-surface); color: var(--primary); font: 600 var(--text-xs)/var(--lh-xs) "JetBrains Mono", monospace; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+  .provider-option strong { color: var(--text-primary); font-size: var(--text-sm); }
+  .provider-option small { margin-top: 2px; color: var(--text-secondary); font-size: var(--text-xs); line-height: var(--lh-xs); }
+  .provider-option-text { min-width: 0; }
+  .provider-option-icon { display: grid; place-items: center; width: 18px; height: 18px; }
+  .provider-option-icon :global(svg) { width: 18px; height: 18px; }
+  /* Collapse via grid tracks, not display: `visibility: hidden` is what removes
+     the collapsed chips' links from the tab order (focusability follows
+     rendering), and the clip element is what lets the track reach 0fr without
+     the content's own padding holding it open. */
+  .option-reveal { grid-column: 1 / -1; min-width: 0; display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows var(--reveal-exit-ms) cubic-bezier(.3, 0, 1, 1), visibility 0s linear var(--reveal-exit-ms); }
+  .option-reveal-clip { min-height: 0; overflow: hidden; }
+  .option-reveal-content { display: grid; gap: var(--space-2); padding-top: var(--space-3); opacity: 0; transition: opacity var(--reveal-enter-ms) linear; }
+  .provider-option:has(input:checked) .option-reveal { grid-template-rows: 1fr; visibility: visible; transition: grid-template-rows var(--reveal-enter-ms) cubic-bezier(0, 0, .2, 1), visibility 0s; }
+  .provider-option:has(input:checked) .option-reveal-content { opacity: 1; }
+  /* The chips say the same thing as the plain line, only linked — so the line
+     gives way rather than repeating itself beside them. */
+  .provider-option:has(input:checked) .option-requirements-line { display: none; }
+  .option-recommendation { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); line-height: var(--lh-sm); }
+  .option-recommendation :global(strong) { color: var(--text-primary); }
+  .option-requirements { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+  /* The chips only ever render on the selected row's --primary-bg, where the
+     neutral --bg-muted reads as muddy grey. They are flat tiles in the raised
+     surface colour (the theme's "white") with the primary rail as their only
+     decoration. */
+  :global(.prerequisite-item) { min-width: 0; padding: var(--space-2) var(--space-3); border-left: var(--border-w-accent) solid var(--primary); background: var(--bg-surface); color: var(--text-secondary); font: var(--text-xs)/var(--lh-xs) "JetBrains Mono", monospace; overflow-wrap: anywhere; }
+  :global(.prerequisite-item-optional) { border-left-style: dashed; }
+  :global(.prerequisite-link) { display: flex; align-items: center; gap: var(--space-2); color: inherit; text-decoration: none; }
+  :global(.prerequisite-link:hover) { color: var(--text-primary); text-decoration: underline; }
+  :global(.prerequisite-link:focus-visible) { outline: var(--border-w-emphasis) solid var(--primary); outline-offset: 3px; }
+  :global(.prerequisite-logo) { display: grid; flex: 0 0 auto; place-items: center; width: 16px; height: 16px; }
+  :global(.prerequisite-logo svg) { width: 16px; height: 16px; }
+  /* Touch: the linked chips are the row's only tappable targets, so they get a
+     full target height instead of the inline padding size. */
+  @media (max-width: 639px) { :global(.prerequisite-item) { display: inline-flex; align-items: center; min-height: var(--target-md); } }
+  /* Zero the duration tokens rather than writing `transition: none`: the
+     checked-row rules below are more specific than any selector this block can
+     name, so a direct override would lose to them. */
+  @media (prefers-reduced-motion: reduce) {
+    .stage-detail { --reveal-enter-ms: 0s; --reveal-exit-ms: 0s; }
+  }
+</style>
