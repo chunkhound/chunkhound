@@ -23,6 +23,7 @@ from tests.ignore._git_oracle import (
     engine_ignored,
     git_ignored,
     run_git,
+    write_file,
 )
 
 
@@ -30,12 +31,6 @@ def _xfail(request: pytest.FixtureRequest, reason: str) -> None:
     request.applymarker(
         pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
     )
-
-
-def _write(repo: Path, rel: str, text: str = "x") -> None:
-    path = repo / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def _init_repo(tmp_path: Path) -> Path:
@@ -54,16 +49,16 @@ def _assert_matches_git(repo: Path, rels: list[str], backend: str) -> None:
 
 def test_character_class_and_question_mark(tmp_path: Path, backend: str) -> None:
     repo = _init_repo(tmp_path)
-    _write(repo, ".gitignore", "[ab].log\n[!c]x\nq?.txt\n")
+    write_file(repo, ".gitignore", "[ab].log\n[!c]x\nq?.txt\n")
     rels = ["a.log", "b.log", "c.log", "ax", "cx", "q1.txt", "qq.txt", "q.txt"]
     for rel in rels:
-        _write(repo, rel)
+        write_file(repo, rel)
     _assert_matches_git(repo, rels, backend)
 
 
 def test_negation_and_doublestar(tmp_path: Path, backend: str) -> None:
     repo = _init_repo(tmp_path)
-    _write(
+    write_file(
         repo, ".gitignore", "*.log\n!keep.log\nbuild/*\n!build/keep\na/**/z\n**/y/**\n"
     )
     rels = [
@@ -77,16 +72,16 @@ def test_negation_and_doublestar(tmp_path: Path, backend: str) -> None:
         "q/y/x",
     ]
     for rel in rels:
-        _write(repo, rel)
+        write_file(repo, rel)
     _assert_matches_git(repo, rels, backend)
 
 
 def test_anchoring_root_vs_nested(tmp_path: Path, backend: str) -> None:
     repo = _init_repo(tmp_path)
-    _write(repo, ".gitignore", "/root.txt\nsub/x.txt\n")
+    write_file(repo, ".gitignore", "/root.txt\nsub/x.txt\n")
     rels = ["root.txt", "d/root.txt", "sub/x.txt", "d/sub/x.txt"]
     for rel in rels:
-        _write(repo, rel)
+        write_file(repo, rel)
     _assert_matches_git(repo, rels, backend)
 
 
@@ -96,8 +91,8 @@ def test_anchoring_root_vs_nested(tmp_path: Path, backend: str) -> None:
 def test_info_exclude_is_honored(tmp_path: Path, backend: str) -> None:
     repo = _init_repo(tmp_path)
     (repo / ".git" / "info" / "exclude").write_text("sec/\n", encoding="utf-8")
-    _write(repo, "sec/a.key")
-    _write(repo, "pub/a.key")
+    write_file(repo, "sec/a.key")
+    write_file(repo, "pub/a.key")
     rels = ["sec/a.key", "pub/a.key"]
     assert git_ignored(rels, repo) == {"sec/a.key": True, "pub/a.key": False}
     if backend == "python":
@@ -123,8 +118,8 @@ def test_chignore_file_is_not_applied(
     .chignore; that gap is an xfail naming it.
     """
     repo = _init_repo(tmp_path)
-    _write(repo, ".chignore", "*.tmp\n")
-    _write(repo, "a.tmp")
+    write_file(repo, ".chignore", "*.tmp\n")
+    write_file(repo, "a.tmp")
     eng = build_backend_engine(repo, backend)
     matched = eng.matches(repo / "a.tmp", is_dir=False) is not None
     if backend == "libgit2":
@@ -150,9 +145,9 @@ def test_tracked_but_ignored_file_counts_as_ignored(
     agrees; plain `git check-ignore` (with index) would say not ignored.
     """
     repo = _init_repo(tmp_path)
-    _write(repo, ".gitignore", "*.log\n")
-    _write(repo, "t.log")
-    _write(repo, "u.log")
+    write_file(repo, ".gitignore", "*.log\n")
+    write_file(repo, "t.log")
+    write_file(repo, "u.log")
     assert run_git(["add", "-f", "t.log"], repo).returncode == 0
     rels = ["t.log", "u.log"]
     assert git_ignored(rels, repo) == {"t.log": True, "u.log": True}
@@ -166,9 +161,9 @@ def test_config_excludes_apply_through_repo_aware_engine(
     tmp_path: Path, backend: str
 ) -> None:
     repo = _init_repo(tmp_path)
-    _write(repo, "pkg/node_modules/dep/index.js")
-    _write(repo, "src/app.min.js")
-    _write(repo, "src/app.js")
+    write_file(repo, "pkg/node_modules/dep/index.js")
+    write_file(repo, "src/app.min.js")
+    write_file(repo, "src/app.js")
     eng = build_backend_engine(
         repo,
         backend,
@@ -189,8 +184,8 @@ def test_config_excludes_apply_through_repo_aware_engine(
 )
 def test_windows_separators_match_on_backend(tmp_path: Path, backend: str) -> None:
     repo = _init_repo(tmp_path)
-    _write(repo, ".gitignore", "build/\n")
-    _write(repo, "build/x.txt")
+    write_file(repo, ".gitignore", "build/\n")
+    write_file(repo, "build/x.txt")
     eng = build_backend_engine(repo, backend)
     win_style = str(repo / "build" / "x.txt").replace("/", "\\")
     assert eng.matches(Path(win_style), is_dir=False) is not None
@@ -203,14 +198,14 @@ def _make_submodule_repo(tmp_path: Path) -> Path:
     lib = tmp_path / "lib"
     lib.mkdir()
     assert run_git(["init"], lib).returncode == 0
-    _write(lib, "s.py")
+    write_file(lib, "s.py")
     run_git(["add", "."], lib)
     run_git(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i"], lib)
 
     top = tmp_path / "top"
     top.mkdir()
     assert run_git(["init"], top).returncode == 0
-    _write(top, ".gitignore", "*.txt\n")
+    write_file(top, ".gitignore", "*.txt\n")
     add = subprocess.run(
         [
             "git",
@@ -245,7 +240,7 @@ def test_submodule_contents_follow_nested_repo_boundary(
     parent's rule does not reach inside it and s.txt is admitted on both.
     """
     top = _make_submodule_repo(tmp_path)
-    _write(top, "vendor/lib/s.txt")
+    write_file(top, "vendor/lib/s.txt")
     assert engine_ignored(["vendor/lib/s.txt"], top, backend) == {
         "vendor/lib/s.txt": False
     }
@@ -262,7 +257,7 @@ def test_submodule_contents_match_git_for_parent_rule(
         "(ignore_engine.py, _detect_repo_roots / _nearest_repo) and admit it",
     )
     top = _make_submodule_repo(tmp_path)
-    _write(top, "vendor/lib/s.txt")
+    write_file(top, "vendor/lib/s.txt")
     _assert_matches_git(top, ["vendor/lib/s.txt"], backend)
 
 
@@ -291,8 +286,8 @@ async def _batch_files(
     from chunkhound.parsers.parser_factory import create_parser_for_language
     from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
-    _write(repo, "pkg/vendored/v.py")
-    _write(repo, "pkg/own.py")
+    write_file(repo, "pkg/vendored/v.py")
+    write_file(repo, "pkg/own.py")
     config = Config(
         target_dir=repo,
         database={"path": str(tmp_path / "d.duckdb"), "provider": "duckdb"},

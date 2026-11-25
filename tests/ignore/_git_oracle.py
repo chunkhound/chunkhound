@@ -58,6 +58,13 @@ def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def write_file(repo: Path, rel: str, text: str = "x") -> None:
+    """Create ``repo/rel`` (and parents) with ``text``, UTF-8."""
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def git_ignored(paths: Iterable[str], repo: Path) -> dict[str, bool]:
     """Return {path: is_ignored} from ``git check-ignore -q --no-index``."""
     out: dict[str, bool] = {}

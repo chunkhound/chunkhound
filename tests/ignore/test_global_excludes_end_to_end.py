@@ -37,7 +37,7 @@ from chunkhound.services.realtime_path_filter import (
     RealtimePathFilterSettings,
 )
 from tests.ignore import _backends
-from tests.ignore._git_oracle import git_ignored, run_git
+from tests.ignore._git_oracle import git_ignored, run_git, write_file
 
 # Shared ``backend`` fixture (python, libgit2 with pygit2 skip).
 backend = _backends.backend
@@ -59,14 +59,9 @@ def global_excludes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return excludes
 
 
-def _write(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("x", encoding="utf-8")
-
-
 def _files(root: Path) -> None:
     for rel in ALL_FILES:
-        _write(root / rel)
+        write_file(root, rel)
 
 
 def _git_repo(tmp_path: Path) -> Path:
