@@ -367,9 +367,7 @@ class WatchmanRealtimeAdapter:
         # As in the watchdog handler, a delete is judged where the path sits:
         # it reads no content, so the target of a link on its way does not
         # decide it.
-        return path_filter.should_index(
-            file_path, check_target=event_type != "deleted"
-        )
+        return path_filter.should_index(file_path, check_target=event_type != "deleted")
 
     def _translate_watchman_file_entry(
         self,

@@ -429,9 +429,7 @@ async def test_excluded_indexed_file_is_cleaned_when_the_root_is_spelled_differe
             {
                 "subscription": "chunkhound-live-indexing",
                 "clock": "c:0:31",
-                "files": [
-                    {"name": "vendor/stale.py", "exists": False, "type": "f"}
-                ],
+                "files": [{"name": "vendor/stale.py", "exists": False, "type": "f"}],
             },
             WatchmanSubscriptionScope(
                 requested_path=root,
