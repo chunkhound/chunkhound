@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import IO, TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
@@ -63,6 +63,7 @@ def _http_request(
     from curl_cffi import requests as creq
     from curl_cffi.requests.exceptions import RequestException
 
+    resp = None
     try:
         resp = getattr(creq, method.lower())(
             url,
@@ -77,6 +78,12 @@ def _http_request(
         # Surface curl_cffi network failures (timeout, DNS, connection reset,
         # SSL) as URLError so _run_engine's per-query recovery applies.
         raise urllib.error.URLError(e) from e
+    finally:
+        # Always close the response; swallow teardown errors so they never
+        # mask the in-flight URLError/ValueError (mid-stream reset risk).
+        if resp is not None:
+            with suppress(Exception):
+                resp.close()
 
 
 def _read_bounded_curl(resp: Any, max_bytes: int | None = None) -> bytes:
