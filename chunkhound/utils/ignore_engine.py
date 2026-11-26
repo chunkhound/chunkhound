@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
+
+from chunkhound.utils.gitignore_rules import (
+    _spec_excludes_dir,
+    _spec_excludes_file,
+    _spec_rules,
+    _SpecRules,
+)
 
 try:
     from pathspec import PathSpec
@@ -25,32 +32,118 @@ class MatchInfo:
     pattern: str | None = None
 
 
+# A transformed .gitignore line: the root-relative pattern, and whether the
+# .gitignore wrote it as a directory pattern ("foo/", emitted as "foo/**").
+_GitignoreLine = tuple[str, bool]
+
+
 @dataclass(frozen=True)
 class _GitignorePruneState:
-    patterns: tuple[str, ...]
+    patterns: tuple[_GitignoreLine, ...]
     spec: PathSpec | None
+    rules: _SpecRules | None = None
 
 
 def _empty_gitignore_prune_state() -> _GitignorePruneState:
     return _GitignorePruneState(patterns=(), spec=None)
 
 
+def _in_tree_path(path: Path, root: Path) -> Path:
+    """Return the path ignore rules are evaluated on: where it sits under ``root``.
+
+    A file reached through a symlink or junction inside the tree is matched by
+    its location in the tree, as Git matches it, so ``node_modules/`` still
+    excludes a linked package. Resolving first would match the link's target
+    instead, which lies outside the tree, where no root-relative rule applies.
+    A path that is not lexically under ``root`` (already resolved, or spelled
+    differently) is resolved as before. ``root`` is resolved, so a path given
+    under a root spelled through a link (``/var`` is ``/private/var`` on macOS)
+    lands here too, and a link below the root is then matched at its target.
+    A caller that receives paths in the requested spelling respells them under
+    the resolved root first, as ``RealtimePathFilter`` does.
+
+    ``os.path.abspath`` collapses ``..`` lexically, as Git does. That differs
+    from ``resolve()`` when the ``..`` follows a link.
+    """
+    in_tree = Path(os.path.abspath(path))
+    try:
+        in_tree.relative_to(root)
+        return in_tree
+    except ValueError:
+        return path.resolve()
+
+
+def _repo_locations(root: Path, repo_roots: list[Path]) -> list[tuple[Path, Path]]:
+    """Each repository as (where it sits under ``root``, its resolved root).
+
+    Nearest first: the deepest location comes first, so a nested repository
+    wins over the one around it.
+    """
+    pairs = [(_in_tree_path(rr, root), rr.resolve()) for rr in repo_roots]
+    return sorted(pairs, key=lambda pair: len(pair[0].as_posix()), reverse=True)
+
+
+def _nearest_repo(
+    path: Path,
+    root: Path,
+    locations: list[tuple[Path, Path]],
+    resolved_roots: list[Path],
+) -> tuple[Path, Path] | None:
+    """The repository holding ``path``, and ``path`` under its resolved root.
+
+    A repository is chosen by where it sits in the workspace, so one reached
+    through a link (``linked/`` to a checkout outside the workspace) still
+    holds the paths spelled through that link. The path is then mapped onto
+    the repository's resolved root, where that repository's own rules match
+    it. A path that is under no in-tree location, such as one already resolved,
+    is looked up among the resolved roots (nearest first), as before.
+    """
+    in_tree = _in_tree_path(path, root)
+    for location, resolved_root in locations:
+        if in_tree.is_relative_to(location):
+            return resolved_root, resolved_root / in_tree.relative_to(location)
+    resolved = path.resolve()
+    for resolved_root in resolved_roots:
+        if resolved.is_relative_to(resolved_root):
+            return resolved_root, resolved
+    return None
+
+
+
 class IgnoreEngine:
-    def __init__(self, root: Path, compiled_specs: list[tuple[Path, PathSpec]]):
+    def __init__(
+        self,
+        root: Path,
+        compiled_specs: list[tuple[Path, PathSpec]],
+        spec_rules: list[_SpecRules] | None = None,
+    ):
         self.root = root.resolve()
         self._compiled_specs = compiled_specs
+        if spec_rules is None:
+            spec_rules = [_spec_rules(spec) for _src, spec in compiled_specs]
+        self._spec_rules = [
+            (src, rules)
+            for (src, _spec), rules in zip(compiled_specs, spec_rules, strict=True)
+        ]
 
     def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
+        """Return a match when ``path`` is excluded.
+
+        For a directory a match means its whole subtree is excluded, so walks
+        may prune it (see ``_spec_excludes_dir``). Specs are consulted in
+        precedence order and the first that excludes the path wins.
+        """
         # Normalize to root-relative POSIX path
+        located = _in_tree_path(path, self.root)
         try:
-            rel = path.resolve().relative_to(self.root)
+            rel = located.relative_to(self.root)
         except Exception:
-            rel = path.resolve()
+            rel = located
         rel_str = rel.as_posix()
 
-        # Evaluate specs in precedence order; first match wins
-        for src, spec in self._compiled_specs:
-            if spec.match_file(rel_str) or (is_dir and spec.match_file(rel_str + "/")):
+        decide = _spec_excludes_dir if is_dir else _spec_excludes_file
+        for src, rules in self._spec_rules:
+            if decide(rules, rel_str):
                 return MatchInfo(matched=True, source=src, pattern=None)
         return None
 
@@ -61,6 +154,14 @@ def _compile_gitwildmatch(patterns: Iterable[str]) -> PathSpec:
             "pathspec is required for IgnoreEngine; please add dependency 'pathspec'"
         )
     return PathSpec.from_lines(GitWildMatchPattern, patterns)
+
+
+def _compile_gitignore_lines(
+    lines: Sequence[_GitignoreLine],
+) -> tuple[PathSpec, _SpecRules]:
+    """Compile transformed .gitignore lines, keeping which were dir patterns."""
+    spec = _compile_gitwildmatch([pattern for pattern, _dir_only in lines])
+    return spec, _spec_rules(spec, [dir_only for _pattern, dir_only in lines])
 
 
 def _collect_global_gitignore_patterns() -> list[str]:
@@ -116,11 +217,14 @@ def build_ignore_engine(
     are applied via git pathspec pushdown in IndexingCoordinator instead.
     """
     compiled: list[tuple[Path, PathSpec]] = []
+    rules: list[_SpecRules] = []
     root = root.resolve()
 
     # Always enforce config_exclude (default excludes) regardless of sources
     if config_exclude:
-        compiled.append((root, _compile_gitwildmatch(config_exclude)))
+        spec = _compile_gitwildmatch(config_exclude)
+        compiled.append((root, spec))
+        rules.append(_spec_rules(spec))
 
     for src in sources:
         if src == "gitignore":
@@ -129,27 +233,31 @@ def build_ignore_engine(
             pre_spec = None
             if config_exclude:
                 pre_spec = _compile_gitwildmatch(config_exclude)
-            pats = _collect_gitignore_patterns(root, pre_spec)
-            if pats:
-                compiled.append((root / ".gitignore", _compile_gitwildmatch(pats)))
+            lines = _collect_gitignore_patterns(root, pre_spec)
+            if lines:
+                spec, spec_rules = _compile_gitignore_lines(lines)
+                compiled.append((root / ".gitignore", spec))
+                rules.append(spec_rules)
         # "chignore" source is no longer supported.
         elif src == "config":
             pats = list(config_exclude or [])
             if pats:
-                compiled.append((root, _compile_gitwildmatch(pats)))
+                spec = _compile_gitwildmatch(pats)
+                compiled.append((root, spec))
+                rules.append(_spec_rules(spec))
 
-    return IgnoreEngine(root, compiled)
+    return IgnoreEngine(root, compiled, rules)
 
 
 def _collect_gitignore_patterns(
     root: Path, pre_exclude_spec: PathSpec | None = None
-) -> list[str]:
+) -> list[_GitignoreLine]:
     """Return root-relative gitwildmatch patterns transformed from .gitignore files.
 
     We walk the directory tree top-down so that root patterns appear before
     child directory patterns; last match still wins in PathSpec.
     """
-    out: list[str] = []
+    out: list[_GitignoreLine] = []
     root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         dpath = Path(dirpath)
@@ -170,7 +278,9 @@ def _collect_gitignore_patterns(
     return out
 
 
-def _read_transformed_gitignore_patterns(root: Path, dir_path: Path) -> list[str]:
+def _read_transformed_gitignore_patterns(
+    root: Path, dir_path: Path
+) -> list[_GitignoreLine]:
     """Load a directory's .gitignore and transform it to root-relative patterns."""
     gi = dir_path / ".gitignore"
     if not gi.exists():
@@ -187,7 +297,7 @@ def _read_transformed_gitignore_patterns(root: Path, dir_path: Path) -> list[str
         return []
     dir_rel = "." if str(rel_from_root) == "." else rel_from_root.as_posix()
 
-    out: list[str] = []
+    out: list[_GitignoreLine] = []
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -210,10 +320,8 @@ def _extend_gitignore_prune_state(
         return base_state
 
     combined = inherited + tuple(local_patterns)
-    return _GitignorePruneState(
-        patterns=combined,
-        spec=_compile_gitwildmatch(combined),
-    )
+    spec, rules = _compile_gitignore_lines(combined)
+    return _GitignorePruneState(patterns=combined, spec=spec, rules=rules)
 
 
 def _detect_repo_roots(
@@ -307,9 +415,9 @@ def _detect_repo_roots(
                 ).is_file():
                     continue
                 child = dn if rel_base == "." else f"{rel_base}/{dn}"
-                if current_gitignore_state.spec.match_file(
-                    child
-                ) or current_gitignore_state.spec.match_file(child + "/"):
+                if current_gitignore_state.rules is not None and _spec_excludes_dir(
+                    current_gitignore_state.rules, child
+                ):
                     to_remove.append(dn)
             for dn in to_remove:
                 dirnames.remove(dn)
@@ -447,6 +555,7 @@ class RepoAwareIgnoreEvaluator:
             key=lambda p: len(p.as_posix()),
             reverse=True,
         )
+        self._repo_locations = _repo_locations(self.root, repo_roots)
         self.sources = sources
         self.chignore_file = chignore_file
         self.config_exclude = list(config_exclude or [])
@@ -464,8 +573,11 @@ class RepoAwareIgnoreEvaluator:
             # This preserves Git anchoring semantics and nested inheritance even
             # when the workspace itself is not a Git repository.
             compiled: list[tuple[Path, PathSpec]] = []
+            rules: list[_SpecRules] = []
             if self.config_exclude:
-                compiled.append((self.root, _compile_gitwildmatch(self.config_exclude)))
+                cfg_spec = _compile_gitwildmatch(self.config_exclude)
+                compiled.append((self.root, cfg_spec))
+                rules.append(_spec_rules(cfg_spec))
             try:
                 pre = (
                     _compile_gitwildmatch(self.config_exclude)
@@ -479,8 +591,10 @@ class RepoAwareIgnoreEvaluator:
             except Exception:
                 pats = []
             if pats:
-                compiled.append((self.root / ".gitignore", _compile_gitwildmatch(pats)))
-            self._workspace_engine = IgnoreEngine(self.root, compiled)
+                gi_spec, gi_rules = _compile_gitignore_lines(pats)
+                compiled.append((self.root / ".gitignore", gi_spec))
+                rules.append(gi_rules)
+            self._workspace_engine = IgnoreEngine(self.root, compiled, rules)
         else:
             # Default: do NOT apply workspace .gitignore at all; only config_exclude
             compiled: list[tuple[Path, PathSpec]] = []
@@ -488,20 +602,11 @@ class RepoAwareIgnoreEvaluator:
                 compiled.append((self.root, _compile_gitwildmatch(self.config_exclude)))
             self._workspace_engine = IgnoreEngine(self.root, compiled)
 
-    def _nearest_repo(self, path: Path) -> Path | None:
-        p = path.resolve()
-        for rr in self.repo_roots:
-            try:
-                p.relative_to(rr)
-                return rr
-            except Exception:
-                continue
-        return None
-
     def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
-        rr = self._nearest_repo(path)
-        if rr is not None:
-            return self._per_repo[rr].matches(path, is_dir)
+        nearest = _nearest_repo(path, self.root, self._repo_locations, self.repo_roots)
+        if nearest is not None:
+            rr, in_repo = nearest
+            return self._per_repo[rr].matches(in_repo, is_dir)
         return self._workspace_engine.matches(path, is_dir)
 
 
@@ -560,11 +665,14 @@ def build_repo_aware_ignore_engine(
     )
 
 
-def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
+def _transform_gitignore_line(dir_rel: str, line: str) -> list[_GitignoreLine]:
     """Transform a .gitignore pattern from a directory into root-relative patterns.
 
     Handles negation (!), anchored (/), and directory-only (trailing /) forms by
     emitting patterns that constrain the match to the originating subtree.
+    Each pattern comes with whether it was a directory pattern: "foo/" is
+    emitted as "foo/**", which matches the same files, and the flag lets
+    directory decisions tell it from a "foo/**" the .gitignore wrote.
     """
     neg = False
     if line.startswith("!"):
@@ -577,14 +685,14 @@ def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
         line = line[:-1]
 
     # Build base (relative to root) for anchored vs unanchored
-    parts: list[str] = []
+    parts: list[_GitignoreLine] = []
 
     def add(p: str) -> None:
         if is_dir_pat:
             p = f"{p}/**"
         if neg:
             p = "!" + p
-        parts.append(p)
+        parts.append((p, is_dir_pat))
 
     # Resolve directory prefix with Git semantics
     # Rules (simplified from gitignore docs):
@@ -708,13 +816,16 @@ class RepoAwareLibgit2Evaluator:
             key=lambda p: len(p.as_posix()),
             reverse=True,
         )
+        self._repo_locations = _repo_locations(self.root, repo_roots)
         self.sources = sources
         self.chignore_file = chignore_file
         self.config_exclude = list(config_exclude or [])
 
         # Precompile config_exclude with pathspec for fast hard excludes
-        self._cfg_spec = (
-            _compile_gitwildmatch(self.config_exclude) if self.config_exclude else None
+        self._cfg_rules = (
+            _spec_rules(_compile_gitwildmatch(self.config_exclude))
+            if self.config_exclude
+            else None
         )
 
         # Open libgit2 repos
@@ -735,42 +846,35 @@ class RepoAwareLibgit2Evaluator:
                     # Ignore repos we can't open; they'll be handled by cfg spec only
                     continue
 
-    def _nearest_repo(self, path: Path) -> Path | None:
-        p = path.resolve()
-        for rr in self.repo_roots:
-            try:
-                p.relative_to(rr)
-                return rr
-            except Exception:
-                continue
-        return None
-
     def _cfg_excluded(self, rel: str, is_dir: bool) -> bool:
-        if self._cfg_spec is None:
+        if self._cfg_rules is None:
             return False
-        return self._cfg_spec.match_file(rel) or (
-            is_dir and self._cfg_spec.match_file(rel + "/")
-        )
+        # Same rule as IgnoreEngine.matches: a directory match means its whole
+        # subtree is excluded. libgit2 decides .gitignore with git's semantics.
+        if is_dir:
+            return _spec_excludes_dir(self._cfg_rules, rel)
+        return _spec_excludes_file(self._cfg_rules, rel)
 
     def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         # Hard exclude via config_exclude first
         try:
-            rel_cfg = path.resolve().relative_to(self.root).as_posix()
+            rel_cfg = _in_tree_path(path, self.root).relative_to(self.root).as_posix()
         except Exception:
             rel_cfg = path.name
         if self._cfg_excluded(rel_cfg, is_dir):
             return MatchInfo(matched=True, source=self.root, pattern=None)
 
-        rr = self._nearest_repo(path)
-        if rr is None or self._pygit2 is None:
+        nearest = _nearest_repo(path, self.root, self._repo_locations, self.repo_roots)
+        if nearest is None or self._pygit2 is None:
             return None
+        rr, in_repo = nearest
         repo = self._repos.get(rr)
         if repo is None:
             return None
 
         # Compute repo-relative path
         try:
-            rel = path.resolve().relative_to(rr).as_posix()
+            rel = in_repo.relative_to(rr).as_posix()
         except Exception:
             rel = path.name
 
