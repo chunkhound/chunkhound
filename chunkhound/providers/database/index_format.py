@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from chunkhound.core.index_format import (
+    INDEX_FORMAT_VERSION,
     LEGACY_INDEX_FORMAT_VERSION,
     IndexFormatError,
     require_supported,
@@ -269,7 +270,7 @@ def stamp_duckdb(conn: Any, *, catalog: str) -> None:
         f"INSERT INTO {table}(version, description) "
         "SELECT ?, 'ChunkHound index format' "
         f"WHERE NOT EXISTS (SELECT 1 FROM {table})",
-        [LEGACY_INDEX_FORMAT_VERSION],
+        [INDEX_FORMAT_VERSION],
     )
 
 
@@ -282,7 +283,7 @@ def stamp_lancedb(conn: Any) -> None:
     rows = pa.Table.from_pylist(
         [
             {
-                "version": LEGACY_INDEX_FORMAT_VERSION,
+                "version": INDEX_FORMAT_VERSION,
                 "description": "ChunkHound index format",
             }
         ],

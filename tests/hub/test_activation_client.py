@@ -54,23 +54,7 @@ from tests.hub.activation_support import config_for, publish
 from tests.hub.artifacts import build_database
 from tests.hub.test_index_format import snapshot
 
-DUCKDB_INSTALL_SUFFIXES = (
-    "",
-    ".wal",
-    ".wal.corrupt",
-    ".compact_backup",
-    ".compact_backup.wal",
-    ".compact_new",
-    ".compact_new.wal",
-    ".old",
-    ".old.wal",
-    ".compact",
-    ".compact.wal",
-    ".swap_intent",
-    ".export_tmp",
-    ".root.json",
-    ".embedding.json",
-)
+DUCKDB_INSTALL_SUFFIXES = hub_client._INSTALL_SUFFIXES["duckdb"]
 
 
 @pytest.mark.parametrize(
