@@ -218,6 +218,7 @@ def test_homepage_layout_has_expected_sections_and_order() -> None:
     assert re.findall(r'href="([^"]+)"', nav_tabs.group(1)) == [
         "/docs/getting-started/",
         "/docs/architecture/",
+        "/docs/faq/",
     ]
     assert "remote embedding, reranking, and LLM providers" in homepage
     assert 'id="agent-scale"' not in homepage
@@ -826,9 +827,9 @@ console.log(JSON.stringify({ pages: DOCS_PAGES }));"""
         f"/{path.parent.relative_to(DIST).as_posix()}/"
         for path in (DIST / "docs").glob("*/index.html")
     }
-    assert built == {page["href"] for page in nav["pages"]}, (
-        "DOCS_PAGES and the built docs tree disagree"
-    )
+    # Every nav guide lives under /docs/ — one tree, no root-level extras.
+    nav_hrefs = {page["href"] for page in nav["pages"]}
+    assert built == nav_hrefs, "DOCS_PAGES and the built docs tree disagree"
     for page in nav["pages"]:
         html = (DIST / page["href"].strip("/") / "index.html").read_text(
             encoding="utf-8"

@@ -1,0 +1,99 @@
+{
+  "languages": [
+    "bash",
+    "c",
+    "cpp",
+    "csharp",
+    "css",
+    "dart",
+    "elixir",
+    "go",
+    "groovy",
+    "haskell",
+    "hcl",
+    "html",
+    "java",
+    "javascript",
+    "jinja",
+    "json",
+    "jsx",
+    "kotlin",
+    "lua",
+    "makefile",
+    "markdown",
+    "matlab",
+    "metal",
+    "objc",
+    "php",
+    "powershell",
+    "python",
+    "rust",
+    "scss",
+    "sql",
+    "svelte",
+    "swift",
+    "toml",
+    "tsx",
+    "twincat",
+    "typescript",
+    "vue",
+    "yaml",
+    "zig"
+  ],
+  "buckets": [
+    {
+      "label": "Programming languages",
+      "members": [
+        "bash",
+        "c",
+        "cpp",
+        "csharp",
+        "dart",
+        "elixir",
+        "go",
+        "groovy",
+        "haskell",
+        "java",
+        "javascript",
+        "jsx",
+        "kotlin",
+        "lua",
+        "makefile",
+        "matlab",
+        "metal",
+        "objc",
+        "php",
+        "powershell",
+        "python",
+        "rust",
+        "sql",
+        "svelte",
+        "swift",
+        "tsx",
+        "twincat",
+        "typescript",
+        "vue",
+        "zig"
+      ]
+    },
+    {
+      "label": "Structured configuration and data",
+      "members": [
+        "hcl",
+        "json",
+        "toml",
+        "yaml"
+      ]
+    },
+    {
+      "label": "Other formats",
+      "members": [
+        "css",
+        "html",
+        "jinja",
+        "markdown",
+        "scss"
+      ]
+    }
+  ]
+}

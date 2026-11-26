@@ -4,6 +4,7 @@ import PhosphorIcon from "./PhosphorIcon.astro";
 // Generated before the build by scripts/sync-contributors.mjs: one number for
 // the receipt, its as-of date, and the page where readers can verify it.
 import contributors from "../lib/contributors.json";
+import positioning from "../lib/positioning.json";
 
 const contributorCount = contributors.count;
 const contributorLabel = `${contributorCount} contributors`;
@@ -26,7 +27,7 @@ const contributorAsOf = new Intl.DateTimeFormat("en-US", {
     <header class="intro" data-reveal>
       <p class="eyebrow">BORN AT APPLIED MATERIALS</p>
       <h2 id="scale-heading">Give your agent the whole system — not the slice you had time to paste.</h2>
-      <p>ChunkHound was created by engineers at <a href="https://www.appliedmaterials.com" target="_blank" rel="noopener">Applied Materials</a> to reverse-engineer a 180-million-line, 24-year-old codebase running around the clock. It is today an independent, MIT-licensed community project.</p>
+      <p set:html={positioning.provenance} />
     </header>
     <!-- Final metric values are server-rendered; count-reveal.ts animates them
          in place on scroll (progressive enhancement — no JS shows final text). -->

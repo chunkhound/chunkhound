@@ -12,9 +12,11 @@ export default defineConfig({
   // tests/site/test_inline_spacing_contract.py.
   compressHTML: true,
   // The enterprise roadmap page predated the product architecture docs and is
-  // superseded by it; keep old links working.
+  // superseded by it; keep old links working. FAQ moved under /docs/ with the
+  // docs-guide promotion; keep old /faq/ links working.
   redirects: {
     '/enterprise/architecture': '/docs/architecture/',
+    '/faq/': '/docs/faq/',
   },
   markdown: {
     // Astro 7 handles GitHub-Flavored Markdown natively, so remark-gfm is no longer needed here.

@@ -44,6 +44,8 @@ def _require_site_toolchain() -> None:
     missing = []
     if shutil.which("npm") is None:
         missing.append("npm")
+    if shutil.which("uv") is None:
+        missing.append("uv")
     if version is None:
         missing.append("Node >=22.18")
     elif version < _SITE_NODE_MIN:

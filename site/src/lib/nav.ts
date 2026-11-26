@@ -4,7 +4,7 @@
  *    page group by product, and the flat guide list derives from them;
  *  - every documentation guide (DOCS_PAGES): featured top-nav shortcuts,
  *    page meta copy, and llms.txt derive from the derived flat list;
- *  - the marketing top nav (NAV_TABS).
+ *  - the top nav (NAV_TABS), derived from the featured guides.
  *
  * Nav philosophy: the top nav is a global nav. It links to the few real
  * destinations that matter — never to same-page scroll anchors, which merely
@@ -101,6 +101,16 @@ export const DOCS_SECTIONS: DocsSection[] = [
         description:
           'How to contribute to ChunkHound — a 100% AI-generated codebase with AI-agent code review.',
       },
+      {
+        title: 'FAQ',
+        href: '/docs/faq/',
+        icon: 'ph-question',
+        description:
+          'Where ChunkHound runs, how it compares with other code-search and research tools, the languages it indexes, and who builds it — every claim cited.',
+        seoDescription:
+          'Where ChunkHound runs, how it compares with other code-search and research tools, the languages it indexes, and who builds it — every claim cited.',
+        inTopNav: true,
+      },
     ],
   },
   {
@@ -161,12 +171,12 @@ export type NavTab = {
 };
 
 /**
- * Top nav = the featured guides, highest-value first.
- * A tab is active on an exact pathname match to its href (see Nav.astro).
+ * Top nav = the featured guides (highest-value first). A tab is active on an
+ * exact pathname match to its href (see Nav.astro).
  */
-export const NAV_TABS: NavTab[] = [
-  ...DOCS_PAGES.filter((page) => page.inTopNav).map((page) => ({
+export const NAV_TABS: NavTab[] = DOCS_PAGES.filter((page) => page.inTopNav).map(
+  (page) => ({
     label: page.title,
     href: page.href,
-  })),
-];
+  }),
+);
