@@ -7,12 +7,13 @@ instances, eliminating duplication across CLI commands and MCP servers.
 import argparse
 from pathlib import Path
 
-from chunkhound.core.config.config import Config
+from chunkhound.core.config.config import Config, _hide_nested_basesettings_env
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.config.mcp_config import MCPConfig
 from chunkhound.core.config.remote import run_remote_config_fetch
 from chunkhound.core.config.research_config import ResearchConfig
+from chunkhound.core.config.websearch_config import WebSearchConfig
 
 
 def _fallback_config(args: argparse.Namespace) -> Config:
@@ -25,17 +26,23 @@ def _fallback_config(args: argparse.Namespace) -> Config:
         except (OSError, RuntimeError, TypeError, ValueError):
             resolved_target = None
 
-    return Config.model_construct(
-        database=DatabaseConfig(),
-        embedding=None,
-        llm=None,
-        mcp=MCPConfig(),
-        indexing=IndexingConfig(),
-        research=ResearchConfig(),
-        debug=False,
-        target_dir=resolved_target,
-        embeddings_disabled=bool(getattr(args, "no_embeddings", False)),
-    )
+    # model_construct still runs default_factory on unset sibling fields (e.g.
+    # fetchurl), so hide every nested BaseSettings env var: a poisoned env
+    # must never raise out of recovery — the fallback returns defaults plus
+    # the reported validation errors instead.
+    with _hide_nested_basesettings_env():
+        return Config.model_construct(
+            database=DatabaseConfig(),
+            embedding=None,
+            llm=None,
+            mcp=MCPConfig(),
+            indexing=IndexingConfig(),
+            research=ResearchConfig.model_construct(),
+            debug=False,
+            target_dir=resolved_target,
+            embeddings_disabled=bool(getattr(args, "no_embeddings", False)),
+            websearch=WebSearchConfig.model_construct(),
+        )
 
 
 async def create_validated_config(

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 
 import pytest
 from pydantic import ValidationError
 
+from chunkhound.api.cli.utils.config_factory import create_validated_config
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.websearch_config import WebSearchConfig
 
@@ -104,3 +106,68 @@ def test_file_overrides_defaults(tmp_path) -> None:
     cfg = Config(target_dir=tmp_path)
     assert cfg.websearch.backends == ["bing"]
     assert cfg.websearch.selection == "random_healthy"
+
+
+def test_env_invalid_cooldown_defeated_by_cli_override(monkeypatch) -> None:
+    """Invalid env cooldown must not defeat a higher-precedence CLI override."""
+    monkeypatch.setenv("CHUNKHOUND_WEBSEARCH_COOLDOWN_SECONDS", "oops")
+    ns = argparse.Namespace(
+        websearch_backends=None,
+        websearch_selection=None,
+        websearch_cooldown_seconds=120,
+    )
+    cfg = Config(args=ns)
+    assert cfg.websearch.cooldown_seconds == 120
+
+
+def test_env_invalid_cooldown_fails_without_override(monkeypatch) -> None:
+    """Invalid env cooldown fails loudly when no override replaces it."""
+    monkeypatch.setenv("CHUNKHOUND_WEBSEARCH_COOLDOWN_SECONDS", "oops")
+    with pytest.raises(ValidationError):
+        Config()
+
+
+def _fallback_args(path: str | None = None) -> argparse.Namespace:
+    """Arg namespace shared by the create_validated_config fallback tests."""
+    return argparse.Namespace(
+        command="index",
+        config=None,
+        path=path,
+        debug=False,
+        verbose=False,
+    )
+
+
+def test_create_validated_config_fallback_survives_invalid_websearch_env(
+    monkeypatch,
+) -> None:
+    """Config-error recovery must not re-read poisoned websearch env in fallback."""
+    monkeypatch.setenv("CHUNKHOUND_WEBSEARCH_BACKENDS", "google")
+    args = _fallback_args()
+    config, errors = asyncio.run(create_validated_config(args, "index"))
+    assert config.websearch.backends == ["duckduckgo", "bing"]
+    assert errors
+
+
+def test_create_validated_config_fallback_survives_invalid_research_env(
+    monkeypatch, tmp_path
+) -> None:
+    """Fallback must not re-read a poisoned sibling research env var."""
+    monkeypatch.setenv("CHUNKHOUND_RESEARCH_NUM_EXPANDED_QUERIES", "oops")
+    args = _fallback_args(str(tmp_path))
+    config, errors = asyncio.run(create_validated_config(args, "index"))
+    assert config.research.num_expanded_queries == 2
+    assert config.websearch.backends == ["duckduckgo", "bing"]
+    assert errors
+
+
+def test_create_validated_config_fallback_survives_invalid_fetchurl_env(
+    monkeypatch, tmp_path
+) -> None:
+    """Fallback must not re-read a poisoned sibling fetchurl env var."""
+    monkeypatch.setenv("CHUNKHOUND_FETCHURL_MAX_RETRIES", "oops")
+    args = _fallback_args(str(tmp_path))
+    config, errors = asyncio.run(create_validated_config(args, "index"))
+    assert config.fetchurl.max_retries == 3
+    assert config.websearch.backends == ["duckduckgo", "bing"]
+    assert errors

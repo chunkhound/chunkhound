@@ -143,7 +143,12 @@ class WebSearchConfig(BaseSettings):
             config["selection"] = selection.strip().lower()
 
         if cooldown := os.getenv("CHUNKHOUND_WEBSEARCH_COOLDOWN_SECONDS"):
-            config["cooldown_seconds"] = int(cooldown)
+            # Keep the raw string; final WebSearchConfig validation coerces it.
+            # Eager int() here would let an invalid env value raise before
+            # CLI/file overrides (higher precedence) can replace it. Deferred
+            # coercion is the intentional pattern; eager sibling coercion is
+            # out of scope.
+            config["cooldown_seconds"] = cooldown
 
         return config
 
