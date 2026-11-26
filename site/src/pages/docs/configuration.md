@@ -389,7 +389,10 @@ Once a manifest is trusted, it may delegate its artifact to another HTTP(S)
 URL and through normal redirects without another authorization prompt. Artifact
 size and checksum verification, redirect restrictions, archive extraction
 limits, database compatibility checks, and safe installation rules still
-apply. Automatic hub use is cold-start only: ChunkHound never replaces an
+apply. The hub operator is trusted to publish only artifact URLs it controls:
+ChunkHound does not restrict the hosts a trusted manifest or its redirects may
+name (including loopback, private and link-local addresses), so authorize only
+hub sources your organization operates. Automatic hub use is cold-start only: ChunkHound never replaces an
 existing database automatically. Use a trusted explicit `pull` to request
 replacement.
 
