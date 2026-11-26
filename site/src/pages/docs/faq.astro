@@ -1,0 +1,315 @@
+---
+// ChunkHound FAQ: a single source of truth for the page body and the
+// JSON-LD FAQPage schema below, so the structured data can never drift from
+// what a human reads. Q&A copy follows the honest-comparison rules from
+// research: lead with the direct answer, substantiate every claim with a
+// link, and state tradeoffs plainly (no superlatives).
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import languageCatalog from "../../lib/language-catalog.gen.json";
+import positioning from "../../lib/positioning.json";
+
+// All language figures derive from the build-time catalog (language-catalog.gen.json),
+// which the generator produces from the backend Language enum and its predicates.
+const languageTotal = languageCatalog.languages.length;
+const languageSummary = languageCatalog.buckets
+  .map((bucket) => `${bucket.members.length} ${bucket.label.toLowerCase()}`)
+  .join(", ");
+// languageBlock is the single derivation feeding both the JSON-LD answer and the visible lists.
+const languageBlock = languageCatalog.buckets.map((b) => `${b.label}: ${b.members.join(", ")}`).join("\n");
+const languageBuckets = languageCatalog.buckets;
+
+const groups = [
+  {
+    id: "privacy",
+    title: "Privacy and deployment",
+    questions: [
+      {
+        q: "Where does ChunkHound run? Is my code private?",
+        a: `<p>By default, indexing and research run entirely on your machine; your code stays local. The stack is fully local (CLI, MCP server, index, and runtime). Most people run ChunkHound locally while using remote model inference: any remote model provider you configure (embeddings, reranking, LLMs) receives only the content relevant to its requests. If you need zero code-egress, choose local providers (next question). Web research is the one explicit boundary: it always contacts DuckDuckGo and target websites, which is inherent to web search. (<a href="/docs/configuration/">configuration</a>)</p>`,
+      },
+      {
+        q: "Can I run ChunkHound fully locally?",
+        a: `<p>Yes. If you run models locally as well (Ollama or vLLM for embeddings, reranking, and LLMs), then ChunkHound runs entirely on your machine: everything runs on your hardware with no external API calls. Regex search needs no providers at all. (<a href="/docs/configuration/">configuration</a>)</p>`,
+      },
+      {
+        q: "Can I serve ChunkHound remotely?",
+        a: `<p>Yes, if you really want, you can serve ChunkHound remotely. The MCP server supports <code>--transport http</code> (<a href="/docs/cli-reference/#chunkhound-mcp">CLI reference</a>), so you can expose your instance over HTTP and let remote agents connect to it. It is your instance and your endpoint; no ChunkHound cloud is required. Non-loopback hosts require bearer auth (<code>--auth-token</code>) and TLS termination at a reverse proxy. (<a href="/docs/cli-reference/#chunkhound-mcp">CLI reference</a>)</p><p>This is how non-developers typically use ChunkHound: product people, designers, marketing, or anyone who needs deep code and product behavior understanding without checking out the code locally benefit from the instance being served over HTTP on a remote server. (<a href="/docs/enterprise/">enterprise setup</a>)</p>`,
+      },
+    ],
+  },
+  {
+    id: "languages",
+    title: "Languages and scale",
+    questions: [
+      {
+        q: "What languages can ChunkHound index?",
+        a: `<p>ChunkHound can index ${languageTotal} languages: ${languageSummary}. See the complete lists below.</p>`,
+        showCatalog: true,
+      },
+      {
+        q: "Isn't ChunkHound only useful for very large codebases?",
+        a: `<p>No. ChunkHound's value comes from focus, not corpus size — its engine adapts to the evidence in front of it, so a tiny repo gets the same sharp, cited answers as a monorepo (<a href="/docs/architecture/">architecture</a>). LLMs have a finite attention budget and lose precision as context grows (<a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">Anthropic context engineering</a>); even long-context models miss mid-context info (<a href="https://arxiv.org/abs/2307.03172">Lost in the Middle</a>). Retrieving the few relevant chunks — and citing them — beats stuffing the whole repo into a prompt at any scale, and costs far less than long-context calls (<a href="https://arxiv.org/abs/2407.16833">RAG vs long-context LLMs</a>). Multi-step cited research works just as well on single-file questions (<a href="https://openai.com/index/introducing-deep-research/">OpenAI deep research</a>).</p>`,
+      },
+    ],
+  },
+  {
+    id: "differences",
+    title: "How is it different?",
+    questions: [
+      {
+        q: "What makes ChunkHound different from other semantic search tools?",
+        a: `<p>Semantic search alone ranks chunks by meaning, and on a large codebase that is rarely enough: it misses exact names, symbols, and patterns that only an exact or structural match finds. <strong>Choose a plain semantic search tool</strong> when your corpus is small and meaning-based ranking is all you need. ChunkHound does not stop at retrieval: its deep-research pipeline combines semantic search with exact regex search, symbol and code-structure awareness, and an LLM that guides the exploration until it converges, then synthesizes one cited answer across code, git history, web pages, and documents. <strong>Choose ChunkHound</strong> when you need precise, cited answers at production scale, not just a list of matches. (<a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+      {
+        q: "How is ChunkHound different from web-search solutions like Brave Search or Tavily?",
+        a: `<p>Web-search APIs return ranked results or the text of individual pages; your agent still has to stitch the answer together. <strong>Choose a web-search API</strong> when you want to build your own summarization and need only raw results: it is simpler and often cheaper per call. ChunkHound's web research runs the same deep-research pipeline end to end: it discovers pages via DuckDuckGo, fetches them with a headless browser, chunks and embeds the content, reranks it, and synthesizes a cited answer in one call. It is optimized for engineering contexts and for grounding agents, rather than chat-app-style summaries. <strong>Choose ChunkHound</strong> when you want engineering-focused, cited research results directly, with fewer tokens spent assembling them. (<a href="/docs/architecture/">architecture</a>, <a href="/docs/cli-reference/">CLI reference</a>)</p>`,
+      },
+      {
+        q: "How is ChunkHound's fetchurl tool different?",
+        a: `<p>Typical URL-fetch tools pull the page, clean it up, and run it through an LLM that summarizes it or answers a specific question about it — long pages are usually truncated (<a href="https://code.claude.com/docs/en/tools-reference.md">Claude Code</a>, <a href="https://opencode.ai/docs/tools/">OpenCode</a>). <strong>Choose a simple fetch tool</strong> when you want the entire document and have your own way to process it. ChunkHound's <code>fetchurl</code> goes further: it splits the page into chunks, ranks them against your question, and uses elbow detection to cut off where relevance drops, feeding only the relevant chunks to the LLM — fewer tokens. <strong>Choose ChunkHound</strong> when you want relevant-only reads tuned to your question. (<a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+    ],
+  },
+  {
+    id: "compare",
+    title: "How does it compare?",
+    questions: [
+      {
+        q: "How does ChunkHound compare to Serena MCP?",
+        a: `<p>Serena MCP is an editing-first tool: it gives your coding agent an IDE's hands: symbol-level code search plus rename, move, inline, and symbolic edit tools across 40+ languages, so agents can change code safely. ChunkHound is the complement: a read-only research engine that does not edit source files; indexing writes a local index database, but it indexes your codebase and runs your git history and fetched web pages through its ephemeral deep-research pipeline, fusing them into one cited answer. In short, Serena answers "how do I edit this correctly?", while ChunkHound answers "what is going on here, and what matters?": one makes your agent a better surgeon, the other a better investigator, and they complement each other rather than compete. (<a href="https://github.com/oraios/serena">Serena MCP</a>, <a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+      {
+        q: "How does ChunkHound compare to Context7?",
+        a: `<p>Context7 is a hosted docs-retrieval service for coding agents. It wins on cloud-style rollout: fully managed, free to start, or self-hosted Docker in your network. It serves library docs, not your worktrees, so agents stay current on public APIs but never see your code. ChunkHound takes the opposite approach: fleet setups need the enterprise route (<a href="/docs/enterprise/">enterprise</a>), but it indexes your private code, including live-indexed worktrees, then runs git history and web pages through an ephemeral deep-research pipeline into one cited answer. So ChunkHound covers a different base: public docs plus your own codebase, all local and cited, no SaaS fee. (<a href="https://context7.com/plans">Context7 plans</a>, <a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+      {
+        q: "How does ChunkHound compare to Graphify?",
+        a: `<p>Graphify and ChunkHound share a foundation: both parse code with tree-sitter into a structural map of definitions, calls, imports, and relationships. Graphify makes that map the whole product: it answers relationship questions exactly, traces each answer to a path through your code, and refreshes incrementally as files change. It is precise and explainable, but it stops at structure. ChunkHound is built on the same structural core and adds more: exact symbol and regex search, fuzzy semantic search for when you do not know the exact name, and deep research that folds in git history and web pages, returning answers with citations. Both run locally; ChunkHound also keeps its index current while your agent edits. <strong>Choose Graphify</strong> when you want a fast, exact structural graph; its hosted service is paid beyond a small free tier. <strong>Choose ChunkHound</strong> when you want one free, MIT-licensed engine that understands structure and meaning, and researches across code, git history, and the web with citations. (<a href="https://github.com/Graphify-Labs/graphify">Graphify</a>, <a href="https://graphify.com/vs/rag">Graphify vs RAG</a>, <a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+      {
+        q: "How does ChunkHound compare to CocoIndex?",
+        a: `<p>CocoIndex is an extensible, incremental ETL framework for building custom RAG systems: you declare sources (codebases, meeting notes, files, web APIs, databases, queues), transformations in Python, and targets such as relational, vector, or graph databases, and its Rust engine reprocesses only what changes. It supplies the pipeline pieces; you assemble and operate them. Its architecture follows the standard server-and-database pattern, usually deployed in the cloud: workers run pipelines, state and output indexes live in Postgres and similar databases, and the licensed code-search tiers (CocoIndex-Code, Code Plus) ship as Kubernetes services. By contrast, ChunkHound is a batteries-included, sealed product that extracts rich engineering context out of the box, with no pipeline to assemble. It is local-first, built to run on your laptop or as a stateless microservice with an embedded file watcher and local index, though the stateless-microservice setup takes more work. <strong>Choose CocoIndex</strong> when you want to build and own a custom context pipeline with incremental freshness across many sources. <strong>Choose ChunkHound</strong> when you want the finished engine now: point it at your codebase and it returns cited answers, with no pipeline work on your side. (<a href="https://cocoindex.io">CocoIndex</a>, <a href="https://cocoindex.io/enterprise/">CocoIndex Plus</a>, <a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+      {
+        q: "How does ChunkHound compare to CodeGraph?",
+        a: `<p>CodeGraph (colbymchenry, MIT) indexes code structurally: it parses your repository into a graph of symbols, calls, and framework routes, served over MCP, so an agent finds code fast and reads less. It builds that index from syntax alone, with no embeddings and no research pipeline, so it cannot match meaning or synthesize findings. ChunkHound also builds a structural map, then goes further: embeddings give it fuzzy semantic search for when you do not know exact names, and its deep-research pipeline works over the code itself, delivering deep or wide understanding and adding git history and web pages on demand, all as cited answers. <strong>Choose CodeGraph</strong> when you want a lean, fully local structural map that cuts an agent's token spend on a single repository. <strong>Choose ChunkHound</strong> when you want understanding plus evidence: semantic search and cited research across code, git history, and the web. Both are local and open source. (<a href="https://code-graph.pro/">CodeGraph</a>, <a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+      {
+        q: "How does ChunkHound compare to Augment?",
+        a: `<p>Augment Code was acquired by Harness in October 2026, and its offering is now Cosmos, a proprietary software factory: a hosted platform that runs fleets of agents across the software lifecycle, sold on a subscription basis. Its scope is managed, org-wide automation of engineering work, with governance and human approval gates built into the service. <strong>Choose Augment</strong> when you want a hosted factory you rent, so agent workflows run without you operating infrastructure. <strong>Choose ChunkHound</strong> when you want to own that factory: ChunkHound is the research engine, and its sister project <a href="https://github.com/chunkhound/pi-schematic">pi-schematic</a> supplies the workflow layer to assemble an equivalent software factory fully local on your laptop, free and MIT-licensed, scaling from a single machine to production. Same destination, opposite ownership: a rented cloud factory versus a local factory you build and keep. (<a href="https://www.harness.io/blog/harness-acquires-augment-code-cosmos">Harness acquisition</a>, <a href="https://www.augmentcode.com/pricing">Augment pricing</a>)</p>`,
+      },
+      {
+        q: "How does ChunkHound compare to Sourcegraph?",
+        a: `<p>Sourcegraph is a proprietary enterprise code intelligence platform, sold under an annual enterprise contract. It takes the cloud-first side of this comparison: one centralized server indexes your organization's entire codebase once, and every engineer and AI agent queries that single shared index, so the load of all agents lands on Sourcegraph's infrastructure. Its Deep Search answers plain-English questions across your whole codebase with citations, and its MCP server exposes the same code graph to coding agents; the company is retiring its Cody assistant to focus on this code-intelligence layer. <strong>Choose Sourcegraph</strong> when you run a large organization that wants one governed, server-side code graph with enterprise support, and has the budget. <strong>Choose ChunkHound</strong> when you want the local-first side: an MIT-licensed, free research engine that runs on developer workstations, spreading the load to developer machines. At fleet scale it stays a set of independent instances that share nothing but an object store for configuration and opt-in analytics, so adding machines adds compute rather than load on one server, and it researches across the code itself with git history and web pages on demand, every answer cited. (<a href="https://sourcegraph.com/pricing">Sourcegraph pricing</a>, <a href="/docs/enterprise/">enterprise</a>)</p>`,
+      },
+      {
+        q: "How does ChunkHound compare to RepoWise?",
+        a: `<p>RepoWise is an open-source codebase intelligence platform: it ships a suite of high-level, purpose-built primitives: code health, ownership, architecture, generated docs, decisions, and security, each serving a specific per-repo workflow, and presents them to coding agents through MCP and to humans through a dashboard and pull-request reviews. ChunkHound instead concentrates on raw, scalable intelligence: deep knowledge extraction and understanding across your code, git history, and the web, delivered as cited answers on demand. Architecturally the two diverge: RepoWise is hosted-first, with a managed server as the product, its tiers running Free for public repositories and paid Pro and Teams for private repositories and team features (as of Nov 2026), while its AGPL-3.0 engine lets you run your own server if you maintain it for your team's scale; ChunkHound is local-first, a free MIT-licensed read-only research engine running on your machine, so your private code stays local. <strong>Choose RepoWise</strong> when you want a managed platform with ready-made repo-intelligence features. <strong>Choose ChunkHound</strong> when you want a local, read-only engine and deep, cited research across code, git, and web. (<a href="https://repowise.dev/pricing">RepoWise pricing</a>, <a href="/docs/architecture/">architecture</a>)</p>`,
+      },
+    ],
+  },
+  {
+    id: "project",
+    title: "Who it's for, and who builds it",
+    questions: [
+      {
+        q: "Who's using ChunkHound?",
+        a: `<p>Developers and teams use ChunkHound everywhere from individual projects to large enterprises. ${positioning.provenance}</p>`,
+      },
+      {
+        q: "Is ChunkHound written in Python or Rust, and who builds it?",
+        a: `<p>ChunkHound is written in Python and Rust, with a long-term strategy of moving more code to Rust: new code is written in Rust and Python usage is gradually reduced. People build it by directing AI agents that generate 100% of the code, under a fully agentic SDLC (<a href="https://agenticoding.ai">agenticoding.ai</a>) — as much an experiment in scaling agentic engineering as a product. It is MIT licensed and community maintained (<a href="https://github.com/chunkhound/chunkhound/blob/main/LICENSE">LICENSE</a>, <a href="/docs/contributing/">contributing</a>).</p>`,
+      },
+    ],
+  },
+];
+
+// TOC derives from the same groups that render the headings, so slugs and
+// labels cannot drift from the page body (permalink ids: faq-<id>-heading).
+const toc: Array<{ depth: 2 | 3; slug: string; text: string }> = groups.map(
+  (group) => ({
+    depth: 2,
+    slug: `faq-${group.id}-heading`,
+    text: group.title,
+  }),
+);
+
+// Languages and buckets come straight from the build-time catalog
+// (language-catalog.gen.json), which the generator derives from the backend
+// Language enum and its predicates. The page keeps no hand-written lists, so
+// it cannot drift from what the backend actually indexes.
+
+// JSON-LD answers keep paragraph boundaries (each <p> becomes \n); links are
+// dropped; the body carries them for humans.
+const plainText = (html: string): string =>
+  html.replace(/<\/p>/g, "\n").replace(/<[^>]*>/g, "")
+    .replace(/[^\S\n]+/g, " ").replace(/ ?\n ?/g, "\n").trim();
+
+const faqSchema = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: groups.flatMap((group) =>
+    group.questions.map((item) => {
+      const languageTail = item.showCatalog ? "\n" + languageBlock : "";
+      return {
+        "@type": "Question",
+        name: item.q,
+        acceptedAnswer: { "@type": "Answer", text: plainText(item.a) + languageTail },
+      };
+    }),
+  ),
+};
+---
+
+<DocsLayout title="FAQ" description="Where ChunkHound runs, how it compares with other code-search and research tools, the languages it indexes, and who builds it — every claim cited." toc={toc}>
+  <script is:inline type="application/ld+json" set:html={JSON.stringify(faqSchema)} />
+  <h1>Questions, answered straight.</h1>
+  <p class="lead">
+    Where ChunkHound runs, how it differs from other search and research tools, the languages it indexes, and who builds and uses it. Every claim links to its source; competitor pricing was checked in November 2026.
+  </p>
+
+    {
+      groups.map((group, i) => (
+        <section id={`faq-${group.id}`} aria-labelledby={`faq-${group.id}-heading`}>
+          <h2 id={`faq-${group.id}-heading`}>{group.title}</h2>
+          {group.questions.map((item, j) => (
+            <details class="faq-item" open={i === 0 && j === 0}>
+              <summary><span>{item.q}</span></summary>
+              <div class="faq-answer">
+                <div class="faq-answer-inner" set:html={item.a} />
+                {item.showCatalog && (
+                  <div class="faq-answer-inner">
+                    {languageBuckets.map((bucket) => (
+                      <p>
+                        <strong>{bucket.label}:</strong>{" "}
+                        {bucket.members.map(
+                          (lang, k) => (
+                            <span>{k > 0 ? ", " : ""}<code>{lang}</code></span>
+                          ),
+                        )}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </details>
+          ))}
+        </section>
+      ))
+    }
+
+</DocsLayout>
+
+<style is:global>
+  /* FAQ page-only styles, namespaced under .faq-* so they cannot leak into
+     other pages. The accordion cards sit on the docs article surface. */
+
+  .faq-item {
+    background: var(--bg-surface);
+    border: var(--border-w-default) solid var(--border-color);
+    border-radius: var(--radius-lg);
+    margin: var(--space-3) 0 0;
+    overflow: hidden;
+  }
+  .faq-item summary {
+    align-items: center;
+    color: var(--text-primary);
+    cursor: pointer;
+    display: flex;
+    font-size: var(--text-base);
+    font-weight: 600;
+    gap: var(--space-4);
+    justify-content: space-between;
+    line-height: var(--lh-base);
+    list-style: none;
+    padding: var(--space-4) var(--space-5);
+  }
+  .faq-item summary::-webkit-details-marker {
+    display: none;
+  }
+  .faq-item summary:hover {
+    background: var(--bg-muted);
+  }
+  .faq-item summary:focus-visible {
+    outline: var(--border-w-emphasis) solid var(--link-focus);
+    outline-offset: -3px;
+  }
+  /* Custom chevron glyph: two borders rotated into a caret, theme-stable. */
+  .faq-item summary::after {
+    border-bottom: 2px solid var(--text-tertiary);
+    border-right: 2px solid var(--text-tertiary);
+    content: "";
+    height: 8px;
+    min-width: 8px;
+    transform: rotate(45deg) translateY(-3px);
+    transition: transform 0.2s ease;
+  }
+  .faq-item[open] summary::after {
+    transform: rotate(225deg) translateY(-3px);
+  }
+  /* Animated open/close: the details' content box is the collapsing grid track
+     (0fr -> 1fr). Opacity softens the change, and the content-visibility
+     transition (allow-discrete) keeps the panel visible for the whole close so
+     the fade-out reads instead of being cut off. Native <details> semantics
+     survive: no-JS and keyboard, and browsers without ::details-content fall
+     back to the instant toggle. 0.2s ease is the design system's
+     interaction-duration token (same as the chevron rotation). */
+  .faq-item::details-content {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transition:
+      grid-template-rows 0.2s ease,
+      opacity 0.2s ease,
+      content-visibility 0.2s ease allow-discrete;
+  }
+  .faq-item[open]::details-content {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .faq-item summary::after,
+    .faq-item::details-content {
+      transition: none;
+    }
+  }
+  .faq-item .faq-answer {
+    min-height: 0;
+    overflow: hidden;
+  }
+  .faq-item .faq-answer-inner {
+    border-top: var(--border-w-subtle) solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    padding: var(--space-4) var(--space-5) var(--space-5);
+  }
+  /* A second inner block continues the answer: suppress the repeated separator
+     and the doubled top padding, but keep the inline and bottom gutter. */
+  .faq-item .faq-answer-inner + .faq-answer-inner {
+    border-top: 0;
+    padding-top: 0;
+  }
+  /* `inherit` keeps the block above the only owner of the answer typography;
+     without it the global .docs-content p rule overrides both. */
+  .faq-item .faq-answer-inner p {
+    color: inherit;
+    line-height: inherit;
+    margin: 0 0 var(--space-3);
+  }
+  .faq-item .faq-answer-inner p:last-child {
+    margin-bottom: 0;
+  }
+  .faq-item .faq-answer-inner a {
+    color: var(--link);
+    font-weight: 600;
+  }
+  .faq-item .faq-answer-inner code {
+    background: var(--bg-muted);
+    border-radius: var(--radius-sm);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.92em;
+    padding: 0.1em 0.35em;
+  }
+
+</style>
