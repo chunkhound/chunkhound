@@ -7,6 +7,7 @@ Implements two-stage deduplication:
 Preserves language-specific exemptions for Vue and Haskell.
 """
 
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Sequence
 
@@ -120,6 +121,13 @@ def _remove_substring_overlaps(chunks: Sequence[Chunk | dict]) -> list[Chunk | d
     # Sort definitions by start line for binary search
     definitions.sort(key=lambda c: _get_start_line(c))
 
+    # Running max of end lines: lets each query skip, by bisection, the prefix of
+    # definitions that all end before the block starts.
+    max_end_prefix: list[int] = []
+    for definition in definitions:
+        end = _get_end_line(definition)
+        max_end_prefix.append(max(end, max_end_prefix[-1]) if max_end_prefix else end)
+
     # Check each BLOCK chunk for substring containment in overlapping DEFINITION/STRUCTURE
     final = other + definitions  # Keep all non-BLOCK chunks
 
@@ -131,7 +139,9 @@ def _remove_substring_overlaps(chunks: Sequence[Chunk | dict]) -> list[Chunk | d
         is_substring = False
 
         # Binary search for overlapping definitions (interval tree query)
-        for definition in _find_overlapping_chunks(definitions, block_start, block_end):
+        for definition in _find_overlapping_chunks(
+            definitions, max_end_prefix, block_start, block_end
+        ):
             def_content = normalize_content(_get_chunk_content(definition))
 
             # Check substring containment
@@ -147,17 +157,21 @@ def _remove_substring_overlaps(chunks: Sequence[Chunk | dict]) -> list[Chunk | d
 
 def _find_overlapping_chunks(
     sorted_chunks: list[Chunk | dict],
+    max_end_prefix: list[int],
     query_start: int,
     query_end: int,
 ) -> list[Chunk | dict]:
     """Find chunks whose line ranges overlap with [query_start, query_end].
 
-    Uses sorted list for early termination when query_end < chunk_start.
-    Complexity: O(k) where k = overlapping chunks (not O(n) full scan).
+    `sorted_chunks` is sorted by start line and `max_end_prefix[i]` is the largest
+    end line among `sorted_chunks[: i + 1]`. Every chunk before the first index
+    whose running max reaches `query_start` ends before the query, so the scan
+    starts there and stops at the first chunk starting after `query_end`.
     """
     overlapping = []
 
-    for chunk in sorted_chunks:
+    for i in range(bisect_left(max_end_prefix, query_start), len(sorted_chunks)):
+        chunk = sorted_chunks[i]
         chunk_start = _get_start_line(chunk)
         chunk_end = _get_end_line(chunk)
 

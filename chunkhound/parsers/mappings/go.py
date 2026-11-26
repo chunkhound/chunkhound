@@ -171,8 +171,7 @@ class GoMapping(BaseMapping):
     ) -> str:
         """Extract name from captures for this concept."""
 
-        # Convert bytes to string for processing
-        source = content.decode("utf-8")
+        source = content
 
         if concept == UniversalConcept.DEFINITION:
             # Check if this is a const_declaration
@@ -254,8 +253,7 @@ class GoMapping(BaseMapping):
     ) -> str:
         """Extract content from captures for this concept."""
 
-        # Convert bytes to string for processing
-        source = content.decode("utf-8")
+        source = content
 
         if "definition" in captures:
             node = captures["definition"]
@@ -272,7 +270,7 @@ class GoMapping(BaseMapping):
     ) -> dict[str, Any]:
         """Extract Go-specific metadata."""
 
-        source = content.decode("utf-8")
+        source = content
         metadata: dict[str, Any] = {}
 
         if concept == UniversalConcept.DEFINITION:
@@ -361,7 +359,7 @@ class GoMapping(BaseMapping):
 
         return metadata
 
-    def _extract_function_parameters(self, func_node: Node, source: str) -> list[str]:
+    def _extract_function_parameters(self, func_node: Node, source: bytes) -> list[str]:
         """Extract parameter types from a Go function node."""
         parameters = []
 
@@ -395,7 +393,9 @@ class GoMapping(BaseMapping):
 
         return parameters
 
-    def _extract_function_return_type(self, func_node: Node, source: str) -> str | None:
+    def _extract_function_return_type(
+        self, func_node: Node, source: bytes
+    ) -> str | None:
         """Extract return type from a Go function node."""
 
         # Look for the result part (return type) after parameters
@@ -432,7 +432,7 @@ class GoMapping(BaseMapping):
         if not def_node or def_node.type != "const_declaration":
             return None
 
-        source = content.decode("utf-8")
+        source = content
         constants = []
 
         # Find all const_spec nodes (handles both single and block const declarations)
