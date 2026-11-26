@@ -626,7 +626,9 @@ async def test_index_trust_cold_validates_refreshes_trust_and_pulls_source(
     assert decision is run.HubIndexDecision.HUB_INSTALLED
     fetch.assert_awaited_once_with(config)
     grant.assert_called_once_with(config.target_dir, config.hub.url)
-    pull.assert_awaited_once_with(config, automatic=True, source=source)
+    pull.assert_awaited_once_with(
+        config, automatic=True, source=source, explicit_trust=True
+    )
 
 
 async def test_explicit_trust_authorizes_without_prompt(
@@ -644,7 +646,9 @@ async def test_explicit_trust_authorizes_without_prompt(
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.HUB_INSTALLED
-    pull.assert_awaited_once_with(config, automatic=True, source=source)
+    pull.assert_awaited_once_with(
+        config, automatic=True, source=source, explicit_trust=True
+    )
 
 
 async def test_trusted_cold_index_calls_automatic_pull(
@@ -703,7 +707,9 @@ async def test_trust_save_failure_warns_but_current_authorized_attempt_proceeds(
     assert decision is run.HubIndexDecision.HUB_INSTALLED
     assert "future automatic hub use was not enabled" in formatter.text
     assert "raw save secret" not in formatter.text
-    pull.assert_awaited_once_with(config, automatic=True, source=source)
+    pull.assert_awaited_once_with(
+        config, automatic=True, source=source, explicit_trust=True
+    )
 
 
 @pytest.mark.parametrize("interactive", [False, True])

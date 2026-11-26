@@ -49,7 +49,8 @@ async def test_artifact_deadline_is_shared_across_retries(tmp_path, monkeypatch)
 
     monkeypatch.setattr(httpx, "AsyncClient", make_client)
     artifact = Artifact(
-        url="https://hub.test/object?secret=url-secret", bytes=len(body),
+        url="https://hub.test/object?secret=url-secret",
+        bytes=len(body),
         sha256=hashlib.sha256(body).hexdigest(),
     )
     part = tmp_path / "artifact.part"
@@ -73,8 +74,7 @@ async def test_pull_timeout_uses_config_and_cleans_workspace(
     config = config_for(tmp_path / "checkout", hub_http)
     config.hub.download_timeout_seconds = 0.05
     _, route = publish(hub_http, build_database(tmp_path / "published"))
-    if automatic:
-        grant_trust(config.target_dir, config.hub.url)
+    grant_trust(config.target_dir, config.hub.url)
     release = threading.Event()
 
     def stall_artifact(path):
@@ -103,6 +103,7 @@ async def test_pull_timeout_uses_config_and_cleans_workspace(
 async def test_cancelled_download_cleans_workspace_without_install(tmp_path, hub_http):
     config = config_for(tmp_path / "checkout", hub_http)
     _, route = publish(hub_http, build_database(tmp_path / "published"))
+    grant_trust(config.target_dir, config.hub.url)
     started = threading.Event()
     release = threading.Event()
 

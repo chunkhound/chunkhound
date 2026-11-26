@@ -11,10 +11,20 @@ from chunkhound.hub.inspect import inspect_database
 from tests.hub.artifacts import build_database
 
 DUCKDB_SUFFIXES = (
-    ".wal", ".wal.corrupt", ".compact_backup", ".compact_backup.wal",
-    ".compact_new", ".compact_new.wal", ".old", ".old.wal",
-    ".compact", ".compact.wal", ".swap_intent", ".export_tmp",
-    ".root.json", ".embedding.json",
+    ".wal",
+    ".wal.corrupt",
+    ".compact_backup",
+    ".compact_backup.wal",
+    ".compact_new",
+    ".compact_new.wal",
+    ".old",
+    ".old.wal",
+    ".compact",
+    ".compact.wal",
+    ".swap_intent",
+    ".export_tmp",
+    ".root.json",
+    ".embedding.json",
 )
 
 
@@ -104,7 +114,8 @@ def test_invalid_candidate_preserves_old_database(tmp_path, backend, kind):
     try:
         spelling = (
             stage / "missing" / ".." / candidate.name
-            if kind == "symlink-absent-parent" else candidate
+            if kind == "symlink-absent-parent"
+            else candidate
         )
         with pytest.raises(native.DatabaseLayoutError):
             lease.install(str(spelling))
@@ -304,8 +315,10 @@ def test_cross_filesystem_candidate_is_rejected_before_old_database_changes(tmp_
     # Probe the device rather than assuming /tmp and shared memory are distinct.
     other = next(
         (
-            path for path in (Path("/dev/shm"), Path("/tmp"))
-            if path.is_dir() and os.access(path, os.W_OK)
+            path
+            for path in (Path("/dev/shm"), Path("/tmp"))
+            if path.is_dir()
+            and os.access(path, os.W_OK)
             and path.stat().st_dev != tmp_path.stat().st_dev
         ),
         None,
@@ -386,7 +399,9 @@ def test_duckdb_candidate_wal_entry_is_refused_without_install_mutation(
                 else:
                     payload = ("file", path.read_bytes())
                 state[str(path.relative_to(tmp_path))] = (
-                    info.st_mode, info.st_mtime_ns, payload
+                    info.st_mode,
+                    info.st_mtime_ns,
+                    payload,
                 )
         return state
 

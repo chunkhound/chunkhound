@@ -31,11 +31,14 @@ def test_healthy_provider_connect_is_idempotent(tmp_path, read_only):
         provider.connect()
         provider.connect()
         assert provider.get_stats()["files"] == 0
-        assert snapshot(
-            tmp_path,
-            live_database_paths=live_paths,
-            live_wal_paths=tuple(str(p) + ".wal" for p in live_paths),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=live_paths,
+                live_wal_paths=tuple(str(p) + ".wal" for p in live_paths),
+            )
+            == before
+        )
     finally:
         provider.disconnect()
 
@@ -91,11 +94,14 @@ def test_partial_release_reconnect_preflights_before_recovery(
             )
             with pytest.raises(IndexFormatError, match="Unsupported index format"):
                 provider.connect()
-            assert snapshot(
-                tmp_path,
-                live_database_paths=live_paths,
-                live_wal_paths=tuple(str(p) + ".wal" for p in live_paths),
-            ) == before
+            assert (
+                snapshot(
+                    tmp_path,
+                    live_database_paths=live_paths,
+                    live_wal_paths=tuple(str(p) + ".wal" for p in live_paths),
+                )
+                == before
+            )
         else:
             provider.connect()
             assert provider.connection.execute("SELECT 1").fetchone() == (1,)
@@ -142,11 +148,14 @@ def test_partial_reconnect_checks_owned_catalog_despite_session_namespace(
         if version == 2:
             with pytest.raises(IndexFormatError, match="Unsupported index format"):
                 provider.connect()
-            assert snapshot(
-                tmp_path,
-                live_database_paths=(provider.db_path,),
-                live_wal_paths=(str(provider.db_path) + ".wal",),
-            ) == before
+            assert (
+                snapshot(
+                    tmp_path,
+                    live_database_paths=(provider.db_path,),
+                    live_wal_paths=(str(provider.db_path) + ".wal",),
+                )
+                == before
+            )
             # Refusal keeps the live handle and its namespace intact.
             sql = (
                 "SELECT version AS value FROM schema_version"
@@ -215,26 +224,33 @@ def test_partial_reconnect_ignores_catalog_helper_macros(
         if version == 2:
             with pytest.raises(IndexFormatError, match="Unsupported index format"):
                 provider.connect()
-            assert snapshot(
-                tmp_path,
-                live_database_paths=(provider.db_path,),
-                live_wal_paths=(str(provider.db_path) + ".wal",),
-            ) == before
+            assert (
+                snapshot(
+                    tmp_path,
+                    live_database_paths=(provider.db_path,),
+                    live_wal_paths=(str(provider.db_path) + ".wal",),
+                )
+                == before
+            )
             rows = query(
                 f"SELECT value, {masked_sql} AS masked, "
                 "(SELECT version FROM owned.main.schema_version) AS version "
                 "FROM retained_session"
             )
             retained = (
-                rows.fetchone() if remaining == "manager"
+                rows.fetchone()
+                if remaining == "manager"
                 else tuple(rows[0][key] for key in ("value", "masked", "version"))
             )
             assert retained == (42, masked_value, 2)
-            assert snapshot(
-                tmp_path,
-                live_database_paths=(provider.db_path,),
-                live_wal_paths=(str(provider.db_path) + ".wal",),
-            ) == before
+            assert (
+                snapshot(
+                    tmp_path,
+                    live_database_paths=(provider.db_path,),
+                    live_wal_paths=(str(provider.db_path) + ".wal",),
+                )
+                == before
+            )
         else:
             provider.connect()
             assert provider.get_stats()["files"] == 0
@@ -263,7 +279,8 @@ def test_partial_reconnect_refuses_metadata_view_despite_catalog_mask(
         query("DROP TABLE schema_version")
         query("CREATE VIEW schema_version AS SELECT 1 AS version")
         definition = (
-            "MACRO duckdb_views() AS TABLE" if mask == "function"
+            "MACRO duckdb_views() AS TABLE"
+            if mask == "function"
             else "VIEW duckdb_views AS"
         )
         query(
@@ -288,19 +305,25 @@ def test_partial_reconnect_refuses_metadata_view_despite_catalog_mask(
         assert backup in before
         with pytest.raises(IndexFormatError, match="physical table"):
             provider.connect()
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
         rows = query("SELECT value FROM retained_session")
         value = rows.fetchone()[0] if remaining == "manager" else rows[0]["value"]
         assert value == 42
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
     finally:
         provider.disconnect(skip_checkpoint=True)
 
@@ -321,11 +344,14 @@ def test_lazy_read_after_partial_release_does_not_skip_reconnect_preflight(tmp_p
         )
         with pytest.raises(IndexFormatError, match="Unsupported index format"):
             provider.connect()
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
         assert provider.get_stats()["files"] == 0
     finally:
         provider.disconnect(skip_checkpoint=True)
@@ -396,11 +422,14 @@ def test_partial_reconnect_checks_live_metadata_before_closing_handles(
         )
         with pytest.raises(IndexFormatError):
             provider.connect()
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
         rows = query("SELECT value FROM retained_session")
         value = rows.fetchone()[0] if remaining == "manager" else rows[0]["value"]
         assert value == 42
@@ -443,11 +472,14 @@ def test_partial_reconnect_refuses_transaction_local_format_without_mutation(
         )
         with pytest.raises(IndexFormatError, match="transaction"):
             provider.connect()
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
         # Refusal must leave the original transaction, including its snapshot,
         # usable until the caller explicitly ends it.
         rows = query("SELECT version FROM schema_version")
@@ -463,11 +495,14 @@ def test_partial_reconnect_refuses_transaction_local_format_without_mutation(
         )
         with pytest.raises(IndexFormatError, match="Unsupported index format"):
             provider.connect()
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
     finally:
         provider.disconnect(skip_checkpoint=True)
 
@@ -500,11 +535,14 @@ def test_partial_reconnect_preserves_pending_work_for_explicit_completion(
             provider.connect()
         with pytest.raises(native.DatabaseBusyError):
             native.acquire_install_lease(str(provider.db_path), "duckdb")
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
         rows = query("SELECT value FROM pending_work")
         assert (rows.fetchone()[0] if owner == "manager" else rows[0]["value"]) == 42
         if owner == "executor-api":
@@ -517,10 +555,13 @@ def test_partial_reconnect_preserves_pending_work_for_explicit_completion(
                 {"value": 42}
             ]
         else:
-            assert provider.execute_query(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_name='pending_work'"
-            ) == []
+            assert (
+                provider.execute_query(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_name='pending_work'"
+                )
+                == []
+            )
         provider.begin_transaction()
         provider.commit_transaction()
     finally:
@@ -555,17 +596,23 @@ def test_partial_reconnect_keeps_aborted_transaction_for_explicit_rollback(
         )
         with pytest.raises(IndexFormatError, match="transaction"):
             provider.connect()
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
         query("ROLLBACK")
         provider.connect()
-        assert provider.execute_query(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_name='pending_work'"
-        ) == []
+        assert (
+            provider.execute_query(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name='pending_work'"
+            )
+            == []
+        )
     finally:
         provider.disconnect(skip_checkpoint=True)
 
@@ -593,11 +640,14 @@ def test_lazy_partial_reconnect_checks_transactions_on_both_live_handles(
         )
         with pytest.raises(IndexFormatError, match="transaction"):
             provider.connect()
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(provider.db_path,),
-            live_wal_paths=(str(provider.db_path) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(provider.db_path,),
+                live_wal_paths=(str(provider.db_path) + ".wal",),
+            )
+            == before
+        )
         query("COMMIT")
         provider.connect()
         assert provider.execute_query("SELECT value FROM pending_work") == [

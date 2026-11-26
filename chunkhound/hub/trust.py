@@ -74,6 +74,10 @@ def _read_store() -> dict[str, object]:
     try:
         path = trust_store_path()
         with path.open(encoding="utf-8") as handle:
+            if os.name != "nt":
+                status = os.fstat(handle.fileno())
+                if status.st_uid != os.getuid() or status.st_mode & 0o077:
+                    raise HubTrustError(_READ_ERROR)
             return _validate_store(json.load(handle))
     except FileNotFoundError:
         return _empty_store()

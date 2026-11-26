@@ -61,7 +61,8 @@ def snapshot(
             )
         else:
             result[str(p)] = (
-                hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns
+                hashlib.sha256(p.read_bytes()).hexdigest(),
+                p.stat().st_mtime_ns,
             )
     return result
 
@@ -324,11 +325,14 @@ def test_live_preflight_refuses_handle_for_another_database(tmp_path):
         )
         with pytest.raises(IndexFormatError, match="catalog identity is ambiguous"):
             preflight_duckdb(path, live_connection=other)
-        assert snapshot(
-            tmp_path,
-            live_database_paths=(unrelated,),
-            live_wal_paths=(str(unrelated) + ".wal",),
-        ) == before
+        assert (
+            snapshot(
+                tmp_path,
+                live_database_paths=(unrelated,),
+                live_wal_paths=(str(unrelated) + ".wal",),
+            )
+            == before
+        )
         assert other.execute("SELECT version FROM schema_version").fetchone() == (1,)
 
 
@@ -342,7 +346,7 @@ def test_live_preflight_checks_attached_catalog_with_embedded_quote(tmp_path, ve
     before = snapshot(tmp_path)
     with duckdb.connect(":memory:") as conn:
         escaped_path = str(path).replace("'", "''")
-        conn.execute(f'''ATTACH '{escaped_path}' AS "owned""quoted" (READ_ONLY)''')
+        conn.execute(f"""ATTACH '{escaped_path}' AS "owned""quoted" (READ_ONLY)""")
         conn.execute("CREATE TEMP TABLE retained_session AS SELECT 42 AS value")
         if version == 2:
             with pytest.raises(IndexFormatError, match="Unsupported index format"):

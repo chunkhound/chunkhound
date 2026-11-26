@@ -103,7 +103,8 @@ async def test_cancelled_async_action_drains_open_past_sync_deadline(
 ):
     path = tmp_path / "chunks.db"
     provider = DuckDBProvider(
-        path, base_directory=tmp_path,
+        path,
+        base_directory=tmp_path,
         config=DatabaseConfig(execute_timeout_seconds=0.2),
     )
     entered = threading.Event()
@@ -321,9 +322,16 @@ def make_services(root):
 
 async def run_empty_phase(services, config, root):
     return await run_rust_indexing_phase(
-        db=services.provider, config=config, embedding_provider=None, progress=None,
-        files_to_process=[], directory=root, force_reindex=False, do_cleanup=False,
-        diff_task=None, parse_task=None,
+        db=services.provider,
+        config=config,
+        embedding_provider=None,
+        progress=None,
+        files_to_process=[],
+        directory=root,
+        force_reindex=False,
+        do_cleanup=False,
+        diff_task=None,
+        parse_task=None,
     )
 
 
@@ -405,9 +413,11 @@ async def test_concurrent_cancelled_searches_share_failed_recovery_and_later_ret
             await run_empty_phase(services, config, tmp_path)
         mode = "recovery-failure"
         for _ in range(3):
-            tasks.append(asyncio.create_task(
-                services.search_service.search_regex_async("never_matches")
-            ))
+            tasks.append(
+                asyncio.create_task(
+                    services.search_service.search_regex_async("never_matches")
+                )
+            )
         assert await asyncio.to_thread(entered.wait, 10)
         for _ in range(3):
             tasks[0].cancel()
@@ -555,7 +565,8 @@ async def test_refused_index_action_does_not_claim_root_or_inspect_sources(
         monkeypatch.setattr(Path, "stat", stat)
         caller = (
             services.indexing_coordinator
-            if action.startswith("coordinator") else provider
+            if action.startswith("coordinator")
+            else provider
         )
         error = None
         try:
@@ -601,7 +612,7 @@ async def test_direct_provider_first_index_action_initializes_local_services(
 def test_unacknowledged_native_failure_requires_restart_not_retry(tmp_path):
     # Only the native-extension boundary fails. The real read-only token and
     # provider retain exclusion until subprocess exit; never fabricate an ack.
-    script = textwrap.dedent('''
+    script = textwrap.dedent("""
         import asyncio
         import sys
         from pathlib import Path
@@ -699,10 +710,12 @@ def test_unacknowledged_native_failure_requires_restart_not_retry(tmp_path):
                 else:
                     raise AssertionError("unacknowledged owner released exclusion")
         asyncio.run(main())
-    ''')
+    """)
     result = subprocess.run(
         [sys.executable, "-c", script, str(tmp_path)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
     native.acquire_install_lease(str(tmp_path / "db" / "chunks.db"), "duckdb").close()

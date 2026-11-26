@@ -1,3 +1,4 @@
+import os
 import asyncio
 import gc
 import hashlib
@@ -91,9 +92,7 @@ def test_automatic_inventory_matches_native_install_inventory(
 
 @pytest.mark.parametrize(
     ("backend", "filename", "suffix"),
-    [
-        ("duckdb", "chunks.db", suffix) for suffix in DUCKDB_INSTALL_SUFFIXES
-    ]
+    [("duckdb", "chunks.db", suffix) for suffix in DUCKDB_INSTALL_SUFFIXES]
     + [
         ("duckdb", "chunks.db", ".chunkhound-install.json"),
         ("lancedb", "lancedb.lancedb", ""),
@@ -114,9 +113,7 @@ def test_unowned_cold_probe_rejects_every_install_state_path(
     assert not automatic_target_appears_cold(target, backend)
 
 
-def test_unowned_cold_probe_suppresses_filesystem_uncertainty(
-    tmp_path, monkeypatch
-):
+def test_unowned_cold_probe_suppresses_filesystem_uncertainty(tmp_path, monkeypatch):
     target = tmp_path / "chunks.db"
     private = Path(f"{target}.wal")
     original_lstat = Path.lstat
@@ -437,7 +434,7 @@ async def test_validated_source_authorizes_without_reading_malformed_store(
     store.write_text("not-json")
     hub_http.requests.clear()
 
-    assert await pull(config, automatic=True, source=source)
+    assert await pull(config, automatic=True, source=source, explicit_trust=True)
     assert [request[0] for request in hub_http.requests] == [
         "/base.tar.gz?token=secret"
     ]
@@ -1141,10 +1138,13 @@ def retained_reader_error(error):
         seen.add(id(current))
         if isinstance(current, DatabaseReaderCloseError):
             return current
-        pending.extend([
-            current.__cause__, current.__context__,
-            getattr(current, "reader_error", None),
-        ])
+        pending.extend(
+            [
+                current.__cause__,
+                current.__context__,
+                getattr(current, "reader_error", None),
+            ]
+        )
     raise AssertionError("Expected a retained-reader capability in failure chain")
 
 
@@ -1315,9 +1315,12 @@ async def test_candidate_workspace_cleanup_refusal_is_sanitized_and_retryable(
             failure.retry_close()
 
 
-@pytest.mark.parametrize("boundary,automatic,cancel", [
-    ("candidate", False, False),
-])
+@pytest.mark.parametrize(
+    "boundary,automatic,cancel",
+    [
+        ("candidate", False, False),
+    ],
+)
 async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
     tmp_path, hub_http, monkeypatch, boundary, automatic, cancel
 ):
@@ -1332,6 +1335,7 @@ async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
     sidecar = target.with_name(target.name + ".root.json")
     sidecar.write_text("local root must survive")
     if boundary == "recheck":
+
         def install_race_winner(route):
             if route.startswith("/base.tar.gz"):
                 lease = native.acquire_install_lease(str(target), "duckdb")
@@ -1341,6 +1345,7 @@ async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
                     lease.close()
                 sidecar.write_text("local root must survive")
                 before.append(snapshot(target))
+
         hub_http.before_get = install_race_winner
 
     def wants_path(path):
@@ -1359,8 +1364,10 @@ async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
     held_workspaces = []
     try:
         with reader_close_fault(
-            monkeypatch, wants_path,
-            entered=entered if cancel else None, release=release,
+            monkeypatch,
+            wants_path,
+            entered=entered if cancel else None,
+            release=release,
         ) as (readers, held_workspaces):
             task = asyncio.create_task(pull(config, automatic=automatic))
             try:
@@ -1539,12 +1546,15 @@ async def test_quota_refusal_preserves_interrupted_install_and_unknown_wal(
     assert not list(target.parent.glob(".chunkhound-pull-*"))
 
 
-@pytest.mark.parametrize("mcp_mode,no_embeddings,disabled,configured", [
-    (True, False, False, True),
-    (False, True, False, True),
-    (False, False, True, True),
-    (False, False, False, False),
-])
+@pytest.mark.parametrize(
+    "mcp_mode,no_embeddings,disabled,configured",
+    [
+        (True, False, False, True),
+        (False, True, False, True),
+        (False, False, True, True),
+        (False, False, False, False),
+    ],
+)
 async def test_automatic_pull_refuses_ineligible_modes_before_local_or_network_work(
     tmp_path, hub_http, mcp_mode, no_embeddings, disabled, configured
 ):
@@ -1606,3 +1616,31 @@ async def test_explicit_pull_is_not_silently_skipped_by_automatic_mode_inputs(
         logger.remove(sink)
     assert "writable directory-layout database" in "\n".join(messages)
     assert hub_http.requests == []
+
+
+async def test_explicit_pull_requires_trust_at_the_client_boundary(
+    tmp_path, hub_http, monkeypatch
+):
+    monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
+    config = config_for(tmp_path / "checkout", hub_http)
+    publish(hub_http, build_database(tmp_path / "published"))
+    source = await fetch_validated_manifest(config)
+    hub_http.requests.clear()
+
+    assert not await pull(config, source=source)
+    assert hub_http.requests == []
+    assert await pull(config, source=source, explicit_trust=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_trust_store_writable_by_others_is_not_trusted(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub_client, "is_trusted", hub_trust.is_trusted)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    grant_trust(checkout, "https://hub.invalid/manifest")
+    assert hub_trust.is_trusted(checkout, "https://hub.invalid/manifest")
+
+    hub_trust.trust_store_path().chmod(0o666)
+
+    with pytest.raises(hub_trust.HubTrustError):
+        hub_trust.is_trusted(checkout, "https://hub.invalid/manifest")

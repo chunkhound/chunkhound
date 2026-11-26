@@ -267,7 +267,9 @@ async def _prepare_hub_index(
         if source is None:
             installed = await pull(config, automatic=True)
         else:
-            installed = await pull(config, automatic=True, source=source)
+            installed = await pull(
+                config, automatic=True, source=source, explicit_trust=True
+            )
     except asyncio.CancelledError:
         formatter.error(HUB_PULL_CANCELLATION_DIAGNOSTIC)
         _hub_authorized_failure_guidance(formatter)

@@ -52,15 +52,14 @@ def test_windows_live_wal_metadata_requires_explicit_opt_in(
     with pytest.raises(PermissionError):
         snapshot(tmp_path, live_database_paths=(primary,))
 
-    before = snapshot(
-        tmp_path, live_database_paths=(primary,), live_wal_paths=(wal,)
-    )
+    before = snapshot(tmp_path, live_database_paths=(primary,), live_wal_paths=(wal,))
     assert before[str(primary)][0] == "live-windows-primary-metadata"
     assert before[str(wal)][0] == "live-windows-wal-metadata"
     wal.write_bytes(b"a larger WAL")
-    assert snapshot(
-        tmp_path, live_database_paths=(primary,), live_wal_paths=(wal,)
-    ) != before
+    assert (
+        snapshot(tmp_path, live_database_paths=(primary,), live_wal_paths=(wal,))
+        != before
+    )
 
 
 @pytest.mark.parametrize("platform", ["nt", "posix"])
@@ -116,9 +115,10 @@ def test_strict_paths_never_substitute_metadata_for_bytes(
     os.utime(strict, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     assert strict.stat().st_size == stat.st_size
     assert strict.stat().st_mtime_ns == stat.st_mtime_ns
-    assert snapshot(
-        tmp_path, live_database_paths=(primary,), live_wal_paths=live_wals
-    ) != before
+    assert (
+        snapshot(tmp_path, live_database_paths=(primary,), live_wal_paths=live_wals)
+        != before
+    )
 
     # Neither the default nor another file's live opt-in may hide read failures.
     denied_reads.add(strict.resolve())

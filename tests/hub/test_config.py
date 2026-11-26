@@ -252,8 +252,18 @@ def test_download_timeout_accepts_positive_finite_numbers(tmp_path, value):
 
 @pytest.mark.parametrize(
     "value",
-    [True, False, 0, -1, float("inf"), float("-inf"), float("nan"),
-     None, "unlimited", "3600"],
+    [
+        True,
+        False,
+        0,
+        -1,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        None,
+        "unlimited",
+        "3600",
+    ],
 )
 def test_download_timeout_rejects_invalid_config(tmp_path, value):
     from pydantic import ValidationError
@@ -276,8 +286,21 @@ def test_download_timeout_environment_is_decoded(tmp_path, monkeypatch, text, va
 
 
 @pytest.mark.parametrize(
-    "text", ["true", "false", "0", "-1", "Infinity", "-Infinity", "NaN",
-             "inf", "null", "unlimited", "", '"3600"'],
+    "text",
+    [
+        "true",
+        "false",
+        "0",
+        "-1",
+        "Infinity",
+        "-Infinity",
+        "NaN",
+        "inf",
+        "null",
+        "unlimited",
+        "",
+        '"3600"',
+    ],
 )
 def test_download_timeout_invalid_environment_is_rejected(tmp_path, monkeypatch, text):
     from pydantic import ValidationError
@@ -302,11 +325,15 @@ def test_download_timeout_obeys_existing_config_precedence(tmp_path, monkeypatch
     )
     args = argparse.Namespace(config=str(explicit))
     assert (
-        Config(target_dir=tmp_path, args=args, skip_layers={"cli"})
-        .hub.download_timeout_seconds == 41
+        Config(
+            target_dir=tmp_path, args=args, skip_layers={"cli"}
+        ).hub.download_timeout_seconds
+        == 41
     )
     direct = Config(
-        target_dir=tmp_path, args=args, hub={"download_timeout_seconds": 51},
+        target_dir=tmp_path,
+        args=args,
+        hub={"download_timeout_seconds": 51},
         skip_layers={"cli"},
     )
     assert direct.hub.download_timeout_seconds == 51
@@ -336,9 +363,7 @@ def test_unknown_top_level_hub_key_fails_closed_in_every_layer(
     explicit.write_text(json.dumps({"hub": hub}))
     all_but = {"global", "env", "local_config", "config_file", "cli"}
     cases = {
-        "direct": lambda: Config(
-            target_dir=tmp_path, hub=hub, skip_layers=all_but
-        ),
+        "direct": lambda: Config(target_dir=tmp_path, hub=hub, skip_layers=all_but),
         "global": lambda: Config(
             target_dir=tmp_path,
             skip_layers={"env", "local_config", "config_file", "cli"},

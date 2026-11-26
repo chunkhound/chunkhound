@@ -96,7 +96,8 @@ def test_parent_close_releases_ownership_while_fork_child_holds_descriptor(
 ):
     _run_fork_probe(
         tmp_path,
-        f"interrupted = {interrupted!r}\n" + textwrap.dedent("""
+        f"interrupted = {interrupted!r}\n"
+        + textwrap.dedent("""
         lease = native.acquire_install_lease(target, "duckdb")
         try:
             if interrupted:

@@ -815,8 +815,10 @@ def test_rust_release_closes_all_retained_handles_or_preserves_lease_for_retry(
         return cursor
 
     def fail_extension(conn, query, *args, **kwargs):
-        if retained == "failed-open" and query == "INSTALL vss" and any(
-            conn is ref() for ref in handles
+        if (
+            retained == "failed-open"
+            and query == "INSTALL vss"
+            and any(conn is ref() for ref in handles)
         ):
             raise OSError("extension initialization failed")
         return real_execute(conn, query, *args, **kwargs)

@@ -41,9 +41,7 @@ def forget_trust_command(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1) from None
     if removed:
-        logger.bind(hub_client=True).info(
-            "Removed hub trust grant for {}", checkout
-        )
+        logger.bind(hub_client=True).info("Removed hub trust grant for {}", checkout)
     else:
         logger.warning(
             "No hub trust grant found for {}; check that the path is the "
@@ -124,7 +122,9 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
         )
         pull_attempted = True
         try:
-            installed = await pull(config, rel=args.version, source=source)
+            installed = await pull(
+                config, rel=args.version, source=source, explicit_trust=args.trust
+            )
         except asyncio.CancelledError:
             logger.error("{}", HUB_PULL_CANCELLATION_DIAGNOSTIC)
             logger.error("{}", HUB_PULL_FAILURE_GUIDANCE)

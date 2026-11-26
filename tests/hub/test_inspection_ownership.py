@@ -68,9 +68,9 @@ def _consume_reader(path, *, ownership=None):
     conn = None
     try:
         with read_only_duckdb(path, ownership=ownership) as conn:
-            assert conn.execute(
-                "SELECT count(*) FROM inspected.main.files"
-            ).fetchone()[0]
+            assert conn.execute("SELECT count(*) FROM inspected.main.files").fetchone()[
+                0
+            ]
     finally:
         # The caller does not keep the handle alive; any retention is in the
         # public exception graph or the implementation's failed-close policy.
@@ -129,7 +129,8 @@ def test_persistent_reader_close_failure_retains_retryable_ownership(
     path = build_database(tmp_path / "published")
     owner = (
         DatabaseOwnership(native.acquire_install_lease(str(path), "duckdb"))
-        if borrowed else None
+        if borrowed
+        else None
     )
     readers = []
     retained_owner = None
@@ -153,9 +154,11 @@ def test_persistent_reader_close_failure_retains_retryable_ownership(
                     _consume_reader(path, ownership=owner)
                 else:
                     inspect_path(path, operation, "duckdb", ownership=owner)
-            assert readers[0]().execute(
-                "SELECT count(*) FROM inspected.main.files"
-            ).fetchone()[0]
+            assert (
+                readers[0]()
+                .execute("SELECT count(*) FROM inspected.main.files")
+                .fetchone()[0]
+            )
             if owner is not None:
                 with pytest.raises(RuntimeError):
                     owner.close()
@@ -195,7 +198,8 @@ def test_reader_error_retry_respects_scope_ownership(tmp_path, monkeypatch, borr
     readers = []
     owner = (
         DatabaseOwnership(native.acquire_install_lease(str(path), "duckdb"))
-        if borrowed else None
+        if borrowed
+        else None
     )
     real_close = duckdb.DuckDBPyConnection.close
 
@@ -242,9 +246,9 @@ def test_borrowed_reader_success_leaves_owner_open_and_reader_closed(tmp_path):
     path = build_database(tmp_path / "published")
     with DatabaseOwnership(native.acquire_install_lease(str(path), "duckdb")) as owner:
         with read_only_duckdb(path, ownership=owner) as conn:
-            assert conn.execute(
-                "SELECT count(*) FROM inspected.main.files"
-            ).fetchone()[0]
+            assert conn.execute("SELECT count(*) FROM inspected.main.files").fetchone()[
+                0
+            ]
         with pytest.raises(duckdb.ConnectionException):
             conn.execute("SELECT 42")
         owner.assert_covers(path)

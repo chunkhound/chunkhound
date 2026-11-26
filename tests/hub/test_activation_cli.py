@@ -78,6 +78,7 @@ def grant_cli_trust(project, checkout, hub_url):
         ),
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
 
 async def test_untrusted_plain_pull_rejects_before_hub_boundaries(
@@ -169,7 +170,9 @@ async def test_trusted_plain_pull_uses_explicit_replacement_path(
 
     trust_check.assert_called_once_with(checkout.resolve(), config.hub.url)
     fetch.assert_awaited_once_with(config, config.hub.url)
-    artifact_pull.assert_awaited_once_with(config, rel="-1", source=source)
+    artifact_pull.assert_awaited_once_with(
+        config, rel="-1", source=source, explicit_trust=False
+    )
 
 
 @pytest.mark.parametrize(
@@ -358,7 +361,9 @@ async def test_pull_trust_revalidates_even_when_source_is_already_trusted(
     trust_check.assert_not_called()
     fetch.assert_awaited_once_with(config, config.hub.url)
     grant.assert_called_once_with(checkout.resolve(), config.hub.url)
-    artifact_pull.assert_awaited_once_with(config, rel="latest", source=source)
+    artifact_pull.assert_awaited_once_with(
+        config, rel="latest", source=source, explicit_trust=True
+    )
 
 
 def test_pull_consent_shows_only_origin_and_selected_embedding(

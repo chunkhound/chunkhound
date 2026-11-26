@@ -89,9 +89,7 @@ def test_pipeline_rejects_non_utf8_canonical_target_without_mutation(
     source = tmp_path / "source.py"
     source.write_text("def answer(): return 42\n")
     files = [] if empty else [(str(source), "source.py")]
-    pipeline = native.IndexingPipeline(
-        {"db_path": str(alias), "skip_embeddings": True}
-    )
+    pipeline = native.IndexingPipeline({"db_path": str(alias), "skip_embeddings": True})
     with pytest.raises(native.DatabaseLayoutError, match="UTF-8"):
         pipeline.run(files, lambda paths, config: [("python", []) for _ in paths])
     assert snapshot() == before

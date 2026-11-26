@@ -269,6 +269,7 @@ async def _pull(
     mcp_mode: bool,
     no_embeddings: bool,
     source: ValidatedHubSource | None = None,
+    explicit_trust: bool = False,
 ) -> bool:
     if automatic and not automatic_pull_eligible(
         config, mcp_mode=mcp_mode, no_embeddings=no_embeddings
@@ -288,7 +289,7 @@ async def _pull(
         or source.url_digest != authorized_url_digest
     ):
         raise HubUnavailable("Validated hub source no longer matches configuration")
-    if automatic and source is None:
+    if not explicit_trust:
         try:
             if not is_trusted(checkout, url):
                 return False
@@ -395,6 +396,7 @@ async def pull(
     mcp_mode: bool = False,
     no_embeddings: bool = False,
     source: ValidatedHubSource | None = None,
+    explicit_trust: bool = False,
 ) -> bool:
     """Install a matching published base index; return whether a base was installed."""
     try:
@@ -406,6 +408,7 @@ async def pull(
                 mcp_mode=mcp_mode,
                 no_embeddings=no_embeddings,
                 source=source,
+                explicit_trust=explicit_trust,
             )
         except DatabaseReaderCloseError as exc:
             raise HubReaderCloseError(exc) from None
