@@ -925,3 +925,25 @@ async def test_index_trust_names_origin_before_first_request(
     assert decision is run.HubIndexDecision.STOP
     assert "https://hub.invalid" in seen[0]
     assert "secret=hidden" not in formatter.text
+
+
+def _unsupported_layout(_config):
+    raise HubUnavailable("Hub pull does not support configured database file paths")
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_unsupported_layout_continues_local_without_hub(
+    config, args, formatter, monkeypatch, trusted
+):
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: trusted)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
+    monkeypatch.setattr(run.prompts, "prompt_text", _forbid)
+    monkeypatch.setattr(run, "installation_target", _unsupported_layout)
+    monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
+    monkeypatch.setattr(run, "pull", _forbid)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.CONTINUE_LOCAL
+    assert formatter.diagnostics == []

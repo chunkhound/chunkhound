@@ -200,7 +200,11 @@ async def _prepare_hub_index(
                     "Continuing with local indexing."
                 )
             return HubIndexDecision.CONTINUE_LOCAL
-        target = installation_target(config)
+        try:
+            target = installation_target(config)
+        except HubUnavailable:
+            # Unsupported layouts (legacy file, explicit file path) never use a hub.
+            return HubIndexDecision.CONTINUE_LOCAL
         if not automatic_target_appears_cold(target, config.database.provider):
             return HubIndexDecision.CONTINUE_LOCAL
         if _choose_untrusted_cold_action(formatter, hub_url) == "local":
@@ -235,6 +239,9 @@ async def _prepare_hub_index(
         target = installation_target(config)
         target_absent = automatic_target_absent(target, config.database.provider)
     except HubUnavailable as exc:
+        if not explicit_trust:
+            # Unsupported layouts (legacy file, explicit file path) never use a hub.
+            return HubIndexDecision.CONTINUE_LOCAL
         formatter.error(str(exc))
         if _hub_prompts_allowed() and _choose_hub_failure_action() == "local":
             return HubIndexDecision.CONTINUE_LOCAL
