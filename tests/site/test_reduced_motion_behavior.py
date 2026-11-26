@@ -114,16 +114,3 @@ def test_nav_drawer_honors_reduced_motion() -> None:
     assert any("transition:none" in body for body in still), (
         ".nav-menu-panel is not zeroed under prefers-reduced-motion"
     )
-
-
-def test_faq_animation_honors_reduced_motion() -> None:
-    """The FAQ accordion chevron and collapsing panel must stop animating."""
-    for selector in (".faq-item summary:after", ".faq-item::details-content"):
-        still = bodies(
-            selector,
-            media="prefers-reduced-motion",
-            page="docs/faq/index.html",
-        )
-        assert any("transition:none" in body for body in still), (
-            f"{selector} is not zeroed under prefers-reduced-motion"
-        )

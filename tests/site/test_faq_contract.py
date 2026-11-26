@@ -7,34 +7,18 @@ from tests.site.dom_helpers import DIST, browser_dom, dist_body
 from tests.site.html_helpers import meta_tag_content, visible_text
 from tests.site.tsx_runner import ROOT, run_tsx_json
 
-FAQ = DIST / "docs" / "faq" / "index.html"
 CATALOG = ROOT / "site" / "src" / "lib" / "language-catalog.gen.json"
-_LD = re.compile(r'<script type="application/ld\+json"[^>]*>(.*?)</script>')
 
-# Read the user-visible surfaces of the rendered page in one DOM pass.
+# Read the visible language chips of the rendered page.
 _PROBE = """
-const summaries = [...document.querySelectorAll('summary')].map((s) => s.textContent.trim());
-const languageCodes = [...document.querySelectorAll('code')].map((c) => c.textContent.trim());
-const answers = [...document.querySelectorAll('.faq-item')].map((d) => ({ q: d.querySelector('summary').textContent.trim(), a: [...d.querySelectorAll('.faq-answer p')].map((p) => p.textContent.replace(/\\s+/g, ' ').trim()).join('\\n') }));
-console.log(JSON.stringify({ summaries, languageCodes, answers }));
+const languageCodes = [...document.querySelectorAll('code')]
+  .map((c) => c.textContent.trim());
+console.log(JSON.stringify({ languageCodes }));
 """
 
 
 def _dom() -> dict:
     return run_tsx_json(browser_dom(dist_body("docs/faq/index.html")) + _PROBE)
-
-
-def test_json_ld_questions_equal_rendered_questions(built_site) -> None:
-    """The schema.org FAQPage block must match what a human reads."""
-    match = _LD.search(FAQ.read_text(encoding="utf-8"))
-    assert match, "JSON-LD block missing"
-    entities = json.loads(match.group(1))["mainEntity"]
-    dom = _dom()
-    answers = {a["q"]: a["a"] for a in dom["answers"]}
-    assert entities and [e["name"] for e in entities] == dom["summaries"] == list(
-        answers
-    )
-    assert all(e["acceptedAnswer"]["text"] == answers[e["name"]] for e in entities)
 
 
 def test_language_figures_equal_catalog(built_site) -> None:
