@@ -130,7 +130,9 @@ def engine_ignored(
     repo: Path,
     backend: str = "python",
     config_exclude: list[str] | None = None,
+    *,
+    is_dir: bool = False,
 ) -> dict[str, bool]:
     """Return {path: is_ignored} from the repo-aware engine for ``backend``."""
     eng = build_backend_engine(repo, backend, config_exclude=config_exclude or [])
-    return {p: eng.matches(repo / p, is_dir=False) is not None for p in paths}
+    return {p: eng.matches(repo / p, is_dir=is_dir) is not None for p in paths}

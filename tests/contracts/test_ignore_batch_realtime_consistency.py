@@ -91,8 +91,9 @@ def _layout_chignore(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write(root / "a.gen.py")
 
 
-# (layout name, builder, gap). gap is None or (backend, reason): the named
-# backend has a known disagreement and is an xfail; the other backend must agree.
+# (layout name, builder, gap). gap is None or (backend, reason, paths): the named
+# backend disagrees with batch on exactly ``paths``. Those paths are isolated into
+# their own strict xfail; every other file is compared without any xfail.
 LAYOUTS = [
     (
         "nested_gitignore",
@@ -101,6 +102,7 @@ LAYOUTS = [
             "libgit2",
             "libgit2 realtime drops src/keep.log (re-included by "
             "'!keep.log'); batch admits it",
+            {"src/keep.log"},
         ),
     ),
     ("char_class", _layout_char_class, None),
@@ -113,6 +115,7 @@ LAYOUTS = [
             "python realtime admits sec/a.py (python engine does not read "
             ".git/info/exclude; ignore_engine.py), but batch excludes it "
             "(git ls-files --exclude-standard)",
+            {"sec/a.py"},
         ),
     ),
     ("chignore", _layout_chignore, None),
@@ -169,7 +172,7 @@ async def test_batch_is_backend_independent_in_git_layouts(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     builder,
-    gap: tuple[str, str] | None,
+    gap: tuple[str, str, set[str]] | None,
 ) -> None:
     """Batch output is the same for python and libgit2 in git repos.
 
@@ -199,13 +202,15 @@ async def test_batch_is_backend_independent_in_git_layouts(
 async def test_batch_and_realtime_agree_on_every_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
     backend: str,
     name: str,
     builder,
-    gap: tuple[str, str] | None,
+    gap: tuple[str, str, set[str]] | None,
 ) -> None:
     """Realtime (this backend) must admit exactly the files batch admits.
+
+    Known-gap paths are excluded here so any other disagreement still fails.
+    They are checked by test_known_batch_realtime_gap_paths.
 
     Batch is computed with the python backend: in git layouts batch is
     backend-independent (see test_batch_is_backend_independent_in_git_layouts),
@@ -214,17 +219,45 @@ async def test_batch_and_realtime_agree_on_every_file(
     root = tmp_path / "repo"
     root.mkdir()
     builder(root, monkeypatch)
-    if gap is not None and gap[0] == backend:
-        request.applymarker(
-            pytest.mark.xfail(strict=True, raises=AssertionError, reason=gap[1])
-        )
+    known = gap[2] if gap is not None and gap[0] == backend else set()
 
-    batch_rels = await _batch_rels(root, tmp_path, "python")
-    rt_rels = _realtime_rels(root, tmp_path, backend)
+    batch_rels = await _batch_rels(root, tmp_path, "python") - known
+    rt_rels = _realtime_rels(root, tmp_path, backend) - known
     assert batch_rels == rt_rels, {
         "only_batch": sorted(batch_rels - rt_rels),
         "only_realtime": sorted(rt_rels - batch_rels),
     }
+
+
+@pytest.mark.parametrize(
+    "name,builder,gap",
+    [layout for layout in LAYOUTS if layout[2] is not None],
+    ids=[layout[0] for layout in LAYOUTS if layout[2] is not None],
+)
+@pytest.mark.asyncio
+async def test_known_batch_realtime_gap_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    backend: str,
+    name: str,
+    builder,
+    gap: tuple[str, str, set[str]],
+) -> None:
+    """Only the documented disagreeing paths are xfail; the gap is strict."""
+    gap_backend, reason, known = gap
+    if backend != gap_backend:
+        pytest.skip(f"known gap is {gap_backend}-only")
+    request.applymarker(
+        pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
+    )
+    root = tmp_path / "repo"
+    root.mkdir()
+    builder(root, monkeypatch)
+
+    batch_rels = await _batch_rels(root, tmp_path, "python")
+    rt_rels = _realtime_rels(root, tmp_path, backend)
+    assert {p: p in batch_rels for p in known} == {p: p in rt_rels for p in known}
 
 
 @pytest.mark.asyncio

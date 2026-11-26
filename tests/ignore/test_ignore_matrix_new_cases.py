@@ -282,7 +282,7 @@ def test_submodule_directory_is_not_ignored_by_parent(
             "git and python do not",
         )
     top = _make_submodule_repo(tmp_path)
-    assert engine_ignored(["vendor/lib"], top, backend) == git_ignored(
+    assert engine_ignored(["vendor/lib"], top, backend, is_dir=True) == git_ignored(
         ["vendor/lib"], top
     )
 
