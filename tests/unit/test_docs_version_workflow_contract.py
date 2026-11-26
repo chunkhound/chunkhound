@@ -431,11 +431,8 @@ class TestDocsVersionWorkflowContract:
             "${{ steps.docs-version.outputs.docs_version }}"
         )
 
-    @pytest.mark.parametrize("job_name", ["site-build-validation", "tests"])
-    def test_consumer_jobs_use_site_build_docs_version_output(
-        self, job_name: str
-    ) -> None:
-        job = _job(".github/workflows/ci.yml", job_name)
+    def test_site_build_validation_uses_site_build_docs_version_output(self) -> None:
+        job = _job(".github/workflows/ci.yml", "site-build-validation")
 
         assert job["needs"] in ("site-build", ["site-build"])
         assert job["env"]["CHUNKHOUND_DOCS_VERSION"] == (

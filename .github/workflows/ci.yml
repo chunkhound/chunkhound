@@ -89,7 +89,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   tests:
-    needs: site-build
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -116,8 +115,6 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
-    env:
-      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
 
     steps:
       - name: Checkout code
