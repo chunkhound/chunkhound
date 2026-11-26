@@ -289,26 +289,25 @@ class TestScanLockSerialization:
         """A transient initial-scan failure is retried, and the retry makes the
         index query-ready."""
         server._INITIAL_SCAN_RETRY_DELAYS_SECONDS = (0.0, 0.0)
-        service = MagicMock(
-            process_directory=AsyncMock(
-                side_effect=[
-                    DirectoryIndexingError(_TRANSIENT_FAILURE),
-                    MagicMock(files_processed=3, chunks_created=9),
-                ]
-            )
+        coordinator = MagicMock()
+        server.services = MagicMock(indexing_coordinator=coordinator)
+        coordinator.process_directory = AsyncMock(
+            side_effect=[
+                _TRANSIENT_FAILURE,
+                {"status": "success", "pipeline": "rust", "skipped_unchanged": 1},
+            ]
         )
-        with patch(
-            "chunkhound.mcp_server.base.DirectoryIndexingService",
-            return_value=service,
-        ):
-            await server._run_initial_scan_with_retry(tmp_path)
+        coordinator.generate_missing_embeddings = AsyncMock(
+            return_value={"status": "success", "generated": 1}
+        )
+        coordinator.compact_database_with_metrics = AsyncMock(
+            return_value={"status": "skipped"}
+        )
+        await server._run_initial_scan_with_retry(tmp_path)
 
         status = derive_daemon_status(server._scan_progress)
-        assert service.process_directory.await_count == 2
-        # The failed run may have committed files without embeddings, and the
-        # retry skips them as unchanged, so the retry must ask for that pass.
-        retry = service.process_directory.await_args
-        assert retry.kwargs["check_missing_embeddings"] is True
+        assert coordinator.process_directory.await_count == 2
+        coordinator.generate_missing_embeddings.assert_awaited_once()
         assert status["query_ready"] is True
         assert status["scan_progress"]["scan_error"] is None
 

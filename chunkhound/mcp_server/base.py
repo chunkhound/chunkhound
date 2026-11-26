@@ -1081,7 +1081,6 @@ class MCPServerBase(ABC):
                     trigger="initial",
                     reason=f"retry {attempt}/{len(delays)}",
                     superseded_after=failed_generation,
-                    check_missing_embeddings=True,
                 )
                 return
             except DirectoryIndexingError as error:
@@ -1097,7 +1096,6 @@ class MCPServerBase(ABC):
         reason: str | None = None,
         no_embeddings: bool = False,
         superseded_after: int | None = None,
-        check_missing_embeddings: bool = False,
     ) -> bool:
         """Perform an initial or reconciliation scan without overlapping other scans.
 
@@ -1109,8 +1107,6 @@ class MCPServerBase(ABC):
             superseded_after: A scan generation. If a scan started after it
                 has succeeded by the time this one holds the lock, this scan
                 is skipped: that scan already brought the index up to date.
-            check_missing_embeddings: Always run the missing-embedding pass;
-                see DirectoryIndexingService.process_directory().
 
         Returns:
             True if the scan ran and succeeded, False if it was skipped.
@@ -1183,7 +1179,6 @@ class MCPServerBase(ABC):
                 stats = await indexing_service.process_directory(
                     target_path,
                     no_embeddings=no_embeddings,
-                    check_missing_embeddings=check_missing_embeddings,
                 )
 
                 # Update final stats
