@@ -383,7 +383,11 @@ cold; they are preserved for ordinary recovery diagnostics rather than treated
 as permission to install or replace.
 
 `chunkhound pull . --forget-trust` removes that checkout/source grant offline.
-It does not contact the hub or delete an installed database.
+It reports whether a grant was removed, and warns when none exists for the
+resolved path. It does not contact the hub or delete an installed database.
+
+Every hub flow prints the manifest origin (scheme, host, and a non-default
+port) before contacting it; paths and query strings are never printed.
 
 Once a manifest is trusted, it may delegate its artifact to another HTTP(S)
 URL and through normal redirects without another authorization prompt. Artifact
