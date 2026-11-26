@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,11 @@ class RealtimePathFilterSettings:
 class RealtimePathFilter:
     """Apply ChunkHound's realtime path filtering independently of the backend."""
 
+    # Bound on memoised directory decisions. A burst touches a few thousand
+    # directories at most; past the bound the memo starts over rather than
+    # growing with the tree.
+    _DIR_DECISIONS_MAX = 8192
+
     def __init__(
         self,
         *,
@@ -73,8 +79,22 @@ class RealtimePathFilter:
         self._include_degraded = False
         self._include_degraded_warned = False
         self._pattern_cache: dict[str, Any] = {}
+        # Directory -> "it, or a directory above it, is excluded". Only valid
+        # for the engine it was computed with (see _directory_excluded).
+        self._dir_decisions: dict[Path, bool] = {}
+        self._dir_decisions_engine: Any | None = None
+        # Kept only when the engine's rules cannot change while it lives. The
+        # libgit2 evaluator rereads .gitignore files, so a kept decision would
+        # outlive an edited rule; it is asked each time instead, and already
+        # applies an excluded parent directory itself.
+        self._keep_dir_decisions = False
         self._settings = settings or RealtimePathFilterSettings.from_config(config)
         self._root = self._resolve_root(config=config, root_path=root_path)
+        # The root as given (normalized, links not resolved) and as the ignore
+        # engine sees it (resolved); see _engine_path. The in-tree root is also
+        # the lexical "is this under the root" test of the directory memo.
+        self._in_tree_root = Path(os.path.abspath(self._root))
+        self._engine_root = self._root.resolve()
 
     @staticmethod
     def _resolve_root(*, config: Config | None, root_path: Path | None) -> Path:
@@ -103,15 +123,127 @@ class RealtimePathFilter:
             or self._include_degraded
         )
 
-    def should_index(self, file_path: Path) -> bool:
-        """Return whether a path should enter the realtime indexing pipeline."""
+    def excludes_directory(self, dir_path: Path) -> bool:
+        """Return whether an ignore rule excludes this directory where it sits.
+
+        Pass the directory's path in the tree, before resolving links: a link
+        under ``node_modules/`` is excluded by its place there, not by its
+        target. A directory below an excluded directory is excluded too.
+        Returns False when the ignore policy cannot be evaluated; each file
+        under the directory is then still checked, and rejected, by
+        ``should_index``. An evaluation error marks the filter degraded and
+        warns once, as it does for a file.
+        """
+        return bool(self._ignore_rule_matches(dir_path, is_dir=True))
+
+    def _ignore_rule_matches(self, path: Path, *, is_dir: bool) -> bool | None:
+        """Whether an ignore rule matches ``path`` where it sits in the tree.
+
+        None means the ignore policy cannot be evaluated: the engine could not
+        be built, or it has failed. The first evaluation error marks the engine
+        degraded and warns once, whichever caller hit it, so ``is_degraded``
+        reports it.
+        """
+        if not self._ensure_engine() or self._ignore_engine_degraded:
+            return None
+        engine = self._engine
+        if engine is None:  # No engine and no failure: no ignore rule applies.
+            return False
+        try:
+            if self._keep_dir_decisions:
+                in_tree = self._in_tree_under_root(path)
+                if in_tree is not None:
+                    if is_dir:
+                        return self._directory_excluded(in_tree)
+                    if self._directory_excluded(in_tree.parent):
+                        return True
+            return engine.matches(self._engine_path(path), is_dir=is_dir) is not None
+        except Exception as error:
+            self._ignore_engine_degraded = True
+            self._engine = None
+            self._warn_ignore_engine_degraded_once(error)
+            return None
+
+    def _in_tree_under_root(self, path: Path) -> Path | None:
+        """``path`` normalized without resolving links, if strictly below the root."""
+        in_tree = Path(os.path.abspath(path))
+        if in_tree != self._in_tree_root and in_tree.is_relative_to(
+            self._in_tree_root
+        ):
+            return in_tree
+        return None
+
+    def _directory_excluded(self, dir_path: Path) -> bool:
+        """Whether ``dir_path``, or a directory above it below the root, is excluded.
+
+        Each directory is matched once, where it sits in the tree, and the
+        answer is kept, so every later file under an excluded directory is
+        rejected without matching the file itself. That is the rule the
+        startup scan applies (it never descends into an excluded directory)
+        and the rule Git applies (a file cannot be re-included below an
+        excluded directory). The kept answers belong to the engine that
+        produced them: a different engine starts from none. Used only for an
+        engine whose rules are fixed (see ``_keep_dir_decisions``).
+
+        ``dir_path`` must come from ``_in_tree_under_root``. Each directory is
+        matched as ``_engine_path`` spells it, as any other path is. Raises
+        whatever the engine raises; ``_ignore_rule_matches`` handles it.
+        """
+        engine = self._engine
+        if self._dir_decisions_engine is not engine:
+            self._dir_decisions = {}
+            self._dir_decisions_engine = engine
+        decisions = self._dir_decisions
+
+        # Climb to the nearest directory already decided (or the root), then
+        # decide the ones below it top-down: once one is excluded, everything
+        # under it is, with no further matching.
+        pending: list[Path] = []
+        current = dir_path
+        excluded = False
+        while current != self._in_tree_root:
+            known = decisions.get(current)
+            if known is not None:
+                excluded = known
+                break
+            pending.append(current)
+            current = current.parent
+
+        if len(decisions) + len(pending) > self._DIR_DECISIONS_MAX:
+            decisions.clear()
+        for directory in reversed(pending):
+            if not excluded:
+                excluded = (
+                    engine.matches(self._engine_path(directory), is_dir=True)
+                    is not None
+                )
+            decisions[directory] = excluded
+        return excluded
+
+    def _engine_path(self, path: Path) -> Path:
+        """``path`` spelled under the resolved root the ignore engine was built on.
+
+        The engine matches a path where it sits only when the path is lexically
+        under its resolved root. Watchman reports paths under the root as it
+        was requested. When that spelling goes through a link (``/var`` is
+        ``/private/var`` on macOS), only the root part is respelled here, so a
+        link further down is still matched where it sits, not at its target.
+        """
+        try:
+            relative = Path(os.path.abspath(path)).relative_to(self._in_tree_root)
+        except ValueError:
+            return path
+        return self._engine_root / relative
+
+    def _ensure_engine(self) -> bool:
+        """Build the ignore engine once; False if it could not be built."""
         settings = self._settings
         if settings is None:
-            return self._language_fallback(file_path)
-
+            return False
         if not self._engine_initialized and not self._engine_initialization_failed:
             try:
                 from chunkhound.utils.ignore_engine import (
+                    RepoAwareLibgit2Evaluator,
                     build_repo_aware_ignore_engine,
                 )
 
@@ -125,6 +257,9 @@ class RealtimePathFilter:
                         settings.workspace_root_only_gitignore
                     ),
                 )
+                self._keep_dir_decisions = not isinstance(
+                    self._engine, RepoAwareLibgit2Evaluator
+                )
                 self._engine_initialized = True
             except Exception as error:
                 self._engine_initialization_failed = True
@@ -136,22 +271,34 @@ class RealtimePathFilter:
                 )
                 return False
 
-        if self._engine_initialization_failed:
+        return not self._engine_initialization_failed
+
+    def should_index(self, file_path: Path, *, check_target: bool = True) -> bool:
+        """Return whether a path should enter the realtime indexing pipeline.
+
+        A path is judged where it sits in the tree. When a link is on its way
+        (the file itself, or a directory between it and the root), the indexer
+        reads the link's target, so the target has to pass as well: a link
+        ``src/a.py -> vendor/x.py`` with ``vendor/`` ignored is not indexed.
+        The startup scan never indexes a symlinked file at all.
+
+        ``check_target=False`` judges the path where it sits only. A delete
+        reads nothing, so its target does not matter.
+        """
+        settings = self._settings
+        if settings is None:
+            return self._language_fallback(file_path)
+        if not self._admits(file_path, settings):
             return False
+        if not check_target:
+            return True
+        target = file_path.resolve()
+        return target == self._engine_path(file_path) or self._admits(target, settings)
 
-        if not self._ignore_engine_degraded:
-            try:
-                if self._engine is not None and self._engine.matches(
-                    file_path, is_dir=False
-                ):
-                    return False
-            except Exception as error:
-                self._ignore_engine_degraded = True
-                self._engine = None
-                self._warn_ignore_engine_degraded_once(error)
-                return False
-
-        if self._ignore_engine_degraded:
+    def _admits(self, file_path: Path, settings: RealtimePathFilterSettings) -> bool:
+        """The policy for ``file_path`` where it sits: ignore rules, then includes."""
+        # A match rejects the file, and so does a policy that cannot be evaluated.
+        if self._ignore_rule_matches(file_path, is_dir=False) is not False:
             return False
 
         if self._include_degraded:
