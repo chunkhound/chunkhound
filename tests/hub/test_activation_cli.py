@@ -1600,3 +1600,24 @@ async def test_pull_names_origin_before_first_request_even_if_manifest_fails(
 
     assert any("https://hub.invalid" in m for m in messages)
     assert "token=secret" not in "\n".join(messages)
+
+
+def test_forget_trust_reports_removed_versus_no_grant_for_wrong_path(
+    tmp_path, hub_http, embedding_http
+):
+    project = tmp_path / "checkout"
+    hub_url = hub_http.url + "/catalogue"
+    write_config(project, "duckdb", hub_url, embedding_http.url)
+    grant_cli_trust(project, project, hub_url)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+
+    wrong = cli(project, "pull", other, "--forget-trust")
+    assert wrong.returncode == 0
+    assert "No hub trust grant found" in wrong.stdout + wrong.stderr
+    assert cli_is_trusted(project, project, hub_url)
+
+    right = cli(project, "pull", project, "--forget-trust")
+    assert right.returncode == 0
+    assert "Removed hub trust grant" in right.stdout + right.stderr
+    assert not cli_is_trusted(project, project, hub_url)

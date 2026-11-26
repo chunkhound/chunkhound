@@ -32,10 +32,24 @@ def forget_trust_command(args: argparse.Namespace) -> None:
     if args.version != "latest":
         raise SystemExit("--version cannot be used with --forget-trust")
     try:
-        forget_checkout_trust(Path(args.path))
-    except HubTrustError as exc:
-        logger.error("{}", str(exc))
+        checkout = Path(args.path).expanduser().resolve()
+        removed = forget_checkout_trust(checkout)
+    except (HubTrustError, OSError) as exc:
+        logger.error(
+            "{}",
+            str(exc) if isinstance(exc, HubTrustError) else "Checkout is unavailable",
+        )
         raise SystemExit(1) from None
+    if removed:
+        logger.bind(hub_client=True).info(
+            "Removed hub trust grant for {}", checkout
+        )
+    else:
+        logger.warning(
+            "No hub trust grant found for {}; check that the path is the "
+            "checkout you indexed",
+            checkout,
+        )
 
 
 async def pull_command(args: argparse.Namespace, config: Config) -> None:
