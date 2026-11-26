@@ -53,7 +53,12 @@ def global_excludes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     excludes = home / "global-ignore"
     excludes.write_text(GLOBAL_PATTERNS, encoding="utf-8")
     gitconfig = home / ".gitconfig"
-    gitconfig.write_text(f"[core]\n\texcludesFile = {excludes}\n", encoding="utf-8")
+    # Use as_posix(): git config treats backslash as an escape character, so
+    # a bare WindowsPath string (backslashes) makes git fail with "bad config
+    # line" on Windows. Forward slashes are accepted by git config on every OS.
+    gitconfig.write_text(
+        f"[core]\n\texcludesFile = {excludes.as_posix()}\n", encoding="utf-8"
+    )
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("HOME", str(home))
     return excludes
