@@ -22,9 +22,6 @@ runs:
         python-version: ${{ inputs.python-version }}
     - name: Install uv
       uses: astral-sh/setup-uv@v3
-    - name: Resolve docs version
-      shell: bash
-      run: bash scripts/resolve_docs_version.sh
     - uses: actions/setup-node@v6
       if: inputs.site == 'true'
       with:
