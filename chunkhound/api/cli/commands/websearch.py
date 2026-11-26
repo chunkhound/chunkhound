@@ -7,7 +7,7 @@ import sys
 import urllib.error
 
 from chunkhound.core.config.config import Config
-from chunkhound.utils.websearch_backends import AllEnginesBlockedError
+from chunkhound.utils.websearch_backends import AllEnginesError
 from chunkhound.utils.websearch_core import websearch_timeout
 from chunkhound.utils.websearch_pipeline import (
     EmptyWebSearchError,
@@ -76,7 +76,7 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
     except NoPagesFetchedError as e:
         formatter.error(str(e))
         sys.exit(1)
-    except AllEnginesBlockedError as e:
+    except AllEnginesError as e:
         formatter.error(str(e))
         sys.exit(1)
     except Exception as exc:

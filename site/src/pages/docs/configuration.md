@@ -1057,13 +1057,13 @@ Engine order and failover are controlled by the `websearch` config section (or `
 | `selection` | `priority` = listed order; `random_healthy` = shuffle among healthy only | `priority` |
 | `cooldown_seconds` | Back-off before a refused engine is retried | 900 |
 
-Every engine response is classified by per-response evidence, and that evidence is only promoted to cooldown after repetition. The three outcomes a query can report:
+Every engine response is classified by per-response evidence, and that evidence is only promoted to cooldown after repetition. Three terminal outcomes a query can report:
 
-- **Blocked** — an engine refuses to serve (status 202/403/429, e.g. a challenge page or bot wall). Two consecutive refusals put the engine into cooldown: the first refusal records a strike, the second starts a cooldown that doubles on each further refusal (base `cooldown_seconds`, capped at 1h, ±20% jitter). A served response clears the strikes. A refusal after some results still returns the partial rows, but records the strike.
-- **Soft-empty** — the engine answered 200 but reports "no results" through its own sentinel (DuckDuckGo's `links_main` container, Bing's `b_no` marker). This is ambiguous evidence: it neither strikes nor resets the engine, and the search fails over to the next engine.
-- **No results** — every configured engine softly reported empty; the search returns "no results", never "blocked".
+- **Blocked** — every engine refuses to serve (status 202/403/429, e.g. a challenge page or bot wall); the search raises `AllEnginesBlockedError`. Two consecutive refusals put an engine into cooldown: the first refusal records a strike, the second starts a cooldown that doubles on each further refusal (base `cooldown_seconds`, capped at 1h, ±20% jitter). A served response clears the strikes and lifts any cooldown; a refusal after some rows still returns the partial rows, with no recorded strike left behind.
+- **No results** — at least one engine reports a genuine empty signal (status 200 with zero rows, via its own sentinel: DuckDuckGo's `links_main` container, Bing's `b_no` marker); the search returns "no results", even when other engines refused. Empty evidence wins: it never strikes or resets an engine, but it decides the query.
+- **Unavailable** — no engine served and none reported empty, but at least one failed non-refusal (timeout, 5xx, connection error, layout drift, or a mixed verdict including refusals); the search raises `AllEnginesUnavailableError`.
 
-Transient failures (timeouts, 5xx, connection errors) also fail over without cooldown; a layout change (drift) is reported as such. When every engine is cooling down, only the single engine that recovers soonest is probed instead of paying the full list's cost on every search. The discovery phase partitions its time budget across engines, so one hanging engine cannot starve its fallback.
+Transient failures fail over without cooldown; a layout change (drift) is reported as such. When every engine is cooling down, only the single engine that recovers soonest is probed instead of paying the full list's cost on every search. The discovery phase partitions its time budget across engines, so one hanging engine cannot starve its fallback.
 
 ### Requirements
 

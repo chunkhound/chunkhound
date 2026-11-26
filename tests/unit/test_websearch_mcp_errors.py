@@ -10,7 +10,10 @@ from chunkhound.mcp_server import tools
 from chunkhound.mcp_server.common import MCPError
 from chunkhound.services import web_research_service
 from chunkhound.utils import websearch_core, websearch_expansion
-from chunkhound.utils.websearch_backends import AllEnginesBlockedError
+from chunkhound.utils.websearch_backends import (
+    AllEnginesBlockedError,
+    AllEnginesUnavailableError,
+)
 
 
 @pytest.fixture
@@ -82,6 +85,22 @@ async def test_all_engines_blocked_raises_mcperror(monkeypatch, patched) -> None
     )
 
     with pytest.raises(MCPError, match="every engine refused"):
+        await invoke()
+
+
+@pytest.mark.asyncio
+async def test_all_engines_unavailable_raises_mcperror(monkeypatch, patched) -> None:
+    monkeypatch.setattr(
+        websearch_core,
+        "search_multi",
+        AsyncMock(
+            side_effect=AllEnginesUnavailableError(
+                [("duckduckgo", "transient failure"), ("bing", "drift")]
+            )
+        ),
+    )
+
+    with pytest.raises(MCPError, match="engines unavailable"):
         await invoke()
 
 

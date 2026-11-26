@@ -40,7 +40,7 @@ from chunkhound.services.research.shared.validation import (
     validate_research_prerequisites,
 )
 from chunkhound.services.vector_cache import VectorCache
-from chunkhound.utils.websearch_backends import AllEnginesBlockedError
+from chunkhound.utils.websearch_backends import AllEnginesError
 
 # Response size limits (tokens)
 MAX_RESPONSE_TOKENS = 20000
@@ -947,7 +947,7 @@ async def websearch_impl(
         raise MCPError(f"Web search failed: HTTP {e.code} {e.reason}") from e
     except urllib.error.URLError as e:
         raise MCPError(f"Web search failed: {e.reason}") from e
-    except AllEnginesBlockedError as e:
+    except AllEnginesError as e:
         raise MCPError(str(e)) from e
     except (TimeoutError, asyncio.TimeoutError) as e:
         raise MCPError(str(e)) from None
