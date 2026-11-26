@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.utils.path_utils import lexical_absolute_path
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
 # The watchdog event types that can mean a file's content changed, and the type
@@ -260,10 +261,17 @@ class SimpleEventHandler:
 
         # Handle directory creation
         if event_type == "created" and event.is_directory:
+            # An excluded directory is never resolved or walked. Judge it where
+            # it sits in the tree: resolving first would turn a link under
+            # node_modules/ into its target outside the root, which no exclude
+            # rule matches.
+            in_tree = lexical_absolute_path(event.src_path)
+            self._record_source_event("dir_created", in_tree)
+            if self._path_filter.excludes_directory(in_tree):
+                self._record_filtered_event("dir_created", in_tree)
+                return
             # Queue directory creation for processing
-            file_path = Path(normalize_file_path(event.src_path))
-            self._record_source_event("dir_created", file_path)
-            self._queue_event("dir_created", file_path)
+            self._queue_admitted("dir_created", in_tree)
             return
 
         # Handle directory deletion
@@ -283,17 +291,20 @@ class SimpleEventHandler:
             self._handle_move_event(event.src_path, event.dest_path)
             return
 
-        # Resolve path to canonical form to avoid /var vs /private/var issues
-        file_path = Path(normalize_file_path(event.src_path))
-        self._record_source_event(event_type, file_path)
+        # Admission judges the file where it sits in the tree, not at the
+        # resolved target of a link above it (e.g. under node_modules/), and a
+        # rejected event is never resolved: a burst of excluded events must not
+        # pay for path resolution.
+        in_tree = lexical_absolute_path(event.src_path)
+        self._record_source_event(event_type, in_tree)
 
         # Simple filtering for supported file types, with a shared
         # previously-indexed delete exception for cleanup correctness.
-        if not self._should_admit_event(event_type, file_path):
-            self._record_filtered_event(event_type, file_path)
+        if not self._should_admit_event(event_type, in_tree):
+            self._record_filtered_event(event_type, in_tree)
             return
 
-        self._queue_event(event_type, file_path)
+        self._queue_admitted(event_type, in_tree)
 
     def _should_index(self, file_path: Path) -> bool:
         """Check if file should be indexed based on config patterns.
@@ -307,8 +318,8 @@ class SimpleEventHandler:
 
     def _handle_move_event(self, src_path: str, dest_path: str) -> None:
         """Handle atomic file moves (temp -> final file)."""
-        src_file = Path(normalize_file_path(src_path))
-        dest_file = Path(normalize_file_path(dest_path))
+        src_file = lexical_absolute_path(src_path)
+        dest_file = lexical_absolute_path(dest_path)
         src_should_index = self._should_index(src_file)
         dest_should_index = self._should_index(dest_file)
         src_should_admit_delete = self._should_admit_event(
@@ -321,21 +332,21 @@ class SimpleEventHandler:
         if not src_should_index and dest_should_index:
             logger.debug(f"Atomic write detected: {src_path} -> {dest_path}")
             self._record_source_event("created", dest_file)
-            self._queue_event("created", dest_file)
+            self._queue_admitted("created", dest_file)
 
         # If moving FROM supported file -> handle as deletion + creation
         elif src_should_admit_delete and dest_should_index:
             logger.debug(f"File rename: {src_path} -> {dest_path}")
             self._record_source_event("deleted", src_file)
-            self._queue_event("deleted", src_file)
+            self._queue_admitted("deleted", src_file)
             self._record_source_event("created", dest_file)
-            self._queue_event("created", dest_file)
+            self._queue_admitted("created", dest_file)
 
         # If moving FROM supported file TO temp/unsupported -> deletion
         elif src_should_admit_delete and not dest_should_index:
             logger.debug(f"File moved to temp/unsupported: {src_path}")
             self._record_source_event("deleted", src_file)
-            self._queue_event("deleted", src_file)
+            self._queue_admitted("deleted", src_file)
 
     def _should_admit_event(
         self,
@@ -344,12 +355,47 @@ class SimpleEventHandler:
         *,
         should_index: bool | None = None,
     ) -> bool:
+        # A delete is judged where the path sits: it reads no content, so the
+        # target of a link on its way does not decide it.
         path_allowed = (
-            should_index if should_index is not None else self._should_index(file_path)
+            should_index
+            if should_index is not None
+            else self._path_filter.should_index(
+                file_path, check_target=event_type != "deleted"
+            )
         )
         if self._admission_callback is None:
             return path_allowed
         return self._admission_callback(event_type, file_path, path_allowed)
+
+    def _queue_admitted(self, event_type: str, in_tree: Path) -> None:
+        """Queue an admitted path by its resolved form, unless that leaves the root.
+
+        A path that resolves outside the root (a linked directory whose target
+        is elsewhere) cannot be stored under it, and the default startup scan,
+        which does not follow directory links, never indexes it either.
+
+        Admission judged the path where it sits; when resolving changes it, the
+        work is done on the target, so the target must pass the same policy:
+        a link ``alias.py -> ignored/secret.py`` must not index secret.py. A
+        delete is not rechecked, so a previously indexed path is still cleaned.
+        """
+        file_path = Path(normalize_file_path(in_tree))
+        if not file_path.is_relative_to(self._root):
+            self._record_filtered_event(event_type, in_tree)
+            return
+        if file_path != in_tree and not self._target_admitted(event_type, file_path):
+            self._record_filtered_event(event_type, in_tree)
+            return
+        self._queue_event(event_type, file_path)
+
+    def _target_admitted(self, event_type: str, target: Path) -> bool:
+        """Whether the resolved target of an admitted path passes the policy."""
+        if event_type == "deleted":
+            return True
+        if event_type == "dir_created":
+            return not self._path_filter.excludes_directory(target)
+        return self._should_admit_event(event_type, target)
 
     def _queue_event(self, event_type: str, file_path: Path) -> None:
         """Queue an event for async processing."""
