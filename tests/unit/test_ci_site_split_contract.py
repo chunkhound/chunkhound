@@ -44,6 +44,11 @@ def test_main_tests_job_excludes_site_and_does_not_wait_for_site_build() -> None
     # neither needs the site dist nor the docs version, so it starts at once.
     assert "site-build" not in _needs(job)
     assert "CHUNKHOUND_DOCS_VERSION" not in job.get("env", {})
+    # The shared setup action must not resolve the docs version either.
+    setup_action = (CI.parents[1] / "actions/ci-python-setup/action.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "resolve_docs_version" not in setup_action
 
 
 def test_site_tests_job_owns_site_contracts() -> None:

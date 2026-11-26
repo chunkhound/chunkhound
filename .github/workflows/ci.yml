@@ -172,7 +172,10 @@ jobs:
     needs: site-build
     strategy:
       matrix:
-        os: [ubuntu-latest]  # Linux only: the site is built and deployed from Linux
+        # Linux only: the site is built and deployed from Linux. Browser contracts
+        # launch real Chromium, so non-Linux browser and toolchain coverage is
+        # intentionally dropped, not equivalent.
+        os: [ubuntu-latest]
         python: ["3.14"]
         split: [1, 2, 3]
         include:
@@ -221,7 +224,7 @@ jobs:
         with:
           timeout_minutes: ${{ matrix.pytest_timeout_minutes || 13 }}
           max_attempts: 2
-          command: uv run pytest tests/site -v --junit-xml=site-test-results.xml --splits 3 --group ${{ matrix.split }} --splitting-algorithm least_duration --timeout=700 ${{ matrix.pytest_extra_args || '' }}
+          command: uv run pytest tests/site -v --junit-xml=site-test-results.xml --splits 3 --group ${{ matrix.split }} --splitting-algorithm least_duration --timeout=700
 
       - name: Upload site test results
         if: always()
