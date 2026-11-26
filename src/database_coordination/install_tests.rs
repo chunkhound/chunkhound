@@ -40,6 +40,8 @@ fn filesystem_failures_preserve_old_or_refuse_open_and_cleanup_is_only_warning()
             assert!(matches!(result, Err(LeaseError::Filesystem(_))));
             assert_eq!(fs::read(&target).unwrap(), b"old");
             assert_eq!(fs::read(sibling(&target, ".wal")).unwrap(), b"old wal");
+            // A failure before the marker must not destroy the verified candidate.
+            assert_eq!(fs::read(&candidate).unwrap(), b"new", "{point:?}");
         }
         assert_eq!(lease.interrupted().unwrap(), interrupted);
         drop(lease);

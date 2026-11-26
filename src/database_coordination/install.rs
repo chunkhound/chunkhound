@@ -157,6 +157,11 @@ pub(super) fn install_with(
         // An unreadable/ambiguous marker is refusal, not permission to index locally.
         match metadata_optional(&marker) {
             Ok(None) => {
+                // Nothing was isolated without a marker; give the verified candidate
+                // back to the caller instead of deleting it with the quarantine.
+                if incoming.exists() {
+                    let _ = fs::rename(&incoming, &candidate);
+                }
                 let _ = fs::remove_dir_all(&quarantine);
                 return Err(error);
             }
