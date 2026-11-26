@@ -383,7 +383,17 @@ async def run_rust_indexing_phase(
             embed_task=embed_task,
             compact_db_file=compact_db_file,
         )
-    progress_cb = progress_bridge
+
+    def progress_cb(phase: str, current: int, total: int, chunks: int = 0) -> None:
+        """Note the run's progress on the database, then drive the progress bars.
+
+        Always passed, so a run holding the database has a heartbeat even with
+        no progress display. Takes write-data's four arguments:
+        Rust discards callback errors, so a wrong arity would go unseen.
+        """
+        db.note_rust_pipeline_progress(phase)
+        if progress_bridge is not None:
+            progress_bridge(phase, current, total, chunks)
 
     # Close Python-side DuckDB BEFORE the Rust pipeline starts.
     #
