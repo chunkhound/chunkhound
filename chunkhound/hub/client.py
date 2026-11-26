@@ -221,6 +221,17 @@ def automatic_pull_eligible(
     )
 
 
+def _authorized_for_pull(checkout: Path, url: str) -> bool:
+    """Whether the stored grant covers this source; unreadable state is fatal."""
+    try:
+        return is_trusted(checkout, url)
+    except HubTrustError:
+        raise HubAuthorizationError(
+            "Hub source authorization could not be verified; automatic hub "
+            "use was not started"
+        ) from None
+
+
 async def _pull(
     config: Config,
     rel: str,
@@ -250,14 +261,8 @@ async def _pull(
     ):
         raise HubUnavailable("Validated hub source no longer matches configuration")
     if not explicit_trust:
-        try:
-            if not is_trusted(checkout, url):
-                return False
-        except HubTrustError:
-            raise HubAuthorizationError(
-                "Hub source authorization could not be verified; automatic hub "
-                "use was not started"
-            ) from None
+        if not _authorized_for_pull(checkout, url):
+            return False
     target = installation_target(config)
     key = configured_key(config)  # Offline; do not let drift pinning run first.
     if automatic:
@@ -278,14 +283,8 @@ async def _pull(
     elif automatic:
         if not binding_unchanged(config, authorized_checkout_digest, url):
             return False
-        try:
-            if not is_trusted(config.target_dir or Path.cwd(), url):
-                return False
-        except HubTrustError:
-            raise HubAuthorizationError(
-                "Hub source authorization could not be verified; automatic hub "
-                "use was not started"
-            ) from None
+        if not _authorized_for_pull(config.target_dir or Path.cwd(), url):
+            return False
         logger.bind(hub_client=True).info(
             "Automatic hub pull from origin={}", hub_origin(url)
         )
@@ -343,7 +342,9 @@ async def _pull(
         installed = await _await_pull_worker(worker)
     if installed:
         logger.bind(hub_client=True).info(
-            "Hub base installed; run index to overlay local changes"
+            "Hub base installed; indexing continues with your local changes"
+            if automatic
+            else "Hub base installed; run index to overlay local changes"
         )
     return installed
 

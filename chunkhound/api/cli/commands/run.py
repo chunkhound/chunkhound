@@ -88,9 +88,7 @@ def _hub_prompts_allowed() -> bool:
     )
 
 
-def _choose_untrusted_cold_action(
-    formatter: RichOutputFormatter, hub_url: str
-) -> str:
+def _choose_untrusted_cold_action(formatter: RichOutputFormatter, hub_url: str) -> str:
     formatter.info(f"Configured hub source: {hub_origin(hub_url)}")
     formatter.info(
         "A hub database may be available and could avoid a full local index."
@@ -209,6 +207,10 @@ async def _prepare_hub_index(
             return HubIndexDecision.CONTINUE_LOCAL
         if _choose_untrusted_cold_action(formatter, hub_url) == "local":
             return HubIndexDecision.CONTINUE_LOCAL
+        formatter.info(
+            "Indexing cancelled; no hub request was made. Run chunkhound index "
+            "--trust to authorize the source, or disable hub.url."
+        )
         return HubIndexDecision.STOP
 
     source: ValidatedHubSource | None = None
@@ -408,7 +410,9 @@ def _is_db_lock_error(exc: Exception) -> bool:
         # DuckDB may append lock-owner process details on subsequent lines.
         or (
             msg.startswith("cannot open file")
-            and msg.partition("\n")[0].rstrip("\r").endswith(
+            and msg.partition("\n")[0]
+            .rstrip("\r")
+            .endswith(
                 "the process cannot access the file because it is being used "
                 "by another process."
             )

@@ -953,3 +953,16 @@ async def test_unsupported_layout_continues_local_without_hub(
 
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
     assert formatter.diagnostics == []
+
+
+async def test_cancelling_untrusted_cold_prompt_says_nothing_was_requested(
+    config, args, formatter, monkeypatch, absent_target
+):
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(run.prompts, "prompt_text", lambda *_a, **_k: "cancel")
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    assert "no hub request was made" in formatter.text
