@@ -109,6 +109,12 @@
       "authUrl": "https://www.runcrate.ai/dashboard/api-keys"
     },
     {
+      "id": "teamorouter",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://teamorouter.com/dashboard?tab=api-keys"
+    },
+    {
       "id": "uberllm",
       "requiresModel": true,
       "customEndpointRequiresModel": true,
