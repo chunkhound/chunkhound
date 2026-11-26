@@ -5,7 +5,7 @@ IN_Q_OVERFLOW record. watchdog 7.1 rebuilds its watches on that record but
 emits no event, so the service cannot know that changes were lost. This module
 builds an inotify observer whose FD reader also calls ``on_overflow``.
 
-Tested with watchdog 7.1.0. The hook relies on two private watchdog internals:
+The hook relies on two private watchdog internals:
 ``inotify_c.InotifyFD.handle_event`` and ``InotifyObserver._inotify_fd``. On
 watchdog < 7.1, on a version whose internals no longer match, or where inotify
 is unusable, no hook is installed and detection reports "unavailable".
@@ -37,7 +37,7 @@ InotifyOverflowDetection = Literal["active", "unavailable", "not_applicable"]
 def create_inotify_observer(
     on_overflow: Callable[[], None],
 ) -> RealtimeObserver | None:
-    """Return a started-FD inotify observer that reports overflows, or None.
+    """Return an inotify observer that reports overflows, or None.
 
     None means no hook can be installed (not Linux, inotify unusable, or
     watchdog < 7.1, which drops the overflow record); the caller then uses
@@ -54,7 +54,9 @@ def create_inotify_observer(
     except (ImportError, UnsupportedLibcError):
         return None
     inotify_fd_cls = getattr(inotify_c, "InotifyFD", None)
-    if inotify_fd_cls is None:
+    if inotify_fd_cls is None or not callable(
+        getattr(inotify_fd_cls, "handle_event", None)
+    ):
         return None
 
     class _OverflowSignalingInotifyFD(inotify_fd_cls):  # type: ignore[misc,valid-type]
@@ -72,12 +74,19 @@ def create_inotify_observer(
                             f"inotify overflow could not be reported: {error}"
                         )
 
-    observer = InotifyObserver()
-    fd = getattr(observer, "_inotify_fd", None)
-    if not isinstance(fd, inotify_fd_cls):
+    class _OverflowObserver(InotifyObserver):
+        def __setattr__(self, name: str, value: Any) -> None:
+            # watchdog assigns the reader during construction in 7.1.0 and
+            # during the first schedule() in 7.1.1, before installing a watch.
+            if name == "_inotify_fd" and isinstance(value, inotify_fd_cls):
+                value.__class__ = _OverflowSignalingInotifyFD
+            super().__setattr__(name, value)
+
+    observer = _OverflowObserver()
+    fd = getattr(observer, "_inotify_fd", ...)
+    if fd is None and isinstance(getattr(observer, "_emitter_kwargs", None), dict):
+        return observer
+    if not isinstance(fd, _OverflowSignalingInotifyFD):
         observer.stop()
         return None
-    # No watch is scheduled yet, so no event can reach the FD thread before
-    # the swap; its run() resolves self.handle_event per event.
-    fd.__class__ = _OverflowSignalingInotifyFD
     return observer

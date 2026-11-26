@@ -124,7 +124,7 @@ class TestRealtimeFailures:
     @pytest.mark.asyncio
     async def test_file_debouncing_cleans_up_state(self, realtime_setup):
         """Test that rapid changes to one file leave no stale debounce state."""
-        service, watch_dir, _, _ = realtime_setup
+        service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
 
         # Wait for initial scan to complete
@@ -136,13 +136,37 @@ class TestRealtimeFailures:
             test_file.write_text(f"def func_{i}(): pass")
             await asyncio.sleep(0.01)
 
-        # Wait for debounce delay + buffer to let the task complete and clean up
-        await asyncio.sleep(2.0)
+        # The watcher can deliver the burst after the writes finish. Observe its
+        # final content in the index before checking for leftover debounce state.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(5.0, get_fs_event_timeout())
+        while True:
+            record = services.provider.get_file_by_path(str(test_file))
+            chunks = (
+                services.provider.get_chunks_by_file_id(record["id"]) if record else []
+            )
+            codes = [chunk["code"] for chunk in chunks]
+            if any("def func_19(): pass" in code for code in codes):
+                break
+            assert loop.time() < deadline, (
+                f"Final write was not indexed: last chunk codes={codes!r}, "
+                f"pending entries={len(service._pending_debounce)} "
+                f"keys={list(service._pending_debounce)!r}, "
+                f"debounce tasks={len(service._debounce_tasks)}"
+            )
+            await asyncio.sleep(0.05)
+
+        deadline = loop.time() + 2.0
+        while loop.time() < deadline and (
+            service._pending_debounce or service._debounce_tasks
+        ):
+            await asyncio.sleep(0.05)
         assert len(service._pending_debounce) == 0, (
             f"Stale debounce entries after processing: {list(service._pending_debounce)}"
         )
         assert len(service._debounce_tasks) == 0, (
-            f"Leaked debounce tasks after processing: {len(service._debounce_tasks)}"
+            f"Leaked debounce tasks after processing: {len(service._debounce_tasks)} "
+            f"{[task.get_coro().__qualname__ for task in service._debounce_tasks]}"
         )
 
     @pytest.mark.asyncio
