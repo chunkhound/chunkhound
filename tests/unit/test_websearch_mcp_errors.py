@@ -81,7 +81,7 @@ async def test_all_engines_blocked_raises_mcperror(monkeypatch, patched) -> None
         ),
     )
 
-    with pytest.raises(MCPError, match="all engines unavailable"):
+    with pytest.raises(MCPError, match="every engine refused"):
         await invoke()
 
 

@@ -13,7 +13,7 @@ _DISCOVERY_TIMEOUT_CAP_SECONDS = 60.0
 
 
 class EmptyWebSearchError(Exception):
-    """Every engine returned no rows for the query (not refused)."""
+    """No engine served; any genuine-empty signal counts, even alongside refusals."""
 
 
 class NoPagesFetchedError(Exception):

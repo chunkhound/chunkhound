@@ -189,7 +189,7 @@ async def test_websearch_command_all_engines_blocked_exits_1(
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "all engines unavailable" in captured.err
+    assert "every engine refused" in captured.err
 
 
 @pytest.mark.asyncio

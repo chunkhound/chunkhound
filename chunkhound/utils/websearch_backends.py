@@ -5,7 +5,9 @@ configurable order (or a shuffle among healthy ones), and the first engine
 that serves wins. Per-response verdicts (see ``websearch_verdict``) are
 evidence; the registry turns accumulated evidence into cooldowns. A refusal
 is distinct from an empty SERP — ``AllEnginesBlockedError`` means every
-attempted engine refused, ``[]`` means the query genuinely had no hits.
+attempted engine refused, ``AllEnginesUnavailableError`` means no engine
+served without a genuine-empty signal, and ``[]`` means the query
+genuinely had no hits.
 """
 
 from __future__ import annotations
@@ -55,16 +57,29 @@ _BING_RESULTS_CONTAINER = 'id="b_results"'
 _BING_NO_RESULTS_TEXT = "there are no results"
 
 
-class AllEnginesBlockedError(Exception):
-    """Every attempted engine refused to serve the search."""
+class AllEnginesError(Exception):
+    """Base for terminal all-engines failures; subclasses set _message_prefix."""
+
+    _message_prefix = ""
 
     def __init__(self, reasons: list[tuple[str, str]]) -> None:
         self.reasons = list(reasons)
         self.engines = [name for name, _ in self.reasons]
         details = "; ".join(f"{name}: {evidence}" for name, evidence in self.reasons)
-        super().__init__(
-            f"Blocked by {', '.join(self.engines)}; all engines unavailable ({details})"
-        )
+        prefix = self._message_prefix.format(engines=", ".join(self.engines))
+        super().__init__(f"{prefix} ({details})")
+
+
+class AllEnginesBlockedError(AllEnginesError):
+    """Every attempted engine refused to serve the search."""
+
+    _message_prefix = "Blocked by {engines}; every engine refused"
+
+
+class AllEnginesUnavailableError(AllEnginesError):
+    """No engine served; at least one was unavailable (not a genuine empty)."""
+
+    _message_prefix = "No engine served; engines unavailable"
 
 
 class EngineRegistry:
@@ -104,7 +119,12 @@ class EngineRegistry:
         cooldown_seconds: int | None = None,
     ) -> None:
         """Accumulate one run's evidence into the health state."""
-        if run.strike:
+        if run.verdict is Verdict.SERVED:
+            self._strikes[engine] = 0
+            # A served run proves the engine works: lift any cooldown,
+            # even when a later query in the same scan was refused.
+            self._blocked_until.pop(engine, None)
+        elif run.strike:
             count = self._strikes.get(engine, 0) + 1
             self._strikes[engine] = count
             if count >= 2:
@@ -112,8 +132,6 @@ class EngineRegistry:
                     engine,
                     cooldown_seconds=self._escalated_cooldown(count, cooldown_seconds),
                 )
-        elif run.verdict is Verdict.SERVED:
-            self._strikes[engine] = 0
 
     def _escalated_cooldown(self, strikes: int, override: int | None) -> int:
         # 2nd strike costs the base cooldown, each further one doubles, so a
@@ -396,9 +414,8 @@ async def _run_engine(
     Each response is evidence only; aggregation decides the run's verdict:
     rows -> SERVED (with a strike when any refusal was seen), refusals ->
     REFUSED, drift -> DRIFT, transient/URLError -> TRANSIENT, all empty ->
-    EMPTY. Early-break after 2 refusals with no rows yet. URLError semantics
-    preserved: continue with remaining queries; re-raise the first only when
-    every query raised one.
+    EMPTY. Early-break after 2 refusals with no rows yet. URLError is a
+    transient signal, never a genuine-empty one, and never aborts the scan.
     """
     n = len(queries)
     batches: list[list[tuple[str, str, str]]] = []
@@ -407,7 +424,6 @@ async def _run_engine(
     drifts = 0
     transients = 0
     urlerrors = 0
-    first_error: urllib.error.URLError | None = None
     cancel_event = threading.Event()
     try:
         for i, q in enumerate(queries, start=1):
@@ -452,8 +468,6 @@ async def _run_engine(
                         "continuing with remaining queries"
                     )
                 evidences.append(f"connection error: {e.reason}")
-                if first_error is None:
-                    first_error = e
                 urlerrors += 1
                 continue
             # Verdict and rows are independent: a refusal that arrives after
@@ -472,17 +486,20 @@ async def _run_engine(
                 break  # two refusals and no rows: this engine is done
     finally:
         cancel_event.set()
-    if urlerrors == n and first_error is not None:
-        raise first_error
     evidence = "; ".join(dict.fromkeys(evidences))
     rows = _merge_rank_major(batches)[:limit]
+    # Transport failures are transient, never a genuine empty — partial or
+    # total, so an unreachable engine fails over instead of reporting [].
+    had_transport_error = urlerrors > 0
     if rows:
         return EngineRun(rows, Verdict.SERVED, evidence, strike=refusals > 0)
+    if refusals and (drifts or transients or had_transport_error):
+        return EngineRun([], Verdict.TRANSIENT, evidence, strike=True)
     if refusals:
         return EngineRun([], Verdict.REFUSED, evidence, strike=True)
     if drifts:
         return EngineRun([], Verdict.DRIFT, evidence)
-    if transients:
+    if transients or had_transport_error:
         return EngineRun([], Verdict.TRANSIENT, evidence)
     return EngineRun([], Verdict.EMPTY, evidence)
 
@@ -503,9 +520,10 @@ async def run_engine_search(
     (remaining / engines remaining, floored): an engine that overruns its
     slice yields TRANSIENT and fails over, so one hanging engine cannot
     starve the fallbacks. EMPTY/DRIFT/TRANSIENT continue to the next engine;
-    only rows end the search. When no engine served and every attempted one
-    was REFUSED, raise ``AllEnginesBlockedError``; otherwise return []
-    (genuine "no results").
+    only rows end the search. When no engine served: any EMPTY verdict
+    means genuine no-results and returns []; every attempted engine REFUSED
+    raises ``AllEnginesBlockedError``; anything else (transient/drift/
+    mixed) raises ``AllEnginesUnavailableError``.
     """
     queries = list(dict.fromkeys(queries))  # dedupe identical strings; preserves order
     if not queries:
@@ -516,6 +534,7 @@ async def run_engine_search(
     deadline = loop.time() + timeout_s if timeout_s is not None else None
     reasons: list[tuple[str, str]] = []
     all_refused = True
+    saw_empty = False
     for idx, engine_name in enumerate(order):
         engines_remaining = len(order) - idx
         engine_deadline: float | None = None
@@ -541,6 +560,8 @@ async def run_engine_search(
         )
         if run.rows:
             return run.rows
+        if run.verdict is Verdict.EMPTY:
+            saw_empty = True
         if run.verdict is not Verdict.REFUSED:
             all_refused = False
         reasons.append((engine_name, run.evidence))
@@ -560,6 +581,8 @@ async def run_engine_search(
                 )
             else:
                 progress_callback(f"{engine_name} transient ({run.evidence}){hint}")
-    if reasons and all_refused:
+    if saw_empty:
+        return []
+    if all_refused:
         raise AllEnginesBlockedError(reasons)
-    return []
+    raise AllEnginesUnavailableError(reasons)

@@ -1233,10 +1233,12 @@ async def search_multi(
     ``websearch_backends`` (engine order, cooldown, failover). When
     ``websearch_config`` is None the default engine list is used.
 
-    On per-query URLError, invoke ``failure_callback`` when provided or
-    fall back to a ``logger.warning`` when no callback is supplied, and
-    continue with the remaining queries; if ALL raise, re-raise the
-    first.
+    On per-query URLError, invoke ``failure_callback`` when provided (or
+    ``logger.warning`` otherwise) and continue with the remaining queries.
+    Terminal outcomes: rows when an engine served; ``[]`` when every
+    engine reported a genuine empty; ``AllEnginesBlockedError`` when every
+    engine refused; ``AllEnginesUnavailableError`` when no engine served
+    without a genuine-empty signal.
     """
     if not queries:
         return []

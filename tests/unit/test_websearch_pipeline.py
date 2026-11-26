@@ -54,7 +54,7 @@ async def test_all_engines_blocked_propagates(monkeypatch) -> None:
         ),
     )
 
-    with pytest.raises(AllEnginesBlockedError, match="all engines unavailable"):
+    with pytest.raises(AllEnginesBlockedError, match="every engine refused"):
         await run_websearch(
             "q",
             limit=1,

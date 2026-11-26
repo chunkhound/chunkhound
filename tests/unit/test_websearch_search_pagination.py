@@ -18,8 +18,28 @@ import urllib.error
 import pytest
 from loguru import logger
 
-from chunkhound.utils import websearch_core as ws_mod
+from chunkhound.core.config.websearch_config import WebSearchConfig
+from chunkhound.utils import websearch_backends as b, websearch_core as ws_mod
+from chunkhound.utils.websearch_backends import AllEnginesUnavailableError
 from chunkhound.utils.websearch_verdict import EngineResponse, Verdict
+
+
+@pytest.fixture(autouse=True)
+def _guard_live_bing(monkeypatch):
+    """Fail loudly if any ``search_multi`` falls through to the live Bing backend.
+
+    Unit tests stub the DuckDuckGo adapter; an empty-stub fallthrough would
+    otherwise hit the real network (slow, flaky, offline-hostile).
+    """
+
+    class _NeverBing:
+        def search(self, *args, **kwargs):
+            raise AssertionError(
+                "test reached the live Bing backend; stub every engine"
+            )
+
+    monkeypatch.setitem(b.ALL_BACKENDS, "bing", _NeverBing())
+
 
 # ---------------------------------------------------------------------------
 # HTML fixture builders
@@ -309,7 +329,15 @@ def test_search_multi_passes_full_limit_to_each_query(monkeypatch) -> None:
     }
     calls = _install_search_stub(monkeypatch, responses)
 
-    asyncio.run(ws_mod.search_multi(["q1", "q2", "q3"], limit=10))
+    # Single-engine config: empty stub rows must not fail over to a live
+    # Bing request (default config would try the real network here).
+    asyncio.run(
+        ws_mod.search_multi(
+            ["q1", "q2", "q3"],
+            limit=10,
+            websearch_config=WebSearchConfig(backends=["duckduckgo"]),
+        )
+    )
 
     assert [c[1] for c in calls] == [10, 10, 10]
 
@@ -485,7 +513,7 @@ def test_search_multi_does_not_log_when_callback_provided(monkeypatch) -> None:
     assert not any("DDG query failed" in m for m in log_messages)
 
 
-def test_search_multi_reraises_first_error_when_all_fail(monkeypatch) -> None:
+def test_search_multi_all_queries_urlerror_raises_unavailable(monkeypatch) -> None:
     first = urllib.error.URLError("first")
     responses: dict[str, list[tuple[str, str, str]] | Exception] = {
         "q1": first,
@@ -493,9 +521,17 @@ def test_search_multi_reraises_first_error_when_all_fail(monkeypatch) -> None:
     }
     _install_search_stub(monkeypatch, responses)
 
-    with pytest.raises(urllib.error.URLError) as exc:
-        asyncio.run(ws_mod.search_multi(["q1", "q2"], limit=10))
-    assert exc.value is first
+    # All queries failing with URLError on the only engine is a transient
+    # outage, not a re-raise: the engine is unavailable and the caller gets
+    # the truthful unavailable outcome instead of a raw URLError.
+    with pytest.raises(AllEnginesUnavailableError):
+        asyncio.run(
+            ws_mod.search_multi(
+                ["q1", "q2"],
+                limit=10,
+                websearch_config=WebSearchConfig(backends=["duckduckgo"]),
+            )
+        )
 
 
 def test_search_multi_empty_queries_returns_empty(monkeypatch) -> None:

@@ -111,7 +111,7 @@ def test_all_engines_refused_raises_with_names_and_evidence(monkeypatch) -> None
         asyncio.run(_run(["q"]))
     assert exc.value.engines == ["duckduckgo", "bing"]
     message = str(exc.value)
-    assert message.startswith("Blocked by duckduckgo, bing; all engines unavailable")
+    assert message.startswith("Blocked by duckduckgo, bing; every engine refused")
     assert "(duckduckgo: refused status 202; bing: refused status 429)" in message
 
 
@@ -123,6 +123,61 @@ def test_all_engines_empty_returns_no_results(monkeypatch) -> None:
     out = asyncio.run(_run(["q"]))
 
     assert out == []
+
+
+def test_mixed_empty_and_refused_returns_no_results(monkeypatch) -> None:
+    # A genuine empty signal (mixed with a refusal) is still a no-results
+    # outcome, not an engine outage.
+    ddg = _FakeBackend("duckduckgo", lambda q: _empty())
+    bing = _FakeBackend("bing", lambda q: _refused(429))
+    _install_backends(monkeypatch, ddg=ddg, bing=bing)
+
+    out = asyncio.run(_run(["q"]))
+
+    assert out == []
+
+
+def test_mixed_refuse_and_transient_raises_unavailable(monkeypatch) -> None:
+    ddg = _FakeBackend("duckduckgo", lambda q: _refused(202))
+    bing = _FakeBackend(
+        "bing",
+        lambda q: EngineResponse((), Verdict.TRANSIENT, 503, "connection reset"),
+    )
+    _install_backends(monkeypatch, ddg=ddg, bing=bing)
+
+    with pytest.raises(b.AllEnginesUnavailableError) as exc:
+        asyncio.run(_run(["q"]))
+    assert exc.value.engines == ["duckduckgo", "bing"]
+
+
+def test_single_engine_mixed_refusal_and_transient_raises_unavailable(
+    monkeypatch,
+) -> None:
+    def serp(q):
+        if q == "q1":
+            return _refused(429)
+        return EngineResponse((), Verdict.TRANSIENT, 503, "overloaded status 503")
+
+    _install_backends(monkeypatch, ddg=_FakeBackend("duckduckgo", serp))
+    registry = b.EngineRegistry()
+    cfg = WebSearchConfig(backends=["duckduckgo"])
+    with pytest.raises(b.AllEnginesUnavailableError) as exc:
+        asyncio.run(_run(["q1", "q2"], config=cfg, registry=registry))
+    assert exc.value.reasons == [
+        ("duckduckgo", "refused status 429; overloaded status 503")
+    ]
+    assert registry.strikes("duckduckgo") == 1
+
+
+def test_partial_url_failure_is_transient_not_genuine_empty(monkeypatch) -> None:
+    def ddg_serp(q):
+        if q == "q1":
+            raise urllib.error.URLError("connection reset")
+        return _empty()
+
+    _install_backends(monkeypatch, ddg=_FakeBackend("duckduckgo", ddg_serp))
+    with pytest.raises(b.AllEnginesUnavailableError):
+        asyncio.run(_run(["q1", "q2"], config=WebSearchConfig(backends=["duckduckgo"])))
 
 
 def test_empty_from_first_engine_falls_through_to_second(monkeypatch) -> None:
@@ -137,7 +192,7 @@ def test_empty_from_first_engine_falls_through_to_second(monkeypatch) -> None:
     assert any("duckduckgo returned no results; trying bing" in m for m in progress)
 
 
-def test_mid_search_refusal_keeps_partial_rows_and_records_strike(
+def test_mid_search_refusal_keeps_partial_rows_and_clears_strike(
     monkeypatch,
 ) -> None:
     def serp(q):
@@ -152,19 +207,29 @@ def test_mid_search_refusal_keeps_partial_rows_and_records_strike(
 
     assert [u for _, u, _ in out] == ["https://a/"]
     assert bing.calls == []
-    assert registry.strikes("duckduckgo") == 1
+    # A served run clears even a same-run refusal strike.
+    assert registry.strikes("duckduckgo") == 0
 
 
-def test_urlerror_all_fail_reraises(monkeypatch) -> None:
+def test_urlerror_all_fail_falls_back_to_next_engine(monkeypatch) -> None:
     first = urllib.error.URLError("boom")
     ddg = _FakeBackend("duckduckgo", lambda q: first)
-    bing = _unused_backend("bing")
+    bing = _FakeBackend("bing", lambda q: _served("https://b/"))
     _install_backends(monkeypatch, ddg=ddg, bing=bing)
 
-    with pytest.raises(urllib.error.URLError) as exc:
+    out = asyncio.run(_run(["q1", "q2"]))
+
+    assert [u for _, u, _ in out] == ["https://b/"]
+    assert bing.calls == [("q1", 10), ("q2", 10)]
+
+
+def test_all_engines_urlerror_raises_unavailable(monkeypatch) -> None:
+    ddg = _FakeBackend("duckduckgo", lambda q: urllib.error.URLError("boom"))
+    bing = _FakeBackend("bing", lambda q: urllib.error.URLError("bang"))
+    _install_backends(monkeypatch, ddg=ddg, bing=bing)
+
+    with pytest.raises(b.AllEnginesUnavailableError):
         asyncio.run(_run(["q1", "q2"]))
-    assert exc.value is first
-    assert bing.calls == []
 
 
 def test_search_multi_defaults_to_duckduckgo_first(monkeypatch) -> None:
@@ -279,9 +344,6 @@ def test_registry_cooldown_blocks_then_expires() -> None:
     assert not registry.is_healthy("bing")
     registry.mark_blocked("bing", cooldown_seconds=0)
     assert registry.is_healthy("bing")
-    # Force expiry.
-    registry._blocked_until["bing"] = time.monotonic() - 1
-    assert registry.is_healthy("bing")
 
 
 def test_multi_query_progress_prefixes_match_iteration(monkeypatch) -> None:
@@ -305,7 +367,7 @@ def test_per_call_cooldown_does_not_mutate_registry(monkeypatch) -> None:
     with pytest.raises(b.AllEnginesBlockedError):
         asyncio.run(_run(["q"], config=cfg, registry=registry))
     assert registry.strikes("duckduckgo") == 1
-    assert "duckduckgo" not in registry._blocked_until
+    assert registry.is_healthy("duckduckgo")
 
     # A second consecutive refusal blocks for the *config* cooldown (±20%
     # jitter), not the registry's own 3600s default.
@@ -313,8 +375,8 @@ def test_per_call_cooldown_does_not_mutate_registry(monkeypatch) -> None:
         asyncio.run(_run(["q"], config=cfg, registry=registry))
 
     assert registry.cooldown_seconds == 3600
-    elapsed = registry._blocked_until["duckduckgo"] - time.monotonic()
-    assert 60 * 0.8 <= elapsed <= 60 * 1.2
+    elapsed = registry.recover_at("duckduckgo") - time.monotonic()
+    assert 60 * 0.8 - 1 <= elapsed <= 60 * 1.2
 
 
 class _HangingBackend:
@@ -345,3 +407,19 @@ def test_hanging_primary_times_out_and_fallback_serves(monkeypatch) -> None:
     assert [u for _, u, _ in out] == ["https://b/"]
     assert ddg.calls == [("q", 10)]
     assert any("transient" in m for m in progress)
+def test_served_run_clears_cooldown_block() -> None:
+    registry = b.EngineRegistry(cooldown_seconds=3600)
+    registry.record(
+        "bing", EngineRun([], Verdict.REFUSED, "refused status 403", strike=True)
+    )
+    registry.record(
+        "bing", EngineRun([], Verdict.REFUSED, "refused status 429", strike=True)
+    )
+    assert not registry.is_healthy("bing")
+
+    registry.record(
+        "bing", EngineRun([("T", "https://a/", "d")], Verdict.SERVED, strike=True)
+    )
+
+    assert registry.is_healthy("bing")
+    assert registry.strikes("bing") == 0
