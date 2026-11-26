@@ -9,11 +9,6 @@ from loguru import logger
 
 import chunkhound_native as native
 from chunkhound.core.config.config import Config
-from chunkhound.core.embedding_model_drift import (
-    active_model_path,
-    read_active_model,
-    resolve_indexed_model,
-)
 from chunkhound.hub.artifact import PreparationState, prepare
 from chunkhound.hub.errors import (
     FATAL_HUB_ERRORS,
@@ -26,7 +21,6 @@ from chunkhound.hub.errors import (
     hub_origin,
     safe_label,
 )
-from chunkhound.hub.inspect import inspect_database
 from chunkhound.hub.install import (
     NATIVE_ERRORS,
     install_candidate,
@@ -35,7 +29,6 @@ from chunkhound.hub.install import (
 )
 from chunkhound.hub.manifest import (
     Manifest,
-    MatchKey,
     configured_key,
     parse_manifest,
     select_manifest,
@@ -159,39 +152,6 @@ def automatic_target_appears_cold(target: Path, backend: str) -> bool:
             return False
         return False
     return True
-
-
-def local_needs_pull(
-    target: Path,
-    key: MatchKey,
-    *,
-    ownership: DatabaseOwnership | None = None,
-) -> bool:
-    # Acquire before existence test: an absent target plus a marker is NOT cold.
-    """Return whether local state is absent or incompatible and so needs a hub base."""
-    with ownership_scope(target, ownership) as held:
-        if not target.exists():
-            return True
-        try:
-            inventory = inspect_database(target, key.db_provider, ownership=held)
-            sidecar = active_model_path(target)
-            active = read_active_model(sidecar) if sidecar is not None else None
-            indexed = resolve_indexed_model(inventory.groups, active)
-        except DatabaseReaderCloseError:
-            raise
-        except NATIVE_ERRORS:
-            raise
-        except Exception:
-            # Unreadable/empty local state is not evidence of embedding drift.
-            logger.bind(hub_client=True).info(
-                "Hub auto-pull skipped: local embedding identity is unreadable"
-            )
-            return False
-        return indexed is not None and (
-            indexed.provider,
-            indexed.model,
-            indexed.dims,
-        ) != (key.provider, key.model, key.dims)
 
 
 def automatic_target_absent(

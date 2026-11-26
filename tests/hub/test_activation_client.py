@@ -28,7 +28,6 @@ from chunkhound.hub.client import (
     automatic_target_absent,
     automatic_target_appears_cold,
     fetch_validated_manifest,
-    local_needs_pull,
     pull,
 )
 from chunkhound.hub.errors import (
@@ -37,7 +36,6 @@ from chunkhound.hub.errors import (
     HubLocalStateError,
 )
 from chunkhound.hub.inspect import inspect_database
-from chunkhound.hub.manifest import configured_key
 from chunkhound.hub.trust import (
     checkout_digest,
     grant_trust,
@@ -47,7 +45,6 @@ from chunkhound.providers.database import ownership
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 from chunkhound.providers.database.ownership import (
-    DatabaseOwnership,
     DatabaseReaderCloseError,
 )
 from tests.hub.activation_support import config_for, publish
@@ -1418,33 +1415,6 @@ async def test_pull_reader_failure_is_fatal_retains_owner_and_retries_safely(
         for workspace in held_workspaces:
             workspace.cleanup()
         logger.remove(sink)
-
-
-def test_local_reader_retry_does_not_release_borrowed_exclusive_owner(
-    tmp_path, hub_http, monkeypatch
-):
-    config = config_for(tmp_path / "checkout", hub_http)
-    target = build_database(config.database.path)
-    owner = DatabaseOwnership(native.acquire_install_lease(str(target), "duckdb"))
-    original = None
-    try:
-        with reader_close_fault(
-            monkeypatch, lambda path: path.resolve() == target.resolve()
-        ):
-            with pytest.raises(DatabaseReaderCloseError) as raised:
-                local_needs_pull(target, configured_key(config), ownership=owner)
-            original = raised.value
-            assert original.ownership is owner
-        original.retry_close()
-        owner.assert_covers(target)
-        with pytest.raises(native.DatabaseBusyError):
-            native.acquire_install_lease(str(target), "duckdb")
-    finally:
-        if original is not None:
-            original.retry_close()
-        # This test is itself the complete enclosing lifecycle, not a borrower.
-        owner.close()
-    native.acquire_install_lease(str(target), "duckdb").close()
 
 
 @pytest.mark.parametrize("automatic", [False])
