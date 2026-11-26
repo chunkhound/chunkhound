@@ -5,5 +5,6 @@
   "footerline": "Own the runtime. Own the index. Choose the models.",
   "title": "ChunkHound — Enterprise-scale engineering research on your laptop",
   "description": "Free, open-source engineering research for code, git history, rendered web pages, and technical documents—local-first, enterprise-scale, and cited.",
-  "enterprise": "Run enterprise-scale research today on developer laptops, in CI, or over HTTP MCP while keeping the runtime, index, provider boundaries, and software economics under your control."
+  "enterprise": "Run enterprise-scale research today on developer laptops, in CI, or over HTTP MCP while keeping the runtime, index, provider boundaries, and software economics under your control.",
+  "provenance": "ChunkHound was created by engineers at <a href=\"https://www.appliedmaterials.com\">Applied Materials</a> to reverse-engineer a 180-million-line, 24-year-old codebase; today it is an independent, MIT-licensed community project."
 }
