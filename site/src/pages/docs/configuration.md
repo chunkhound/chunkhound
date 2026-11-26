@@ -654,6 +654,7 @@ The `llm` section is configured independently of `embedding`: you can set `llm.p
 | cheapaimodel | `cheapaimodel` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | Must be set explicitly (configurator defaults to `deepseek-v4-1-flash`) | cheapaimodel API. Registry providers require explicit `model`. |
 | UberLLM | `uberllm` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | Must be set explicitly (configurator defaults to `deepseek/deepseek-v4.1-flash`) | UberLLM API. Registry providers require explicit `model`. |
 | AIGROW | `aigrow` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly (configurator defaults to `claude-haiku-5.5`) | Must be set explicitly (configurator defaults to `claude-haiku-5.5`) | AIGROW API. Registry providers require explicit `model`. |
+| TeamoRouter | `teamorouter` | `CHUNKHOUND_LLM_API_KEY` | Must be set explicitly | Must be set explicitly | TeamoRouter API. Registry providers require explicit `model`. |
 
 `"model"` is a convenience shorthand that sets both `utility_model` and `synthesis_model` to the same value. To use different models per role, set `utility_model` and `synthesis_model` explicitly.
 

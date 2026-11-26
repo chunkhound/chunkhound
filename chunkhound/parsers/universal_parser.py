@@ -914,6 +914,13 @@ class UniversalParser:
         """
         chunks = []
 
+        # Offset of each line start, computed once: re-splitting the whole file
+        # per chunk made large files quadratic (#561).
+        line_starts = [0]
+        if content:
+            for line in content.split("\n"):
+                line_starts.append(line_starts[-1] + len(line) + 1)  # +1 for newline
+
         for i, uc in enumerate(universal_chunks):
             # Map UniversalConcept to ChunkType
             chunk_type = self._map_concept_to_chunk_type(uc.concept, uc.metadata)
@@ -922,10 +929,8 @@ class UniversalParser:
             start_byte = None
             end_byte = None
             if content:
-                lines_before = content.split("\n")[: uc.start_line - 1]
-                start_byte = ByteOffset(
-                    sum(len(line) + 1 for line in lines_before)
-                )  # +1 for newlines
+                line_index = min(max(uc.start_line - 1, 0), len(line_starts) - 1)
+                start_byte = ByteOffset(line_starts[line_index])
                 end_byte = ByteOffset(start_byte + len(uc.content.encode("utf-8")))
 
             chunk = Chunk(

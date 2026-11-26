@@ -18,6 +18,7 @@ import math
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
 from fnmatch import fnmatch
 from functools import partial
@@ -1958,12 +1959,16 @@ class IndexingCoordinator(BaseService):
                     "error": str(e),
                     "pipeline": "rust",
                     "rust_pipeline_error": True,
+                    "transient": e.transient,
                 }
             else:
                 return {
                     "status": "error",
                     "error": str(e),
                     "pipeline": "rust" if _use_rust else "python",
+                    # A worker died in a process pool this run created (the
+                    # Python path's parse pool); the next run creates another.
+                    "transient": isinstance(e, BrokenProcessPool),
                 }
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:

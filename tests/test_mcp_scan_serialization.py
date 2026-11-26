@@ -20,6 +20,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.mcp_server.status import derive_daemon_status
+from chunkhound.services.directory_indexing_service import DirectoryIndexingError
+
+# The result IndexingCoordinator.process_directory returns when a parse worker
+# died mid-run.
+_TRANSIENT_FAILURE = {
+    "status": "error",
+    "error": "Rust pipeline failed: BrokenProcessPool: A process in the process "
+    "pool was terminated abruptly while the future was running or pending.",
+    "pipeline": "rust",
+    "rust_pipeline_error": True,
+    "transient": True,
+}
 
 
 class _TestableMCPServer(MCPServerBase):
@@ -131,7 +144,10 @@ class TestScanLockSerialization:
         process_calls: list[str] = []  # tracks which triggers were executed
 
         async def monitored_process(
-            target_path: Path, *, no_embeddings: bool = False  # noqa: ARG001
+            target_path: Path,  # noqa: ARG001
+            *,
+            no_embeddings: bool = False,  # noqa: ARG001
+            check_missing_embeddings: bool = False,  # noqa: ARG001
         ) -> MagicMock:
             trigger = _current_trigger  # captured from outer scope
             process_calls.append(trigger)
@@ -194,7 +210,10 @@ class TestScanLockSerialization:
     ) -> None:
         """A scan that raises must clear ``is_scanning`` and record the error."""
         async def failing_process(
-            target_path: Path, *, no_embeddings: bool = False  # noqa: ARG001
+            target_path: Path,  # noqa: ARG001
+            *,
+            no_embeddings: bool = False,  # noqa: ARG001
+            check_missing_embeddings: bool = False,  # noqa: ARG001
         ) -> MagicMock:
             raise RuntimeError("Simulated scan failure")
 
@@ -262,6 +281,75 @@ class TestScanLockSerialization:
             )
             second_query_ready_at = server._scan_progress["query_ready_at"]
             assert second_query_ready_at is not None
+
+    @pytest.mark.asyncio
+    async def test_initial_scan_lost_to_a_dead_worker_is_retried_until_ready(
+        self, server: _TestableMCPServer, tmp_path: Path
+    ) -> None:
+        """A transient initial-scan failure is retried, and the retry makes the
+        index query-ready."""
+        server._INITIAL_SCAN_RETRY_DELAYS_SECONDS = (0.0, 0.0)
+        coordinator = MagicMock()
+        server.services = MagicMock(indexing_coordinator=coordinator)
+        coordinator.process_directory = AsyncMock(
+            side_effect=[
+                _TRANSIENT_FAILURE,
+                {"status": "success", "pipeline": "rust", "skipped_unchanged": 1},
+            ]
+        )
+        coordinator.generate_missing_embeddings = AsyncMock(
+            return_value={"status": "success", "generated": 1}
+        )
+        coordinator.compact_database_with_metrics = AsyncMock(
+            return_value={"status": "skipped"}
+        )
+        await server._run_initial_scan_with_retry(tmp_path)
+
+        status = derive_daemon_status(server._scan_progress)
+        assert coordinator.process_directory.await_count == 2
+        coordinator.generate_missing_embeddings.assert_awaited_once()
+        assert status["query_ready"] is True
+        assert status["scan_progress"]["scan_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_initial_scan_retries_are_bounded_and_only_for_transient_failures(
+        self, server: _TestableMCPServer, tmp_path: Path
+    ) -> None:
+        """Every attempt failing transiently ends degraded after the last retry;
+        a non-transient failure is not retried at all."""
+        server._INITIAL_SCAN_RETRY_DELAYS_SECONDS = (0.0, 0.0)
+        always_transient = MagicMock(
+            process_directory=AsyncMock(
+                side_effect=DirectoryIndexingError(_TRANSIENT_FAILURE)
+            )
+        )
+        with patch(
+            "chunkhound.mcp_server.base.DirectoryIndexingService",
+            return_value=always_transient,
+        ):
+            with pytest.raises(DirectoryIndexingError):
+                await server._run_initial_scan_with_retry(tmp_path)
+
+        status = derive_daemon_status(server._scan_progress)
+        assert always_transient.process_directory.await_count == 3
+        assert status["status"] == "degraded"
+        assert status["query_ready"] is False
+        assert "BrokenProcessPool" in status["scan_progress"]["scan_error"]
+
+        permanent = MagicMock(
+            process_directory=AsyncMock(
+                side_effect=DirectoryIndexingError(
+                    {"status": "error", "error": "disk full", "transient": False}
+                )
+            )
+        )
+        with patch(
+            "chunkhound.mcp_server.base.DirectoryIndexingService",
+            return_value=permanent,
+        ):
+            with pytest.raises(DirectoryIndexingError):
+                await server._run_initial_scan_with_retry(tmp_path)
+        assert permanent.process_directory.await_count == 1
 
     @pytest.mark.asyncio
     async def test_run_directory_scan_requires_services(

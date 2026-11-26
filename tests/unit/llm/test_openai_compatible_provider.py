@@ -250,6 +250,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "teamorouter",
+            "model": "deepseek-v4-flash",
+            "expected_name": "teamorouter",
+            "expected_base_url": "https://api.teamorouter.com/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'teamorouter'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="teamorouter",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -411,6 +426,7 @@ class TestFactoryPipeline:
             "cheapaimodel": 10,
             "uberllm": 10,
             "aigrow": 5,
+            "teamorouter": 5,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected
