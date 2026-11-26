@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 - Added Enterprise Setup, pi-schematic, and Workflows documentation pages.
 - **Vercel AI Gateway LLM provider** — Vercel AI Gateway is now supported as an OpenAI-compatible LLM provider (`provider: vercel` or `CHUNKHOUND_LLM_PROVIDER=vercel`). Like every registry provider it requires an explicit `model`; the configurator's Vercel preset defaults to `deepseek/deepseek-v4.1-flash`. The gateway documents `max_tokens` as optional, so provider-managed synthesis omits the cap as it does for OpenRouter, and structured calls probe the same reasoning-disable payload.
-- **FAQ page** — The `/docs/faq/` guide answers common privacy, deployment, language-support, and license questions, with JSON-LD `FAQPage` schema derived from the same copy. It sits in the docs sidebar and the top nav like the other featured guides; the retired `/faq/` route redirects there.
+- **FAQ page** — The `/docs/faq/` guide answers common privacy, deployment, language-support, and license questions, compares ChunkHound with competing code-search and research tools, and emits JSON-LD `FAQPage` schema derived from the same copy. It sits in the docs sidebar and the top nav like the other featured guides; the retired `/faq/` route redirects there.
 - **Build-time language catalog** — The site build derives its supported-language figures from the backend `Language` enum via `scripts/generate_site_language_catalog.py`, so the FAQ cannot drift from what the parsers support.
 
 ### Changed
