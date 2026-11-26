@@ -36,6 +36,12 @@ jobs:
       - name: Export docs version as job output
         id: docs-version
         run: echo "docs_version=$CHUNKHOUND_DOCS_VERSION" >> "$GITHUB_OUTPUT"
+      # Language-catalog extraction at build time shells out to Python (uv);
+      # the non-test build job must provision the same toolchain.
+      - uses: ./.github/actions/ci-python-setup
+        with:
+          python-version: "3.14"
+          build-rust-extension: "false"
       - run: npm ci --prefix site
       - run: npm run build --prefix site
         env:
@@ -76,6 +82,11 @@ jobs:
           cache: npm
           cache-dependency-path: site/package-lock.json
       - run: npm ci --prefix site
+      # Language-catalog extraction during build requires the Python toolchain.
+      - uses: ./.github/actions/ci-python-setup
+        with:
+          python-version: "3.14"
+          build-rust-extension: "false"
       - run: npm run check --prefix site
         env:
           # precheck resolves generated sources (contributors.json).

@@ -12,6 +12,7 @@ from tests.site.tsx_runner import ROOT, run_tsx_json, run_tsx_raw
 _PLAYWRIGHT = ROOT / "site" / "node_modules" / "playwright" / "index.mjs"
 _REQUIRE_SITE_ENV = "CHUNKHOUND_REQUIRE_SITE"
 SITE_INSTALL_COMMAND = (
+    "uv sync --locked && "
     "npm ci --prefix site && npm exec --prefix site -- playwright install chromium"
 )
 

@@ -10,6 +10,9 @@ inputs:
   opencode:
     description: Install the pinned opencode CLI for integration tests
     default: "false"
+  build-rust-extension:
+    description: Build the Rust extension after dependency sync
+    default: "true"
 runs:
   using: composite
   steps:
@@ -61,4 +64,5 @@ runs:
         name: site-contributors-record
         path: site/src/lib
     - name: Build Rust extension
+      if: inputs.build-rust-extension == 'true'
       uses: ./.github/actions/build-rust-extension
