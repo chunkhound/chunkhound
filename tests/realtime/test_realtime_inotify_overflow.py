@@ -8,6 +8,7 @@ without a hook ChunkHound never learns that changes were lost.
 from __future__ import annotations
 
 import asyncio
+import struct
 import sys
 import threading
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from chunkhound.core.config.config import Config
+from chunkhound.services.realtime.events import SimpleEventHandler
 from chunkhound.services.realtime.inotify_overflow import InotifyOverflowDetection
 from chunkhound.services.realtime.service import RealtimeIndexingService
 
@@ -25,7 +27,7 @@ from chunkhound.services.realtime.service import RealtimeIndexingService
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="inotify is Linux-only"
 )
-def test_kernel_overflow_reaches_the_service() -> None:
+def test_kernel_overflow_reaches_the_service(tmp_path: Path) -> None:
     from watchdog.version import VERSION_INFO
 
     if VERSION_INFO < (7, 1):
@@ -40,15 +42,59 @@ def test_kernel_overflow_reaches_the_service() -> None:
     observer, detection = startup_module._create_watchdog_observer(
         lambda: calls.append(None)
     )
+    observer.schedule(SimpleEventHandler(None), str(tmp_path))
     observer.start()
     try:
         assert detection == "active"
         observer._inotify_fd.handle_event(  # type: ignore[attr-defined]
-            inotify_c.InotifyEvent(
-                -1, inotify_c.InotifyConstants.IN_Q_OVERFLOW, 0, b""
-            )
+            inotify_c.InotifyEvent(-1, inotify_c.InotifyConstants.IN_Q_OVERFLOW, 0, b"")
         )
         assert len(calls) == 1
+    finally:
+        observer.stop()
+        observer.join(timeout=1.0)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="inotify is Linux-only"
+)
+def test_overflow_record_from_the_reader_reaches_on_overflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw kernel overflow record reaches the callback through watchdog's reader."""
+    from watchdog.version import VERSION_INFO
+
+    if VERSION_INFO < (7, 1):
+        pytest.skip("watchdog < 7.1 drops the overflow record; nothing to hook")
+    from watchdog.observers import inotify_c
+
+    import chunkhound.services.realtime.startup as startup_module
+
+    # Replace one real kernel read with the record the kernel sends on overflow.
+    # Both versions keep their normal reader thread and dispatch lifecycle.
+    read = inotify_c.InotifyFD._read_event_buffer
+    inject = threading.Event()
+    reported = threading.Event()
+
+    def read_event_buffer(fd: Any, *args: Any, **kwargs: Any) -> bytes:
+        data = read(fd, *args, **kwargs)
+        if data and inject.is_set():
+            inject.clear()
+            return struct.pack(
+                "iIII", -1, inotify_c.InotifyConstants.IN_Q_OVERFLOW, 0, 0
+            )
+        return data
+
+    monkeypatch.setattr(inotify_c.InotifyFD, "_read_event_buffer", read_event_buffer)
+    observer, detection = startup_module._create_watchdog_observer(reported.set)
+    observer.schedule(SimpleEventHandler(None), str(tmp_path))
+    observer.start()
+    try:
+        assert detection == "active"
+        inject.set()
+        (tmp_path / "wake-reader").touch()
+        assert reported.wait(5), "inotify reader did not report the overflow record"
     finally:
         observer.stop()
         observer.join(timeout=1.0)
