@@ -36,6 +36,7 @@ from chunkhound.hub.errors import (
     HUB_PULL_FAILURE_GUIDANCE,
     HubLocalStateError,
     HubUnavailable,
+    hub_origin,
 )
 from chunkhound.hub.install import (
     NATIVE_ERRORS,
@@ -87,7 +88,10 @@ def _hub_prompts_allowed() -> bool:
     )
 
 
-def _choose_untrusted_cold_action(formatter: RichOutputFormatter) -> str:
+def _choose_untrusted_cold_action(
+    formatter: RichOutputFormatter, hub_url: str
+) -> str:
+    formatter.info(f"Configured hub source: {hub_origin(hub_url)}")
     formatter.info(
         "A hub database may be available and could avoid a full local index."
     )
@@ -199,12 +203,13 @@ async def _prepare_hub_index(
         target = installation_target(config)
         if not automatic_target_appears_cold(target, config.database.provider):
             return HubIndexDecision.CONTINUE_LOCAL
-        if _choose_untrusted_cold_action(formatter) == "local":
+        if _choose_untrusted_cold_action(formatter, hub_url) == "local":
             return HubIndexDecision.CONTINUE_LOCAL
         return HubIndexDecision.STOP
 
     source: ValidatedHubSource | None = None
     if explicit_trust:
+        formatter.info(f"Hub source origin: {hub_origin(hub_url)}")
         try:
             source = await fetch_validated_manifest(config)
             still_bound = binding_unchanged(config, authorized_checkout_digest, hub_url)

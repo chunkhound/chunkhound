@@ -1574,3 +1574,29 @@ raise outcome
     search = cli(project, "search", "must_not_index", project, "--regex")
     assert search.returncode == 0, search.stdout + search.stderr
     assert "No results found" in search.stdout + search.stderr
+
+
+async def test_pull_names_origin_before_first_request_even_if_manifest_fails(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    config.hub.url = "https://hub.invalid/catalogue?token=secret"
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    messages: list[str] = []
+
+    async def fetch(_config):
+        assert any("https://hub.invalid" in m for m in messages)
+        raise HubUnavailable("incompatible manifest")
+
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fetch)
+    sink = logger.add(lambda m: messages.append(m.record["message"]), level="INFO")
+    args = argparse.Namespace(trust=True, path=checkout, version="latest")
+    try:
+        with pytest.raises(SystemExit):
+            await pull_module.pull_command(args, config)
+    finally:
+        logger.remove(sink)
+
+    assert any("https://hub.invalid" in m for m in messages)
+    assert "token=secret" not in "\n".join(messages)

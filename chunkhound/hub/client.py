@@ -23,6 +23,7 @@ from chunkhound.hub.errors import (
     HubLocalStateError,
     HubReaderCloseError,
     HubUnavailable,
+    hub_origin,
     safe_label,
 )
 from chunkhound.hub.inspect import inspect_database
@@ -318,6 +319,9 @@ async def _pull(
                 "Hub source authorization could not be verified; automatic hub "
                 "use was not started"
             ) from None
+        logger.bind(hub_client=True).info(
+            "Automatic hub pull from origin={}", hub_origin(url)
+        )
         validated = await _fetch_bound_manifest(
             url,
             authorized_checkout_digest,

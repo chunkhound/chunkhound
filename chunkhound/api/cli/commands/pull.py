@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -14,6 +13,7 @@ from chunkhound.hub.errors import (
     HubAuthorizationError,
     HubLocalStateError,
     HubUnavailable,
+    hub_origin,
     safe_label,
 )
 from chunkhound.hub.manifest import configured_key, select_manifest
@@ -36,18 +36,6 @@ def forget_trust_command(args: argparse.Namespace) -> None:
     except HubTrustError as exc:
         logger.error("{}", str(exc))
         raise SystemExit(1) from None
-
-
-def hub_origin(manifest_url: str) -> str:
-    """Return only scheme, normalized host, and a non-default port."""
-    parts = urlsplit(manifest_url)
-    host = parts.hostname or ""
-    if ":" in host:
-        host = f"[{host}]"
-    port = parts.port
-    default_port = 80 if parts.scheme == "http" else 443
-    suffix = f":{port}" if port not in (None, default_port) else ""
-    return f"{parts.scheme}://{host}{suffix}"
 
 
 async def pull_command(args: argparse.Namespace, config: Config) -> None:
@@ -83,6 +71,7 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
         # Resolve the key before any hub request so unknown dimensions never
         # probe the hub or embedding service.
         key = configured_key(config)
+        logger.info("Hub source origin={}", hub_origin(authorized_url))
         try:
             source = await fetch_validated_manifest(config)
         except asyncio.CancelledError:

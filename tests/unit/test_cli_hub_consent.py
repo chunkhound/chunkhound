@@ -39,6 +39,11 @@ class RecordingFormatter:
         self.messages.append(("error", message))
 
     @property
+    def diagnostics(self) -> list[tuple[str, str]]:
+        """Messages other than the source-origin line, for exact-outcome checks."""
+        return [m for m in self.messages if not m[1].startswith("Hub source origin")]
+
+    @property
     def text(self) -> str:
         return "\n".join(message for _, message in self.messages)
 
@@ -82,9 +87,7 @@ def absent_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(
         run, "automatic_target_appears_cold", lambda _target, _backend: True
     )
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: True
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: True)
     return target
 
 
@@ -176,9 +179,7 @@ async def test_trusted_existing_index_never_fetches_or_pulls(
     target = tmp_path / ("aligned.db" if aligned else "misaligned.db")
     monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: False
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: False)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "fetch_validated_manifest", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
@@ -288,9 +289,7 @@ async def test_unsupported_target_is_safe_failure_without_implicit_fallback(
         "installation_target",
         lambda _config: (_ for _ in ()).throw(HubUnavailable("unsupported target")),
     )
-    monkeypatch.setattr(
-        run, "fetch_validated_manifest", AsyncMock(return_value=source)
-    )
+    monkeypatch.setattr(run, "fetch_validated_manifest", AsyncMock(return_value=source))
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: False)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
     monkeypatch.setattr(run, "pull", _forbid)
@@ -319,9 +318,7 @@ async def test_target_inspection_failures_are_normalized_as_fatal_local_state(
     target = tmp_path / "chunks.db"
     source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "fetch_validated_manifest", AsyncMock(return_value=source)
-    )
+    monkeypatch.setattr(run, "fetch_validated_manifest", AsyncMock(return_value=source))
     monkeypatch.setattr(
         run,
         "automatic_target_absent",
@@ -405,9 +402,7 @@ async def test_index_trust_existing_validates_refreshes_trust_without_artifact_p
     target = tmp_path / "chunks.db"
     source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: False
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: False)
     fetch = AsyncMock(return_value=source)
     grant = Mock()
     monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
@@ -442,9 +437,7 @@ async def test_interactive_binding_change_stops_without_grant_or_local_fallback(
         return source
 
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: False
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: False)
     fetch = AsyncMock(side_effect=mutate_config_during_fetch)
     grant = Mock()
     monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
@@ -458,7 +451,7 @@ async def test_interactive_binding_change_stops_without_grant_or_local_fallback(
     assert decision is run.HubIndexDecision.STOP
     fetch.assert_awaited_once_with(config)
     grant.assert_not_called()
-    assert formatter.messages == [
+    assert formatter.diagnostics == [
         (
             "error",
             "Validated hub source no longer matches authorized configuration",
@@ -475,9 +468,7 @@ async def test_interactive_invalid_manifest_stops_without_grant_or_local_fallbac
     monkeypatch.setattr(
         run,
         "fetch_validated_manifest",
-        AsyncMock(
-            side_effect=HubUnavailable("Hub manifest is invalid or unsupported")
-        ),
+        AsyncMock(side_effect=HubUnavailable("Hub manifest is invalid or unsupported")),
     )
     monkeypatch.setattr(run, "grant_trust", grant)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
@@ -488,7 +479,7 @@ async def test_interactive_invalid_manifest_stops_without_grant_or_local_fallbac
 
     assert decision is run.HubIndexDecision.STOP
     grant.assert_not_called()
-    assert formatter.messages == [
+    assert formatter.diagnostics == [
         ("error", "Hub manifest is invalid or unsupported")
     ]
 
@@ -500,9 +491,7 @@ async def test_index_trust_ambiguous_state_retains_validated_trust_but_aborts(
     target = tmp_path / "chunks.db"
     source = _validated_source(config.target_dir, config.hub.url)
     grant = Mock()
-    monkeypatch.setattr(
-        run, "fetch_validated_manifest", AsyncMock(return_value=source)
-    )
+    monkeypatch.setattr(run, "fetch_validated_manifest", AsyncMock(return_value=source))
     monkeypatch.setattr(run, "grant_trust", grant)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
     monkeypatch.setattr(
@@ -530,9 +519,7 @@ async def test_mismatched_validated_capability_stops_before_grant_or_pull(
     )
     grant = Mock()
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: False
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: False)
     monkeypatch.setattr(
         run, "fetch_validated_manifest", AsyncMock(return_value=mismatched)
     )
@@ -560,9 +547,7 @@ async def test_post_fetch_checkout_failure_is_formatted_once(
         raise OSError("raw post-fetch checkout path?token=secret")
 
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: False
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: False)
     monkeypatch.setattr(
         run,
         "fetch_validated_manifest",
@@ -574,9 +559,7 @@ async def test_post_fetch_checkout_failure_is_formatted_once(
     with pytest.raises(HubLocalStateError):
         await run._prepare_hub_index(args, config, formatter)
 
-    assert formatter.messages == [
-        ("error", "Hub checkout identity is unavailable")
-    ]
+    assert formatter.diagnostics == [("error", "Hub checkout identity is unavailable")]
     assert "raw post-fetch checkout path" not in formatter.text
 
 
@@ -587,9 +570,7 @@ async def test_manifest_binding_fatal_failure_is_formatted_before_run_exit(
     target = tmp_path / "chunks.db"
     failure = HubLocalStateError("Hub checkout identity is unavailable")
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: False
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: False)
     monkeypatch.setattr(
         run,
         "fetch_validated_manifest",
@@ -599,9 +580,7 @@ async def test_manifest_binding_fatal_failure_is_formatted_before_run_exit(
     with pytest.raises(HubLocalStateError):
         await run._prepare_hub_index(args, config, formatter)
 
-    assert formatter.messages == [
-        ("error", "Hub checkout identity is unavailable")
-    ]
+    assert formatter.diagnostics == [("error", "Hub checkout identity is unavailable")]
 
 
 async def test_postauthorization_classification_failure_offers_local_fallback(
@@ -620,9 +599,7 @@ async def test_postauthorization_classification_failure_offers_local_fallback(
     )
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(run.prompts, "prompt_choice", lambda *_args, **_kwargs: "local")
-    monkeypatch.setattr(
-        run, "fetch_validated_manifest", AsyncMock(return_value=source)
-    )
+    monkeypatch.setattr(run, "fetch_validated_manifest", AsyncMock(return_value=source))
     monkeypatch.setattr(run, "grant_trust", Mock())
     monkeypatch.setattr(run, "pull", _forbid)
 
@@ -737,9 +714,7 @@ async def test_attempted_index_pull_unavailable_always_stops_with_local_retry_gu
     source = _validated_source(config.target_dir, config.hub.url)
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: interactive)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
-    monkeypatch.setattr(
-        run, "fetch_validated_manifest", AsyncMock(return_value=source)
-    )
+    monkeypatch.setattr(run, "fetch_validated_manifest", AsyncMock(return_value=source))
     monkeypatch.setattr(run, "grant_trust", Mock())
     monkeypatch.setattr(
         run, "pull", AsyncMock(side_effect=HubUnavailable("sanitized unavailable"))
@@ -748,7 +723,7 @@ async def test_attempted_index_pull_unavailable_always_stops_with_local_retry_gu
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.STOP
-    assert formatter.messages == [
+    assert formatter.diagnostics == [
         ("error", "sanitized unavailable"),
         ("info", HUB_PULL_FAILURE_GUIDANCE),
     ]
@@ -767,7 +742,7 @@ async def test_attempted_index_pull_cancellation_stops_with_exact_guidance(
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.STOP
-    assert formatter.messages == [
+    assert formatter.diagnostics == [
         ("error", "The attempted hub pull was cancelled before completion."),
         ("info", HUB_PULL_FAILURE_GUIDANCE),
     ]
@@ -792,7 +767,7 @@ async def test_attempted_index_pull_fatal_error_stops_with_guidance(
     with pytest.raises(type(failure), match=str(failure)):
         await run._prepare_hub_index(args, config, formatter)
 
-    assert formatter.messages == [("info", HUB_PULL_FAILURE_GUIDANCE)]
+    assert formatter.diagnostics == [("info", HUB_PULL_FAILURE_GUIDANCE)]
 
 
 async def test_race_created_valid_database_continues_without_failure_prompt(
@@ -814,7 +789,7 @@ async def test_race_created_valid_database_continues_without_failure_prompt(
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.CONTINUE_LOCAL
-    assert formatter.messages == []
+    assert formatter.diagnostics == []
 
 
 @pytest.mark.parametrize("interactive", [False, True])
@@ -824,9 +799,7 @@ async def test_still_cold_after_unsuccessful_pull_always_stops_with_guidance(
     target = tmp_path / "chunks.db"
     monkeypatch.setattr(run, "is_trusted", lambda *_args: True)
     monkeypatch.setattr(run, "installation_target", lambda _config: target)
-    monkeypatch.setattr(
-        run, "automatic_target_absent", lambda _target, _backend: True
-    )
+    monkeypatch.setattr(run, "automatic_target_absent", lambda _target, _backend: True)
     monkeypatch.setattr(run, "pull", AsyncMock(return_value=False))
     monkeypatch.setattr(run.prompts, "is_interactive", lambda: interactive)
     monkeypatch.setattr(run.prompts, "prompt_choice", _forbid)
@@ -834,7 +807,7 @@ async def test_still_cold_after_unsuccessful_pull_always_stops_with_guidance(
     decision = await run._prepare_hub_index(args, config, formatter)
 
     assert decision is run.HubIndexDecision.STOP
-    assert formatter.messages == [("info", HUB_PULL_FAILURE_GUIDANCE)]
+    assert formatter.diagnostics == [("info", HUB_PULL_FAILURE_GUIDANCE)]
 
 
 @pytest.mark.parametrize(
@@ -902,7 +875,7 @@ async def test_race_created_ambiguous_state_aborts_before_registry(
     with pytest.raises(expected_type, match=diagnostic):
         await run._prepare_hub_index(args, config, formatter)
 
-    assert formatter.messages == [
+    assert formatter.diagnostics == [
         ("error", diagnostic),
         ("info", HUB_PULL_FAILURE_GUIDANCE),
     ]
@@ -920,3 +893,35 @@ async def test_fatal_local_failure_never_offers_fallback(
 
     with pytest.raises(HubLocalStateError, match="unsafe local state"):
         await run._prepare_hub_index(args, config, formatter)
+
+
+async def test_untrusted_prompt_names_origin_never_query(
+    config, args, formatter, monkeypatch, absent_target
+):
+    monkeypatch.setattr(run, "is_trusted", lambda *_args: False)
+    monkeypatch.setattr(run.prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(run.prompts, "prompt_text", lambda *_a, **_k: "cancel")
+
+    await run._prepare_hub_index(args, config, formatter)
+
+    assert "https://hub.invalid" in formatter.text
+    assert "secret=hidden" not in formatter.text
+
+
+async def test_index_trust_names_origin_before_first_request(
+    config, args, formatter, monkeypatch, absent_target
+):
+    args.trust = True
+    seen: list[str] = []
+
+    async def fetch(_config):
+        seen.append(formatter.text)
+        raise HubUnavailable("manifest incompatible")
+
+    monkeypatch.setattr(run, "fetch_validated_manifest", fetch)
+
+    decision = await run._prepare_hub_index(args, config, formatter)
+
+    assert decision is run.HubIndexDecision.STOP
+    assert "https://hub.invalid" in seen[0]
+    assert "secret=hidden" not in formatter.text

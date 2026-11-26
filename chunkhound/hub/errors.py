@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 from chunkhound.providers.database.ownership import (
     DatabaseOwnership,
@@ -83,3 +84,15 @@ def safe_label(value: object) -> str:
     return (
         "[redacted metadata]" if any(s in text for s in ("://", "?")) else text[:2048]
     )
+
+
+def hub_origin(manifest_url: str) -> str:
+    """Return only scheme, normalized host, and a non-default port."""
+    parts = urlsplit(manifest_url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port
+    default_port = 80 if parts.scheme == "http" else 443
+    suffix = f":{port}" if port not in (None, default_port) else ""
+    return f"{parts.scheme}://{host}{suffix}"
