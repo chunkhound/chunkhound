@@ -1,9 +1,9 @@
 """Signal a kernel inotify queue overflow to the realtime service.
 
 When the kernel inotify queue overflows, the kernel drops events and queues one
-IN_Q_OVERFLOW record. watchdog 7.1 rebuilds its watches on that record but
-emits no event, so the service cannot know that changes were lost. This module
-builds an inotify observer whose FD reader also calls ``on_overflow``.
+IN_Q_OVERFLOW record. watchdog 7.1.0 emits no public event for that record,
+and 7.1.1 emits an EventsLostEvent that ChunkHound does not map. The FD reader
+calls ``on_overflow`` after watchdog handles the record on either version.
 
 The hook relies on two private watchdog internals:
 ``inotify_c.InotifyFD.handle_event`` and ``InotifyObserver._inotify_fd``. On
@@ -49,17 +49,14 @@ def create_inotify_observer(
 
     # The same guard watchdog's own observer selection uses on Linux.
     try:
-        from watchdog.observers import inotify_c
         from watchdog.observers.inotify import InotifyObserver
+        from watchdog.observers.inotify_c import InotifyFD
     except (ImportError, UnsupportedLibcError):
         return None
-    inotify_fd_cls = getattr(inotify_c, "InotifyFD", None)
-    if inotify_fd_cls is None or not callable(
-        getattr(inotify_fd_cls, "handle_event", None)
-    ):
+    if not callable(getattr(InotifyFD, "handle_event", None)):
         return None
 
-    class _OverflowSignalingInotifyFD(inotify_fd_cls):  # type: ignore[misc,valid-type]
+    class _OverflowSignalingInotifyFD(InotifyFD):
         def handle_event(self, event: Any) -> None:
             try:
                 super().handle_event(event)
@@ -78,15 +75,14 @@ def create_inotify_observer(
         def __setattr__(self, name: str, value: Any) -> None:
             # watchdog assigns the reader during construction in 7.1.0 and
             # during the first schedule() in 7.1.1, before installing a watch.
-            if name == "_inotify_fd" and isinstance(value, inotify_fd_cls):
+            if name == "_inotify_fd" and isinstance(value, InotifyFD):
                 value.__class__ = _OverflowSignalingInotifyFD
             super().__setattr__(name, value)
 
     observer = _OverflowObserver()
     fd = getattr(observer, "_inotify_fd", ...)
-    if fd is None and isinstance(getattr(observer, "_emitter_kwargs", None), dict):
-        return observer
-    if not isinstance(fd, _OverflowSignalingInotifyFD):
+    lazy = fd is None and isinstance(getattr(observer, "_emitter_kwargs", None), dict)
+    if not lazy and not isinstance(fd, _OverflowSignalingInotifyFD):
         observer.stop()
         return None
     return observer
