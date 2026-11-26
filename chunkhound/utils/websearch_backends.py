@@ -346,8 +346,10 @@ class BingBackend:
                 first += _BING_PAGE_SIZE
                 continue
             if status != 200:
+                # Keep rows accumulated from earlier pages: partial results
+                # are better than dropping everything on a later-page refusal.
                 return EngineResponse(
-                    (),
+                    tuple(results[:limit]),
                     verdict_from_status(status),
                     status,
                     status_evidence(status),
@@ -540,7 +542,9 @@ async def run_engine_search(
         engine_deadline: float | None = None
         if deadline is not None:
             remaining = max(0.0, deadline - loop.time())
-            budget = max(_MIN_ENGINE_BUDGET_S, remaining / engines_remaining)
+            budget = min(
+                remaining, max(_MIN_ENGINE_BUDGET_S, remaining / engines_remaining)
+            )
             engine_deadline = loop.time() + budget
         backend = ALL_BACKENDS[engine_name]
         if progress_callback is not None and idx > 0:

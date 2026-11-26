@@ -407,6 +407,46 @@ def test_hanging_primary_times_out_and_fallback_serves(monkeypatch) -> None:
     assert [u for _, u, _ in out] == ["https://b/"]
     assert ddg.calls == [("q", 10)]
     assert any("transient" in m for m in progress)
+
+
+def test_budget_floor_never_extends_deadline(monkeypatch) -> None:
+    # Regression: the 5s per-engine floor must not push an engine past the
+    # caller's deadline when almost no time remains.
+    captured: dict[str, float] = {}
+
+    async def spy_run_engine(*args, **kwargs):
+        captured["deadline"] = kwargs["deadline"]
+        captured["now"] = asyncio.get_running_loop().time()
+        return EngineRun([("T", "https://a/", "d")], Verdict.SERVED, "ok")
+
+    monkeypatch.setattr(b, "_run_engine", spy_run_engine)
+    asyncio.run(_run(["q"], timeout_s=0.2))
+
+    budget = captured["deadline"] - captured["now"]
+    assert 0 < budget <= 0.2 + 0.01
+
+
+def _bing_serp_html(count: int) -> bytes:
+    rows = "".join(
+        f'<li class="b_algo"><h2><a href="https://example.com/r{i}">'
+        f'Title {i}</a></h2><p class="b_lineclamp1">snippet {i}</p></li>'
+        for i in range(count)
+    )
+    return f'<div id="b_results">{rows}</div>'.encode()
+
+
+def test_bing_keeps_earlier_rows_on_later_page_refusal(monkeypatch) -> None:
+    responses = [(200, _bing_serp_html(10)), (429, b"rate limited")]
+    monkeypatch.setattr(b, "_http_request", lambda *a, **k: responses.pop(0))
+
+    resp = b.BingBackend().search("q", limit=20)
+
+    assert len(resp.rows) == 10
+    assert resp.rows[0][1] == "https://example.com/r0"
+    assert resp.verdict is Verdict.REFUSED
+    assert resp.status == 429
+
+
 def test_served_run_clears_cooldown_block() -> None:
     registry = b.EngineRegistry(cooldown_seconds=3600)
     registry.record(

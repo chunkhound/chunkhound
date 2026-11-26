@@ -369,3 +369,44 @@ async def test_provider_timeout_is_not_reported_as_budget_timeout(
         )
 
     assert hasattr(info.value, "websearch_warnings")
+
+
+@pytest.mark.asyncio
+async def test_discovery_passes_remaining_budget_to_search_multi(monkeypatch) -> None:
+    async def slow_expansion(*args, **kwargs):
+        await asyncio.sleep(0.1)
+        return ["q"]
+
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries", slow_expansion
+    )
+    captured: dict[str, float | None] = {}
+
+    async def spy_search_multi(*args, **kwargs):
+        captured["timeout_s"] = kwargs.get("timeout_s")
+        return [("T", "https://example.invalid/p", "s")]
+
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi", spy_search_multi
+    )
+
+    async def pages(*args, **kwargs):
+        yield "https://example.invalid/p", ".md", "# p"
+
+    monkeypatch.setattr("chunkhound.utils.websearch_core.fetch_pages", pages)
+    monkeypatch.setattr(
+        "chunkhound.services.web_research_service.research_web_pages",
+        AsyncMock(return_value=("answer", ["w"])),
+    )
+
+    await run_websearch(
+        "q",
+        limit=1,
+        config=None,
+        embedding_manager=None,
+        llm_manager=None,
+        timeout_s=0.8,
+    )
+
+    assert captured["timeout_s"] is not None
+    assert 0 < captured["timeout_s"] < 0.2

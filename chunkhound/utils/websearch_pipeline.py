@@ -110,6 +110,7 @@ async def run_websearch(
 
     async def _run() -> tuple[dict[str, Any], list[str]]:
         discovery_s = websearch_discovery_timeout(total)
+        discovery_start = loop.time()
 
         async def discover() -> list[tuple[str, str, str]]:
             queries = await expand_web_queries(
@@ -118,15 +119,17 @@ async def run_websearch(
             websearch_config = (
                 getattr(config, "websearch", None) if config is not None else None
             )
+            # Cap engine search at the remaining discovery-phase window.
+            remaining = max(0.0, deadline - loop.time())
+            elapsed = loop.time() - discovery_start
+            engine_timeout = max(0.0, min(remaining, discovery_s - elapsed))
             return await search_multi(
                 queries,
                 limit,
                 progress_callback,
                 failure_callback=failure_callback,
                 websearch_config=websearch_config,
-                # Partition the discovery budget: one hanging engine must
-                # not starve its fallback within the discovery phase.
-                timeout_s=discovery_s,
+                timeout_s=engine_timeout,
             )
 
         discovery_task = asyncio.create_task(discover())
