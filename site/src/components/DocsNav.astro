@@ -17,7 +17,6 @@ const { currentPath } = Astro.props;
 // Same trailing-slash-insensitive rule as Nav.astro — shared from lib/nav.ts.
 const isActive = (href: string): boolean => isActivePath(currentPath, href);
 
-const sections = DOCS_SECTIONS;
 ---
 
 <div class="sidebar-inner">
@@ -31,7 +30,7 @@ const sections = DOCS_SECTIONS;
     data-docs-nav-filter
   />
 
-  {sections.map((section) => {
+  {DOCS_SECTIONS.map((section) => {
     // One landmark per group: APG requires a distinct accessible name for each
     // nav on a page, so the visible title names its own nav via aria-labelledby.
     const titleId = `docs-section-${section.id}`;
