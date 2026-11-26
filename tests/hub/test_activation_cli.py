@@ -168,7 +168,7 @@ async def test_trusted_plain_pull_uses_explicit_replacement_path(
     await pull_module.pull_command(args, config)
 
     trust_check.assert_called_once_with(checkout.resolve(), config.hub.url)
-    fetch.assert_awaited_once_with(config)
+    fetch.assert_awaited_once_with(config, config.hub.url)
     artifact_pull.assert_awaited_once_with(config, rel="-1", source=source)
 
 
@@ -300,7 +300,7 @@ async def test_trusted_plain_pull_manifest_fetch_cancellation_exits_with_exact_g
         logger.remove(sink)
 
     assert stopped.value.code == 1
-    fetch.assert_awaited_once_with(config)
+    fetch.assert_awaited_once_with(config, config.hub.url)
     artifact_pull.assert_not_awaited()
     assert messages == [
         "The attempted hub pull was cancelled before completion.",
@@ -356,7 +356,7 @@ async def test_pull_trust_revalidates_even_when_source_is_already_trusted(
     await pull_module.pull_command(args, config)
 
     trust_check.assert_not_called()
-    fetch.assert_awaited_once_with(config)
+    fetch.assert_awaited_once_with(config, config.hub.url)
     grant.assert_called_once_with(checkout.resolve(), config.hub.url)
     artifact_pull.assert_awaited_once_with(config, rel="latest", source=source)
 
@@ -575,7 +575,7 @@ async def test_pull_trust_manifest_binding_failure_is_sanitized_once(
     raw = "raw checkout path?token=secret"
     pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
 
-    async def fail_fetch(_config):
+    async def fail_fetch(_config, _url=None):
         try:
             raise OSError(raw)
         except OSError as cause:
@@ -650,7 +650,7 @@ async def test_pull_trust_revalidates_captured_identity_before_grant_or_artifact
     captured_url = config.hub.url
     source = valid_source(first_checkout, captured_url)
 
-    async def fetch_and_mutate(_config):
+    async def fetch_and_mutate(_config, _url=None):
         if change == "checkout":
             config.target_dir = second_checkout
         else:
@@ -1585,7 +1585,7 @@ async def test_pull_names_origin_before_first_request_even_if_manifest_fails(
     pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
     messages: list[str] = []
 
-    async def fetch(_config):
+    async def fetch(_config, _url=None):
         assert any("https://hub.invalid" in m for m in messages)
         raise HubUnavailable("incompatible manifest")
 
@@ -1621,3 +1621,26 @@ def test_forget_trust_reports_removed_versus_no_grant_for_wrong_path(
     assert right.returncode == 0
     assert "Removed hub trust grant" in right.stdout + right.stderr
     assert not cli_is_trusted(project, project, hub_url)
+
+
+async def test_explicit_pull_fetches_the_authorized_url_not_a_changed_config(
+    tmp_path, hub_http, monkeypatch
+):
+    checkout = tmp_path / "checkout"
+    config = config_for(checkout, hub_http)
+    authorized = "https://authorized.invalid/manifest"
+    config.hub.url = authorized
+    pull_module = importlib.import_module("chunkhound.api.cli.commands.pull")
+    monkeypatch.setattr(pull_module, "is_trusted", Mock(return_value=True))
+    fetched: list[str] = []
+
+    async def fetch(cfg, url=None):
+        fetched.append(url)
+        raise HubUnavailable("stop here")
+
+    monkeypatch.setattr(pull_module, "fetch_validated_manifest", fetch)
+    monkeypatch.setattr(pull_module, "configured_key", Mock())
+    args = argparse.Namespace(trust=False, path=checkout, version="latest")
+    with pytest.raises(SystemExit):
+        await pull_module.pull_command(args, config)
+    assert fetched == [authorized]

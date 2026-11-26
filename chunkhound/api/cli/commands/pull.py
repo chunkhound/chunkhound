@@ -87,7 +87,7 @@ async def pull_command(args: argparse.Namespace, config: Config) -> None:
         key = configured_key(config)
         logger.info("Hub source origin={}", hub_origin(authorized_url))
         try:
-            source = await fetch_validated_manifest(config)
+            source = await fetch_validated_manifest(config, authorized_url)
         except asyncio.CancelledError:
             if pull_attempted:
                 logger.error("{}", HUB_PULL_CANCELLATION_DIAGNOSTIC)

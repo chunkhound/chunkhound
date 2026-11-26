@@ -95,9 +95,15 @@ def binding_unchanged(
     )
 
 
-async def fetch_validated_manifest(config: Config) -> ValidatedHubSource:
-    """Fetch and validate the manifest, bound to this checkout and URL."""
-    url = config.hub.url
+async def fetch_validated_manifest(
+    config: Config, url: str | None = None
+) -> ValidatedHubSource:
+    """Fetch and validate the manifest, bound to this checkout and URL.
+
+    Callers that already authorized a URL pass it so the fetch cannot follow a
+    later change to the configuration.
+    """
+    url = url or config.hub.url
     if not url:
         raise HubUnavailable("No hub manifest URL configured")
     checkout = config.target_dir or Path.cwd()
