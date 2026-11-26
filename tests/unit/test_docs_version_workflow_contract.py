@@ -600,14 +600,21 @@ class TestDocsVersionWorkflowContract:
     def test_site_build_validation_job_contract(self) -> None:
         job = _job(".github/workflows/ci.yml", "site-build-validation")
         steps = cast(list[dict[str, Any]], job["steps"])
-        matrix = cast(dict[str, Any], job["strategy"]["matrix"])
 
-        assert matrix["os"] == ["ubuntu-latest", "macos-latest", "windows-latest"]
-        assert job["runs-on"] == "${{ matrix.os }}"
+        assert job["runs-on"] == "ubuntu-latest"
+        assert "strategy" not in job
         assert not any(
             str(step.get("uses", "")).startswith("actions/upload-artifact@")
             for step in steps
         )
+
+    def test_site_tests_job_runs_on_linux_only(self) -> None:
+        job = _job(".github/workflows/ci.yml", "site-tests")
+
+        assert job["strategy"]["matrix"]["os"] == ["ubuntu-latest"]
+        assert {e["os"] for e in job["strategy"]["matrix"]["include"]} == {
+            "ubuntu-latest"
+        }
 
     def test_pages_artifact_job_contract(self) -> None:
         job = _job(".github/workflows/ci.yml", "pages-artifact")
