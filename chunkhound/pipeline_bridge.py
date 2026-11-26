@@ -15,6 +15,7 @@ import os
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
@@ -65,6 +66,10 @@ class _CancellationToken(Protocol):
     def is_cancelled(self) -> bool: ...
     @property
     def cleanup_complete(self) -> bool: ...
+
+_BROKEN_POOL_REAP_TIMEOUT_SECS = 2.0
+"""Longest time _discard_broken_parse_pool() waits for the executor's manager
+thread to reap a broken pool's workers, so that it can log their exit codes."""
 
 
 def _new_cancellation_token() -> _CancellationToken:
@@ -364,6 +369,63 @@ def _shut_down_parse_pool_at_exit() -> None:
         _parse_pool_idle_token = None
     if pool is not None:
         pool.shutdown(cancel_futures=True)
+
+
+def _discard_broken_parse_pool(
+    pool: ProcessPoolExecutor, file_paths: list[str]
+) -> None:
+    """Stop sharing a pool whose worker died, so the next batch gets new workers.
+
+    A broken executor fails every later submit, so keeping it as the shared
+    pool would fail every later parse in this process. Called inside the
+    batch's lease; because _parse_pool no longer names this pool, that lease
+    starts no idle timer for it when it ends. Logs each worker's pid
+    and exit code and the batch that was in flight; the worker list is read
+    before shutdown(), which drops it. Exit codes are read once the executor
+    has reaped the workers, or logged as unknown if it has not within
+    _BROKEN_POOL_REAP_TIMEOUT_SECS. A shutdown error is logged, never raised,
+    so it cannot replace the BrokenProcessPool.
+    """
+    global _parse_pool
+    with _parse_pool_lock:
+        if _parse_pool is pool:
+            _parse_pool = None
+    # _processes and _executor_manager_thread are CPython's private executor
+    # state; no public API exposes the workers' pids and exit codes. The map is
+    # read without the executor's lock, while its manager thread may still
+    # change it; dict() takes a copy.
+    workers = dict(getattr(pool, "_processes", None) or {})
+    # The manager thread fails the batch first, then terminates and joins the
+    # workers while holding the executor's shutdown lock. Until it has joined
+    # them an exit code reads None, and a second reaper could read a wrong one
+    # (forkserver hands each exit status to one reader only). So wait for the
+    # manager, up to a deadline, and read the codes only once it is done.
+    manager = getattr(pool, "_executor_manager_thread", None)
+    if manager is not None:
+        manager.join(_BROKEN_POOL_REAP_TIMEOUT_SECS)
+    reaped = manager is None or not manager.is_alive()
+    worker_states = ", ".join(
+        f"pid={pid} exitcode={process.exitcode if reaped else 'unknown'}"
+        for pid, process in workers.items()
+    )
+    shown = ", ".join(file_paths[:3])
+    more = f" (+{len(file_paths) - 3} more)" if len(file_paths) > 3 else ""
+    logger.error(
+        "Parse pool broke: a worker process died. Workers: {}. Batch in flight: "
+        "{} files: {}{}. Discarding the pool; the next batch starts new workers.",
+        worker_states or "none recorded",
+        len(file_paths),
+        shown,
+        more,
+    )
+    if not reaped:
+        # shutdown() takes the lock the manager still holds, so it would wait
+        # for the manager too. The manager finishes the cleanup on its own.
+        return
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception as error:
+        logger.warning("Shutting down the broken parse pool failed: {}", error)
 
 
 def parse_file_callback(
@@ -714,6 +776,7 @@ def parse_batch_callback(
     parse_config: Any = None,
     *,
     index_unknown_files: bool = False,
+    on_pool_broken: Callable[[BrokenProcessPool], None] | None = None,
 ) -> list[tuple[str, list[dict], str | None, str | None]]:
     """Adapter: batch-parse files in parallel (called from Rust parse thread).
 
@@ -735,6 +798,14 @@ def parse_batch_callback(
             ParseCallConfig has no such field, so run_rust_pipeline() binds
             this from the resolved indexing config via functools.partial
             rather than it flowing through parse_config.
+        on_pool_broken: Called with the BrokenProcessPool when a worker
+            died during this batch, before the error propagates. Rust turns
+            the error into a plain string, so run_rust_pipeline() binds this
+            to learn that its run failed because of a dead worker.
+
+    Raises:
+        BrokenProcessPool: A pool worker died. The pool has been discarded,
+            so the next call starts new workers.
 
     Returns:
         List of (language, chunks, error, skip_reason) tuples — same order as
@@ -747,7 +818,13 @@ def parse_batch_callback(
     )
     args_list = [(p, cfg) for p in file_paths]
     with _leased_parse_pool(cfg.parse_thread_pool_size) as pool:
-        return list(pool.map(_parse_one_file, args_list))
+        try:
+            return list(pool.map(_parse_one_file, args_list))
+        except BrokenProcessPool as error:
+            if on_pool_broken is not None:
+                on_pool_broken(error)
+            _discard_broken_parse_pool(pool, file_paths)
+            raise
 
 
 def _detect_embed_concurrency(embedding_cfg: Any) -> int:
@@ -1043,6 +1120,10 @@ async def _run_rust_pipeline_body(
     # shared with any other concurrent or past run_rust_pipeline() call. See
     # _EmbedThreadCache's docstring for why that isolation matters.
     embed_cache = _resources.cache
+    # Filled by parse_batch_callback on Rust's parse thread when a pool worker
+    # dies; read after pipeline.run() has returned or raised. Per run, so a
+    # concurrent run's broken pool does not mark this one.
+    pool_breaks: list[BrokenProcessPool] = []
 
     # Preserve typed coordination failures from construction and pipeline.run().
     # Wrap other failures so callers can distinguish native pipeline failures
@@ -1061,7 +1142,9 @@ async def _run_rust_pipeline_body(
                 cancellation_token=_resources.token,
                 files=file_entries,
                 parse_batch_callback=functools.partial(
-                    parse_batch_callback, index_unknown_files=_index_unknown
+                    parse_batch_callback,
+                    index_unknown_files=_index_unknown,
+                    on_pool_broken=pool_breaks.append,
                 ),
                 embed_batch_callback=(
                     functools.partial(
@@ -1100,7 +1183,7 @@ async def _run_rust_pipeline_body(
     ):
         raise
     except Exception as e:
-        raise RustPipelineError(reason=str(e)) from e
+        raise RustPipelineError(reason=str(e), transient=bool(pool_breaks)) from e
 
     # Map PipelineReport → coordinator stats dict.
     # `report.errors` entries are Rust-formatted as "{path}: {message}"

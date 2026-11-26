@@ -56,13 +56,10 @@ jobs:
           path: site/src/lib/contributors.json
           if-no-files-found: error
 
+  # Linux only: the site is built and deployed from Linux.
   site-build-validation:
     needs: site-build
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-      fail-fast: false
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
@@ -92,7 +89,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   tests:
-    needs: site-build
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -119,8 +115,6 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}
-    env:
-      CHUNKHOUND_DOCS_VERSION: ${{ needs.site-build.outputs.docs_version }}
 
     steps:
       - name: Checkout code
@@ -212,23 +206,19 @@ jobs:
     needs: site-build
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux only: the site is built and deployed from Linux. Browser contracts
+        # launch real Chromium, so non-Linux browser and toolchain coverage is
+        # intentionally dropped, not equivalent.
+        os: [ubuntu-latest]
         python: ["3.14"]
         split: [1, 2, 3]
         include:
           # Browser contracts are heavier than unit tests: the retry wrapper needs
           # room to report a hung 700s test instead of killing the whole shard.
-          # ubuntu/macos: 2 attempts x 900s + 300s setup reserve = 2100s < 2400s.
+          # 2 attempts x 900s + 300s setup reserve = 2100s < 2400s.
           - os: ubuntu-latest
             job_timeout_minutes: 40
             pytest_timeout_minutes: 15
-          - os: macos-latest
-            job_timeout_minutes: 40
-            pytest_timeout_minutes: 15
-          - os: windows-latest
-            job_timeout_minutes: 60
-            pytest_timeout_minutes: 20
-            pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.job_timeout_minutes || 30 }}

@@ -34,18 +34,21 @@ def _pytest_commands(job: dict[str, Any]) -> list[str]:
     return [command for command in commands if "pytest" in command]
 
 
-def test_main_tests_job_excludes_site_and_reads_docs_version_from_site_build() -> None:
+def test_main_tests_job_excludes_site_and_does_not_wait_for_site_build() -> None:
     job = _jobs()["tests"]
     commands = _pytest_commands(job)
 
     assert commands
     assert all(SITE_IGNORE in command for command in commands)
-    # Site contracts live in the separate site-tests job; this job only waits
-    # on site-build for the shared docs-version output, never for the site dist.
-    assert "site-build" in _needs(job)
-    assert job["env"]["CHUNKHOUND_DOCS_VERSION"] == (
-        "${{ needs.site-build.outputs.docs_version }}"
+    # Site contracts live in the separate site-tests job; the Python suite
+    # neither needs the site dist nor the docs version, so it starts at once.
+    assert "site-build" not in _needs(job)
+    assert "CHUNKHOUND_DOCS_VERSION" not in job.get("env", {})
+    # The shared setup action must not resolve the docs version either.
+    setup_action = (CI.parents[1] / "actions/ci-python-setup/action.yml").read_text(
+        encoding="utf-8"
     )
+    assert "resolve_docs_version" not in setup_action
 
 
 def test_site_tests_job_owns_site_contracts() -> None:
