@@ -9,6 +9,7 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime.events import SimpleEventHandler
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
+from tests.ignore._git_oracle import git_ignored
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -17,11 +18,6 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
-
-
-def _git_ignored(repo: Path, rel_path: str) -> bool:
-    result = _git(repo, "check-ignore", "-q", "--no-index", rel_path)
-    return result.returncode == 0
 
 
 def _git_init_and_commit(repo: Path) -> None:
@@ -153,8 +149,8 @@ def test_realtime_path_filter_honors_libgit2_backend(tmp_path: Path) -> None:
     handler = SimpleEventHandler(event_queue=None, config=cfg, loop=None)
     path_filter = RealtimePathFilter(config=cfg, root_path=repo)
 
-    assert _git_ignored(repo, "foo/x.py") is True
-    assert _git_ignored(repo, "bar/y.py") is False
+    oracle = git_ignored(["foo/x.py", "bar/y.py"], repo)
+    assert oracle == {"foo/x.py": True, "bar/y.py": False}
     assert handler._should_index(ignored_file) is False
     assert path_filter.should_index(ignored_file) is False
     assert handler._should_index(included_file) is True

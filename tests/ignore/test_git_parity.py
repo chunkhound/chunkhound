@@ -8,38 +8,15 @@ until the engine is implemented, as part of TDD.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
-
-def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([
-        "git",
-        "-c",
-        "core.autocrlf=false",
-        "-c",
-        "core.safecrlf=false",
-        *args,
-    ], cwd=str(cwd), text=True, capture_output=True, check=False)
-
-
-def git_ignored(paths: Iterable[str], repo: Path) -> dict[str, bool]:
-    """Return a mapping {path: is_ignored} using git check-ignore -q.
-
-    We call git one path at a time to keep parsing simple and stable.
-    """
-    out: dict[str, bool] = {}
-    for p in paths:
-        proc = run_git(["check-ignore", "-q", "--no-index", p], repo)
-        out[p] = (proc.returncode == 0)
-    return out
+from tests.ignore._git_oracle import engine_ignored, git_ignored, run_git
 
 
 @pytest.mark.asyncio
-async def test_git_parity_basic(tmp_path: Path) -> None:
+async def test_git_parity_basic(tmp_path: Path, backend: str) -> None:
     repo = tmp_path
 
     # Initialize repo
@@ -85,19 +62,6 @@ async def test_git_parity_basic(tmp_path: Path) -> None:
 
     git_map = git_ignored(rels, repo)
 
-    # Import (non-existent) engine to enforce TDD failure until implemented
-    from chunkhound.utils.ignore_engine import build_ignore_engine  # type: ignore
-
-    engine = build_ignore_engine(
-        root=repo,
-        sources=["gitignore"],
-        chignore_file=".chignore",
-        config_exclude=None,
-    )
-
-    engine_map: dict[str, bool] = {}
-    for p in rels:
-        engine_map[p] = engine.matches((repo / p), is_dir=False) is not None
+    engine_map = engine_ignored(rels, repo, backend)
 
     assert engine_map == git_map
-

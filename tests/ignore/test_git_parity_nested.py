@@ -6,76 +6,77 @@ subdirectories, including negation and anchored patterns.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
+from tests.ignore._git_oracle import engine_ignored, git_ignored, run_git, write_file
 
-def run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([
-        "git",
-        "-c",
-        "core.autocrlf=false",
-        "-c",
-        "core.safecrlf=false",
-        *args,
-    ], cwd=str(cwd), text=True, capture_output=True, check=False)
+KEEP_LOG = "sub/keep.log"
 
-
-def git_ignored(paths: Iterable[str], repo: Path) -> dict[str, bool]:
-    out: dict[str, bool] = {}
-    for p in paths:
-        proc = run_git(["check-ignore", "-q", "--no-index", p], repo)
-        out[p] = (proc.returncode == 0)
-    return out
+# Known libgit2 disagreement: root '*.log' is not re-included by sub/.gitignore
+# '!keep.log' in the libgit2 backend. Only this path is isolated; every other
+# path stays strictly checked.
+LIBGIT2_KNOWN_MISMATCH = (
+    "libgit2 re-ignores sub/keep.log: root '*.log' is not "
+    "re-included by sub/.gitignore '!keep.log' (git says not ignored)"
+)
 
 
-@pytest.mark.asyncio
-async def test_git_parity_nested_negation_and_anchoring(tmp_path: Path) -> None:
+def _build_nested_repo(tmp_path: Path) -> tuple[Path, list[str]]:
     repo = tmp_path
     assert run_git(["init"], repo).returncode == 0
 
     # Root .gitignore: ignore logs everywhere and a root-only file
-    (repo / ".gitignore").write_text("""*.log
-/only-at-root.txt
-""")
+    write_file(repo, ".gitignore", "*.log\n/only-at-root.txt\n")
 
     # Subdirectory .gitignore: ignore 'build/' inside sub, but re-include keep.log
-    (repo / "sub").mkdir(parents=True, exist_ok=True)
-    (repo / "sub" / ".gitignore").write_text("""build/
-!keep.log
-""")
+    write_file(repo, "sub/.gitignore", "build/\n!keep.log\n")
 
-    # Create files to test
-    (repo / "a.log").write_text("x")
-    (repo / "only-at-root.txt").write_text("x")
-    (repo / "sub" / "b.log").write_text("x")
-    (repo / "sub" / "keep.log").write_text("x")
-    (repo / "sub" / "build").mkdir(parents=True, exist_ok=True)
-    (repo / "sub" / "build" / "tool.txt").write_text("x")
-    (repo / "other" / "build").mkdir(parents=True, exist_ok=True)
-    (repo / "other" / "build" / "tool.txt").write_text("x")
+    write_file(repo, "a.log")
+    write_file(repo, "only-at-root.txt")
+    write_file(repo, "sub/b.log")
+    write_file(repo, KEEP_LOG)
+    write_file(repo, "sub/build/tool.txt")
+    write_file(repo, "other/build/tool.txt")
 
     rels = [
-        "a.log",                    # ignored by root *.log
-        "only-at-root.txt",         # ignored by root anchored path
-        "sub/b.log",                # ignored by root *.log (still ignored)
-        "sub/keep.log",             # re-included by sub/.gitignore
-        "sub/build/tool.txt",       # ignored by sub/.gitignore build/
-        "other/build/tool.txt",     # not ignored (no sub/.gitignore in 'other')
+        "a.log",  # ignored by root *.log
+        "only-at-root.txt",  # ignored by root anchored path
+        "sub/b.log",  # ignored by root *.log (still ignored)
+        KEEP_LOG,  # re-included by sub/.gitignore
+        "sub/build/tool.txt",  # ignored by sub/.gitignore build/
+        "other/build/tool.txt",  # not ignored (no sub/.gitignore in 'other')
     ]
+    return repo, rels
+
+
+@pytest.mark.asyncio
+async def test_git_parity_nested_negation_and_anchoring(
+    tmp_path: Path, backend: str
+) -> None:
+    repo, rels = _build_nested_repo(tmp_path)
+    if backend == "libgit2":
+        # The known mismatch is isolated in test_libgit2_nested_keep_log_known_gap.
+        rels = [r for r in rels if r != KEEP_LOG]
 
     gmap = git_ignored(rels, repo)
-
-    from chunkhound.utils.ignore_engine import build_ignore_engine  # type: ignore
-
-    engine = build_ignore_engine(root=repo, sources=["gitignore"], chignore_file=".chignore", config_exclude=None)
-
-    emap: dict[str, bool] = {}
-    for p in rels:
-        emap[p] = engine.matches(repo / p, is_dir=False) is not None
+    emap = engine_ignored(rels, repo, backend)
 
     assert emap == gmap
 
+
+@pytest.mark.asyncio
+async def test_libgit2_nested_keep_log_known_gap(
+    tmp_path: Path, backend: str, request: pytest.FixtureRequest
+) -> None:
+    if backend != "libgit2":
+        pytest.skip("known gap is libgit2-only")
+    request.applymarker(
+        pytest.mark.xfail(
+            strict=True, raises=AssertionError, reason=LIBGIT2_KNOWN_MISMATCH
+        )
+    )
+    repo, _ = _build_nested_repo(tmp_path)
+
+    assert engine_ignored([KEEP_LOG], repo, backend) == git_ignored([KEEP_LOG], repo)
