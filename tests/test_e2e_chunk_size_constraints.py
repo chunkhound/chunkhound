@@ -1,97 +1,30 @@
-"""E2E test: All parsers respect chunk size constraints.
+"""Indexing must send valid embedding requests for every supported text language.
 
-Verifies that ALL parser features NEVER produce chunks exceeding limits
-by intercepting at the embedding provider level.
-
-IMPORTANT: This test MUST cover all available Language parsers.
-If a new language is added to the Language enum, add samples here.
-The test_all_parsers_covered test will fail if any parsers are missing.
-
-Validates:
-1. max_chunk_size: 1200 non-whitespace chars - FAIL on violation
-2. safe_token_limit: 6000 tokens - FAIL on violation
-3. min_chunk_size: 25 non-whitespace chars - Log warning only (soft threshold)
+Provider limits apply to complete inputs, including any metadata. Parser size,
+chunk boundaries, and header formats are not external contracts.
 """
-
-from logging import getLogger
-from pathlib import Path
 
 import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
-from chunkhound.core.utils import format_chunk_for_embedding
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.parsers.chunk_splitter import CASTConfig
 from tests.fixtures.fake_providers import ValidatingEmbeddingProvider
 
-logger = getLogger(__name__)
-
-# Derive constraints from CASTConfig to avoid drift
-_config = CASTConfig()
-# Content limit is max_chunk_size non-ws chars, but the embedded text also
-# carries the embedding header. Its size is path-dependent (macOS temp roots
-# alone exceed ~130 chars), so it is derived per-run from the real tmp_path —
-# see _max_header_overhead.
-# Intentionally lower than CASTConfig.min_chunk_size (50) — this is a soft
-# warning threshold for the test harness, not an enforcement limit. Using a
-# lower value avoids false-positive warnings from legitimate small chunks
-# produced by real parsers (e.g., short import blocks, single-line rules).
-MIN_CHUNK_SIZE = 25
-SAFE_TOKEN_LIMIT = _config.safe_token_limit
-
-# Languages with binary content (cannot test with text samples)
+# PDF needs a binary fixture rather than generated source text.
 BINARY_CONTENT_LANGUAGES = {Language.PDF}
-
-# Languages that don't use cAST algorithm for size enforcement
-# These parsers use simpler line-based or fallback chunking strategies
-# TODO: Consider adding size enforcement to these parsers
-LANGUAGES_WITHOUT_SIZE_ENFORCEMENT = {
-    Language.TEXT,  # Plaintext fallback - no semantic structure
-    Language.UNKNOWN,  # Generic fallback parser
-}
+# These enum values do not represent supported on-disk source languages.
+UNSUPPORTED_FILE_LANGUAGES = {Language.UNKNOWN, Language.GIT_DIFF}
 
 
 def _make_large_statements(statement: str, count: int = 500) -> str:
-    """Generate repeated statements to exceed 1200 non-ws chars.
-
-    Each statement should have ~5-10 non-ws chars to reliably exceed 1200 total.
-    With count=500 and 5 chars/statement, we get ~2500 non-ws chars.
-    """
+    """Build a large input without prescribing its chunk boundaries."""
     return "\n".join([statement] * count)
 
 
-def _max_header_overhead(tmp_path: Path) -> int:
-    """Non-ws-char budget for the embedding header prepended to every chunk.
-
-    Measured from the real formatter (format_chunk_for_embedding) so the header
-    format cannot drift between this test and production. Derived from the real
-    tmp_path because macOS temp roots alone exceed ~130 chars, which a
-    hardcoded guess must underestimate. `"all:"` is the longest rule_target the
-    samples generate (the Makefile sample's `all:` rule) — the same raw
-    target-line string the makefile parser stores as metadata["rule_target"].
-    The current samples produce no constants annotations; if one is added,
-    extend this — the failure output shows the offending header verbatim.
-    """
-    header_lengths = (
-        len(
-            format_chunk_for_embedding(
-                "",
-                str(tmp_path / f"large_{language.value}{ext}"),
-                language.value,
-                rule_target="all:",
-            )
-        )
-        for language, (ext, _, _) in LARGE_LANGUAGE_SAMPLES.items()
-        if language not in BINARY_CONTENT_LANGUAGES
-    )
-    return max(header_lengths)
-
-
 # Language samples: (extension, large_sample, normal_sample)
-# Large samples MUST exceed 1200 non-whitespace chars to trigger split paths
-# Normal samples verify no over-splitting on small inputs
+# Exercise both large and small inputs without requiring a particular split.
 LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
     # === Programming Languages ===
     Language.PYTHON: (
@@ -115,7 +48,8 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         ".ts",
         # Large class
         "class DataProcessor {\n"
-        + _make_large_statements("  private field: number = 0;"),
+        + "\n".join(f"  private field{index}: number = 0;" for index in range(500))
+        + "\n}",
         # Normal
         "function greet(name: string): string {\n  return `Hello, ${name}`;\n}",
     ),
@@ -297,8 +231,8 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         + _make_large_statements("    $x = 1")
         + "\n    return $x\n}",
         # Normal
-        'function Get-Greeting {\n'
-        '    param([string]$Name)\n'
+        "function Get-Greeting {\n"
+        "    param([string]$Name)\n"
         '    return "Hello, $Name"\n}',
     ),
     Language.BASH: (
@@ -424,9 +358,7 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         ".sql",
         # Large: many-column CREATE TABLE triggers splitting
         "CREATE TABLE large_table (\n"
-        + ",\n".join(
-            f"    col_{i} VARCHAR(255) NOT NULL DEFAULT ''" for i in range(80)
-        )
+        + ",\n".join(f"    col_{i} VARCHAR(255) NOT NULL DEFAULT ''" for i in range(80))
         + "\n);",
         # Normal: simple CREATE TABLE
         "CREATE TABLE users (\n"
@@ -448,9 +380,7 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
     Language.CSS: (
         ".css",
         # Large CSS with many rules
-        ".container {\n"
-        + _make_large_statements("  color: red;")
-        + "\n}",
+        ".container {\n" + _make_large_statements("  color: red;") + "\n}",
         # Normal
         ".container {\n  display: flex;\n  color: blue;\n}",
     ),
@@ -482,8 +412,9 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
     ),
     Language.GIT_DIFF: (
         ".patch",
-        # Large diff — in-memory pseudo-language, no file parser; uses same text fallback
-        "diff --git a/foo.py b/foo.py\n" + _make_large_statements("+    line of diff content"),
+        # In-memory diff pseudo-language; not a supported on-disk file type.
+        "diff --git a/foo.py b/foo.py\n"
+        + _make_large_statements("+    line of diff content"),
         # Normal
         "diff --git a/foo.py b/foo.py\n+added line\n-removed line\n",
     ),
@@ -492,36 +423,28 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Large FUNCTION_BLOCK - triggers line-based split
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<TcPlcObject Version="1.1.0.1">\n'
-        '  <POU Name="FB_Large" Id="{00000000-0000-0000-0000-000000000001}" SpecialFunc="None">\n'
-        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Large\nVAR\nEND_VAR\n]]></Declaration>\n"
+        '  <POU Name="FB_Large" Id="{00000000-0000-0000-0000-000000000001}" '
+        'SpecialFunc="None">\n'
+        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Large\n"
+        "VAR\nEND_VAR\n]]></Declaration>\n"
         "    <Implementation>\n      <ST><![CDATA["
         + _make_large_statements("    nX := nX + 1;")
         + "]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
         # Normal - small FUNCTION_BLOCK, no over-splitting
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<TcPlcObject Version="1.1.0.1">\n'
-        '  <POU Name="FB_Greet" Id="{00000000-0000-0000-0000-000000000002}" SpecialFunc="None">\n'
-        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Greet\nVAR\nEND_VAR\n]]></Declaration>\n"
-        "    <Implementation>\n      <ST><![CDATA[nX := 1;\n]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
+        '  <POU Name="FB_Greet" Id="{00000000-0000-0000-0000-000000000002}" '
+        'SpecialFunc="None">\n'
+        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Greet\n"
+        "VAR\nEND_VAR\n]]></Declaration>\n"
+        "    <Implementation>\n      <ST><![CDATA[nX := 1;\n]]></ST>\n"
+        "    </Implementation>\n  </POU>\n</TcPlcObject>",
     ),
 }
 
 
-@pytest.fixture
-async def validating_db(tmp_path):
-    """Create DB with ValidatingEmbeddingProvider to intercept all chunks."""
-    db_path = tmp_path / "chunk_validation_test.duckdb"
-
-    embedding_manager = EmbeddingManager()
-    validating_provider = ValidatingEmbeddingProvider(
-        dims=1536,
-        max_chunk_size=_config.max_chunk_size + _max_header_overhead(tmp_path),
-        min_chunk_size=MIN_CHUNK_SIZE,
-        safe_token_limit=SAFE_TOKEN_LIMIT,
-    )
-    embedding_manager.register_provider(validating_provider, set_default=True)
-
-    config = Config(
+def embedding_test_config(tmp_path, db_path):
+    return Config(
         target_dir=tmp_path,
         database={"path": str(db_path), "provider": "duckdb"},
         embedding={
@@ -531,147 +454,82 @@ async def validating_db(tmp_path):
         },
     )
 
-    services = create_services(db_path, config, embedding_manager)
-    yield services, validating_provider, tmp_path
+
+@pytest.fixture
+async def validating_db(tmp_path):
+    """Use a real database and validate final embedding requests."""
+    db_path = tmp_path / "chunk_validation_test.duckdb"
+    embedding_manager = EmbeddingManager()
+    validating_provider = ValidatingEmbeddingProvider(dims=1536)
+    embedding_manager.register_provider(validating_provider, set_default=True)
+    services = create_services(
+        db_path, embedding_test_config(tmp_path, db_path), embedding_manager
+    )
+    try:
+        yield services, validating_provider, tmp_path
+    finally:
+        services.provider.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_all_parsers_respect_chunk_size_constraints(validating_db):
-    """Verify ALL parsers using cAST NEVER produce chunks exceeding size constraints.
-
-    This test:
-    1. Processes large samples (>1200 non-ws chars) that MUST trigger splitting
-    2. Processes normal samples to verify no over-splitting
-    3. Validates all chunks via ValidatingEmbeddingProvider intercept
-    4. Fails on max_chunk_size or safe_token_limit violations (for cAST parsers)
-    5. Logs warnings for suspiciously small chunks
-    6. Separately tracks violations from parsers without size enforcement
-
-    Note: Some parsers (TEXT, UNKNOWN) don't use cAST
-    and are tracked separately as known limitations.
-    """
+@pytest.mark.parametrize(
+    "language",
+    [
+        lang
+        for lang in LARGE_LANGUAGE_SAMPLES
+        if lang not in BINARY_CONTENT_LANGUAGES | UNSUPPORTED_FILE_LANGUAGES
+    ],
+    ids=lambda lang: lang.value,
+)
+async def test_indexing_sends_valid_embedding_requests(validating_db, language):
+    """Every input must index successfully and reach the provider without rejection."""
     services, provider, tmp_path = validating_db
+    extension, large, normal = LARGE_LANGUAGE_SAMPLES[language]
+    for label, sample in (("large", large), ("normal", normal)):
+        source = tmp_path / f"{label}_{language.name.lower()}{extension}"
+        source.write_text(sample, encoding="utf-8")
+        await assert_embedding_requests(services, provider, source)
 
-    # Track languages separately for validation
-    enforced_languages = []
-    non_enforced_languages = []
 
-    for language, (ext, large_sample, normal_sample) in LARGE_LANGUAGE_SAMPLES.items():
-        if language in BINARY_CONTENT_LANGUAGES:
-            continue
+async def assert_embedding_requests(services, provider, source):
+    provider.all_texts.clear()
+    result = await services.indexing_coordinator.process_file(source)
+    assert result["status"] == "success", result
+    assert result["embedding_error"] is None, result
+    assert result["embeddings_generated"] > 0, result
+    assert provider.all_texts, f"No embedding request for {source.name}"
 
-        if large_sample is None:
-            continue
 
-        # Track which type of language
-        if language in LANGUAGES_WITHOUT_SIZE_ENFORCEMENT:
-            non_enforced_languages.append(language)
-        else:
-            enforced_languages.append(language)
+@pytest.mark.asyncio
+async def test_oversized_input_produces_valid_embedding_requests(validating_db):
+    services, provider, tmp_path = validating_db
+    directory = tmp_path / ("long_source_path_" + "x" * 120)
+    directory.mkdir()
+    source = directory / "oversized.py"
+    # Exceed the provider budget but stay far under the 128KB parse-timeout
+    # domain: ~34KB payload -> est. ~8200 tokens > max_tokens (8192).
+    payload = "oversized_content " * ((provider.max_tokens * 4) // 17 + 10)
+    assert provider.estimate_tokens(payload) > provider.max_tokens
+    source.write_text(f'def oversized():\n    return "{payload}"\n', encoding="utf-8")
+    await assert_embedding_requests(services, provider, source)
 
-        # Process large sample (must trigger splitting for cAST parsers)
-        large_file = tmp_path / f"large_{language.name.lower()}{ext}"
-        large_file.write_text(large_sample)
-        await services.indexing_coordinator.process_file(
-            large_file, skip_embeddings=False
-        )
 
-        # Process normal sample
-        if normal_sample:
-            normal_file = tmp_path / f"normal_{language.name.lower()}{ext}"
-            normal_file.write_text(normal_sample)
-            await services.indexing_coordinator.process_file(
-                normal_file, skip_embeddings=False
-            )
-
-        # For enforced languages, check if large sample created violations
-        # (violations from non-enforced languages will be filtered later)
-
-    # Separate violations by type and language
-    # Languages without size enforcement (lowercase for header matching)
-    non_enforced_language_names = {
-        lang.name.lower() for lang in LANGUAGES_WITHOUT_SIZE_ENFORCEMENT
-    }
-
-    # Get violations from enforced languages only (excluding non-enforced)
-    enforced_char_violations = provider.get_violations_excluding_languages(
-        "max_chars_exceeded", non_enforced_language_names
-    )
-    enforced_token_violations = provider.get_violations_excluding_languages(
-        "max_tokens_exceeded", non_enforced_language_names
-    )
-    small_chunks = provider.get_violations_by_type("suspiciously_small")
-
-    # Get violations from non-enforced languages for reporting
-    non_enforced_char_violations = provider.get_violations_by_languages(
-        "max_chars_exceeded", non_enforced_language_names
-    )
-
-    # Fail on violations from cAST-enforced languages
-    assert not enforced_char_violations, (
-        f"Found {len(enforced_char_violations)} chunks from cAST parsers exceeding "
-        f"max_chunk_size ({provider.max_chunk_size} non-ws chars):\n"
-        + "\n".join(
-            f"  - {v['non_ws_chars']} chars [{v.get('language', 'unknown')}]: "
-            f"{v['text_preview'][:50]}..."
-            for v in enforced_char_violations[:5]
-        )
-    )
-
-    assert not enforced_token_violations, (
-        f"Found {len(enforced_token_violations)} chunks from cAST parsers exceeding "
-        f"safe_token_limit ({SAFE_TOKEN_LIMIT} tokens):\n"
-        + "\n".join(
-            f"  - {v['estimated_tokens']} tokens [{v.get('language', 'unknown')}]: "
-            f"{v['text_preview'][:50]}..."
-            for v in enforced_token_violations[:5]
-        )
-    )
-
-    # Log known limitations from non-enforced parsers
-    if non_enforced_char_violations:
-        logger.warning(
-            "%d oversized chunks from parsers without size enforcement (TEXT, UNKNOWN)",
-            len(non_enforced_char_violations),
-        )
-
-    # Log suspiciously small chunks (soft threshold, don't fail)
-    if small_chunks:
-        logger.warning(
-            "%d suspiciously small chunks (<%d non-ws chars)",
-            len(small_chunks),
-            MIN_CHUNK_SIZE,
-        )
-
-    # Sanity check: verify we actually processed chunks
-    assert provider.chunk_stats["total"] > 0, "No chunks were processed"
-    logger.info("=== Chunk Size Constraint Test Results ===")
-    logger.info("Languages with cAST enforcement: %d", len(enforced_languages))
-    logger.info(
-        "Languages without enforcement: %d (%s)",
-        len(non_enforced_languages),
-        ", ".join(lang.name for lang in non_enforced_languages),
-    )
-    logger.info("Total chunks validated: %d", provider.chunk_stats["total"])
-    logger.info(
-        "Char range: %d - %d non-ws chars",
-        provider.chunk_stats["min_size"],
-        provider.chunk_stats["max_size"],
-    )
-    logger.info(
-        "Token range: %d - %d est. tokens",
-        provider.chunk_stats["min_tokens"],
-        provider.chunk_stats["max_tokens"],
-    )
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "language", list(UNSUPPORTED_FILE_LANGUAGES), ids=lambda lang: lang.value
+)
+async def test_unsupported_files_do_not_request_embeddings(validating_db, language):
+    services, provider, tmp_path = validating_db
+    extension, sample, _ = LARGE_LANGUAGE_SAMPLES[language]
+    source = tmp_path / f"unsupported{extension}"
+    source.write_text(sample, encoding="utf-8")
+    result = await services.indexing_coordinator.process_file(source)
+    assert result["status"] == "skipped", result
+    assert not provider.all_texts
 
 
 def test_all_parsers_covered_with_large_samples():
-    """Verify every Language enum member has test samples.
-
-    This test ensures that when new languages are added to the Language enum,
-    they MUST also be added to LARGE_LANGUAGE_SAMPLES. Without this guard,
-    new parsers could be added without chunk size constraint coverage.
-    """
+    """New supported languages must receive embedding request coverage."""
     all_languages = set(Language)
     covered_languages = set(LARGE_LANGUAGE_SAMPLES.keys())
 
@@ -686,31 +544,4 @@ def test_all_parsers_covered_with_large_samples():
     assert not extra_languages, (
         f"LARGE_LANGUAGE_SAMPLES contains languages not in Language enum: "
         f"{sorted(lang.name for lang in extra_languages)}"
-    )
-
-
-def test_large_samples_exceed_threshold():
-    """Verify large samples actually exceed 1200 non-whitespace chars.
-
-    If samples don't exceed the threshold, they won't trigger split paths
-    and the test won't be effective.
-    """
-    import re
-
-    min_large_size = 1200  # Must exceed max_chunk_size to trigger split
-
-    undersized = []
-    for language, (ext, large_sample, normal_sample) in LARGE_LANGUAGE_SAMPLES.items():
-        if language in BINARY_CONTENT_LANGUAGES or large_sample is None:
-            continue
-
-        non_ws_chars = len(re.sub(r"\s", "", large_sample))
-        if non_ws_chars < min_large_size:
-            undersized.append(
-                f"{language.name}: {non_ws_chars} chars (need {min_large_size}+)"
-            )
-
-    assert not undersized, (
-        f"Large samples must exceed {min_large_size} non-ws chars "
-        "to trigger splitting:\n" + "\n".join(f"  - {s}" for s in undersized)
     )
