@@ -2370,7 +2370,7 @@ class TestRealtimeFunctional:
         ) -> WatchdogBootstrap:
             time.sleep(0.05)
             loop.call_soon_threadsafe(late_watchdog_returned.set)
-            return WatchdogBootstrap(late_observer, MagicMock(), "not_applicable")
+            return WatchdogBootstrap(late_observer, MagicMock())
 
         monkeypatch.setattr(
             service, "_WATCHDOG_SETUP_TIMEOUT_SECONDS", 0.01, raising=False

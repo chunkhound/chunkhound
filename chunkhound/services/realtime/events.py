@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,8 +31,10 @@ from chunkhound.services.realtime_path_filter import RealtimePathFilter
 # `attrib` whenever the record's change time is ahead of its write time, which
 # an ordinary append usually is, so for most writes it is the only signal. On
 # Linux it is IN_ATTRIB (chmod, touch), which watchdog 6 already reported as
-# `modified`. Reads raise no `attrib` on Windows because
-# ignore_windows_last_access() unsubscribes from last-access changes.
+# `modified`. Reads raise no `attrib` on Windows because the observer's
+# notify_filter omits FILE_NOTIFY_CHANGE_LAST_ACCESS. watchdog before 7.1.1
+# has no such argument; ignore_windows_last_access() clears that bit on the
+# module global those releases read.
 WATCHDOG_TO_CONSUMER_EVENT = {
     "created": "created",
     "modified": "modified",
@@ -41,33 +44,46 @@ WATCHDOG_TO_CONSUMER_EVENT = {
 }
 
 
-def ignore_windows_last_access() -> None:
-    """Stop watchdog's Windows emitter from reporting last-access changes.
+def windows_notify_filter() -> int | None:
+    """Windows ``dwNotifyFilter`` with last-access removed, or None off Windows.
 
-    When last-access updates are on (`fsutil behavior query
-    disablelastaccess`), every read of a file not read for an hour changes its
-    access time, and watchdog subscribes to that
-    (FILE_NOTIFY_CHANGE_LAST_ACCESS): without this, each read raises an event
-    (7: `attrib`, 6: `modified`) that takes a queue slot, and the start-up scan
-    reads every file. Writes still arrive through LAST_WRITE, SIZE and
-    ATTRIBUTES.
-
-    watchdog has no per-watch flag: it reads the module global
-    WATCHDOG_FILE_NOTIFY_FLAGS on every ReadDirectoryChangesW call (6.0 and
-    7.1), so clearing the bit before an observer starts covers every watch.
-    It is process-wide; ChunkHound's watchdog observer is its only user here.
+    watchdog 7.1.1 passes this to ``ReadDirectoryChangesW`` as
+    ``WindowsApiObserver(notify_filter=...)``. One observer uses one mask for
+    every watch. Writes still arrive through LAST_WRITE, SIZE and ATTRIBUTES.
+    ``None`` means this is not Windows, or this watchdog has no notify constants.
     """
     if os.name != "nt":
-        return
+        return None
     try:
         from watchdog.observers import winapi
     except ImportError:
-        return
+        return None
     flags = getattr(winapi, "WATCHDOG_FILE_NOTIFY_FLAGS", None)
     last_access = getattr(winapi, "FILE_NOTIFY_CHANGE_LAST_ACCESS", None)
-    if flags is None or last_access is None:
+    if not isinstance(flags, int) or not isinstance(last_access, int):
+        return None
+    return flags & ~last_access
+
+
+def ignore_windows_last_access() -> None:
+    """Drop last-access from watchdog's process-wide Windows notify mask.
+
+    watchdog before 7.1.1 has no ``notify_filter`` argument. It reads
+    ``WATCHDOG_FILE_NOTIFY_FLAGS`` on every ``ReadDirectoryChangesW`` call.
+    Python 3.10 installs that line (6.x). The startup path calls this only
+    when the observer constructor has no ``notify_filter`` parameter. The
+    assignment is process-wide; ChunkHound's watchdog observer is its only
+    user here. When last-access updates are on, every read of a file not read
+    for an hour would otherwise take a queue slot.
+    """
+    if os.name != "nt":
         return
-    winapi.WATCHDOG_FILE_NOTIFY_FLAGS = flags & ~last_access
+    narrowed = windows_notify_filter()
+    if narrowed is None:
+        return
+    from watchdog.observers import winapi
+
+    winapi.WATCHDOG_FILE_NOTIFY_FLAGS = narrowed
 
 
 def watchdog_event_filter() -> list[type]:
@@ -78,6 +94,11 @@ def watchdog_event_filter() -> list[type]:
     watchdog 7 shares one inotify descriptor per observer and each
     `inotify_add_watch` replaces the inode's mask, so a narrower filter on one
     watch would silently narrow an overlapping one.
+
+    On Linux, watchdog 7.1.1's ``EventsLostEvent`` is included. The mask
+    builder ignores that class, so the kernel watch is unchanged. watchdog
+    drops the event unless the filter lists it. Windows buffer-overflow
+    events of the same class stay out of the filter.
     """
     # Imported here so this module stays importable without watchdog.
     import watchdog.events as watchdog_events
@@ -90,12 +111,16 @@ def watchdog_event_filter() -> list[type]:
         # Only watchdog 7 has the attrib classes; 6 reports attrib as modified.
         "attrib": ("FileAttribEvent",),
     }
-    return [
+    classes = [
         getattr(watchdog_events, name)
         for event_type in sorted(names)
         for name in names[event_type]
         if hasattr(watchdog_events, name)
     ]
+    events_lost = getattr(watchdog_events, "EventsLostEvent", None)
+    if events_lost is not None and sys.platform.startswith("linux"):
+        classes.append(events_lost)
+    return classes
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -232,6 +257,7 @@ class SimpleEventHandler:
         source_event_callback: Callable[[str, Path], None] | None = None,
         filtered_event_callback: Callable[[str, Path], None] | None = None,
         admission_callback: AdmissionCallback | None = None,
+        events_lost_callback: Callable[[], None] | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
@@ -240,6 +266,7 @@ class SimpleEventHandler:
         self._source_event_callback = source_event_callback
         self._filtered_event_callback = filtered_event_callback
         self._admission_callback = admission_callback
+        self._events_lost_callback = events_lost_callback
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -253,6 +280,12 @@ class SimpleEventHandler:
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
+        # watchdog 7.1.1 emits this after repairing watches. The path is the
+        # watch, not a changed file, so it must not take a queue slot.
+        if getattr(event, "event_type", None) == "events_lost":
+            self._report_events_lost()
+            return
+
         # No callbacks for a dropped read: each would cost a cross-thread call.
         event_type = WATCHDOG_TO_CONSUMER_EVENT.get(event.event_type)
         if event_type is None:
@@ -336,6 +369,14 @@ class SimpleEventHandler:
             logger.debug(f"File moved to temp/unsupported: {src_path}")
             self._record_source_event("deleted", src_file)
             self._queue_event("deleted", src_file)
+
+    def _report_events_lost(self) -> None:
+        if self._events_lost_callback is None:
+            return
+        try:
+            self._events_lost_callback()
+        except Exception as error:
+            logger.warning(f"lost filesystem events could not be reported: {error}")
 
     def _should_admit_event(
         self,

@@ -92,7 +92,7 @@ async def test_windows_read_raises_no_event_and_write_is_a_change(
     winapi = pytest.importorskip("watchdog.observers.winapi")
     import chunkhound.services.realtime.startup as startup_module
 
-    # The helper narrows a process-wide watchdog global; restore it afterwards.
+    # watchdog before 7.1.1 narrows a process-wide global. Restore it afterwards.
     monkeypatch.setattr(
         winapi, "WATCHDOG_FILE_NOTIFY_FLAGS", winapi.WATCHDOG_FILE_NOTIFY_FLAGS
     )
@@ -105,7 +105,7 @@ async def test_windows_read_raises_no_event_and_write_is_a_change(
 
     queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
     handler, _ = _handler(tmp_path, queue, asyncio.get_running_loop())
-    observer, _ = startup_module._create_watchdog_observer(lambda: None)
+    observer = startup_module._create_watchdog_observer()
     observer.schedule(
         handler, str(tmp_path), recursive=True, event_filter=watchdog_event_filter()
     )

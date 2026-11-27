@@ -1,8 +1,8 @@
 """A kernel inotify queue overflow requests a realtime resync.
 
-When the kernel inotify queue overflows it drops events and queues one
-IN_Q_OVERFLOW record. watchdog 7.1 rebuilds its watches but emits no event, so
-without a hook ChunkHound never learns that changes were lost.
+watchdog 7.1.1 emits EventsLostEvent after it rebuilds the watches a kernel
+IN_Q_OVERFLOW dropped. ChunkHound accepts that event and asks for a resync.
+A later content write is still a content change. watchdog 6 has no such event.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,37 +17,88 @@ from typing import Any
 import pytest
 
 from chunkhound.core.config.config import Config
-from chunkhound.services.realtime.inotify_overflow import InotifyOverflowDetection
+from chunkhound.services.realtime.events import (
+    SimpleEventHandler,
+    watchdog_event_filter,
+)
 from chunkhound.services.realtime.service import RealtimeIndexingService
+
+
+def test_events_lost_is_in_the_linux_filter_only() -> None:
+    """Linux admits EventsLostEvent. Other platforms keep it out of the filter."""
+    watchdog_events = pytest.importorskip("watchdog.events")
+    events_lost = getattr(watchdog_events, "EventsLostEvent", None)
+    if events_lost is None:
+        pytest.skip("watchdog 6 has no EventsLostEvent")
+
+    classes = watchdog_event_filter()
+    if sys.platform.startswith("linux"):
+        assert events_lost in classes
+    else:
+        assert events_lost not in classes
+
+
+def test_events_lost_requests_a_resync_and_a_write_stays_a_change(
+    tmp_path: Path,
+) -> None:
+    """EventsLostEvent calls the overflow callback. A content write still queues."""
+    watchdog_events = pytest.importorskip("watchdog.events")
+    events_lost_cls = getattr(watchdog_events, "EventsLostEvent", None)
+    if events_lost_cls is None:
+        pytest.skip("watchdog 6 has no EventsLostEvent")
+
+    calls: list[None] = []
+    seen: list[str] = []
+    handler = SimpleEventHandler(
+        None,
+        Config(target_dir=tmp_path),
+        None,
+        root_path=tmp_path,
+        source_event_callback=lambda kind, _path: seen.append(kind),
+        events_lost_callback=lambda: calls.append(None),
+    )
+    source = tmp_path / "module.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+
+    handler.dispatch(watchdog_events.FileModifiedEvent(str(source)))
+    handler.dispatch(events_lost_cls(str(tmp_path), is_directory=True))
+
+    assert seen == ["modified"]
+    assert calls == [None]
 
 
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="inotify is Linux-only"
 )
-def test_kernel_overflow_reaches_the_service() -> None:
-    from watchdog.version import VERSION_INFO
-
-    if VERSION_INFO < (7, 1):
-        pytest.skip("watchdog < 7.1 drops the overflow record; nothing to hook")
-    # From 7.1 on the hook must install: a renamed or reshaped private
-    # InotifyFD or observer._inotify_fd fails here instead of skipping.
-    from watchdog.observers import inotify_c
+def test_linux_observer_watches_and_reports_events_lost(tmp_path: Path) -> None:
+    """The real Linux observer starts, and its handler accepts EventsLostEvent."""
+    watchdog_events = pytest.importorskip("watchdog.events")
+    events_lost_cls = getattr(watchdog_events, "EventsLostEvent", None)
+    if events_lost_cls is None:
+        pytest.skip("watchdog 6 drops the overflow record and emits no event")
 
     import chunkhound.services.realtime.startup as startup_module
 
     calls: list[None] = []
-    observer, detection = startup_module._create_watchdog_observer(
-        lambda: calls.append(None)
+    observer = startup_module._create_watchdog_observer()
+    handler = SimpleEventHandler(
+        None,
+        Config(target_dir=tmp_path),
+        None,
+        root_path=tmp_path,
+        events_lost_callback=lambda: calls.append(None),
+    )
+    observer.schedule(
+        handler,
+        str(tmp_path),
+        recursive=True,
+        event_filter=watchdog_event_filter(),
     )
     observer.start()
     try:
-        assert detection == "active"
-        observer._inotify_fd.handle_event(  # type: ignore[attr-defined]
-            inotify_c.InotifyEvent(
-                -1, inotify_c.InotifyConstants.IN_Q_OVERFLOW, 0, b""
-            )
-        )
-        assert len(calls) == 1
+        assert observer.is_alive()
+        handler.dispatch(events_lost_cls(str(tmp_path), is_directory=True))
+        assert calls == [None]
     finally:
         observer.stop()
         observer.join(timeout=1.0)
@@ -72,13 +122,8 @@ async def test_overflow_requests_a_loss_of_sync_resync(
 
         def join(self, timeout: float | None = None) -> None: ...
 
-    captured: list[Callable[[], None]] = []
-
-    def fake_create(
-        on_overflow: Callable[[], None],
-    ) -> tuple[FakeObserver, InotifyOverflowDetection]:
-        captured.append(on_overflow)
-        return FakeObserver(), "active"
+    def fake_create() -> FakeObserver:
+        return FakeObserver()
 
     monkeypatch.setattr(startup_module, "_create_watchdog_observer", fake_create)
     config = Config(target_dir=tmp_path, indexing={"realtime_backend": "watchdog"})
@@ -107,12 +152,15 @@ async def test_overflow_requests_a_loss_of_sync_resync(
             bootstrap.observer,
             bootstrap.event_handler,
             tmp_path,
-            bootstrap.inotify_overflow_detection,
         )
 
-        thread = threading.Thread(target=captured[0])
-        thread.start()
-        thread.join()
+        watchdog_events = pytest.importorskip("watchdog.events")
+        events_lost_cls = getattr(watchdog_events, "EventsLostEvent", None)
+        if events_lost_cls is None:
+            pytest.skip("watchdog 6 has no EventsLostEvent")
+        bootstrap.event_handler.dispatch(
+            events_lost_cls(str(tmp_path), is_directory=True)
+        )
         await asyncio.wait_for(resync_requested.wait(), timeout=5.0)
 
         health = await service.get_health()
@@ -121,7 +169,6 @@ async def test_overflow_requests_a_loss_of_sync_resync(
         details = health["resync"]["last_details"]
         assert details["loss_of_sync_reason"] == "inotify_queue_overflow"
         overflow = health["inotify_overflow"]
-        assert overflow["detection"] == "active"
         assert overflow["count"] == 1
         assert overflow["last_at"] is not None
     finally:
