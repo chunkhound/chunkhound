@@ -373,6 +373,7 @@ class Language(Enum):
             Language.GO,
             Language.HASKELL,
             Language.RUST,
+            Language.ZIG,
             Language.BASH,
             Language.MAKEFILE,
             Language.C,

@@ -63,6 +63,7 @@ const state = () => ({
   bodyOverflow: doc.body.style.overflow || '',
   active: activeName(),
   inert: inertTargets.map((t) => [t.inert, t.getAttribute('aria-hidden')]),
+  faqLink: !!panel.querySelector('a[href="/docs/faq/"]'),
 });
 """
 
@@ -78,6 +79,7 @@ _OPEN = {
     "bodyOverflow": "hidden",
     "active": "filter",
     "inert": [[True, "true"]] * 5,
+    "faqLink": True,
 }
 
 _CLOSED = {
@@ -92,6 +94,7 @@ _CLOSED = {
     "bodyOverflow": "",
     "active": "toggle",
     "inert": [[False, None]] * 5,
+    "faqLink": True,
 }
 
 

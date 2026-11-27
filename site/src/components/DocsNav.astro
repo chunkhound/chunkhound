@@ -16,6 +16,7 @@ const { currentPath } = Astro.props;
 
 // Same trailing-slash-insensitive rule as Nav.astro — shared from lib/nav.ts.
 const isActive = (href: string): boolean => isActivePath(currentPath, href);
+
 ---
 
 <div class="sidebar-inner">
@@ -74,6 +75,7 @@ const isActive = (href: string): boolean => isActivePath(currentPath, href);
   import "@phosphor-icons/webcomponents/PhClockCounterClockwise";
   import "@phosphor-icons/webcomponents/PhCode";
   import "@phosphor-icons/webcomponents/PhGitPullRequest";
+  import "@phosphor-icons/webcomponents/PhQuestion";
   import "@phosphor-icons/webcomponents/PhRocketLaunch";
   import "@phosphor-icons/webcomponents/PhSealCheck";
   import "@phosphor-icons/webcomponents/PhSlidersHorizontal";
