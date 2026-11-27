@@ -241,6 +241,7 @@ async def test_non_reranking_provider_searches_without_a_warning():
     provider.supports_reranking = Mock(return_value=False)
     provider.embed_query = AsyncMock(return_value=[[0.1, 0.2]])
     db = Mock()
+    db.ensure_ready_async = AsyncMock()
     db.search_semantic = Mock(return_value=([], {"total": 0}))
     manager = Mock(spec=EmbeddingManager)
     manager.list_providers.return_value = ["openai"]

@@ -91,6 +91,9 @@ class SearchService(BaseService):
         """
         if not query or not query.strip():
             raise ValueError("Search query must not be blank")
+        ready = getattr(self._db, "ensure_ready_async", None)
+        if callable(ready):
+            await ready()
         try:
             if not self._embedding_provider:
                 raise ValueError(
@@ -189,6 +192,9 @@ class SearchService(BaseService):
         Returns:
             Tuple of (results, pagination_metadata)
         """
+        ready = getattr(self._db, "ensure_ready", None)
+        if callable(ready):
+            ready()
         try:
             logger.debug(f"Performing regex search for pattern: '{pattern}'")
 
@@ -242,6 +248,9 @@ class SearchService(BaseService):
         Returns:
             Tuple of (results, pagination_metadata)
         """
+        ready = getattr(self._db, "ensure_ready_async", None)
+        if callable(ready):
+            await ready()
         try:
             logger.debug(f"Performing async regex search for pattern: '{pattern}'")
 

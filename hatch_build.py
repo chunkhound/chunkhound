@@ -46,19 +46,20 @@ _SYSTEM_ALIASES = {
     "darwin": "macos",
 }
 _PACKAGED_RUNTIME_BUILD_ENV = "CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME"
-_ALPHA_RELEASE_BUILD_ENV = "CHUNKHOUND_BUILD_ALPHA_RELEASE"
+_RELEASE_ARTIFACT_BUILD_ENV = "CHUNKHOUND_BUILD_RELEASE_ARTIFACT"
 
 
-def _alpha_native_requirement(version: str) -> str:
+def _release_native_requirement(version: str) -> str:
     parsed = Version(version)
     if (
-        parsed.pre is None
-        or parsed.pre[0] != "a"
-        or parsed.dev is not None
-        or parsed.local
+        parsed.dev is not None
+        or parsed.local is not None
+        or (parsed.pre is not None and parsed.pre[0] not in {"a", "b", "rc"})
     ):
-        raise RuntimeError("Alpha release builds require an alpha release version")
-    return f"chunkhound-native=={version}"
+        raise RuntimeError(
+            "Official release artifacts require a stable or a/b/rc version"
+        )
+    return f"chunkhound-native=={parsed}"
 
 
 _SOURCE_COMMIT_URL_LABEL = "Source commit"
@@ -93,15 +94,15 @@ def _add_source_commit_url(metadata: dict, root: Path) -> None:
 
 
 class CustomMetadataHook(MetadataHookInterface):
-    """Keep stable dependencies, pairing alpha releases with their native build."""
+    """Pair official release-artifact metadata with the matching native build."""
 
     PLUGIN_NAME = "custom"
 
     def update(self, metadata: dict) -> None:
         _add_source_commit_url(metadata, _REPO_ROOT)
         dependencies = list(self.config["dependencies"])
-        if os.environ.get(_ALPHA_RELEASE_BUILD_ENV) == "1":
-            pin = _alpha_native_requirement(metadata["version"])
+        if os.environ.get(_RELEASE_ARTIFACT_BUILD_ENV) == "1":
+            pin = _release_native_requirement(metadata["version"])
             native = [
                 index
                 for index, value in enumerate(dependencies)
@@ -248,16 +249,15 @@ def _platform_only_tag(allowed_platform_tags: set[str] | None = None) -> str:
 
 
 class CustomBuildHook(BuildHookInterface):
-    """Persist alpha sdist pins and tag Watchman-carrying wheels by platform."""
+    """Persist release pins into sdists and tag Watchman-carrying wheels."""
 
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         if getattr(self, "target_name", None) == "sdist":
-            if os.environ.get(_ALPHA_RELEASE_BUILD_ENV) == "1":
-                # Change only the archived config, never the checkout. This makes
-                # source rebuilds independent of CI flags (even without PKG-INFO).
-                pin = _alpha_native_requirement(self.metadata.version)
+            if os.environ.get(_RELEASE_ARTIFACT_BUILD_ENV) == "1":
+                # Persist only to the archive; never modify the checkout.
+                pin = _release_native_requirement(self.metadata.version)
                 source = _PYPROJECT_PATH.read_text(encoding="utf-8")
                 dependencies = self.metadata.hatch.metadata.hooks["custom"].config[
                     "dependencies"
@@ -268,12 +268,16 @@ class CustomBuildHook(BuildHookInterface):
                     if canonicalize_name(Requirement(value).name) == "chunkhound-native"
                 ]
                 if len(native) != 1 or source.count(json.dumps(native[0])) != 1:
-                    raise RuntimeError("Cannot persist the alpha native dependency pin")
+                    raise RuntimeError(
+                        "Cannot persist the release native dependency pin"
+                    )
                 source = source.replace(json.dumps(native[0]), json.dumps(pin))
-                self._alpha_sdist_directory = tempfile.TemporaryDirectory(
-                    prefix="chunkhound-alpha-sdist-"
+                self._release_sdist_directory = tempfile.TemporaryDirectory(
+                    prefix="chunkhound-release-sdist-"
                 )
-                config_path = Path(self._alpha_sdist_directory.name) / "pyproject.toml"
+                config_path = (
+                    Path(self._release_sdist_directory.name) / "pyproject.toml"
+                )
                 config_path.write_text(source, encoding="utf-8")
                 force_include = build_data["force_include"]
                 for path, destination in list(force_include.items()):
@@ -302,6 +306,6 @@ class CustomBuildHook(BuildHookInterface):
     def finalize(
         self, version: str, build_data: dict[str, object], artifact_path: str
     ) -> None:
-        directory = getattr(self, "_alpha_sdist_directory", None)
+        directory = getattr(self, "_release_sdist_directory", None)
         if directory is not None:
             directory.cleanup()

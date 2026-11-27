@@ -93,6 +93,7 @@ class TestCLICommands:
             ["chunkhound", "--help"],
             ["chunkhound", "--version"],
             ["chunkhound", "index", "--help"],
+            ["chunkhound", "pull", "--help"],
             ["chunkhound", "search", "--help"],
             ["chunkhound", "research", "--help"],
             ["chunkhound", "map", "--help"],

@@ -7,6 +7,7 @@ use super::factory::EmbedConfig;
 use super::retry::{embed_with_retry, embed_with_split, RetryPolicy};
 use super::token::{estimate_tokens, BatchBuilder, BatchConfig};
 use super::EmbedBatchResult;
+use crate::cancellation::StopToken;
 use crate::error::PipelineError;
 use rayon::current_thread_index;
 use reqwest::blocking::Client;
@@ -40,7 +41,9 @@ impl HttpClientPool {
 
     pub(crate) fn client_slot(&self) -> Result<Arc<Mutex<Option<Client>>>, PipelineError> {
         let index = current_thread_index().unwrap_or(0);
-        let mut slots = self.clients.lock().map_err(|_| PipelineError::Cancelled)?;
+        let mut slots = self.clients.lock().map_err(|_| {
+            PipelineError::ProviderError("embedding client state unavailable".into())
+        })?;
         if slots.len() <= index {
             slots.resize_with(index + 1, || Arc::new(Mutex::new(None)));
         }
@@ -54,7 +57,9 @@ impl HttpClientPool {
         operation: impl FnOnce(&Client) -> Result<T, PipelineError>,
     ) -> Result<T, PipelineError> {
         let slot = self.client_slot()?;
-        let mut client = slot.lock().map_err(|_| PipelineError::Cancelled)?;
+        let mut client = slot.lock().map_err(|_| {
+            PipelineError::ProviderError("embedding client state unavailable".into())
+        })?;
         if client.is_none() {
             let mut builder = Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -68,7 +73,9 @@ impl HttpClientPool {
                     .map_err(|e| PipelineError::IoError(sanitize(e.to_string(), None)))?,
             );
         }
-        operation(client.as_ref().ok_or(PipelineError::Cancelled)?)
+        operation(client.as_ref().ok_or_else(|| {
+            PipelineError::ProviderError("embedding client state unavailable".into())
+        })?)
     }
 }
 
@@ -133,8 +140,10 @@ pub(crate) fn run_embed_batch(
     texts: &[String],
     config: &EmbedConfig,
     observed_dims: &AtomicUsize,
+    stop: &StopToken,
     mut request_with_retry: impl FnMut(&[String]) -> Result<Vec<Vec<f32>>, PipelineError>,
-) -> Result<EmbedBatchResult, String> {
+) -> Result<EmbedBatchResult, PipelineError> {
+    stop.check()?;
     let mut result = EmbedBatchResult::empty(texts.len());
     let mut builder = BatchBuilder::new(BatchConfig {
         max_tokens: config.max_tokens_per_batch,
@@ -142,6 +151,7 @@ pub(crate) fn run_embed_batch(
     });
     let mut batches = Vec::new();
     for (index, text) in texts.iter().enumerate() {
+        stop.check()?;
         if estimate_tokens(text) > config.max_tokens_per_batch {
             result.errors.push(format!(
                 "input {index}: {}",
@@ -157,14 +167,17 @@ pub(crate) fn run_embed_batch(
         batches.push(batch);
     }
     for batch in batches {
+        stop.check()?;
         log::trace!("embedding batch token estimate: {}", batch.tokens);
-        for (offset, outcome) in embed_with_split(&batch.texts, &mut request_with_retry)
+        for (offset, outcome) in embed_with_split(&batch.texts, stop, &mut request_with_retry)?
             .into_iter()
             .enumerate()
         {
+            stop.check()?;
             let index = batch.indices[offset];
             let vector = match outcome {
                 Ok(vector) => vector,
+                Err(PipelineError::Cancelled) => return Err(PipelineError::Cancelled),
                 Err(error) => {
                     result.errors.push(format!("input {index}: {error}"));
                     continue;
@@ -179,6 +192,7 @@ pub(crate) fn run_embed_batch(
             result.vectors[index] = Some(output);
         }
     }
+    stop.check()?;
     Ok(result)
 }
 
@@ -242,6 +256,7 @@ where
 
 /// Convenience wrapper used by both providers' `request_with_retry` methods.
 pub(crate) fn default_retry<T>(
+    stop: &StopToken,
     request: impl FnMut() -> Result<T, PipelineError>,
 ) -> Result<T, PipelineError> {
     embed_with_retry(
@@ -249,6 +264,7 @@ pub(crate) fn default_retry<T>(
             max_attempts: 3,
             base_delay: Duration::from_secs(1),
         },
+        stop,
         request,
     )
 }

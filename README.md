@@ -208,6 +208,37 @@ ChunkHound is especially useful for:
 - local-only or security-sensitive environments
 - engineering teams that want agents, support, and product questions grounded in the same code index
 
+## Central base indexes
+
+Use an explicitly trusted hub source to install a compatible organization-hosted
+base, then run `chunkhound index [path]` to overlay local changes:
+
+```bash
+# Validate and trust this checkout's configured source, then pull explicitly.
+chunkhound pull . --trust
+
+# Later explicit replacements can use the stored exact checkout/source trust.
+chunkhound pull .
+
+# Trust and use a hub base only when index has no local database state.
+chunkhound index . --trust
+```
+
+If an authorized hub pull is attempted but cannot complete, ChunkHound stops
+instead of silently continuing with local indexing. Remove the stored grant with
+`chunkhound pull . --forget-trust` or disable `hub.url`, then rerun `index` to
+work locally without another hub attempt.
+
+An ordinary trusted `index` may use a hub base only when an exhaustive inventory
+shows genuinely cold state. Every existing database stays local and reaches
+ordinary model-drift handling; use trusted explicit `pull` when replacement is
+intended. DuckDB and LanceDB support changed/new/deleted-file overlay; DuckDB is
+recommended and LanceDB remains experimental. Pull installs only and may replace
+local index work; checksum/format validation does not establish publisher content
+freshness. See [Central Indexing Hub configuration](site/src/pages/docs/configuration.md#central-indexing-hub)
+for hub settings, archive packaging and limits, command authorization, and recovery
+precautions.
+
 ## Community
 
 ChunkHound is MIT licensed, open source, and community built.

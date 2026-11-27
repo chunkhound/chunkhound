@@ -9,6 +9,9 @@ This module provides a unified configuration system with clear precedence:
 5. Environment variables
 6. Default values (lowest priority)
 
+``hub.url`` is the exception: its environment variable overrides explicit,
+project, and global files so operators can select or disable the runtime hub.
+
 Global config support means you can maintain common settings (API keys,
 indexing rules, etc.) in one place instead of copying .chunkhound.json
 to every project directory. Project-local files override the global layer.
@@ -26,6 +29,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chunkhound.core.config._utils import read_json_file
+from chunkhound.core.config.hub_config import HubConfig
 from chunkhound.utils.logging_guard import log_if_not_mcp
 
 from .analytics_config import AnalyticsConfig
@@ -127,6 +131,8 @@ class Config(BaseModel):
        ~/.config/chunkhound/*.json etc.)
     5. Environment variables (CHUNKHOUND_*)
     6. Defaults
+
+    ``hub.url`` is the exception: environment overrides the file layers.
     """
 
     model_config = ConfigDict(validate_assignment=True)
@@ -139,6 +145,7 @@ class Config(BaseModel):
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     fetchurl: FetchUrlConfig = Field(default_factory=FetchUrlConfig)
     remote_config: RemoteConfig | None = Field(default=None)
+    hub: HubConfig = Field(default_factory=HubConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     debug: bool = Field(default=False)
 
@@ -192,6 +199,7 @@ class Config(BaseModel):
         5. Environment variables
         6. Default values (lowest priority)
 
+        ``hub.url`` is the exception: environment overrides the file layers.
         Global config enables one set of defaults (e.g. embedding provider + key,
         common excludes) without copying .chunkhound.json into every project.
         Local project config and explicit/CLI always override globals.
@@ -276,6 +284,12 @@ class Config(BaseModel):
         # 4. Load explicit config file last so it wins over auto-discovered local config
         if "config_file" not in skips:
             self._apply_config_file(config_data, config_file)
+
+        # hub.url is a project locator with a runtime operator override. Other
+        # hub fields retain the normal layered precedence.
+        if "env" not in skips and "CHUNKHOUND_HUB__URL" in os.environ:
+            hub = config_data.setdefault("hub", {})
+            hub["url"] = os.environ["CHUNKHOUND_HUB__URL"] or None
 
         # 5. Apply CLI arguments (highest precedence)
         if "cli" not in skips and args:
@@ -517,6 +531,8 @@ class Config(BaseModel):
             config["remote_config"] = remote_config
         if analytics_config := AnalyticsConfig.load_from_env():
             config["analytics"] = analytics_config
+        if hub_config := HubConfig.load_from_env():
+            config["hub"] = hub_config
 
         return config
 
@@ -616,7 +632,7 @@ class Config(BaseModel):
             self.database.path = project_root / ".chunkhound" / "db"
 
         # Ensure database path is resolved to canonical form (handles symlinks)
-        if self.database.path:
+        if self.database.path and str(self.database.path) != ":memory:":
             self.database.path = self.database.path.resolve()
 
         return self

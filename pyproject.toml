@@ -40,8 +40,8 @@ classifiers = [
 ]
 [tool.hatch.metadata.hooks.custom]
 path = "hatch_build.py"
-# Stable builds keep this dependency range. Alpha release builds replace only
-# chunkhound-native with the exact main version and persist it in the sdist.
+# Ordinary builds keep this dependency range. Official release-artifact builds
+# replace only chunkhound-native with the exact main version and persist it in the sdist.
 dependencies = [
     "duckdb==1.5.4",
     "openai>=1.0.0",
@@ -133,7 +133,10 @@ dependencies = [
     # 6.1.0 is the first release with AnalyticsRecorder, which
     # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
     # command; an older native satisfies a lower bound and then fails there.
-    "chunkhound-native>=6.1.0",
+    # Known gap: no published native yet has the database lease API this
+    # package imports, so source/editable installs need `make dev`. Official
+    # release artifacts pin the exact matching native instead.
+    "chunkhound-native>=6.2.0",
 ]
 
 [project.optional-dependencies]

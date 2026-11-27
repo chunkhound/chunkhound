@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-import runpy
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import zipfile
 from email.parser import Parser
 from pathlib import Path
@@ -27,6 +27,7 @@ def _build_environment() -> dict[str, str]:
         if not key.startswith("SETUPTOOLS_SCM_PRETEND_VERSION")
         and key
         not in {
+            "CHUNKHOUND_BUILD_RELEASE_ARTIFACT",
             "CHUNKHOUND_BUILD_ALPHA_RELEASE",
             "CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME",
         }
@@ -48,16 +49,20 @@ def _native_requirement(metadata_text: str) -> Requirement:
 
 
 @pytest.mark.parametrize(
-    ("version", "alpha", "expected_specifier"),
+    ("version", "release_artifact", "expected_specifier"),
     [
-        ("6.2.0", False, None),
-        ("6.2.0rc1", False, None),
-        ("6.2.0a43", False, None),
-        ("6.2.0a43", True, "==6.2.0a43"),
+        ("6.2.0", False, ">=6.2.0"),
+        ("6.2.0a10", False, ">=6.2.0"),
+        ("6.2.0b1", False, ">=6.2.0"),
+        ("6.2.0rc1", False, ">=6.2.0"),
+        ("6.2.0", True, "==6.2.0"),
+        ("6.2.0a10", True, "==6.2.0a10"),
+        ("6.2.0b1", True, "==6.2.0b1"),
+        ("6.2.0rc1", True, "==6.2.0rc1"),
     ],
 )
-def test_release_artifacts_preserve_native_dependency_on_source_rebuild(
-    tmp_path: Path, version: str, alpha: bool, expected_specifier: str | None
+def test_public_build_round_trip_preserves_native_dependency_policy(
+    tmp_path: Path, version: str, release_artifact: bool, expected_specifier: str
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -65,21 +70,10 @@ def test_release_artifacts_preserve_native_dependency_on_source_rebuild(
         shutil.copy2(ROOT / filename, source / filename)
     shutil.copytree(ROOT / "chunkhound", source / "chunkhound")
     original_config = (source / "pyproject.toml").read_bytes()
-    expected_dependencies = hatch_build.tomllib.loads(original_config.decode())[
-        "tool"
-    ]["hatch"]["metadata"]["hooks"]["custom"]["dependencies"]
-    if expected_specifier is None:
-        native = [
-            Requirement(value)
-            for value in expected_dependencies
-            if canonicalize_name(Requirement(value).name) == "chunkhound-native"
-        ]
-        assert len(native) == 1
-        expected_specifier = str(native[0].specifier)
     environment = _build_environment()
     environment["SETUPTOOLS_SCM_PRETEND_VERSION"] = version
-    if alpha:
-        environment["CHUNKHOUND_BUILD_ALPHA_RELEASE"] = "1"
+    if release_artifact:
+        environment["CHUNKHOUND_BUILD_RELEASE_ARTIFACT"] = "1"
     artifacts = tmp_path / "dist"
     result = subprocess.run(
         ["uv", "build", "--sdist", "--wheel", "--out-dir", str(artifacts)],
@@ -109,31 +103,57 @@ def test_release_artifacts_preserve_native_dependency_on_source_rebuild(
         dependencies = persisted["tool"]["hatch"]["metadata"]["hooks"]["custom"][
             "dependencies"
         ]
-        if alpha:
-            expected_dependencies = [
-                f"chunkhound-native=={version}"
-                if canonicalize_name(Requirement(value).name) == "chunkhound-native"
-                else value
-                for value in expected_dependencies
-            ]
-        assert dependencies == expected_dependencies
-        package_info = archive.extractfile(f"chunkhound-{version}/PKG-INFO")
-        assert package_info is not None
-        assert str(_native_requirement(package_info.read().decode()).specifier) == (
+        native_config = [
+            Requirement(value)
+            for value in dependencies
+            if canonicalize_name(Requirement(value).name) == "chunkhound-native"
+        ]
+        assert len(native_config) == 1
+        assert str(native_config[0].specifier) == expected_specifier
+        assert native_config[0].marker is None
+        assert not native_config[0].extras and native_config[0].url is None
+        info_member = archive.extractfile(f"chunkhound-{version}/PKG-INFO")
+        assert info_member is not None
+        assert str(_native_requirement(info_member.read().decode()).specifier) == (
             expected_specifier
         )
 
-    # Use the real publication checker, which clears all release environment
-    # variables before rebuilding. No Watchman payload is needed for this wheel.
-    checker = runpy.run_path(str(ROOT / "scripts/validate_release_artifacts.py"))
-    checker["check_sdist"](sdist, version, alpha)
-    checker["rebuild_sdist"](sdist, version, alpha)
+    with tempfile.TemporaryDirectory(prefix="chunkhound-test-sdist-") as directory:
+        root = Path(directory)
+        with tarfile.open(sdist) as archive:
+            archive.extractall(root, filter="data")
+        rebuilt = root / "rebuilt"
+        result = subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", str(rebuilt)],
+            cwd=root / f"chunkhound-{version}",
+            env=_build_environment(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        rebuilt_wheels = list(rebuilt.glob("*.whl"))
+        assert len(rebuilt_wheels) == 1
+        with zipfile.ZipFile(rebuilt_wheels[0]) as archive:
+            metadata_path = next(
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            )
+            rebuilt_requirement = _native_requirement(
+                archive.read(metadata_path).decode()
+            )
+        assert str(rebuilt_requirement.specifier) == expected_specifier
 
 
-def test_alpha_release_build_rejects_a_stable_version(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", ["6.2.0.dev1", "6.2.0+local"])
+def test_release_artifact_build_rejects_dev_and_local_versions(
+    tmp_path: Path, version: str
+) -> None:
     environment = _build_environment()
     environment.update(
-        SETUPTOOLS_SCM_PRETEND_VERSION="6.2.0", CHUNKHOUND_BUILD_ALPHA_RELEASE="1"
+        SETUPTOOLS_SCM_PRETEND_VERSION=version,
+        CHUNKHOUND_BUILD_RELEASE_ARTIFACT="1",
     )
     result = subprocess.run(
         ["uv", "build", "--sdist", "--out-dir", str(tmp_path)],
@@ -144,4 +164,6 @@ def test_alpha_release_build_rejects_a_stable_version(tmp_path: Path) -> None:
         timeout=120,
     )
     assert result.returncode != 0
-    assert "Alpha release builds require an alpha release version" in result.stderr
+    assert "Official release artifacts require a stable or a/b/rc version" in (
+        result.stderr
+    )

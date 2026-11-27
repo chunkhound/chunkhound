@@ -32,7 +32,8 @@ impl DuckDbHnswBackend {
     fn run_attach_copy_compaction(&mut self) -> Result<(), DbError> {
         let db_path = PathBuf::from(&self.config.db_path);
         let compact_path = PathBuf::from(format!("{}.compact", self.config.db_path));
-        let old_path = PathBuf::from(format!("{}.old", self.config.db_path));
+        let old_path_string = format!("{}.old", self.config.db_path);
+        let old_path = PathBuf::from(&old_path_string);
         let intent_path = PathBuf::from(format!("{}.swap_intent", self.config.db_path));
 
         // --- Phase 1: CHECKPOINT + close live connection --------------------
@@ -52,6 +53,10 @@ impl DuckDbHnswBackend {
 
         conn.execute_batch("CHECKPOINT")?;
         self.conn = None;
+        #[cfg(test)]
+        if let Some(hook) = &self.compaction_closed_hook {
+            hook(&db_path);
+        }
 
         // A previous crashed compact can leave .old / .compact that would
         // make Windows rename(live→.old) fail. Live is the good copy here.
@@ -67,10 +72,7 @@ impl DuckDbHnswBackend {
 
         // Create fresh DB and attach the old DB as 'src'.
         let import_conn = Connection::open(&compact_path)?;
-        let attach_sql = format!(
-            "ATTACH '{}' AS src",
-            old_path.to_string_lossy().replace('\'', "''")
-        );
+        let attach_sql = format!("ATTACH '{}' AS src", old_path_string.replace('\'', "''"));
         log::info!("compaction: {}", attach_sql);
         import_conn.execute_batch(&attach_sql)?;
 

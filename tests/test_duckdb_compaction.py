@@ -4,6 +4,7 @@ Every test reuses the existing synthetic-vector infrastructure used elsewhere
 in the suite.
 """
 
+import hashlib
 import io
 import os
 import pathlib
@@ -16,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 from loguru import logger
 
 import pytest
+
+from chunkhound.core.index_format import IndexFormatError
 
 duckdb = pytest.importorskip("duckdb")
 
@@ -842,6 +845,98 @@ class TestCompactionCrashRecovery:
         assert inserted_id > 0
         _assert_db_integrity(populated_db.db_path)
 
+    def test_finalize_failure_restores_custom_hnsw_metric_after_swap(
+        self, populated_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure after the real swap but before backup deletion restores the
+        original DB and its custom-named, non-cosine HNSW index."""
+        db_path = Path(cast(str, populated_db.db_path))
+        backup_path = db_path.with_suffix(db_path.suffix + ".compact_backup")
+
+        manager_conn = populated_db._connection_manager.connection
+        assert manager_conn is not None
+        manager_conn.execute("DROP INDEX IF EXISTS idx_hnsw_16")
+        manager_conn.execute(
+            "CREATE INDEX idx_hnsw_16 ON embeddings_16 USING HNSW (embedding) "
+            "WITH (metric = 'l2sq')"
+        )
+        before = [
+            info for info in populated_db.get_existing_vector_indexes()
+            if info["index_name"] == "idx_hnsw_16"
+        ]
+        assert len(before) == 1 and before[0]["metric"] == "l2sq"
+
+        original_create_indexes = populated_db._executor_create_indexes
+        original_restore = populated_db._compact_restore
+        original_recreate = populated_db._executor_recreate_vector_index_from_info
+        create_index_calls = 0
+        restore_calls: list[dict[str, Any]] = []
+        backup_present_at_restore: list[bool] = []
+        recreated: list[dict[str, Any]] = []
+
+        def _fail_after_swap_before_backup_delete(
+            conn: Any, state: dict[str, Any]
+        ) -> None:
+            # Finalize calls this right after the real swap and before it deletes
+            # the backup. Fail only that first call so the real restore can run.
+            nonlocal create_index_calls
+            create_index_calls += 1
+            if create_index_calls == 1:
+                raise RuntimeError("simulated post-swap finalize failure")
+            original_create_indexes(conn, state)
+
+        def _record_restore(*args, **kwargs):
+            restore_calls.append({"vector_indexes": kwargs.get("vector_indexes")})
+            backup_present_at_restore.append(backup_path.exists())
+            return original_restore(*args, **kwargs)
+
+        def _record_recreate(
+            conn: Any, state: dict[str, Any], index_info: dict[str, Any]
+        ) -> None:
+            recreated.append(index_info)
+            return original_recreate(conn, state, index_info)
+
+        monkeypatch.setattr(
+            populated_db,
+            "_executor_create_indexes",
+            _fail_after_swap_before_backup_delete,
+        )
+        monkeypatch.setattr(populated_db, "_compact_restore", _record_restore)
+        monkeypatch.setattr(
+            populated_db, "_executor_recreate_vector_index_from_info", _record_recreate
+        )
+
+        with pytest.raises(RuntimeError, match="simulated post-swap finalize failure"):
+            populated_db.compact_database()
+
+        # Backup restoration really ran: the backup existed at restore entry and
+        # was moved back into place (so it is gone afterwards).
+        assert backup_present_at_restore == [True]
+        assert not backup_path.exists()
+
+        # Captured metadata is nonempty and includes the custom name + l2sq.
+        assert len(restore_calls) == 1
+        captured = restore_calls[0]["vector_indexes"]
+        assert captured
+        assert any(
+            info["index_name"] == "idx_hnsw_16" and info["metric"] == "l2sq"
+            for info in captured
+        )
+
+        # Restore's recreation loop must have re-created the captured index.
+        # Removing that loop must fail this test.
+        assert any(
+            info["index_name"] == "idx_hnsw_16" and info["metric"] == "l2sq"
+            for info in recreated
+        )
+
+        restored = [
+            info for info in populated_db.get_existing_vector_indexes()
+            if info["index_name"] == "idx_hnsw_16"
+        ]
+        assert len(restored) == 1 and restored[0]["metric"] == "l2sq"
+        assert populated_db.get_stats()["files"] == 2
+
     def test_provider_remains_usable_after_restore_path_failure(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -885,10 +980,10 @@ class TestCompactionCrashRecovery:
         assert file_backed_db.get_stats()["files"] == 2
         _assert_db_integrity(file_backed_db.db_path)
 
-    def test_stale_backup_cleaned_up_when_live_db_is_healthy(
+    def test_corrupt_stale_backup_blocks_recovery_without_mutation(
         self, file_backed_db: DuckDBProvider
     ) -> None:
-        """Stale compaction artifacts are cleaned up when live DB is intact."""
+        """A healthy live DB cannot authorize deleting uninspectable candidates."""
         db_path = Path(cast(str, file_backed_db.db_path))
         file_backed_db._execute_in_db_thread_sync(
             "insert_file",
@@ -909,21 +1004,18 @@ class TestCompactionCrashRecovery:
         backup_path.write_bytes(b"stale backup")
         staged_path.write_bytes(b"stale staged")
 
-        live_size_before = db_path.stat().st_size
-
+        before = {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in db_path.parent.rglob("*") if p.is_file()
+        }
         recovered = DuckDBProvider(db_path, base_directory=db_path.parent)
         recovered.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
-        recovered.connect()
-        try:
-            # Live DB is intact — data preserved
-            assert recovered.get_stats()["files"] == 1
-            # Stale artifacts cleaned up
-            assert not backup_path.exists()
-            assert not staged_path.exists()
-            # Live file unchanged
-            assert db_path.stat().st_size == live_size_before
-        finally:
-            recovered.disconnect()
+        with pytest.raises(IndexFormatError, match="format compatibility is unknown"):
+            recovered.connect()
+        assert {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in db_path.parent.rglob("*") if p.is_file()
+        } == before
 
     def test_compacted_file_corruption_triggers_restore_from_backup(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
@@ -1001,10 +1093,10 @@ class TestCompactionGuard:
         finally:
             db._executor.set_compaction_in_progress(False)
 
-    def test_readonly_connect_does_not_mutate_compaction_artifacts(
+    def test_readonly_refuses_corrupt_compaction_artifacts_without_mutation(
         self, tmp_path: Path
     ) -> None:
-        """Read-only connect leaves pre-existing compaction artifacts untouched."""
+        """Read-only opens also fail closed, preserving all recovery artifacts."""
         db_path = tmp_path / "readonly_guard.duckdb"
         db = DuckDBProvider(db_path, base_directory=tmp_path)
         db.config = DatabaseConfig(fragmentation_threshold_pct=30.0)
@@ -1016,29 +1108,22 @@ class TestCompactionGuard:
         staged_path = db_path.with_suffix(db_path.suffix + ".compact_new")
         backup_path.write_bytes(b"backup artifact")
         staged_path.write_bytes(b"staged artifact")
-        artifacts_before = {
-            path: (path.read_bytes(), path.stat().st_mtime_ns)
-            for path in (backup_path, staged_path)
+        before = {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in tmp_path.rglob("*") if p.is_file()
         }
-        live_before = (db_path.read_bytes(), db_path.stat().st_mtime_ns)
 
         ro_db = DuckDBProvider(
             db_path,
             base_directory=tmp_path,
             config=DatabaseConfig(fragmentation_threshold_pct=30.0, read_only=True),
         )
-        ro_db.connect()
-        try:
-            assert ro_db.get_stats()["files"] == 0
-            artifacts_after = {
-                path: (path.read_bytes(), path.stat().st_mtime_ns)
-                for path in (backup_path, staged_path)
-            }
-            live_after = (db_path.read_bytes(), db_path.stat().st_mtime_ns)
-            assert artifacts_after == artifacts_before
-            assert live_after == live_before
-        finally:
-            ro_db.disconnect()
+        with pytest.raises(IndexFormatError, match="format compatibility is unknown"):
+            ro_db.connect()
+        assert {
+            p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in tmp_path.rglob("*") if p.is_file()
+        } == before
 
 
 class TestEmbeddingTableNamePattern:
@@ -1295,7 +1380,9 @@ class TestHNSWCatalogAwareContracts:
             db.compact_database()
 
             remaining_indexes = _fetch_index_names(db.db_path)
-            assert "idx_hnsw_3" in remaining_indexes
+            # Source records are restored exactly: the custom name survives and
+            # no canonical name is synthesized.
+            assert "alt_live_idx" in remaining_indexes
         finally:
             db.disconnect()
 
@@ -2338,7 +2425,6 @@ class TestAutoCompactionMaintenance:
             logger.remove(sink_id)
 
         out = buf.getvalue()
-        assert "Database compaction in progress — refusing connection" in out
         assert "DuckDB connection failed" not in out
 
     def test_unexpected_connect_failure_is_still_logged_as_error(
@@ -2352,7 +2438,7 @@ class TestAutoCompactionMaintenance:
         monkeypatch.setattr(
             provider._connection_manager,
             "connect",
-            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         buf = io.StringIO()
         sink_id = logger.add(buf, level="ERROR")
@@ -2363,7 +2449,7 @@ class TestAutoCompactionMaintenance:
         finally:
             logger.remove(sink_id)
 
-        assert "DuckDB connection failed: boom" in buf.getvalue()
+        assert "DuckDB connection failed: RuntimeError" in buf.getvalue()
 
     def test_dispatch_layer_triggers_compact_if_needed(
         self, file_backed_db: DuckDBProvider, monkeypatch: pytest.MonkeyPatch
@@ -3366,6 +3452,62 @@ def test_non_cosine_hnsw_metric_survives_index_rebuild(
         db._execute_in_db_thread_sync("delete_chunks_batch", [original_chunk_id])
 
         after = [i for i in db.get_existing_vector_indexes() if i["index_name"] == "idx_hnsw_3"]
+        assert len(after) == 1
+        assert after[0]["metric"] == "l2sq"
+    finally:
+        db.disconnect()
+
+
+def test_auto_compaction_preserves_non_cosine_hnsw_metric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sampled auto-compaction keeps custom HNSW index name and metric."""
+    from chunkhound.providers.database import serial_executor
+
+    db = DuckDBProvider(tmp_path / "metric-auto.duckdb", base_directory=tmp_path)
+    db.connect()
+    try:
+        _, chunk_id = _seed_embedding_dims_3(db)
+        db.execute_query("DROP INDEX IF EXISTS idx_hnsw_3", [])
+        db.execute_query(
+            "CREATE INDEX idx_hnsw_3 ON embeddings_3 USING HNSW (embedding) "
+            "WITH (metric = 'l2sq')",
+            [],
+        )
+        before = [
+            i for i in db.get_existing_vector_indexes()
+            if i["index_name"] == "idx_hnsw_3"
+        ]
+        assert len(before) == 1
+        assert before[0]["metric"] == "l2sq"
+
+        sampled: list[str] = []
+        monkeypatch.setattr(
+            serial_executor,
+            "_should_sample_auto_compaction",
+            lambda operation_name: sampled.append(operation_name)
+            or operation_name == "delete_chunks_batch",
+        )
+        db.config = DatabaseConfig(fragmentation_threshold_pct=0.0)
+        compacted: list[bool] = []
+        original_compact = db._executor_compact_database
+
+        def compact(conn: Any, state: dict[str, Any]) -> int:
+            # Record only after the real compaction returns, so a failure that
+            # the sampler swallows cannot satisfy the assertion below.
+            result = original_compact(conn, state)
+            compacted.append(True)
+            return result
+
+        monkeypatch.setattr(db, "_executor_compact_database", compact)
+        db._execute_in_db_thread_sync("delete_chunks_batch", [chunk_id])
+        assert sampled
+        assert compacted == [True]
+
+        after = [
+            i for i in db.get_existing_vector_indexes()
+            if i["index_name"] == "idx_hnsw_3"
+        ]
         assert len(after) == 1
         assert after[0]["metric"] == "l2sq"
     finally:

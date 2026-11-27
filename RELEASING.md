@@ -137,6 +137,16 @@ No tag, GitHub App, PAT, or `contents: write` is used for alphas.
 - Uploads for alphas do not use `skip-existing`. If the selected version already
   exists on PyPI, the run fails instead of mixing artifacts from different commits.
 
+The requested tag supplies the exact version to both builds. Main builds override
+Hatch discovery with `SETUPTOOLS_SCM_PRETEND_VERSION`; native builds receive the
+explicit tag. Multiple tags on a source commit cannot select a different version.
+Every official alpha, beta, RC, and stable `chunkhound` artifact requires the
+matching `chunkhound-native` version exactly, including when a wheel is rebuilt
+from the published sdist. This release-artifact rule does not change the
+`chunkhound-native>=6.2.0` dependency range used by ordinary local, editable, and
+non-release builds. Alpha-specific allocation and approval routing remain
+separate from artifact dependency pairing.
+
 ### Gaps and ordering
 
 Partial publication is possible. If native `aN` publishes but main `aN` fails,

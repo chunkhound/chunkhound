@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -49,11 +51,34 @@ from typing import Any
 import pytest
 from loguru import logger
 
+import chunkhound.hub.trust as hub_trust
 from chunkhound.core.config.remote import run_remote_config_fetch
+from tests.hub.activation_support import ROOT, cli_env, write_config
+from tests.hub.conftest import embedding_server, hub_server
 
 # --------------------------------------------------------------------------- #
 # Harness
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _project_root(_isolate: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run real project discovery separately from the isolated HOME config."""
+    project = _isolate / "pipeline-project"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.chdir(project)
+
+
+@pytest.fixture
+def remote_hub_http():
+    with hub_server() as server:
+        yield server
+
+
+@pytest.fixture
+def remote_embedding_http():
+    with embedding_server() as server:
+        yield server
 
 
 def _args(**overrides: Any) -> argparse.Namespace:
@@ -108,6 +133,30 @@ def _target_path(home: Path) -> Path:
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("op", ["set", "merge"])
+async def test_hub_unknown_key_is_schema_error_and_next_rule_applies(
+    _isolate, monkeypatch, op
+):
+    target = _target_path(_isolate)
+    original_hub = {"url": "https://publisher.test/catalogue"}
+    target.write_text(json.dumps({"hub": original_hub}))
+    rules = [
+        {"id": "hub", "op": op, "value": {"urll": "typo"}},
+        {"id": "mcp.host", "op": "set", "value": "127.0.0.1"},
+    ]
+    _install_fetch(monkeypatch, {"version": 1, "rules": rules})
+    messages = []
+    handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+    data = _read_target(target)
+    assert data["hub"] == original_hub
+    assert data["mcp"]["host"] == "127.0.0.1"
+    assert any("schema_error" in m and "urll" in m for m in messages), messages
 
 
 async def test_successful_apply_writes_expected_dict(
@@ -1078,8 +1127,8 @@ async def test_parent_set_with_unknown_nested_key_is_schema_error(
 async def test_deep_path_with_dict_value_defers_to_sub_model_validation(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Locks in the ``len(segments) == 1`` guard on the payload-key pre-check
-    # in ``rules.py`` (see comment at the guard site for the full rationale).
+    # A dict value for a scalar target must reach sub-model validation,
+    # not be treated as model fields by the payload-key pre-check.
     from loguru import logger
 
     envelope = {
@@ -1708,3 +1757,241 @@ async def test_pipeline_skips_fetch_for_internal_subprocess_commands(
         assert len(fake.calls) == prior, (
             f"{command!r} must skip fetch; got calls={fake.calls}"
         )
+
+
+@pytest.mark.parametrize("operation", ["set", "merge"])
+async def test_remote_hub_declaration_cannot_authorize_cold_index(
+    _isolate,
+    monkeypatch,
+    remote_hub_http,
+    remote_embedding_http,
+    operation,
+):
+    hub_http = remote_hub_http
+    embedding_http = remote_embedding_http
+    project = _isolate / "checkout"
+    project_data = write_config(project, "duckdb", None, embedding_http.url)
+    project_data.pop("hub")
+    (project / ".chunkhound.json").write_text(
+        json.dumps(project_data), encoding="utf-8"
+    )
+    (project / "source.py").write_text(
+        "def must_not_index(): return 1\n", encoding="utf-8"
+    )
+
+    child_env = cli_env(project)
+    child_env.pop("CHUNKHOUND_GLOBAL_CONFIG_FILE")
+    monkeypatch.setenv("HOME", child_env["HOME"])
+    monkeypatch.setenv("USERPROFILE", child_env["HOME"])
+    rule = {
+        "id": "hub",
+        "op": operation,
+        "value": {"url": hub_http.url + "/catalogue?token=secret"},
+    }
+    _install_fetch(monkeypatch, {"version": 1, "rules": [rule]})
+
+    await run_remote_config_fetch(
+        _args(remote_config_url="http://127.0.0.1:1/config.json"), "search"
+    )
+
+    persisted = json.loads((Path.home() / ".chunkhound.json").read_text())
+    assert persisted["hub"]["url"] == (
+        hub_http.url + "/catalogue?token=secret"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "chunkhound.api.cli.main", "index", str(project)],
+        cwd=project,
+        env={
+            **child_env,
+            "PYTHONPATH": os.pathsep.join(
+                (str(ROOT), child_env.get("PYTHONPATH", ""))
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert hub_http.requests == []
+    assert embedding_http.requests
+    assert not hub_trust.trust_store_path().exists()
+    assert (project / ".chunkhound" / "db" / "chunks.db").exists()
+
+
+@pytest.mark.parametrize("operation", ["set", "merge"])
+async def test_remote_hub_cannot_configure_trust_store_path(
+    _isolate, monkeypatch, operation
+):
+    alternate_trust_store = _isolate / "attacker" / "grants.json"
+    rule = {
+        "id": "hub",
+        "op": operation,
+        "value": {"trust_store_path": str(alternate_trust_store)},
+    }
+    _install_fetch(monkeypatch, {"version": 1, "rules": [rule]})
+    messages = []
+    handler = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+
+    assert "hub" not in _read_target(_target_path(_isolate))
+    assert any(
+        "schema_error" in message and "hub.trust_store_path" in message
+        for message in messages
+    )
+    assert not alternate_trust_store.exists()
+    assert not hub_trust.trust_store_path().exists()
+
+
+@pytest.mark.parametrize(
+    "path,op,value,expected",
+    [
+        ("hub.archive_limits.max_members", "set", 7,
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits.max_members", "merge", 7,
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits", "merge", {"max_members": 7},
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits", "set", {"max_members": 7},
+         {"max_members": 7}),
+        ("hub", "merge", {"archive_limits": {"max_members": 7}},
+         {"max_members": 7, "max_path_depth": 12}),
+        ("hub.archive_limits.max_members", "remove", None,
+         {"max_path_depth": 12}),
+    ],
+)
+async def test_nested_archive_rules_persist_valid_updates(
+    _isolate, monkeypatch, path, op, value, expected
+):
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({
+        "hub": {"archive_limits": {"max_members": 10, "max_path_depth": 12}}
+    }))
+    rule = {"id": path, "op": op}
+    if op != "remove":
+        rule["value"] = value
+    _install_fetch(monkeypatch, {"version": 1, "rules": [rule]})
+    await run_remote_config_fetch(_args(), "search")
+    assert _read_target(target)["hub"]["archive_limits"] == expected
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"id": "hub.archive_limits.max_membrs", "op": "set", "value": 7},
+        {"id": "hub.archive_limits.max_membrs", "op": "merge", "value": 7},
+        {"id": "hub.archive_limits.max_membrs", "op": "remove"},
+        {"id": "hub.archive_limits", "op": "set",
+         "value": {"max_members": 7, "max_membrs": 7}},
+        {"id": "hub.archive_limits", "op": "merge",
+         "value": {"max_members": 7, "max_membrs": 7}},
+        {"id": "hub", "op": "set",
+         "value": {"archive_limits": {"max_members": 7, "max_membrs": 7}}},
+        {"id": "hub", "op": "merge",
+         "value": {"archive_limits": {"max_members": 7, "max_membrs": 7}}},
+    ],
+)
+async def test_nested_archive_typos_are_schema_errors_and_next_rule_applies(
+    _isolate, monkeypatch, rule
+):
+    target = _target_path(_isolate)
+    original_hub = {
+        "url": "https://publisher.test/catalogue",
+        "archive_limits": {"max_members": 10, "max_path_depth": 12},
+    }
+    target.write_text(json.dumps({"hub": original_hub}))
+    _install_fetch(monkeypatch, {"version": 1, "rules": [
+        rule, {"id": "mcp.host", "op": "set", "value": "127.0.0.1"}
+    ]})
+    messages = []
+    handler = logger.add(lambda m: messages.append(str(m)), level="INFO")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+    data = _read_target(target)
+    assert data["hub"] == original_hub
+    assert data["mcp"]["host"] == "127.0.0.1"
+    first = [m for m in messages if "rule 1 on" in m]
+    assert any(
+        "schema_error" in m and "unknown path" in m
+        and "hub.archive_limits.max_membrs" in m for m in first
+    ), messages
+    assert not any("no-op" in m or "applied:" in m for m in first), messages
+
+
+@pytest.mark.parametrize("invalid", [True, 1.5, 0, -1, "7", None])
+@pytest.mark.parametrize("op", ["set", "merge"])
+async def test_nested_archive_invalid_quota_rolls_back_before_next_rule(
+    _isolate, monkeypatch, invalid, op
+):
+    target = _target_path(_isolate)
+    original_hub = {"archive_limits": {"max_members": 10, "max_path_depth": 12}}
+    target.write_text(json.dumps({"hub": original_hub}))
+    _install_fetch(monkeypatch, {"version": 1, "rules": [
+        {"id": "hub.archive_limits", "op": op,
+         "value": {"max_members": invalid, "max_path_depth": 9}},
+        {"id": "mcp.host", "op": "set", "value": "127.0.0.1"},
+    ]})
+    messages = []
+    handler = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await run_remote_config_fetch(_args(), "search")
+    finally:
+        logger.remove(handler)
+    data = _read_target(target)
+    assert data["hub"] == original_hub
+    assert data["mcp"]["host"] == "127.0.0.1"
+    assert any(
+        "rule 1 on" in m and "schema_error" in m
+        and "sub-model validation failed" in m for m in messages
+    ), messages
+
+
+@pytest.mark.parametrize("value", [0.25, True, 0, -1, "unlimited", None])
+async def test_remote_download_timeout_rules_validate_persist_and_reload(
+    _isolate, monkeypatch, tmp_path, value
+):
+    import httpx
+
+    from chunkhound.core.config.config import Config
+
+    target = _target_path(_isolate)
+    target.write_text(json.dumps({"hub": {"download_timeout_seconds": 12}}))
+    envelope = {
+        "version": 1,
+        "rules": [
+            {"id": "hub.download_timeout_seconds", "op": "set", "value": value},
+            {"id": "hub.url", "op": "set", "value": "https://hub.test/catalogue"},
+        ],
+    }
+    real_client = httpx.AsyncClient
+
+    def make_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=envelope)
+        )
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", make_client)
+    monkeypatch.setenv("CHUNKHOUND_HUB__DOWNLOAD_TIMEOUT_SECONDS", "4")
+    await run_remote_config_fetch(_args(), "search")
+    expected = 0.25 if type(value) is float else 12
+    assert _read_target(target)["hub"] == {
+        "download_timeout_seconds": expected,
+        "url": "https://hub.test/catalogue",
+    }
+    project = tmp_path / "project"
+    project.mkdir()
+    config = Config(target_dir=project, skip_layers={"cli"})
+    assert config.hub.download_timeout_seconds == expected
+    (project / ".chunkhound.json").write_text(
+        json.dumps({"hub": {"download_timeout_seconds": 9}})
+    )
+    assert (
+        Config(target_dir=project, skip_layers={"cli"}).hub.download_timeout_seconds
+        == 9
+    )

@@ -201,6 +201,24 @@ mod crash_recovery_tests {
     use super::*;
     use crate::db::DbBackend;
 
+    fn snapshot_files(
+        root: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)> {
+        std::fs::read_dir(root)
+            .expect("snapshot directory")
+            .map(|entry| {
+                let path = entry.expect("directory entry").path();
+                let bytes = std::fs::read(&path).expect("snapshot bytes");
+                let modified = path
+                    .metadata()
+                    .expect("metadata")
+                    .modified()
+                    .expect("mtime");
+                (path, (bytes, modified))
+            })
+            .collect()
+    }
+
     #[test]
     fn pre_swap_intent_cleared_on_open() {
         // pre-swap with a live DB still present (rename had not happened).
@@ -355,10 +373,9 @@ mod crash_recovery_tests {
     }
 
     #[test]
-    fn phase2_intent_removes_old_file() {
-        // Already-swapped leftover: compact→db rename finished, .old and
-        // intent were not cleaned up. Recovery must keep the live DB and
-        // drop the sidecar files.
+    fn phase2_open_refuses_corrupt_old_without_changing_files() {
+        // Even after a completed swap, an unreadable .old has unknown format
+        // compatibility. Refuse before deleting any candidate or intent.
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("t.duckdb");
         let old_path = tmp.path().join("t.duckdb.old");
@@ -375,15 +392,24 @@ mod crash_recovery_tests {
 
         std::fs::write(&old_path, "stale backup marker").expect("write old");
         std::fs::write(&intent_path, "phase2").expect("write intent");
+        let before = snapshot_files(tmp.path());
 
         let mut backend = DuckDbHnswBackend::new(super::super::test_support::config(
             db_path.to_string_lossy().into_owned(),
         ));
-        backend.open().expect("open");
-        backend.close().expect("close");
-
-        assert!(!intent_path.exists());
-        assert!(!old_path.exists());
+        let message = backend
+            .open()
+            .expect_err("corrupt candidate must block recovery")
+            .to_string();
+        assert!(
+            message.contains("format compatibility is unknown"),
+            "{message}"
+        );
+        assert!(message.contains("Preserve the database"), "{message}");
+        assert!(
+            snapshot_files(tmp.path()) == before,
+            "refusal changed recovery files"
+        );
     }
 
     #[test]
@@ -694,7 +720,7 @@ mod crash_recovery_tests {
     }
 
     #[test]
-    fn phase1_open_deletes_incomplete_compact_beside_restored_live() {
+    fn phase1_open_refuses_incomplete_compact_without_restoring_old() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("t.duckdb");
         let old_path = tmp.path().join("t.duckdb.old");
@@ -712,16 +738,25 @@ mod crash_recovery_tests {
 
         std::fs::write(&compact_path, "incomplete compact").expect("write compact");
         std::fs::write(&intent_path, "phase1").expect("write intent");
+        // The .old fixture's lease is distinct; baseline the primary stable file too.
+        drop(crate::database_coordination::lease::acquire_shared(&db_path).expect("primary lease"));
+        let before = snapshot_files(tmp.path());
 
         let mut backend = DuckDbHnswBackend::new(super::super::test_support::config(
             db_path.to_string_lossy().into_owned(),
         ));
-        backend.open().expect("open");
-        backend.close().expect("close");
-
+        let message = backend
+            .open()
+            .expect_err("incomplete candidate must block recovery")
+            .to_string();
         assert!(
-            !compact_path.exists(),
-            "open() must drop leftover phase1 .compact, not only the in-process fallback"
+            message.contains("format compatibility is unknown"),
+            "{message}"
+        );
+        assert!(message.contains("Preserve the database"), "{message}");
+        assert!(
+            snapshot_files(tmp.path()) == before,
+            "refusal changed recovery files"
         );
     }
 
