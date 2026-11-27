@@ -27,6 +27,7 @@ from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
     EmbeddingProviderError,
+    RerankEndpointError,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "EmbeddingProviderError",
     "EmbeddingDimensionError",
     "EmbeddingConfigurationError",
+    "RerankEndpointError",
 ]

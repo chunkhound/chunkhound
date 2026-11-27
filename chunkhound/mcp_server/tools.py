@@ -346,12 +346,20 @@ def _convert_paths_to_native(results: list[dict[str, Any]]) -> list[dict[str, An
 
 # Type definitions for return values
 class PaginationInfo(TypedDict):
-    """Pagination metadata for search results."""
+    """Pagination metadata for search results.
+
+    ``total`` counts only what the pagination window can serve, so every page
+    derived from it is reachable, and ``next_offset`` is always a page the same
+    search accepts. ``corpus_total`` is the unbounded match count and may exceed
+    that window; it is present only when the search counted the whole corpus and
+    is omitted for transient hybrid search, which ranks a bounded snapshot.
+    """
 
     offset: int
     page_size: int
     has_more: bool
     total: NotRequired[int | None]
+    corpus_total: NotRequired[int]
     next_offset: NotRequired[int | None]
 
 
@@ -502,9 +510,10 @@ DECISION GUIDE:
 GIT HISTORY SEARCH (type='semantic' only):
 - commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
 - commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
-- last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+- last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history; the CLI prints a warning, MCP callers see no notice; with merged branches the range can include substantially more than N commits, up to ~100 extra in a large repository, from the merged branches or the mainline).
 - vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
+- strategy: Optional semantic strategy. Omit it to let the provider choose. 'single_hop' runs one vector search with no expansion or reranking — fast, for callers that rerank results themselves. 'multi_hop' forces expansion with reranking. A valid value has no effect for type='regex'; an invalid value raises. Rejected with commit_range, commit_hash or last_n_commits unless vector_source='db' (so vector_source='both' is rejected too).
 
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
@@ -519,6 +528,8 @@ TYPE — choose one:
 DECISION GUIDE:
 - Known symbol or pattern → regex
 - Concept or behavior → semantic
+
+STRATEGY (type='semantic'): Optional. Omit it to let the provider choose. 'single_hop' runs one vector search with no expansion or reranking — fast, for callers that rerank results themselves. 'multi_hop' forces expansion with reranking. A valid value has no effect for type='regex'; an invalid value raises.
 
 OUTPUT: Markdown blocks — file path, line range, symbol name, code block, pagination footer."""
 
@@ -542,7 +553,7 @@ SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster,
 GIT HISTORY RESEARCH:
 - commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
 - commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
-- last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+- last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history; the CLI prints a warning, MCP callers see no notice; with merged branches the range can include substantially more than N commits, up to ~100 extra in a large repository, from the merged branches or the mainline).
 - vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
 Note: commit_range, commit_hash, and last_n_commits are mutually exclusive — provide at most one.
 
@@ -574,10 +585,11 @@ FETCHURL_DESCRIPTION = """Fetch a single URL (HTML or PDF) and return a Markdown
 # =============================================================================
 
 
-def _resolve_commit_range(
+async def _resolve_commit_range(
     commit_range: str | None,
     commit_hash: str | None,
     last_n_commits: int | None,
+    services: DatabaseServices,
 ) -> str | None:
     """Resolve mutually-exclusive commit inputs to a single git revision range."""
     if sum(x is not None for x in [commit_range, commit_hash, last_n_commits]) > 1:
@@ -591,7 +603,13 @@ def _resolve_commit_range(
     if last_n_commits is not None:
         if last_n_commits <= 0:
             raise ValueError("last_n_commits must be a positive integer.")
-        return f"HEAD~{last_n_commits}..HEAD"
+        # Local import, like the other git_diff uses below, to avoid a circular
+        # dependency with this module.
+        from chunkhound.core.git_diff import resolve_last_n_commits_range
+
+        return await resolve_last_n_commits_range(
+            last_n_commits, await _git_cwd_from_services(services)
+        )
     return commit_range
 
 
@@ -703,6 +721,7 @@ async def search_impl(
     commit_hash: str | None = None,
     last_n_commits: int | None = None,
     vector_source: str = "diff",
+    strategy: Literal["single_hop", "multi_hop"] | None = None,
 ) -> SearchResponse:
     """Unified search dispatching to regex or semantic based on type.
 
@@ -716,28 +735,53 @@ async def search_impl(
         offset: Starting offset for pagination
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided with type='semantic', searches changed code in that range.
         commit_hash: Single commit hash — searches only that commit's diff (equivalent to '<hash>^..<hash>').
-        last_n_commits: Integer shorthand — searches last N commits (equivalent to 'HEAD~N..HEAD').
+        last_n_commits: Integer shorthand — searches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history; the CLI prints a warning, MCP callers see no notice; with merged branches the range can include substantially more than N commits, up to ~100 extra in a large repository, from the merged branches or the mainline).
         vector_source: Controls search scope when commit input given. 'diff' (default) searches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and searches DB only.
+        strategy: Semantic search strategy. Omit it to choose by provider: multi-hop expansion with reranking when the provider can rerank, else single-hop. 'single_hop' runs one vector search with no expansion or reranking — sub-second, for callers that rerank results themselves. 'multi_hop' forces expansion with reranking; if the provider cannot rerank, the service logs a warning and uses single-hop. Cannot be combined with commit_range, commit_hash or last_n_commits unless vector_source='db'. A valid value has no effect for type='regex'; an invalid value raises.
 
     Returns:
         Dict with 'results' and 'pagination' keys
 
     Raises:
-        ValueError: If type is invalid or semantic search lacks embedding provider
+        ValueError: If type or strategy is invalid, if strategy is combined
+            with a commit input and vector_source is not 'db', or if semantic
+            search lacks an embedding provider
     """
     # Validate type parameter
     if type not in ("semantic", "regex"):
         raise ValueError(
             f"Invalid search type: '{type}'. Must be 'semantic' or 'regex'."
         )
+    if strategy not in (None, "single_hop", "multi_hop"):
+        raise ValueError(
+            f"Invalid search strategy: '{strategy}'. "
+            "Must be 'single_hop' or 'multi_hop'."
+        )
 
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
 
-    effective_commit_range = _resolve_commit_range(
-        commit_range, commit_hash, last_n_commits
+    effective_commit_range = await _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits, services
     )
+
+    # The diff search path has no strategies, so it cannot honor one.
+    # vector_source='db' skips the diff path, so the strategy applies there.
+    # 'both' runs the DB half (which would honor it) and the diff half (which
+    # cannot); rather than apply the strategy to one half only, refuse it, as
+    # for 'diff'. This differs from the CLI, which refuses --single-hop/
+    # --multi-hop with any commit input.
+    if (
+        type == "semantic"
+        and strategy is not None
+        and effective_commit_range is not None
+        and vector_source != "db"
+    ):
+        raise ValueError(
+            "strategy cannot be combined with commit_range/commit_hash/"
+            "last_n_commits unless vector_source='db'."
+        )
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -774,6 +818,7 @@ async def search_impl(
             provider=provider_name,
             model=model_name,
             path_filter=path,
+            force_strategy=strategy,
         )
     else:  # regex
         # Perform regex search; pass query so results are scored by cosine similarity
@@ -837,7 +882,7 @@ async def deep_research_impl(
         config: Application configuration (optional, defaults to environment config)
         commit_range: Optional git revision range (e.g. 'HEAD~10..HEAD', 'v1.0..v2.0'). When provided, research incorporates code changed in that range.
         commit_hash: Single commit hash — researches only that commit's diff (equivalent to '<hash>^..<hash>').
-        last_n_commits: Integer shorthand — researches last N commits (equivalent to 'HEAD~N..HEAD').
+        last_n_commits: Integer shorthand — researches the last N commits reachable from HEAD (merge commits count; a value above the available history is clamped to the full history; the CLI prints a warning, MCP callers see no notice; with merged branches the range can include substantially more than N commits, up to ~100 extra in a large repository, from the merged branches or the mainline).
         vector_source: Controls search scope when commit input given. 'diff' (default) researches only changed code. 'both' merges diff and DB results. 'db' ignores commit input and uses DB only.
         previous_query: Prior query for follow-up framing (optional). When set, the synthesis stage frames the answer in the prior topic's context. Does not affect which code is searched or retrieved.
 
@@ -849,8 +894,8 @@ async def deep_research_impl(
     """
     validate_research_prerequisites(embedding_manager, llm_manager)
 
-    effective_commit_range = _resolve_commit_range(
-        commit_range, commit_hash, last_n_commits
+    effective_commit_range = await _resolve_commit_range(
+        commit_range, commit_hash, last_n_commits, services
     )
 
     if effective_commit_range is not None and vector_source != "db":
