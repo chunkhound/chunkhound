@@ -54,6 +54,7 @@ def _manager_provider(
         ("uberllm", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("aigrow", "max_tokens", OutputLimitCapability.UNKNOWN),
         ("teamorouter", "max_tokens", OutputLimitCapability.UNKNOWN),
+        ("llmtr", "max_tokens", OutputLimitCapability.UNKNOWN),
     ],
 )
 async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
@@ -112,6 +113,7 @@ async def test_canonical_builtin_provider_managed_request_respects_cap_policy(
         ("uberllm", "max_tokens"),
         ("aigrow", "max_tokens"),
         ("teamorouter", "max_tokens"),
+        ("llmtr", "max_tokens"),
     ],
 )
 async def test_custom_builtin_endpoint_uses_fallback_cap(

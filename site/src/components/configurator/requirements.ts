@@ -3,6 +3,7 @@ import { backendAuthUrl } from "./catalog.ts";
 import {
   AIGROW_SVG,
   TEAMOROUTER_SVG,
+  LLMTR_SVG,
   ANTHROPIC_SVG,
   API_ROUTE_SVG,
   ATLASCLOUD_SVG,
@@ -274,5 +275,11 @@ export const requirements = {
     label: "TeamoRouter API key",
     provider: "teamorouter",
     svg: TEAMOROUTER_SVG,
+  }),
+  llmtrApiKey: apiKeyRequirement({
+    id: "llmtr-api-key",
+    label: "LLMTR API key",
+    provider: "llmtr",
+    svg: LLMTR_SVG,
   }),
 } satisfies Record<string, ConfiguratorRequirement>;

@@ -219,4 +219,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, OpenAICompatibleSpec] = {
         docs_url="https://teamorouter.com/docs",
         auth_url="https://teamorouter.com/dashboard?tab=api-keys",
     ),
+    "llmtr": OpenAICompatibleSpec(
+        name="llmtr",
+        default_base_url="https://llmtr.com/v1",
+        supports_structured_outputs=False,
+        max_tokens_param_name="max_tokens",
+        synthesis_concurrency=5,
+        docs_url="https://llmtr.com/docs/en/",
+        auth_url="https://llmtr.com/dashboard/keys",
+    ),
 }

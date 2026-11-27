@@ -152,6 +152,7 @@ LLMProviderLiteral = Literal[
     "uberllm",
     "aigrow",
     "teamorouter",
+    "llmtr",
     "opencode-cli",
 ]
 
@@ -202,6 +203,7 @@ CLI_PROVIDER_CHOICES = (
     "uberllm",
     "aigrow",
     "teamorouter",
+    "llmtr",
     "opencode-cli",
 )
 
