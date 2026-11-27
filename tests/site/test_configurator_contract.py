@@ -942,6 +942,14 @@ def test_teamorouter_llm_configurator_emits_model() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
+def test_llmtr_llm_configurator_emits_model() -> None:
+    config = _load_preset("llmProviders", "llmtr")
+
+    assert config["provider"] == "llmtr"
+    assert config["model"] == "qwen/qwen3.8-flash"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning:.*configurator.*")
 def test_gemini_llm_configurator_emits_model() -> None:
     config = _load_preset("llmProviders", "gemini")
 
@@ -1170,6 +1178,7 @@ console.log(JSON.stringify(llmProviders.map((provider) => ({
         "uberllm": "deepseek/deepseek-v4.1-flash",
         "aigrow": "claude-haiku-5.5",
         "teamorouter": "deepseek-v4-flash",
+        "llmtr": "qwen/qwen3.8-flash",
         "ollama-llm": "qwen3-coder:30b",
         "vllm-llm": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         "opencode-cli": "opencode/deepseek-v4.1-flash",

@@ -24,6 +24,7 @@ import {
   UBERLLM_SVG,
   AIGROW_SVG,
   TEAMOROUTER_SVG,
+  LLMTR_SVG,
   VERCEL_SVG,
   VLLM_SVG,
   VOYAGEAI_SVG,
@@ -420,6 +421,18 @@ export const llmProviders: ConfiguratorProviderOption[] = [
     requirements: [requirements.teamorouterApiKey],
     recommendation:
       "<strong>DeepSeek V4 Flash</strong> — the OpenAI-compatible route through TeamoRouter.",
+  },
+  {
+    id: "llmtr",
+    name: "LLMTR",
+    svg: LLMTR_SVG,
+    description: "Recommended model: Qwen3.8 Flash",
+    config: { provider: "llmtr", model: "qwen/qwen3.8-flash" },
+    apiKeyPlaceholder: "<YOUR_LLMTR_API_KEY>",
+    group: "cloud",
+    requirements: [requirements.llmtrApiKey],
+    recommendation:
+      "<strong>Qwen3.8 Flash</strong> — the OpenAI-compatible route through LLMTR.",
   },
   {
     id: "anthropic",

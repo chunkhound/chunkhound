@@ -265,6 +265,21 @@ SPECS = [
     ),
     pytest.param(
         {
+            "provider": "llmtr",
+            "model": "qwen/qwen3.8-flash",
+            "expected_name": "llmtr",
+            "expected_base_url": "https://llmtr.com/v1",
+            "expected_sso": False,
+            "expected_class": OpenAICompatibleProvider,
+            "expected_missing_model_error": (
+                "Model is required for 'llmtr'. "
+                "Set `llm.model` (or per-role model override) in your configuration."
+            ),
+        },
+        id="llmtr",
+    ),
+    pytest.param(
+        {
             "provider": "openai",
             "model": "gpt-4o",
             "expected_name": "openai",
@@ -427,6 +442,7 @@ class TestFactoryPipeline:
             "uberllm": 10,
             "aigrow": 5,
             "teamorouter": 5,
+            "llmtr": 5,
             "openai": 3,
         }[spec["provider"]]
         assert provider.get_synthesis_concurrency() == expected

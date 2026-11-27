@@ -61,6 +61,12 @@
       "authUrl": "https://console.x.ai/team/default/api-keys"
     },
     {
+      "id": "llmtr",
+      "requiresModel": true,
+      "customEndpointRequiresModel": true,
+      "authUrl": "https://llmtr.com/dashboard/keys"
+    },
+    {
       "id": "obscurify-ai",
       "requiresModel": true,
       "customEndpointRequiresModel": true,
