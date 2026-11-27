@@ -93,6 +93,7 @@ const socialImageUrl = new URL(socialImage, Astro.site);
           if (btn) {
             var labels = { light: 'Switch to dark mode', dark: 'Switch to system theme', system: 'Switch to light mode' };
             btn.setAttribute('aria-label', labels[setting]);
+            btn.setAttribute('title', labels[setting]);
           }
         }
 
