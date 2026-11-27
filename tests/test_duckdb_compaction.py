@@ -341,6 +341,39 @@ class TestMeasureFragmentation:
         # 1.05x tolerance for rounding), not absolute minimum.
         assert ratio_after_compact <= ratio_before * 1.05
 
+    def test_large_chunks_not_reported_as_fragmented(
+        self, file_backed_db: DuckDBProvider
+    ) -> None:
+        """Freshly written long chunks overflow into extra storage blocks.
+
+        Those blocks are live data, so they must not make a just-written
+        database look fragmented and trigger a needless compaction.
+        """
+        file_id = file_backed_db.insert_file(
+            File(
+                path=FilePath("big.py"),
+                mtime=0.0,
+                size_bytes=10,
+                language=Language.PYTHON,
+            )
+        )
+        file_backed_db.insert_chunks_batch(
+            [
+                Chunk(
+                    file_id=file_id,
+                    chunk_type=ChunkType.FUNCTION,
+                    symbol=f"f{i}",
+                    code="x = 1\n" * 50_000 + f"# {i}",
+                    start_line=1,
+                    end_line=2,
+                    language=Language.PYTHON,
+                )
+                for i in range(20)
+            ]
+        )
+        file_backed_db._execute_in_db_thread_sync("maybe_checkpoint", True)
+        assert file_backed_db.measure_fragmentation() < 2.0
+
     def test_in_memory_returns_zero(self, compaction_db: DuckDBProvider) -> None:
         """In-memory never has fragmentation."""
         ratio = compaction_db.measure_fragmentation()
