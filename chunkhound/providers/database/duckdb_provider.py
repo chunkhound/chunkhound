@@ -1133,9 +1133,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         data_blocks = 0
         for (t,) in tables:
             escaped = t.replace("'", "''")
+            # Segments that overflow (e.g. long strings) list their extra
+            # blocks in additional_block_ids, so count those too.
             count = conn.execute(
-                f"SELECT COUNT(DISTINCT block_id) FROM pragma_storage_info('{escaped}') "
-                f"WHERE block_id >= 0"
+                f"SELECT COUNT(DISTINCT b) FROM ("
+                f"SELECT block_id AS b FROM pragma_storage_info('{escaped}') "
+                f"UNION ALL "
+                f"SELECT unnest(additional_block_ids) "
+                f"FROM pragma_storage_info('{escaped}')"
+                f") WHERE b >= 0"
             ).fetchone()[0]
             data_blocks += count
 
