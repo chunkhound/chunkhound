@@ -16,6 +16,10 @@ def cli_env(tmp_path):
         for key, value in os.environ.items()
         if not key.startswith("CHUNKHOUND_")
     }
+    # Restore the pinned empty global config so CLI subprocesses stay isolated
+    # from developer-wide settings (session-autouse fixture in conftest.py).
+    if global_config := os.environ.get("CHUNKHOUND_GLOBAL_CONFIG_FILE"):
+        env["CHUNKHOUND_GLOBAL_CONFIG_FILE"] = global_config
     env.update(
         CHUNKHOUND_NO_PROMPTS="1",
         CHUNKHOUND_NO_RICH="1",
