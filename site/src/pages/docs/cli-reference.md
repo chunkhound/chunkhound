@@ -133,7 +133,7 @@ chunkhound search "database migration" --commit-range main..HEAD
 
 ## `chunkhound websearch`
 
-Search the web via DuckDuckGo, fetch the top pages, and run deep research over the fetched content to produce a cited answer. Use it to pinpoint external technical facts before connecting them to local code research.
+Search the web via configurable search engines (DuckDuckGo by default, with Bing fallback), fetch the top pages, and run deep research over the fetched content to produce a cited answer. Use it to pinpoint external technical facts before connecting them to local code research.
 
 ```bash
 chunkhound websearch <query> [options]

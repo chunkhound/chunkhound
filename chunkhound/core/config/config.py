@@ -37,6 +37,7 @@ from .llm_config import LLMConfig
 from .mcp_config import MCPConfig, is_loopback_host
 from .remote_config import RemoteConfig
 from .research_config import ResearchConfig
+from .websearch_config import WebSearchConfig
 
 
 class ConfigErrorCode(str, Enum):
@@ -87,6 +88,7 @@ _NESTED_BASESETTINGS_ENV_PREFIXES: tuple[str, ...] = (
     "CHUNKHOUND_LLM_",
     "CHUNKHOUND_RESEARCH_",
     "CHUNKHOUND_FETCHURL_",
+    "CHUNKHOUND_WEBSEARCH_",
 )
 
 
@@ -138,6 +140,7 @@ class Config(BaseModel):
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     fetchurl: FetchUrlConfig = Field(default_factory=FetchUrlConfig)
+    websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
     remote_config: RemoteConfig | None = Field(default=None)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     debug: bool = Field(default=False)
@@ -311,6 +314,11 @@ class Config(BaseModel):
         if "fetchurl" in config_data and isinstance(config_data["fetchurl"], dict):
             # Create FetchUrlConfig instance with the data
             config_data["fetchurl"] = FetchUrlConfig(**config_data["fetchurl"])
+
+        # Special handling for WebSearchConfig
+        if "websearch" in config_data and isinstance(config_data["websearch"], dict):
+            # Create WebSearchConfig instance with the data
+            config_data["websearch"] = WebSearchConfig(**config_data["websearch"])
 
         # Special handling for RemoteConfig. `RemoteConfig | None` follows the
         # `embedding | None` / `llm | None` pattern (no default_factory), so
@@ -513,6 +521,8 @@ class Config(BaseModel):
             config["research"] = research_config
         if fetchurl_config := FetchUrlConfig.load_from_env():
             config["fetchurl"] = fetchurl_config
+        if websearch_config := WebSearchConfig.load_from_env():
+            config["websearch"] = websearch_config
         if remote_config := RemoteConfig.load_from_env():
             config["remote_config"] = remote_config
         if analytics_config := AnalyticsConfig.load_from_env():
@@ -557,6 +567,8 @@ class Config(BaseModel):
             overrides["research"] = research_overrides
         if fetchurl_overrides := FetchUrlConfig.extract_cli_overrides(args):
             overrides["fetchurl"] = fetchurl_overrides
+        if websearch_overrides := WebSearchConfig.extract_cli_overrides(args):
+            overrides["websearch"] = websearch_overrides
         if remote_config_overrides := RemoteConfig.extract_cli_overrides(args):
             overrides["remote_config"] = remote_config_overrides
 
@@ -564,7 +576,8 @@ class Config(BaseModel):
 
     @staticmethod
     def deep_merge(base: dict[str, Any], update: dict[str, Any]) -> None:
-        """Merge ``update`` into ``base`` in place: nested dicts recurse, all other values overwrite."""
+        """Merge ``update`` into ``base`` in place: nested dicts recurse,
+        all other values overwrite."""
         for key, value in update.items():
             if key in base and isinstance(base[key], dict) and isinstance(value, dict):
                 Config.deep_merge(base[key], value)

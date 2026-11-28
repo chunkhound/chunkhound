@@ -12,7 +12,6 @@ import asyncio
 import base64
 import html
 import html.parser
-import itertools
 import math
 import os
 import re
@@ -23,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import IO, TYPE_CHECKING, Any, TypeVar
 
 import psutil
@@ -35,12 +34,80 @@ if TYPE_CHECKING:
     import zendriver as zd
 
 from chunkhound.utils.ssrf import validate_url, validate_url_sync
+from chunkhound.utils.websearch_verdict import (
+    EngineResponse,
+    Verdict,
+    status_evidence,
+    verdict_from_status,
+)
 
 _MAX_FETCH_CONCURRENCY = 5
 
 T = TypeVar("T")
 
 WEBSEARCH_LIMIT_MAX = 100
+
+
+def _http_request(
+    method: str,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    data: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> tuple[int, bytes]:
+    """Issue one engine request via curl_cffi and return (status, body).
+
+    curl_cffi wraps libcurl, whose TLS fingerprint passes DDG's bot filter
+    (urllib's native TLS is the guaranteed-bot fingerprint). No impersonate
+    profile is used: the probe showed the default profile is what returns a
+    real 200 SERP.
+    """
+    from curl_cffi import requests as creq
+    from curl_cffi.requests.exceptions import RequestException
+
+    resp = None
+    try:
+        resp = getattr(creq, method.lower())(
+            url,
+            params=params,
+            data=data,
+            headers=headers,
+            timeout=timeout,
+            stream=True,
+        )
+        return resp.status_code, _read_bounded_curl(resp)
+    except RequestException as e:
+        # Surface curl_cffi network failures (timeout, DNS, connection reset,
+        # SSL) as URLError so _run_engine's per-query recovery applies.
+        raise urllib.error.URLError(e) from e
+    finally:
+        # Always close the response; swallow teardown errors so they never
+        # mask the in-flight URLError/ValueError (mid-stream reset risk).
+        if resp is not None:
+            with suppress(Exception):
+                resp.close()
+
+
+def _read_bounded_curl(resp: Any, max_bytes: int | None = None) -> bytes:
+    """Stream a curl_cffi response body up to ``max_bytes``.
+
+    Mirror of ``_read_bounded`` for materialized urllib responses: iterates
+    in fixed-size chunks so an oversized response is caught before it is
+    fully buffered. ``max_bytes`` resolves at call time so this helper can
+    live above the ``_MAX_PAGE_BYTES`` constant definition.
+    """
+    cap = _MAX_PAGE_BYTES if max_bytes is None else max_bytes
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_content(65536):
+        total += len(chunk)
+        if total > cap:
+            raise ValueError(f"Response exceeds maximum page size of {cap} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 
 # Cap on a single fetched page's body size. A target URL can be anything --
 # a mis-served multi-GB file, an infinite stream -- and there's no way to
@@ -635,15 +702,19 @@ async def _await_with_page_limit(
         await asyncio.gather(limit, return_exceptions=True)
 
 
-def _fetch(params: dict[str, str]) -> str:
-    data = urllib.parse.urlencode(params).encode()
-    req = urllib.request.Request(
+def _fetch(params: dict[str, str]) -> tuple[int, str]:
+    """POST one query page to the DDG HTML endpoint; return (status, body).
+
+    Non-200 statuses pass through untouched: classification is the caller's
+    job (see ``search``), not the transport's.
+    """
+    status, body = _http_request(
+        "post",
         "https://html.duckduckgo.com/html/",
-        data=data,
+        data=params,
         headers={"User-Agent": "Mozilla/5.0"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return _read_bounded(resp).decode()
+    return status, body.decode()
 
 
 def _html_to_markdown(html_text: str) -> str:
@@ -1244,27 +1315,48 @@ async def fetch_pages(
             tasks.clear()
 
 
+# DDG's HTML endpoint wraps organic results in this container; its presence
+# on a 0-row page 1 distinguishes a genuine empty SERP from a layout drift.
+_DDG_RESULTS_CONTAINER = 'id="links_main"'
+
+
 def search(
     query: str,
     limit: int = 30,
     progress_callback: Callable[[str], None] | None = None,
     *,
     cancel_event: threading.Event | None = None,
-) -> list[tuple[str, str, str]]:
+) -> EngineResponse:
+    """Run one query against DDG HTML and classify the response.
+
+    Verdict rules: parsed rows -> SERVED; non-200 -> ``verdict_from_status``;
+    page 1 with 0 rows and the ``links_main`` container -> EMPTY; page 1 with
+    0 rows and no container -> DRIFT. An empty page after page 1 is the
+    normal end of pagination, not a signal.
+    """
     results: list[tuple[str, str, str]] = []
     params: dict[str, str] = {"q": query, "b": ""}  # b = submit button name
     page_num = 0
+    status = 200
     while cancel_event is None or not cancel_event.is_set():
         page_num += 1
         if progress_callback:
             progress_callback(f"Fetching page {page_num}...")
-        page = _fetch(params)
+        status, page = _fetch(params)
         if cancel_event is not None and cancel_event.is_set():
             break
         rp = _ResultParser()
         rp.feed(page)
         if not rp.results:
-            break
+            if status != 200:
+                return _status_response(results, status)
+            if page_num > 1:
+                break  # empty later page = end of pagination
+            if _DDG_RESULTS_CONTAINER in page:
+                return EngineResponse(
+                    (), Verdict.EMPTY, status, "links_main present, 0 rows"
+                )
+            return EngineResponse((), Verdict.DRIFT, status, "links_main missing")
         results.extend(rp.results)
         if len(results) >= limit:
             break
@@ -1274,7 +1366,14 @@ def search(
         if not next_params:
             break
         params = next_params
-    return results[:limit]
+    return EngineResponse(tuple(results[:limit]), Verdict.SERVED, status)
+
+
+def _status_response(rows: list[tuple[str, str, str]], status: int) -> EngineResponse:
+    """Build a non-200 EngineResponse for the rows collected so far."""
+    return EngineResponse(
+        tuple(rows), verdict_from_status(status), status, status_evidence(status)
+    )
 
 
 def _normalize_url(raw: str) -> str:
@@ -1293,16 +1392,20 @@ async def search_multi(
     limit: int,
     progress_callback: Callable[[str], None] | None = None,
     failure_callback: Callable[[str, urllib.error.URLError], None] | None = None,
+    *,
+    websearch_config: Any = None,
+    timeout_s: float | None = None,
 ) -> list[tuple[str, str, str]]:
-    """Run multiple DDG queries sequentially, interleave by rank, dedupe.
+    """Run expanded queries across the configured search engines.
 
-    Sequential (not parallel) because DDG's HTML endpoint rate-limits
-    aggressively. Each variant is capped at the full ``limit`` (not
-    ``limit / n``) so that heavy cross-variant overlap — common when the
-    LLM produces near-synonym expansions — cannot leave the caller with
-    fewer than ``limit`` distinct URLs. All queries are executed — no
-    early exit — so diversity from later variants is not lost when an
-    earlier variant alone could saturate ``limit``.
+    Sequential per engine (not parallel) because engine HTML endpoints
+    rate-limit aggressively. Each variant is capped at the full ``limit``
+    (not ``limit / n``) so that heavy cross-variant overlap — common when
+    the LLM produces near-synonym expansions — cannot leave the caller
+    with fewer than ``limit`` distinct URLs. Every query runs unless the
+    engine refuses twice (early break: a third attempt is wasted budget) or
+    its time budget expires, so diversity from later variants is not lost
+    when an earlier variant alone could saturate ``limit``.
 
     Ordering is rank-major: every variant's rank-1 hit comes before any
     variant's rank-2 hit, etc. — so no single query dominates the head of
@@ -1310,64 +1413,31 @@ async def search_multi(
     stored ``(title, snippet)`` comes from the query where it ranked
     highest. Dedupe (first-occurrence-wins by ``_normalize_url``) and
     truncation to ``limit`` happen once, after every query has run.
-    Cost: worst case ``N × ceil(limit / page_size)`` page fetches —
-    traded against heavy cross-variant overlap silently under-filling
-    the result set.
 
-    On per-query URLError, invoke ``failure_callback`` when provided or
-    fall back to a ``logger.warning`` when no callback is supplied, and
-    continue with the remaining queries; if ALL raise, re-raise the
-    first.
+    This is the stable facade over the multi-engine orchestrator in
+    ``websearch_backends`` (engine order, cooldown, failover). When
+    ``websearch_config`` is None the default engine list is used.
+
+    On per-query URLError, invoke ``failure_callback`` when provided (or
+    ``logger.warning`` otherwise) and continue with the remaining queries.
+    Terminal outcomes: rows when an engine served; ``[]`` when every
+    engine reported a genuine empty; ``AllEnginesBlockedError`` when every
+    engine refused; ``AllEnginesUnavailableError`` when no engine served
+    without a genuine-empty signal.
     """
     if not queries:
         return []
-    queries = list(dict.fromkeys(queries))  # dedupe identical strings; preserves order
-    n = len(queries)
-    batches: list[list[tuple[str, str, str]]] = []
-    first_error: urllib.error.URLError | None = None
-    successes = 0
-    cancel_event = threading.Event()
-    try:
-        for i, q in enumerate(queries, start=1):
-            if progress_callback is None:
-                per_query_progress = None
-            else:
-                prefix = f"[{i}/{n}] "
+    from chunkhound.utils.websearch_backends import run_engine_search
 
-                def per_query_progress(msg: str) -> None:
-                    progress_callback(f"{prefix}{msg}")
+    if websearch_config is None:
+        from chunkhound.core.config.websearch_config import WebSearchConfig
 
-            try:
-                batch = await asyncio.to_thread(
-                    search,
-                    q,
-                    limit,
-                    per_query_progress,
-                    cancel_event=cancel_event,
-                )
-            except urllib.error.URLError as e:
-                if failure_callback is not None:
-                    failure_callback(q, e)
-                else:
-                    logger.warning(
-                        f"DDG query failed ({q!r}): {e.reason}; "
-                        "continuing with remaining queries"
-                    )
-                if first_error is None:
-                    first_error = e
-                continue
-            successes += 1
-            batches.append(batch)
-    finally:
-        cancel_event.set()
-    if successes == 0 and first_error is not None:
-        raise first_error
-    seen: dict[str, tuple[str, str, str]] = {}
-    for rank_row in itertools.zip_longest(*batches):
-        for row in rank_row:
-            if row is None:
-                continue
-            key = _normalize_url(row[1])
-            if key not in seen:
-                seen[key] = row
-    return list(seen.values())[:limit]
+        websearch_config = WebSearchConfig()
+    return await run_engine_search(
+        queries,
+        limit,
+        progress_callback=progress_callback,
+        failure_callback=failure_callback,
+        websearch_config=websearch_config,
+        timeout_s=timeout_s,
+    )

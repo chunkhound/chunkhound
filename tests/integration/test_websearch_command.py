@@ -10,6 +10,10 @@ import pytest
 from chunkhound.api.cli.commands import websearch as ws_mod
 from chunkhound.services import web_research_service
 from chunkhound.utils import websearch_core, websearch_expansion
+from chunkhound.utils.websearch_backends import (
+    AllEnginesBlockedError,
+    AllEnginesUnavailableError,
+)
 
 
 def make_args(
@@ -166,6 +170,52 @@ async def test_websearch_command_empty_results_exits_10(monkeypatch, providers) 
         await ws_mod.websearch_command(make_args("zero"), MagicMock())
 
     assert exc.value.code == 10
+
+
+@pytest.mark.asyncio
+async def test_websearch_command_all_engines_blocked_exits_1(
+    monkeypatch, providers, capsys
+) -> None:
+    monkeypatch.setattr(
+        websearch_core,
+        "search_multi",
+        AsyncMock(
+            side_effect=AllEnginesBlockedError(
+                [("duckduckgo", "refused status 202"), ("bing", "refused status 429")]
+            )
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        await ws_mod.websearch_command(make_args(), MagicMock())
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "every engine refused" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_websearch_command_all_engines_unavailable_exits_1(
+    monkeypatch, providers, capsys
+) -> None:
+    monkeypatch.setattr(
+        websearch_core,
+        "search_multi",
+        AsyncMock(
+            side_effect=AllEnginesUnavailableError(
+                [("duckduckgo", "transient failure"), ("bing", "drift")]
+            )
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        await ws_mod.websearch_command(make_args(), MagicMock())
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "engines unavailable" in captured.err
 
 
 @pytest.mark.asyncio

@@ -117,6 +117,11 @@ def add_config_arguments(parser: argparse.ArgumentParser, configs: list[str]) ->
 
         ResearchConfig.add_cli_arguments(parser)
 
+    if "websearch" in configs:
+        from chunkhound.core.config.websearch_config import WebSearchConfig
+
+        WebSearchConfig.add_cli_arguments(parser)
+
 
 def build_forwarded_argv(
     parser: argparse.ArgumentParser,

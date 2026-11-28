@@ -54,7 +54,7 @@ dependencies = [
     "tree-sitter-markdown>=0.5.1",
     "tree-sitter-language-pack>=0.7.3,<1.0.0",
     "pydantic>=2.12.0",
-    "pydantic-settings>=2.0.0",
+    "pydantic-settings>=2.7.0",
     "loguru>=0.6.0",
     # SDK 2.x, constructor-callback API. All mcp imports live in
     # chunkhound/mcp_server/base.py (single dispatch point); enforced by
@@ -134,6 +134,7 @@ dependencies = [
     # chunkhound/core/analytics/recorder.py calls on every analytics-wrapped
     # command; an older native satisfies a lower bound and then fails there.
     "chunkhound-native>=6.1.0",
+    "curl-cffi>=0.9.0",
 ]
 
 [project.optional-dependencies]

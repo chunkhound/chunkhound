@@ -7,6 +7,7 @@ import sys
 import urllib.error
 
 from chunkhound.core.config.config import Config
+from chunkhound.utils.websearch_backends import AllEnginesError
 from chunkhound.utils.websearch_core import websearch_timeout
 from chunkhound.utils.websearch_pipeline import (
     EmptyWebSearchError,
@@ -21,7 +22,7 @@ from ..utils.tree_progress import TreeProgressDisplay
 
 
 async def websearch_command(args: argparse.Namespace, config: Config) -> None:
-    """Fetch DuckDuckGo results for the given query."""
+    """Fetch search-engine results for the given query."""
     # Empty-string → None coercion at the surface boundary, so every
     # downstream consumer sees the two-valued "real string or None" contract.
     previous_query = args.previous_query or None
@@ -38,7 +39,8 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
 
     def _on_query_failure(q: str, e: urllib.error.URLError) -> None:
         _warning_to_stderr(
-            f"DDG query failed ({q!r}): {e.reason}; continuing with remaining queries"
+            f"Search query failed ({q!r}): {e.reason}; "
+            "continuing with remaining queries"
         )
 
     def _progress_to_stderr(message: str) -> None:
@@ -72,6 +74,9 @@ async def websearch_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(str(e))
         sys.exit(124)
     except NoPagesFetchedError as e:
+        formatter.error(str(e))
+        sys.exit(1)
+    except AllEnginesError as e:
         formatter.error(str(e))
         sys.exit(1)
     except Exception as exc:

@@ -24,8 +24,8 @@ def add_websearch_subparser(subparsers: Any) -> argparse.ArgumentParser:
     """Add websearch command subparser to the main parser."""
     p = subparsers.add_parser(
         "websearch",
-        help="Search the web via DuckDuckGo",
-        description="Search DuckDuckGo and print results.",
+        help="Search the web via configurable search engines",
+        description="Search the web and print results.",
     )
 
     p.add_argument("query", help="Search query")
@@ -48,7 +48,7 @@ def add_websearch_subparser(subparsers: Any) -> argparse.ArgumentParser:
     )
 
     add_common_arguments(p)
-    add_config_arguments(p, ["embedding", "llm", "research"])
+    add_config_arguments(p, ["embedding", "llm", "research", "websearch"])
 
     return cast(argparse.ArgumentParser, p)
 

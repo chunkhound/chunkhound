@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from chunkhound.utils.websearch_backends import AllEnginesBlockedError
 from chunkhound.utils.websearch_pipeline import (
     NoPagesFetchedError,
     run_websearch,
@@ -35,6 +36,32 @@ async def test_discovery_timeout_does_not_wait_for_full_budget(monkeypatch) -> N
             embedding_manager=None,
             llm_manager=None,
             timeout_s=0.08,
+        )
+
+
+@pytest.mark.asyncio
+async def test_all_engines_blocked_propagates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries",
+        AsyncMock(return_value=["q"]),
+    )
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi",
+        AsyncMock(
+            side_effect=AllEnginesBlockedError(
+                [("duckduckgo", "refused status 202"), ("bing", "refused status 429")]
+            )
+        ),
+    )
+
+    with pytest.raises(AllEnginesBlockedError, match="every engine refused"):
+        await run_websearch(
+            "q",
+            limit=1,
+            config=None,
+            embedding_manager=None,
+            llm_manager=None,
+            timeout_s=30,
         )
 
 
@@ -342,3 +369,44 @@ async def test_provider_timeout_is_not_reported_as_budget_timeout(
         )
 
     assert hasattr(info.value, "websearch_warnings")
+
+
+@pytest.mark.asyncio
+async def test_discovery_passes_remaining_budget_to_search_multi(monkeypatch) -> None:
+    async def slow_expansion(*args, **kwargs):
+        await asyncio.sleep(0.1)
+        return ["q"]
+
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_expansion.expand_web_queries", slow_expansion
+    )
+    captured: dict[str, float | None] = {}
+
+    async def spy_search_multi(*args, **kwargs):
+        captured["timeout_s"] = kwargs.get("timeout_s")
+        return [("T", "https://example.invalid/p", "s")]
+
+    monkeypatch.setattr(
+        "chunkhound.utils.websearch_core.search_multi", spy_search_multi
+    )
+
+    async def pages(*args, **kwargs):
+        yield "https://example.invalid/p", ".md", "# p"
+
+    monkeypatch.setattr("chunkhound.utils.websearch_core.fetch_pages", pages)
+    monkeypatch.setattr(
+        "chunkhound.services.web_research_service.research_web_pages",
+        AsyncMock(return_value=("answer", ["w"])),
+    )
+
+    await run_websearch(
+        "q",
+        limit=1,
+        config=None,
+        embedding_manager=None,
+        llm_manager=None,
+        timeout_s=0.8,
+    )
+
+    assert captured["timeout_s"] is not None
+    assert 0 < captured["timeout_s"] < 0.2
